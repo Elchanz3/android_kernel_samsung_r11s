@@ -98,8 +98,7 @@ static int __init exynos_chipid_early_init(void)
 		goto err;
 	}
 
-	dev_info(soc_device_to_device(soc_dev),
-		 "Exynos: CPU[%s] PRO_ID[0x%x] REV[0x%x] Detected\n",
+	dev_info(&pdev->dev, "Exynos: CPU[%s] PRO_ID[0x%x] REV[0x%x] Detected\n",
 		 soc_dev_attr->soc_id, product_id, revision);
 
 	return 0;
