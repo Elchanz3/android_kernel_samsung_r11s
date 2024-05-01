@@ -94,3 +94,4 @@ kernel/kheaders_data.tar.xz
 *.pyc
 scripts/basic/fixdep
 include/linux/ologk.h
+/KernelSU-Next
