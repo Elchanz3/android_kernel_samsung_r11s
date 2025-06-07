@@ -9,8 +9,21 @@
 #define	__ASM_INSN_H
 #include <linux/build_bug.h>
 #include <linux/types.h>
+#include <asm/brk-imm.h>
 
 #include <asm/alternative.h>
+
+/*
+ * BRK instruction encoding
+ * The #imm16 value should be placed at bits[20:5] within BRK ins
+ */
+#define AARCH64_BREAK_MON      0xd4200000
+
+/*
+ * BRK instruction for provoking a fault on purpose
+ * Unlike kgdb, #imm16 value with unallocated handler is used for faulting.
+ */
+#define AARCH64_BREAK_FAULT    (AARCH64_BREAK_MON | (FAULT_BRK_IMM << 5))
 
 #ifndef __ASSEMBLY__
 /*
