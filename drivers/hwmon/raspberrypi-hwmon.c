@@ -7,7 +7,6 @@
  * Copyright (C) 2018 Stefan Wahren <stefan.wahren@i2se.com>
  */
 #include <linux/device.h>
-#include <linux/devm-helpers.h>
 #include <linux/err.h>
 #include <linux/hwmon.h>
 #include <linux/module.h>
@@ -53,7 +52,7 @@ static void rpi_firmware_get_throttled(struct rpi_hwmon_data *data)
 	else
 		dev_info(data->hwmon_dev, "Voltage normalised\n");
 
-	hwmon_notify_event(data->hwmon_dev, hwmon_in, hwmon_in_lcrit_alarm, 0);
+	sysfs_notify(&data->hwmon_dev->kobj, NULL, "in0_lcrit_alarm");
 }
 
 static void get_values_poll(struct work_struct *work)
@@ -81,14 +80,20 @@ static int rpi_read(struct device *dev, enum hwmon_sensor_types type,
 	return 0;
 }
 
-static const struct hwmon_channel_info * const rpi_info[] = {
+static umode_t rpi_is_visible(const void *_data, enum hwmon_sensor_types type,
+			      u32 attr, int channel)
+{
+	return 0444;
+}
+
+static const struct hwmon_channel_info *rpi_info[] = {
 	HWMON_CHANNEL_INFO(in,
 			   HWMON_I_LCRIT_ALARM),
 	NULL
 };
 
 static const struct hwmon_ops rpi_hwmon_ops = {
-	.visible = 0444,
+	.is_visible = rpi_is_visible,
 	.read = rpi_read,
 };
 
@@ -101,7 +106,6 @@ static int rpi_hwmon_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct rpi_hwmon_data *data;
-	int ret;
 
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
@@ -114,46 +118,30 @@ static int rpi_hwmon_probe(struct platform_device *pdev)
 							       data,
 							       &rpi_chip_info,
 							       NULL);
-	if (IS_ERR(data->hwmon_dev))
-		return PTR_ERR(data->hwmon_dev);
 
-	ret = devm_delayed_work_autocancel(dev, &data->get_values_poll_work,
-					   get_values_poll);
-	if (ret)
-		return ret;
+	INIT_DELAYED_WORK(&data->get_values_poll_work, get_values_poll);
 	platform_set_drvdata(pdev, data);
 
-	schedule_delayed_work(&data->get_values_poll_work, 2 * HZ);
+	if (!PTR_ERR_OR_ZERO(data->hwmon_dev))
+		schedule_delayed_work(&data->get_values_poll_work, 2 * HZ);
 
-	return 0;
+	return PTR_ERR_OR_ZERO(data->hwmon_dev);
 }
 
-static int rpi_hwmon_suspend(struct device *dev)
+static int rpi_hwmon_remove(struct platform_device *pdev)
 {
-	struct rpi_hwmon_data *data = dev_get_drvdata(dev);
+	struct rpi_hwmon_data *data = platform_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&data->get_values_poll_work);
 
 	return 0;
 }
 
-static int rpi_hwmon_resume(struct device *dev)
-{
-	struct rpi_hwmon_data *data = dev_get_drvdata(dev);
-
-	get_values_poll(&data->get_values_poll_work.work);
-
-	return 0;
-}
-
-static DEFINE_SIMPLE_DEV_PM_OPS(rpi_hwmon_pm_ops, rpi_hwmon_suspend,
-				rpi_hwmon_resume);
-
 static struct platform_driver rpi_hwmon_driver = {
 	.probe = rpi_hwmon_probe,
+	.remove = rpi_hwmon_remove,
 	.driver = {
 		.name = "raspberrypi-hwmon",
-		.pm = pm_ptr(&rpi_hwmon_pm_ops),
 	},
 };
 module_platform_driver(rpi_hwmon_driver);

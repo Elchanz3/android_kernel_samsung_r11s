@@ -33,11 +33,7 @@ enum rdma_cm_event_type {
 	RDMA_CM_EVENT_MULTICAST_JOIN,
 	RDMA_CM_EVENT_MULTICAST_ERROR,
 	RDMA_CM_EVENT_ADDR_CHANGE,
-	RDMA_CM_EVENT_TIMEWAIT_EXIT,
-	RDMA_CM_EVENT_ADDRINFO_RESOLVED,
-	RDMA_CM_EVENT_ADDRINFO_ERROR,
-	RDMA_CM_EVENT_USER,
-	RDMA_CM_EVENT_INTERNAL,
+	RDMA_CM_EVENT_TIMEWAIT_EXIT
 };
 
 const char *__attribute_const__ rdma_event_msg(enum rdma_cm_event_type event);
@@ -56,20 +52,7 @@ struct rdma_addr {
 struct rdma_route {
 	struct rdma_addr addr;
 	struct sa_path_rec *path_rec;
-
-	/* Optional path records of primary path */
-	struct sa_path_rec *path_rec_inbound;
-	struct sa_path_rec *path_rec_outbound;
-
-	/*
-	 * 0 - No primary nor alternate path is available
-	 * 1 - Only primary path is available
-	 * 2 - Both primary and alternate path are available
-	 */
-	int num_pri_alt_paths;
-
-	unsigned int num_service_recs;
-	struct sa_service_rec *service_recs;
+	int num_paths;
 };
 
 struct rdma_conn_param {
@@ -100,7 +83,6 @@ struct rdma_cm_event {
 	union {
 		struct rdma_conn_param	conn;
 		struct rdma_ud_param	ud;
-		u64			arg;
 	} param;
 	struct rdma_ucm_ece ece;
 };
@@ -125,8 +107,7 @@ struct rdma_cm_id {
 	struct rdma_route	 route;
 	enum rdma_ucm_port_space ps;
 	enum ib_qp_type		 qp_type;
-	u32			 port_num;
-	struct work_struct net_work;
+	u8			 port_num;
 };
 
 struct rdma_cm_id *
@@ -204,17 +185,6 @@ int rdma_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr,
  * into an RDMA address before calling this routine.
  */
 int rdma_resolve_route(struct rdma_cm_id *id, unsigned long timeout_ms);
-
-/**
- * rdma_resolve_ib_service - Resolve the IB service record of the
- *   service with the given service ID or name.
- *
- * This function is optional in the rdma cm flow. It is called on the client
- * side of a connection, before calling rdma_resolve_route. The resolution
- * can be done once per rdma_cm_id.
- */
-int rdma_resolve_ib_service(struct rdma_cm_id *id,
-			    struct rdma_ucm_ib_service *ibs);
 
 /**
  * rdma_create_qp - Allocate a QP and associate it with the specified RDMA
@@ -361,8 +331,6 @@ int rdma_set_reuseaddr(struct rdma_cm_id *id, int reuse);
 int rdma_set_afonly(struct rdma_cm_id *id, int afonly);
 
 int rdma_set_ack_timeout(struct rdma_cm_id *id, u8 timeout);
-
-int rdma_set_min_rnr_timer(struct rdma_cm_id *id, u8 min_rnr_timer);
  /**
  * rdma_get_service_id - Return the IB service ID for a specified address.
  * @id: Communication identifier associated with the address.
@@ -407,5 +375,6 @@ void rdma_read_gids(struct rdma_cm_id *cm_id, union ib_gid *sgid,
 		    union ib_gid *dgid);
 
 struct iw_cm_id *rdma_iw_cm_id(struct rdma_cm_id *cm_id);
+struct rdma_cm_id *rdma_res_to_id(struct rdma_restrack_entry *res);
 
 #endif /* RDMA_CM_H */

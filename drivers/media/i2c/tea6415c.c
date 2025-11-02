@@ -3,7 +3,7 @@
     tea6415c - i2c-driver for the tea6415c by SGS Thomson
 
     Copyright (C) 1998-2003 Michael Hunold <michael@mihu.de>
-    Copyright (C) 2008 Hans Verkuil <hverkuil@kernel.org>
+    Copyright (C) 2008 Hans Verkuil <hverkuil@xs4all.nl>
 
     The tea6415c is a bus controlled video-matrix-switch
     with 8 inputs and 6 outputs.
@@ -116,7 +116,8 @@ static const struct v4l2_subdev_ops tea6415c_ops = {
 	.video = &tea6415c_video_ops,
 };
 
-static int tea6415c_probe(struct i2c_client *client)
+static int tea6415c_probe(struct i2c_client *client,
+			  const struct i2c_device_id *id)
 {
 	struct v4l2_subdev *sd;
 
@@ -133,15 +134,16 @@ static int tea6415c_probe(struct i2c_client *client)
 	return 0;
 }
 
-static void tea6415c_remove(struct i2c_client *client)
+static int tea6415c_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
+	return 0;
 }
 
 static const struct i2c_device_id tea6415c_id[] = {
-	{ "tea6415c" },
+	{ "tea6415c", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tea6415c_id);

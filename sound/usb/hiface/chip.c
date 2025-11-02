@@ -21,6 +21,23 @@ MODULE_AUTHOR("Michael Trimarchi <michael@amarulasolutions.com>");
 MODULE_AUTHOR("Antonio Ospite <ao2@amarulasolutions.com>");
 MODULE_DESCRIPTION("M2Tech hiFace USB-SPDIF audio driver");
 MODULE_LICENSE("GPL v2");
+MODULE_SUPPORTED_DEVICE("{{M2Tech,Young},"
+			 "{M2Tech,hiFace},"
+			 "{M2Tech,North Star},"
+			 "{M2Tech,W4S Young},"
+			 "{M2Tech,Corrson},"
+			 "{M2Tech,AUDIA},"
+			 "{M2Tech,SL Audio},"
+			 "{M2Tech,Empirical},"
+			 "{M2Tech,Rockna},"
+			 "{M2Tech,Pathos},"
+			 "{M2Tech,Metronome},"
+			 "{M2Tech,CAD},"
+			 "{M2Tech,Audio Esclusive},"
+			 "{M2Tech,Rotel},"
+			 "{M2Tech,Eeaudio},"
+			 "{The Chord Company,CHORD},"
+			 "{AVA Group A/S,Vitus}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX; /* Index 0-max */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR; /* Id for card */
@@ -63,12 +80,12 @@ static int hiface_chip_create(struct usb_interface *intf,
 		return ret;
 	}
 
-	strscpy(card->driver, DRIVER_NAME, sizeof(card->driver));
+	strlcpy(card->driver, DRIVER_NAME, sizeof(card->driver));
 
 	if (quirk && quirk->device_name)
-		strscpy(card->shortname, quirk->device_name, sizeof(card->shortname));
+		strlcpy(card->shortname, quirk->device_name, sizeof(card->shortname));
 	else
-		strscpy(card->shortname, "M2Tech generic audio", sizeof(card->shortname));
+		strlcpy(card->shortname, "M2Tech generic audio", sizeof(card->shortname));
 
 	strlcat(card->longname, card->shortname, sizeof(card->longname));
 	len = strlcat(card->longname, " at ", sizeof(card->longname));
@@ -101,7 +118,7 @@ static int hiface_chip_probe(struct usb_interface *intf,
 
 	/* check whether the card is already registered */
 	chip = NULL;
-	guard(mutex)(&register_mutex);
+	mutex_lock(&register_mutex);
 
 	for (i = 0; i < SNDRV_CARDS; i++)
 		if (enable[i])
@@ -109,12 +126,13 @@ static int hiface_chip_probe(struct usb_interface *intf,
 
 	if (i >= SNDRV_CARDS) {
 		dev_err(&device->dev, "no available " CARD_NAME " audio device\n");
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err;
 	}
 
 	ret = hiface_chip_create(intf, device, i, quirk, &chip);
 	if (ret < 0)
-		return ret;
+		goto err;
 
 	ret = hiface_pcm_init(chip, quirk ? quirk->extra_freq : 0);
 	if (ret < 0)
@@ -126,11 +144,15 @@ static int hiface_chip_probe(struct usb_interface *intf,
 		goto err_chip_destroy;
 	}
 
+	mutex_unlock(&register_mutex);
+
 	usb_set_intfdata(intf, chip);
 	return 0;
 
 err_chip_destroy:
 	snd_card_free(chip->card);
+err:
+	mutex_unlock(&register_mutex);
 	return ret;
 }
 

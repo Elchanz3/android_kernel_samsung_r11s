@@ -77,7 +77,6 @@ enum sctp_event_timeout {
 	SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD,
 	SCTP_EVENT_TIMEOUT_HEARTBEAT,
 	SCTP_EVENT_TIMEOUT_RECONF,
-	SCTP_EVENT_TIMEOUT_PROBE,
 	SCTP_EVENT_TIMEOUT_SACK,
 	SCTP_EVENT_TIMEOUT_AUTOCLOSE,
 };
@@ -201,23 +200,6 @@ enum sctp_sock_state {
 	SCTP_SS_CLOSING        = TCP_CLOSE_WAIT,
 };
 
-enum sctp_plpmtud_state {
-	SCTP_PL_DISABLED,
-	SCTP_PL_BASE,
-	SCTP_PL_SEARCH,
-	SCTP_PL_COMPLETE,
-	SCTP_PL_ERROR,
-};
-
-#define	SCTP_BASE_PLPMTU	1200
-#define	SCTP_MAX_PLPMTU		9000
-#define	SCTP_MIN_PLPMTU		512
-
-#define	SCTP_MAX_PROBES		3
-
-#define SCTP_PL_BIG_STEP	32
-#define SCTP_PL_MIN_STEP	4
-
 /* These functions map various type to printable names.  */
 const char *sctp_cname(const union sctp_subtype id);	/* chunk types */
 const char *sctp_oname(const union sctp_subtype id);	/* other events */
@@ -296,14 +278,13 @@ enum { SCTP_MAX_GABS = 16 };
 					 */
 #define SCTP_DEFAULT_MINSEGMENT 512	/* MTU size ... if no mtu disc */
 
-#define SCTP_COOKIE_KEY_SIZE 32	/* size of cookie HMAC key */
-#define SCTP_COOKIE_MAC_SIZE 32	/* size of HMAC field in cookies */
+#define SCTP_SECRET_SIZE 32		/* Number of octets in a 256 bits. */
+
+#define SCTP_SIGNATURE_SIZE 20	        /* size of a SLA-1 signature */
 
 #define SCTP_COOKIE_MULTIPLE 32 /* Pad out our cookie to make our hash
 				 * functions simpler to write.
 				 */
-
-#define SCTP_DEFAULT_UDP_PORT 9899	/* default UDP tunneling port */
 
 /* These are the values for pf exposure, UNUSED is to keep compatible with old
  * applications by default.
@@ -416,12 +397,16 @@ enum {
 	SCTP_AUTH_HMAC_ID_RESERVED_0,
 	SCTP_AUTH_HMAC_ID_SHA1,
 	SCTP_AUTH_HMAC_ID_RESERVED_2,
+#if defined (CONFIG_CRYPTO_SHA256) || defined (CONFIG_CRYPTO_SHA256_MODULE)
 	SCTP_AUTH_HMAC_ID_SHA256,
+#endif
 	__SCTP_AUTH_HMAC_MAX
 };
 
 #define SCTP_AUTH_HMAC_ID_MAX	__SCTP_AUTH_HMAC_MAX - 1
 #define SCTP_AUTH_NUM_HMACS 	__SCTP_AUTH_HMAC_MAX
+#define SCTP_SHA1_SIG_SIZE 20
+#define SCTP_SHA256_SIG_SIZE 32
 
 /*  SCTP-AUTH, Section 3.2
  *     The chunk types for INIT, INIT-ACK, SHUTDOWN-COMPLETE and AUTH chunks
@@ -434,7 +419,5 @@ enum {
  * The RANDOM parameter MUST contain a 32 byte random number.
  */
 #define SCTP_AUTH_RANDOM_LENGTH 32
-
-#define SCTP_PROBE_TIMER_MIN	5000
 
 #endif /* __sctp_constants_h__ */

@@ -20,7 +20,6 @@
 #include <linux/uaccess.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 #include <linux/poll.h>
 #include <linux/kthread.h>
 #include <linux/aio.h>
@@ -32,12 +31,6 @@
 
 #include <linux/usb/gadgetfs.h>
 #include <linux/usb/gadget.h>
-#include <linux/usb/composite.h> /* for USB_GADGET_DELAYED_STATUS */
-
-/* Undef helpers from linux/usb/composite.h as gadgetfs redefines them */
-#undef DBG
-#undef ERROR
-#undef INFO
 
 
 /*
@@ -480,7 +473,7 @@ static void ep_user_copy_worker(struct work_struct *work)
 		ret = -EFAULT;
 
 	/* completing the iocb can drop the ctx and mm, don't touch mm after */
-	iocb->ki_complete(iocb, ret);
+	iocb->ki_complete(iocb, ret, ret);
 
 	kfree(priv->buf);
 	kfree(priv->to_free);
@@ -507,8 +500,10 @@ static void ep_aio_complete(struct usb_ep *ep, struct usb_request *req)
 		kfree(priv->to_free);
 		kfree(priv);
 		iocb->private = NULL;
-		iocb->ki_complete(iocb,
-				req->actual ? req->actual : (long)req->status);
+		/* aio_complete() reports bytes-transferred _and_ faults */
+
+		iocb->ki_complete(iocb, req->actual ? req->actual : req->status,
+				req->status);
 	} else {
 		/* ep_copy_to_user() won't report both; we hide some faults */
 		if (unlikely(0 != req->status))
@@ -621,7 +616,7 @@ ep_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		if (!priv)
 			goto fail;
 		priv->to_free = dup_iter(&priv->to, to, GFP_KERNEL);
-		if (!iter_is_ubuf(&priv->to) && !priv->to_free) {
+		if (!priv->to_free) {
 			kfree(priv);
 			goto fail;
 		}
@@ -706,6 +701,7 @@ static const struct file_operations ep_io_operations = {
 
 	.open =		ep_open,
 	.release =	ep_release,
+	.llseek =	no_llseek,
 	.unlocked_ioctl = ep_ioctl,
 	.read_iter =	ep_read_iter,
 	.write_iter =	ep_write_iter,
@@ -1183,7 +1179,7 @@ ep0_fasync (int f, struct file *fd, int on)
 {
 	struct dev_data		*dev = fd->private_data;
 	// caller must F_SETOWN before signal delivery happens
-	VDEBUG(dev, "%s %s\n", __func__, str_on_off(on));
+	VDEBUG (dev, "%s %s\n", __func__, on ? "on" : "off");
 	return fasync_helper (f, fd, on, &dev->fasync);
 }
 
@@ -1221,8 +1217,8 @@ dev_release (struct inode *inode, struct file *fd)
 static __poll_t
 ep0_poll (struct file *fd, poll_table *wait)
 {
-	struct dev_data         *dev = fd->private_data;
-	__poll_t                mask = 0;
+       struct dev_data         *dev = fd->private_data;
+       __poll_t                mask = 0;
 
 	if (dev->state <= STATE_DEV_OPENED)
 		return DEFAULT_POLLMASK;
@@ -1250,7 +1246,7 @@ out:
 	return mask;
 }
 
-static long gadget_dev_ioctl (struct file *fd, unsigned code, unsigned long value)
+static long dev_ioctl (struct file *fd, unsigned code, unsigned long value)
 {
 	struct dev_data		*dev = fd->private_data;
 	struct usb_gadget	*gadget = dev->gadget;
@@ -1517,16 +1513,7 @@ delegate:
 			event->u.setup = *ctrl;
 			ep0_readable (dev);
 			spin_unlock (&dev->lock);
-			/*
-			 * Return USB_GADGET_DELAYED_STATUS as a workaround to
-			 * stop some UDC drivers (e.g. dwc3) from automatically
-			 * proceeding with the status stage for 0-length
-			 * transfers.
-			 * Should be removed once all UDC drivers are fixed to
-			 * always delay the status stage until a response is
-			 * queued to EP0.
-			 */
-			return w_length == 0 ? USB_GADGET_DELAYED_STATUS : 0;
+			return 0;
 		}
 	}
 
@@ -1561,6 +1548,7 @@ static void destroy_ep_files (struct dev_data *dev)
 	spin_lock_irq (&dev->lock);
 	while (!list_empty(&dev->epfiles)) {
 		struct ep_data	*ep;
+		struct inode	*parent;
 		struct dentry	*dentry;
 
 		/* break link to FS */
@@ -1570,6 +1558,7 @@ static void destroy_ep_files (struct dev_data *dev)
 
 		dentry = ep->dentry;
 		ep->dentry = NULL;
+		parent = d_inode(dentry->d_parent);
 
 		/* break link to controller */
 		mutex_lock(&ep->lock);
@@ -1584,7 +1573,10 @@ static void destroy_ep_files (struct dev_data *dev)
 		put_ep (ep);
 
 		/* break link to dcache */
-		simple_recursive_removal(dentry, NULL);
+		inode_lock(parent);
+		d_delete (dentry);
+		dput (dentry);
+		inode_unlock(parent);
 
 		spin_lock_irq (&dev->lock);
 	}
@@ -1610,7 +1602,7 @@ static int activate_ep_files (struct dev_data *dev)
 		mutex_init(&data->lock);
 		init_waitqueue_head (&data->wait);
 
-		strscpy(data->name, ep->name);
+		strncpy (data->name, ep->name, sizeof (data->name) - 1);
 		refcount_set (&data->count, 1);
 		data->dev = dev;
 		get_dev (dev);
@@ -1885,7 +1877,7 @@ dev_config (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
 	else
 		gadgetfs_driver.max_speed = USB_SPEED_FULL;
 
-	value = usb_gadget_register_driver(&gadgetfs_driver);
+	value = usb_gadget_probe_driver(&gadgetfs_driver);
 	if (value != 0) {
 		spin_lock_irq(&dev->lock);
 		goto fail;
@@ -1916,7 +1908,7 @@ fail:
 }
 
 static int
-gadget_dev_open (struct inode *inode, struct file *fd)
+dev_open (struct inode *inode, struct file *fd)
 {
 	struct dev_data		*dev = inode->i_private;
 	int			value = -EBUSY;
@@ -1934,13 +1926,14 @@ gadget_dev_open (struct inode *inode, struct file *fd)
 }
 
 static const struct file_operations ep0_operations = {
+	.llseek =	no_llseek,
 
-	.open =		gadget_dev_open,
+	.open =		dev_open,
 	.read =		ep0_read,
 	.write =	dev_config,
 	.fasync =	ep0_fasync,
 	.poll =		ep0_poll,
-	.unlocked_ioctl = gadget_dev_ioctl,
+	.unlocked_ioctl = dev_ioctl,
 	.release =	dev_release,
 };
 
@@ -1978,7 +1971,8 @@ gadgetfs_make_inode (struct super_block *sb,
 		inode->i_mode = mode;
 		inode->i_uid = make_kuid(&init_user_ns, default_uid);
 		inode->i_gid = make_kgid(&init_user_ns, default_gid);
-		simple_inode_init_ts(inode);
+		inode->i_atime = inode->i_mtime = inode->i_ctime
+				= current_time(inode);
 		inode->i_private = data;
 		inode->i_fop = fops;
 	}
@@ -2011,7 +2005,7 @@ gadgetfs_create_file (struct super_block *sb, char const *name,
 
 static const struct super_operations gadget_fs_operations = {
 	.statfs =	simple_statfs,
-	.drop_inode =	inode_just_drop,
+	.drop_inode =	generic_delete_inode,
 };
 
 static int
@@ -2124,7 +2118,7 @@ MODULE_ALIAS_FS("gadgetfs");
 
 /*----------------------------------------------------------------------*/
 
-static int __init gadgetfs_init (void)
+static int __init init (void)
 {
 	int status;
 
@@ -2134,12 +2128,12 @@ static int __init gadgetfs_init (void)
 			shortname, driver_desc);
 	return status;
 }
-module_init (gadgetfs_init);
+module_init (init);
 
-static void __exit gadgetfs_cleanup (void)
+static void __exit cleanup (void)
 {
 	pr_debug ("unregister %s\n", shortname);
 	unregister_filesystem (&gadgetfs_type);
 }
-module_exit (gadgetfs_cleanup);
+module_exit (cleanup);
 

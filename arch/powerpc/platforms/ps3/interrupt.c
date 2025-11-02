@@ -9,7 +9,6 @@
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/irq.h>
-#include <linux/irqdomain.h>
 
 #include <asm/machdep.h>
 #include <asm/udbg.h>
@@ -46,7 +45,7 @@
  * implementation equates HV plug value to Linux virq value, constrains each
  * interrupt to have a system wide unique plug number, and limits the range
  * of the plug values to map into the first dword of the bitmaps.  This
- * gives a usable range of plug values of  {NR_IRQS_LEGACY..63}.  Note
+ * gives a usable range of plug values of  {NUM_ISA_INTERRUPTS..63}.  Note
  * that there is no constraint on how many in this set an individual thread
  * can acquire.
  *
@@ -378,9 +377,9 @@ int ps3_send_event_locally(unsigned int virq)
 
 /**
  * ps3_sb_event_receive_port_setup - Setup a system bus event receive port.
- * @dev: The system bus device instance.
  * @cpu: enum ps3_cpu_binding indicating the cpu the interrupt should be
  * serviced on.
+ * @dev: The system bus device instance.
  * @virq: The assigned Linux virq.
  *
  * An event irq represents a virtual device interrupt.  The interrupt_id
@@ -722,7 +721,7 @@ static unsigned int ps3_get_irq(void)
 	}
 
 #if defined(DEBUG)
-	if (unlikely(plug < NR_IRQS_LEGACY || plug > PS3_PLUG_MAX)) {
+	if (unlikely(plug < NUM_ISA_INTERRUPTS || plug > PS3_PLUG_MAX)) {
 		dump_bmp(&per_cpu(ps3_private, 0));
 		dump_bmp(&per_cpu(ps3_private, 1));
 		BUG();
@@ -743,8 +742,8 @@ void __init ps3_init_IRQ(void)
 	unsigned cpu;
 	struct irq_domain *host;
 
-	host = irq_domain_create_nomap(NULL, PS3_PLUG_MAX + 1, &ps3_host_ops, NULL);
-	irq_set_default_domain(host);
+	host = irq_domain_add_nomap(NULL, PS3_PLUG_MAX + 1, &ps3_host_ops, NULL);
+	irq_set_default_host(host);
 
 	for_each_possible_cpu(cpu) {
 		struct ps3_private *pd = &per_cpu(ps3_private, cpu);

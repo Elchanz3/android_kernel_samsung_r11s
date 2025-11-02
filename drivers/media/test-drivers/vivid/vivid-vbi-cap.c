@@ -14,7 +14,6 @@
 #include "vivid-kthread-cap.h"
 #include "vivid-vbi-cap.h"
 #include "vivid-vbi-gen.h"
-#include "vivid-vid-common.h"
 
 static void vivid_sliced_vbi_cap_fill(struct vivid_dev *dev, unsigned seqnr)
 {
@@ -24,7 +23,7 @@ static void vivid_sliced_vbi_cap_fill(struct vivid_dev *dev, unsigned seqnr)
 	vivid_vbi_gen_sliced(vbi_gen, is_60hz, seqnr);
 
 	if (!is_60hz) {
-		if (vivid_vid_can_loop(dev)) {
+		if (dev->loop_video) {
 			if (dev->vbi_out_have_wss) {
 				vbi_gen->data[12].data[0] = dev->vbi_out_wss[0];
 				vbi_gen->data[12].data[1] = dev->vbi_out_wss[1];
@@ -48,7 +47,7 @@ static void vivid_sliced_vbi_cap_fill(struct vivid_dev *dev, unsigned seqnr)
 				break;
 			}
 		}
-	} else if (vivid_vid_can_loop(dev) && is_60hz) {
+	} else if (dev->loop_video && is_60hz) {
 		if (dev->vbi_out_have_cc[0]) {
 			vbi_gen->data[0].data[0] = dev->vbi_out_cc[0][0];
 			vbi_gen->data[0].data[1] = dev->vbi_out_cc[0][1];
@@ -133,9 +132,10 @@ static int vbi_cap_queue_setup(struct vb2_queue *vq,
 	if (!vivid_is_sdtv_cap(dev))
 		return -EINVAL;
 
-	if (*nplanes)
-		return sizes[0] < size ? -EINVAL : 0;
 	sizes[0] = size;
+
+	if (vq->num_buffers + *nbuffers < 2)
+		*nbuffers = 2 - vq->num_buffers;
 
 	*nplanes = 1;
 	return 0;
@@ -230,6 +230,8 @@ const struct vb2_ops vivid_vbi_cap_qops = {
 	.start_streaming	= vbi_cap_start_streaming,
 	.stop_streaming		= vbi_cap_stop_streaming,
 	.buf_request_complete	= vbi_cap_buf_request_complete,
+	.wait_prepare		= vb2_ops_wait_prepare,
+	.wait_finish		= vb2_ops_wait_finish,
 };
 
 int vidioc_g_fmt_vbi_cap(struct file *file, void *priv,
@@ -253,8 +255,10 @@ int vidioc_s_fmt_vbi_cap(struct file *file, void *priv,
 
 	if (ret)
 		return ret;
-	if (f->type != V4L2_BUF_TYPE_VBI_CAPTURE && vb2_is_busy(&dev->vb_vbi_cap_q))
+	if (dev->stream_sliced_vbi_cap && vb2_is_busy(&dev->vb_vbi_cap_q))
 		return -EBUSY;
+	dev->stream_sliced_vbi_cap = false;
+	dev->vbi_cap_dev.queue->type = V4L2_BUF_TYPE_VBI_CAPTURE;
 	return 0;
 }
 
@@ -282,7 +286,7 @@ void vivid_fill_service_lines(struct v4l2_sliced_vbi_format *vbi, u32 service_se
 	}
 }
 
-int vidioc_g_fmt_sliced_vbi_cap(struct file *file, void *priv, struct v4l2_format *fmt)
+int vidioc_g_fmt_sliced_vbi_cap(struct file *file, void *fh, struct v4l2_format *fmt)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct v4l2_sliced_vbi_format *vbi = &fmt->fmt.sliced;
@@ -294,7 +298,7 @@ int vidioc_g_fmt_sliced_vbi_cap(struct file *file, void *priv, struct v4l2_forma
 	return 0;
 }
 
-int vidioc_try_fmt_sliced_vbi_cap(struct file *file, void *priv, struct v4l2_format *fmt)
+int vidioc_try_fmt_sliced_vbi_cap(struct file *file, void *fh, struct v4l2_format *fmt)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct v4l2_sliced_vbi_format *vbi = &fmt->fmt.sliced;
@@ -310,21 +314,23 @@ int vidioc_try_fmt_sliced_vbi_cap(struct file *file, void *priv, struct v4l2_for
 	return 0;
 }
 
-int vidioc_s_fmt_sliced_vbi_cap(struct file *file, void *priv, struct v4l2_format *fmt)
+int vidioc_s_fmt_sliced_vbi_cap(struct file *file, void *fh, struct v4l2_format *fmt)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct v4l2_sliced_vbi_format *vbi = &fmt->fmt.sliced;
-	int ret = vidioc_try_fmt_sliced_vbi_cap(file, priv, fmt);
+	int ret = vidioc_try_fmt_sliced_vbi_cap(file, fh, fmt);
 
 	if (ret)
 		return ret;
-	if (fmt->type != V4L2_BUF_TYPE_SLICED_VBI_CAPTURE && vb2_is_busy(&dev->vb_vbi_cap_q))
+	if (!dev->stream_sliced_vbi_cap && vb2_is_busy(&dev->vb_vbi_cap_q))
 		return -EBUSY;
 	dev->service_set_cap = vbi->service_set;
+	dev->stream_sliced_vbi_cap = true;
+	dev->vbi_cap_dev.queue->type = V4L2_BUF_TYPE_SLICED_VBI_CAPTURE;
 	return 0;
 }
 
-int vidioc_g_sliced_vbi_cap(struct file *file, void *priv, struct v4l2_sliced_vbi_cap *cap)
+int vidioc_g_sliced_vbi_cap(struct file *file, void *fh, struct v4l2_sliced_vbi_cap *cap)
 {
 	struct vivid_dev *dev = video_drvdata(file);
 	struct video_device *vdev = video_devdata(file);

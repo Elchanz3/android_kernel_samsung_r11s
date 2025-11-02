@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2025 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2007-2011 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -44,9 +44,6 @@
 /* hbqinfo output buffer size */
 #define LPFC_HBQINFO_SIZE 8192
 
-/* hdwqinfo output buffer size */
-#define LPFC_HDWQINFO_SIZE 8192
-
 /* nvmestat output buffer size */
 #define LPFC_NVMESTAT_SIZE 8192
 #define LPFC_IOKTIME_SIZE 8192
@@ -54,9 +51,6 @@
 
 /* scsistat output buffer size */
 #define LPFC_SCSISTAT_SIZE 8192
-
-/* Congestion Info Buffer size */
-#define LPFC_CGN_BUF_SIZE 8192
 
 #define LPFC_DEBUG_OUT_LINE_SZ	80
 
@@ -285,12 +279,6 @@ struct lpfc_idiag {
 	void *ptr_private;
 };
 
-#define MAX_DEBUGFS_RX_INFO_SIZE	(128 * LPFC_MAX_RXMONITOR_ENTRY)
-struct lpfc_rx_monitor_debug {
-	char *i_private;
-	char *buffer;
-};
-
 #else
 
 #define lpfc_nvmeio_data(phba, fmt, arg...) \
@@ -325,17 +313,6 @@ enum {
 						 * discovery */
 #endif /* H_LPFC_DEBUG_FS */
 
-enum {
-	writeGuard = 1,
-	writeApp,
-	writeRef,
-	readGuard,
-	readApp,
-	readRef,
-	InjErrLBA,
-	InjErrNPortID,
-	InjErrWWPN,
-};
 
 /*
  * Driver debug utility routines outside of debugfs. The debug utility

@@ -11,15 +11,15 @@
 
 static const struct flag_info flag_array[] = {
 	{
-		.mask	= _PAGE_READ,
-		.val	= 0,
-		.set	= " ",
-		.clear	= "r",
+		.mask	= _PAGE_USER,
+		.val	= _PAGE_USER,
+		.set	= "user",
+		.clear	= "    ",
 	}, {
-		.mask	= _PAGE_WRITE,
+		.mask	= _PAGE_RW,
 		.val	= 0,
-		.set	= " ",
-		.clear	= "w",
+		.set	= "r ",
+		.clear	= "rw",
 	}, {
 		.mask	= _PAGE_EXEC,
 		.val	= _PAGE_EXEC,
@@ -67,11 +67,9 @@ static const struct flag_info flag_array[] = {
 	}
 };
 
-struct ptdump_pg_level pg_level[5] = {
-	{ /* pgd */
-		.flag	= flag_array,
-		.num	= ARRAY_SIZE(flag_array),
-	}, { /* p4d */
+struct pgtable_level pg_level[5] = {
+	{
+	}, { /* pgd */
 		.flag	= flag_array,
 		.num	= ARRAY_SIZE(flag_array),
 	}, { /* pud */

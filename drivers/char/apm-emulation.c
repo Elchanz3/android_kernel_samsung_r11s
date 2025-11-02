@@ -141,6 +141,9 @@ static struct apm_queue kapmd_queue;
 
 static DEFINE_MUTEX(state_lock);
 
+static const char driver_version[] = "1.13";	/* no spaces */
+
+
 
 /*
  * Compatibility cruft until the IPAQ people move over to the new
@@ -432,8 +435,6 @@ static struct miscdevice apm_device = {
  */
 static int proc_apm_show(struct seq_file *m, void *v)
 {
-	static const char driver_version[] = "1.13";	/* no spaces */
-
 	struct apm_power_info info;
 	char *units;
 
@@ -543,7 +544,7 @@ static int apm_suspend_notifier(struct notifier_block *nb,
 		wake_up_interruptible(&apm_waitqueue);
 
 		/*
-		 * Wait for the suspend_acks_pending variable to drop to
+		 * Wait for the the suspend_acks_pending variable to drop to
 		 * zero, meaning everybody acked the suspend event (or the
 		 * process was killed.)
 		 *

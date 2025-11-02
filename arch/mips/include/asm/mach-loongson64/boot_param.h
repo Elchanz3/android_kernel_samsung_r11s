@@ -14,11 +14,7 @@
 #define ADAPTER_ROM		8
 #define ACPI_TABLE		9
 #define SMBIOS_TABLE		10
-#define UMA_VIDEO_RAM		11
-#define VUMA_VIDEO_RAM		12
-#define MAX_MEMORY_TYPE		13
-
-#define MEM_SIZE_IS_IN_BYTES	(1 << 31)
+#define MAX_MEMORY_TYPE		11
 
 #define LOONGSON3_BOOT_MEM_MAP_MAX 128
 struct efi_memory_map_loongson {
@@ -42,14 +38,12 @@ enum loongson_cpu_type {
 	Legacy_1B = 0x5,
 	Legacy_2G = 0x6,
 	Legacy_2H = 0x7,
-	Legacy_2K = 0x8,
 	Loongson_1A = 0x100,
 	Loongson_1B = 0x101,
 	Loongson_2E = 0x200,
 	Loongson_2F = 0x201,
 	Loongson_2G = 0x202,
 	Loongson_2H = 0x203,
-	Loongson_2K = 0x204,
 	Loongson_3A = 0x300,
 	Loongson_3B = 0x301
 };
@@ -123,15 +117,14 @@ struct irq_source_routing_table {
 	u64 pci_io_start_addr;
 	u64 pci_io_end_addr;
 	u64 pci_config_addr;
-	u16 dma_mask_bits;
-	u16 dma_noncoherent;
+	u32 dma_mask_bits;
 } __packed;
 
 struct interface_info {
-	u16 vers; /* version of the specification */
-	u16 size; /* size of this interface */
-	u8  flag; /* used or unused */
-	char description[64]; /* description for each change */
+	u16 vers; /* version of the specificition */
+	u16 size;
+	u8  flag;
+	char description[64];
 } __packed;
 
 #define MAX_RESOURCE_NUMBER 128
@@ -205,12 +198,35 @@ enum loongson_bridge_type {
 	VIRTUAL = 3
 };
 
+struct loongson_system_configuration {
+	u32 nr_cpus;
+	u32 nr_nodes;
+	int cores_per_node;
+	int cores_per_package;
+	u16 boot_cpu_id;
+	u16 reserved_cpus_mask;
+	enum loongson_cpu_type cputype;
+	enum loongson_bridge_type bridgetype;
+	u64 ht_control_base;
+	u64 pci_mem_start_addr;
+	u64 pci_mem_end_addr;
+	u64 pci_io_base;
+	u64 restart_addr;
+	u64 poweroff_addr;
+	u64 suspend_addr;
+	u64 vgabios_addr;
+	u32 dma_mask_bits;
+	char ecname[32];
+	u32 nr_uarts;
+	struct uart_device uarts[MAX_UARTS];
+	u32 nr_sensors;
+	struct sensor_device sensors[MAX_SENSORS];
+	u64 workarounds;
+	void (*early_config)(void);
+};
+
 extern struct efi_memory_map_loongson *loongson_memmap;
 extern struct loongson_system_configuration loongson_sysconf;
-
-extern struct board_devices *eboard;
-extern struct interface_info *einter;
-extern struct loongson_special_attribute *especial;
 
 extern u32 node_id_offset;
 extern void ls7a_early_config(void);

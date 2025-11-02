@@ -1,13 +1,17 @@
-# SPDX-License-Identifier: GPL-2.0
-
+CC = $(CROSS_COMPILE)gcc
 CFLAGS = -g -Wall -O2 -D_FORTIFY_SOURCE=2
-CFLAGS += $(KHDR_INCLUDES)
+SRCS=$(wildcard *.c)
+OBJS=$(SRCS:.c=.o)
 
-TEST_GEN_PROGS := resctrl_tests
+all: resctrl_tests
 
-LOCAL_HDRS += $(wildcard *.h)
+$(OBJS): $(SRCS)
+	$(CC) $(CFLAGS) -c $(SRCS)
 
-include ../lib.mk
-CFLAGS += -I$(top_srcdir)/tools/include
+resctrl_tests: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^
 
-$(OUTPUT)/resctrl_tests: $(wildcard *.c)
+.PHONY: clean
+
+clean:
+	$(RM) $(OBJS) resctrl_tests

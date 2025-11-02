@@ -10,7 +10,8 @@
 #include <assert.h>
 #include <unistd.h>
 #include <stdarg.h>
-#include <linux/kallsyms.h>
+
+#define unlikely(cond) (cond)
 
 #include <asm/insn.h>
 #include <inat.c>
@@ -105,7 +106,7 @@ static void parse_args(int argc, char **argv)
 	}
 }
 
-#define BUFSIZE (256 + KSYM_NAME_LEN)
+#define BUFSIZE 256
 
 int main(int argc, char **argv)
 {
@@ -119,7 +120,7 @@ int main(int argc, char **argv)
 
 	while (fgets(line, BUFSIZE, stdin)) {
 		char copy[BUFSIZE], *s, *tab1, *tab2;
-		int nb = 0, ret;
+		int nb = 0;
 		unsigned int b;
 
 		if (line[0] == '<') {
@@ -147,12 +148,10 @@ int main(int argc, char **argv)
 			} else
 				break;
 		}
-
 		/* Decode an instruction */
-		ret = insn_decode(&insn, insn_buff, sizeof(insn_buff),
-				  x86_64 ? INSN_MODE_64 : INSN_MODE_32);
-
-		if (ret < 0 || insn.length != nb) {
+		insn_init(&insn, insn_buff, sizeof(insn_buff), x86_64);
+		insn_get_length(&insn);
+		if (insn.length != nb) {
 			warnings++;
 			pr_warn("Found an x86 instruction decoder bug, "
 				"please report this.\n", sym);
@@ -167,7 +166,7 @@ int main(int argc, char **argv)
 		pr_warn("Decoded and checked %d instructions with %d "
 			"failures\n", insns, warnings);
 	else
-		fprintf(stdout, "  %s: success: Decoded and checked %d"
+		fprintf(stdout, "%s: success: Decoded and checked %d"
 			" instructions\n", prog, insns);
 	return 0;
 }

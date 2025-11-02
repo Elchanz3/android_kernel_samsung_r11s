@@ -17,6 +17,7 @@
 #include <linux/initrd.h>
 #include <asm/smp.h>
 #include <linux/user.h>
+#include <linux/screen_info.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
@@ -50,6 +51,18 @@
 
 #include "kernel.h"
 
+struct screen_info screen_info = {
+	0, 0,			/* orig-x, orig-y */
+	0,			/* unused */
+	0,			/* orig-video-page */
+	0,			/* orig-video-mode */
+	128,			/* orig-video-cols */
+	0,0,0,			/* ega_ax, ega_bx, ega_cx */
+	54,			/* orig-video-lines */
+	0,                      /* orig-video-isVGA */
+	16                      /* orig-video-points */
+};
+
 /* Typing sync at the prom prompt calls the function pointed to by
  * romvec->pv_synchook which I set to the following function.
  * This should sync all filesystems and return, for now it just
@@ -67,10 +80,10 @@ static void prom_sync_me(void)
 	__asm__ __volatile__("wr %0, 0x0, %%tbr\n\t"
 			     "nop\n\t"
 			     "nop\n\t"
-			     "nop\n\t" : : "r" (&trapbase[0]));
+			     "nop\n\t" : : "r" (&trapbase));
 
 	prom_printf("PROM SYNC COMMAND...\n");
-	show_mem();
+	show_free_areas(0, NULL);
 	if (!is_idle_task(current)) {
 		local_irq_enable();
 		ksys_sync();
@@ -253,6 +266,7 @@ static __init void leon_patch(void)
 }
 
 struct tt_entry *sparc_ttable;
+static struct pt_regs fake_swapper_regs;
 
 /* Called from head_32.S - before we have setup anything
  * in the kernel. Be very careful with what you do here.
@@ -285,11 +299,11 @@ void __init setup_arch(char **cmdline_p)
 	int i;
 	unsigned long highest_paddr;
 
-	sparc_ttable = &trapbase[0];
+	sparc_ttable = &trapbase;
 
 	/* Initialize PROM console and command line. */
 	*cmdline_p = prom_getbootargs();
-	strscpy(boot_command_line, *cmdline_p, COMMAND_LINE_SIZE);
+	strlcpy(boot_command_line, *cmdline_p, COMMAND_LINE_SIZE);
 	parse_early_param();
 
 	boot_flags_init(*cmdline_p);
@@ -348,6 +362,8 @@ void __init setup_arch(char **cmdline_p)
 		printk("Booted under KADB. Syncing trap table.\n");
 		(*(linux_dbvec->teach_debugger))();
 	}
+
+	init_task.thread.kregs = &fake_swapper_regs;
 
 	/* Run-time patch instructions to match the cpu model */
 	per_cpu_patch();

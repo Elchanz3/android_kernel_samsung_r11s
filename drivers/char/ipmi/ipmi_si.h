@@ -18,21 +18,9 @@
 #define DEFAULT_REGSPACING	1
 #define DEFAULT_REGSIZE		1
 
-/* Numbers in this enumerator should be mapped to si_to_str[] */
 enum si_type {
-	SI_TYPE_INVALID, SI_KCS, SI_SMIC, SI_BT, SI_TYPE_MAX
+	SI_TYPE_INVALID, SI_KCS, SI_SMIC, SI_BT
 };
-
-/* Array is defined in the ipmi_si_intf.c */
-extern const char *const si_to_str[];
-
-struct ipmi_match_info {
-	enum si_type type;
-};
-
-extern const struct ipmi_match_info ipmi_kcs_si_info;
-extern const struct ipmi_match_info ipmi_smic_si_info;
-extern const struct ipmi_match_info ipmi_bt_si_info;
 
 enum ipmi_addr_space {
 	IPMI_IO_ADDR_SPACE, IPMI_MEM_ADDR_SPACE
@@ -60,6 +48,8 @@ struct si_sm_io {
 	enum ipmi_addr_space addr_space;
 	unsigned long addr_data;
 	enum ipmi_addr_src addr_source; /* ACPI, PCI, SMBIOS, hardcode, etc. */
+	void (*addr_source_cleanup)(struct si_sm_io *io);
+	void *addr_source_data;
 	union ipmi_smi_info_union addr_info;
 
 	int (*io_setup)(struct si_sm_io *info);
@@ -72,7 +62,7 @@ struct si_sm_io {
 	void (*irq_cleanup)(struct si_sm_io *io);
 
 	u8 slave_addr;
-	const struct ipmi_match_info *si_info;
+	enum si_type si_type;
 	struct device *dev;
 };
 
@@ -81,7 +71,7 @@ irqreturn_t ipmi_si_irq_handler(int irq, void *data);
 void ipmi_irq_start_cleanup(struct si_sm_io *io);
 int ipmi_std_irq_setup(struct si_sm_io *io);
 void ipmi_irq_finish_setup(struct si_sm_io *io);
-void ipmi_si_remove_by_dev(struct device *dev);
+int ipmi_si_remove_by_dev(struct device *dev);
 struct device *ipmi_si_remove_by_data(int addr_space, enum si_type si_type,
 				      unsigned long addr);
 void ipmi_hardcode_init(void);
@@ -100,13 +90,6 @@ void ipmi_si_pci_shutdown(void);
 #else
 static inline void ipmi_si_pci_init(void) { }
 static inline void ipmi_si_pci_shutdown(void) { }
-#endif
-#ifdef CONFIG_IPMI_LS2K
-void ipmi_si_ls2k_init(void);
-void ipmi_si_ls2k_shutdown(void);
-#else
-static inline void ipmi_si_ls2k_init(void) { }
-static inline void ipmi_si_ls2k_shutdown(void) { }
 #endif
 #ifdef CONFIG_PARISC
 void ipmi_si_parisc_init(void);

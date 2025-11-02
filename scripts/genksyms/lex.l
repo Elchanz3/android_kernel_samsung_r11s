@@ -12,7 +12,6 @@
 %{
 
 #include <limits.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -51,7 +50,6 @@ MC_TOKEN		([~%^&*+=|<>/-]=)|(&&)|("||")|(->)|(<<)|(>>)
 
 %%
 
-u?int(8|16|32|64)x(1|2|4|8|16)_t	return BUILTIN_INT_KEYW;
 
  /* Keep track of our location in the original source files.  */
 ^#[ \t]+{INT}[ \t]+\"[^\"\n]+\".*\n	return FILENAME;
@@ -115,23 +113,18 @@ u?int(8|16|32|64)x(1|2|4|8|16)_t	return BUILTIN_INT_KEYW;
 /* The second stage lexer.  Here we incorporate knowledge of the state
    of the parser to tailor the tokens that are returned.  */
 
-/*
- * The lexer cannot distinguish whether a typedef'ed string is a TYPE or an
- * IDENT. We need a hint from the parser to handle this accurately.
- */
-bool dont_want_type_specifier;
-
 int
 yylex(void)
 {
   static enum {
     ST_NOTSTARTED, ST_NORMAL, ST_ATTRIBUTE, ST_ASM, ST_TYPEOF, ST_TYPEOF_1,
-    ST_BRACKET, ST_BRACE, ST_EXPRESSION, ST_STATIC_ASSERT,
+    ST_BRACKET, ST_BRACE, ST_EXPRESSION,
+    ST_TABLE_1, ST_TABLE_2, ST_TABLE_3, ST_TABLE_4,
+    ST_TABLE_5, ST_TABLE_6
   } lexstate = ST_NOTSTARTED;
 
   static int suppress_type_lookup, dont_want_brace_phrase;
   static struct string_list *next_node;
-  static char *source_file;
 
   int token, count = 0;
   struct string_list *cur_node;
@@ -176,10 +169,10 @@ repeat:
   switch (lexstate)
     {
     case ST_NORMAL:
-      APP;
       switch (token)
 	{
 	case IDENT:
+	  APP;
 	  {
 	    int r = is_reserved_word(yytext, yyleng);
 	    if (r >= 0)
@@ -208,14 +201,9 @@ repeat:
 
 		  case EXPORT_SYMBOL_KEYW:
 		      goto fini;
-
-		  case STATIC_ASSERT_KEYW:
-		    lexstate = ST_STATIC_ASSERT;
-		    count = 0;
-		    goto repeat;
 		  }
 	      }
-	    if (!suppress_type_lookup && !dont_want_type_specifier)
+	    if (!suppress_type_lookup)
 	      {
 		if (find_symbol(yytext, SYM_TYPEDEF, 1))
 		  token = TYPE;
@@ -224,11 +212,13 @@ repeat:
 	  break;
 
 	case '[':
+	  APP;
 	  lexstate = ST_BRACKET;
 	  count = 1;
 	  goto repeat;
 
 	case '{':
+	  APP;
 	  if (dont_want_brace_phrase)
 	    break;
 	  lexstate = ST_BRACE;
@@ -236,10 +226,13 @@ repeat:
 	  goto repeat;
 
 	case '=': case ':':
+	  APP;
 	  lexstate = ST_EXPRESSION;
 	  break;
 
+	case DOTS:
 	default:
+	  APP;
 	  break;
 	}
       break;
@@ -408,23 +401,55 @@ repeat:
 	}
       break;
 
-    case ST_STATIC_ASSERT:
-      APP;
+    case ST_TABLE_1:
+      goto repeat;
+
+    case ST_TABLE_2:
+      if (token == IDENT && yyleng == 1 && yytext[0] == 'X')
+	{
+	  token = EXPORT_SYMBOL_KEYW;
+	  lexstate = ST_TABLE_5;
+	  APP;
+	  break;
+	}
+      lexstate = ST_TABLE_6;
+      /* FALLTHRU */
+
+    case ST_TABLE_6:
       switch (token)
 	{
-	case '(':
+	case '{': case '[': case '(':
 	  ++count;
-	  goto repeat;
-	case ')':
-	  if (--count == 0)
-	    {
-	      lexstate = ST_NORMAL;
-	      token = STATIC_ASSERT_PHRASE;
-	      break;
-	    }
-	  goto repeat;
+	  break;
+	case '}': case ']': case ')':
+	  --count;
+	  break;
+	case ',':
+	  if (count == 0)
+	    lexstate = ST_TABLE_2;
+	  break;
+	};
+      goto repeat;
+
+    case ST_TABLE_3:
+      goto repeat;
+
+    case ST_TABLE_4:
+      if (token == ';')
+	lexstate = ST_NORMAL;
+      goto repeat;
+
+    case ST_TABLE_5:
+      switch (token)
+	{
+	case ',':
+	  token = ';';
+	  lexstate = ST_TABLE_2;
+	  APP;
+	  break;
 	default:
-	  goto repeat;
+	  APP;
+	  break;
 	}
       break;
 
@@ -435,12 +460,7 @@ fini:
 
   if (suppress_type_lookup > 0)
     --suppress_type_lookup;
-
-  /*
-   *  __attribute__() can be placed immediately after the 'struct' keyword.
-   *  e.g.) struct __attribute__((__packed__)) foo { ... };
-   */
-  if (token != ATTRIBUTE_PHRASE && dont_want_brace_phrase > 0)
+  if (dont_want_brace_phrase > 0)
     --dont_want_brace_phrase;
 
   yylval = &next_node->next;

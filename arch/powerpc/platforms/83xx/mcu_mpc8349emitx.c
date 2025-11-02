@@ -8,16 +8,17 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/mutex.h>
 #include <linux/i2c.h>
 #include <linux/gpio/driver.h>
+#include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/slab.h>
 #include <linux/kthread.h>
-#include <linux/property.h>
 #include <linux/reboot.h>
+#include <asm/prom.h>
 #include <asm/machdep.h>
 
 /*
@@ -92,11 +93,10 @@ static void mcu_power_off(void)
 	mutex_unlock(&mcu->lock);
 }
 
-static int mcu_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
+static void mcu_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 {
 	struct mcu *mcu = gpiochip_get_data(gc);
 	u8 bit = 1 << (4 + gpio);
-	int ret;
 
 	mutex_lock(&mcu->lock);
 	if (val)
@@ -104,39 +104,42 @@ static int mcu_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 	else
 		mcu->reg_ctrl |= bit;
 
-	ret = i2c_smbus_write_byte_data(mcu->client, MCU_REG_CTRL,
-					mcu->reg_ctrl);
+	i2c_smbus_write_byte_data(mcu->client, MCU_REG_CTRL, mcu->reg_ctrl);
 	mutex_unlock(&mcu->lock);
-
-	return ret;
 }
 
 static int mcu_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 {
-	return mcu_gpio_set(gc, gpio, val);
+	mcu_gpio_set(gc, gpio, val);
+	return 0;
 }
 
 static int mcu_gpiochip_add(struct mcu *mcu)
 {
-	struct device *dev = &mcu->client->dev;
+	struct device_node *np;
 	struct gpio_chip *gc = &mcu->gc;
 
+	np = of_find_compatible_node(NULL, NULL, "fsl,mcu-mpc8349emitx");
+	if (!np)
+		return -ENODEV;
+
 	gc->owner = THIS_MODULE;
-	gc->label = kasprintf(GFP_KERNEL, "%pfw", dev_fwnode(dev));
+	gc->label = kasprintf(GFP_KERNEL, "%pOF", np);
 	gc->can_sleep = 1;
 	gc->ngpio = MCU_NUM_GPIO;
 	gc->base = -1;
 	gc->set = mcu_gpio_set;
 	gc->direction_output = mcu_gpio_dir_out;
-	gc->parent = dev;
+	gc->of_node = np;
 
 	return gpiochip_add_data(gc, mcu);
 }
 
-static void mcu_gpiochip_remove(struct mcu *mcu)
+static int mcu_gpiochip_remove(struct mcu *mcu)
 {
 	kfree(mcu->gc.label);
 	gpiochip_remove(&mcu->gc);
+	return 0;
 }
 
 static int mcu_probe(struct i2c_client *client)
@@ -181,9 +184,10 @@ err:
 	return ret;
 }
 
-static void mcu_remove(struct i2c_client *client)
+static int mcu_remove(struct i2c_client *client)
 {
 	struct mcu *mcu = i2c_get_clientdata(client);
+	int ret;
 
 	kthread_stop(shutdown_thread);
 
@@ -194,8 +198,11 @@ static void mcu_remove(struct i2c_client *client)
 		glob_mcu = NULL;
 	}
 
-	mcu_gpiochip_remove(mcu);
+	ret = mcu_gpiochip_remove(mcu);
+	if (ret)
+		return ret;
 	kfree(mcu);
+	return 0;
 }
 
 static const struct i2c_device_id mcu_ids[] = {
@@ -214,7 +221,7 @@ static struct i2c_driver mcu_driver = {
 		.name = "mcu-mpc8349emitx",
 		.of_match_table = mcu_of_match_table,
 	},
-	.probe = mcu_probe,
+	.probe_new = mcu_probe,
 	.remove	= mcu_remove,
 	.id_table = mcu_ids,
 };

@@ -107,8 +107,7 @@ static int get_max_afu_index(struct pci_dev *dev, int *afu_idx)
 	int pos;
 	u32 val;
 
-	pos = pci_find_dvsec_capability(dev, PCI_VENDOR_ID_IBM,
-					OCXL_DVSEC_FUNC_ID);
+	pos = find_dvsec_from_pos(dev, OCXL_DVSEC_FUNC_ID, 0);
 	if (!pos)
 		return -ESRCH;
 
@@ -172,11 +171,12 @@ static void pnv_ocxl_fixup_actag(struct pci_dev *dev)
 	if (phb->type != PNV_PHB_NPU_OCAPI)
 		return;
 
-	guard(mutex)(&links_list_lock);
+	mutex_lock(&links_list_lock);
 
 	link = find_link(dev);
 	if (!link) {
 		dev_warn(&dev->dev, "couldn't update actag information\n");
+		mutex_unlock(&links_list_lock);
 		return;
 	}
 
@@ -205,6 +205,7 @@ static void pnv_ocxl_fixup_actag(struct pci_dev *dev)
 	dev_dbg(&dev->dev, "total actags for function: %d\n",
 		link->fn_desired_actags[PCI_FUNC(dev->devfn)]);
 
+	mutex_unlock(&links_list_lock);
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, pnv_ocxl_fixup_actag);
 
@@ -251,11 +252,12 @@ int pnv_ocxl_get_actag(struct pci_dev *dev, u16 *base, u16 *enabled,
 {
 	struct npu_link *link;
 
-	guard(mutex)(&links_list_lock);
+	mutex_lock(&links_list_lock);
 
 	link = find_link(dev);
 	if (!link) {
 		dev_err(&dev->dev, "actag information not found\n");
+		mutex_unlock(&links_list_lock);
 		return -ENODEV;
 	}
 	/*
@@ -271,6 +273,7 @@ int pnv_ocxl_get_actag(struct pci_dev *dev, u16 *base, u16 *enabled,
 	*enabled   = link->fn_actags[PCI_FUNC(dev->devfn)].count;
 	*supported = link->fn_desired_actags[PCI_FUNC(dev->devfn)];
 
+	mutex_unlock(&links_list_lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pnv_ocxl_get_actag);
@@ -285,15 +288,16 @@ int pnv_ocxl_get_pasid_count(struct pci_dev *dev, int *count)
 	 * be used by a function depends on how many functions exist
 	 * on the device. The NPU needs to be configured to know how
 	 * many bits are available to PASIDs and how many are to be
-	 * used by the function BDF identifier.
+	 * used by the function BDF indentifier.
 	 *
 	 * We only support one AFU-carrying function for now.
 	 */
-	guard(mutex)(&links_list_lock);
+	mutex_lock(&links_list_lock);
 
 	link = find_link(dev);
 	if (!link) {
 		dev_err(&dev->dev, "actag information not found\n");
+		mutex_unlock(&links_list_lock);
 		return -ENODEV;
 	}
 
@@ -304,6 +308,7 @@ int pnv_ocxl_get_pasid_count(struct pci_dev *dev, int *count)
 			break;
 		}
 
+	mutex_unlock(&links_list_lock);
 	dev_dbg(&dev->dev, "%d PASIDs available for function\n",
 		rc ? 0 : *count);
 	return rc;
@@ -443,7 +448,7 @@ int pnv_ocxl_spa_setup(struct pci_dev *dev, void *spa_mem, int PE_mask,
 	if (!data)
 		return -ENOMEM;
 
-	bdfn = pci_dev_id(dev);
+	bdfn = (dev->bus->number << 8) | dev->devfn;
 	rc = opal_npu_spa_setup(phb->opal_id, bdfn, virt_to_phys(spa_mem),
 				PE_mask);
 	if (rc) {
@@ -472,121 +477,9 @@ EXPORT_SYMBOL_GPL(pnv_ocxl_spa_release);
 int pnv_ocxl_spa_remove_pe_from_cache(void *platform_data, int pe_handle)
 {
 	struct spa_data *data = (struct spa_data *) platform_data;
-
-	return opal_npu_spa_clear_cache(data->phb_opal_id, data->bdfn, pe_handle);
-}
-EXPORT_SYMBOL_GPL(pnv_ocxl_spa_remove_pe_from_cache);
-
-int pnv_ocxl_map_lpar(struct pci_dev *dev, uint64_t lparid,
-		      uint64_t lpcr, void __iomem **arva)
-{
-	struct pci_controller *hose = pci_bus_to_host(dev->bus);
-	struct pnv_phb *phb = hose->private_data;
-	u64 mmio_atsd;
 	int rc;
 
-	/* ATSD physical address.
-	 * ATSD LAUNCH register: write access initiates a shoot down to
-	 * initiate the TLB Invalidate command.
-	 */
-	rc = of_property_read_u64_index(hose->dn, "ibm,mmio-atsd",
-					0, &mmio_atsd);
-	if (rc) {
-		dev_info(&dev->dev, "No available ATSD found\n");
-		return rc;
-	}
-
-	/* Assign a register set to a Logical Partition and MMIO ATSD
-	 * LPARID register to the required value.
-	 */
-	rc = opal_npu_map_lpar(phb->opal_id, pci_dev_id(dev),
-			       lparid, lpcr);
-	if (rc) {
-		dev_err(&dev->dev, "Error mapping device to LPAR: %d\n", rc);
-		return rc;
-	}
-
-	*arva = ioremap(mmio_atsd, 24);
-	if (!(*arva)) {
-		dev_warn(&dev->dev, "ioremap failed - mmio_atsd: %#llx\n", mmio_atsd);
-		rc = -ENOMEM;
-	}
-
+	rc = opal_npu_spa_clear_cache(data->phb_opal_id, data->bdfn, pe_handle);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(pnv_ocxl_map_lpar);
-
-void pnv_ocxl_unmap_lpar(void __iomem *arva)
-{
-	iounmap(arva);
-}
-EXPORT_SYMBOL_GPL(pnv_ocxl_unmap_lpar);
-
-void pnv_ocxl_tlb_invalidate(void __iomem *arva,
-			     unsigned long pid,
-			     unsigned long addr,
-			     unsigned long page_size)
-{
-	unsigned long timeout = jiffies + (HZ * PNV_OCXL_ATSD_TIMEOUT);
-	u64 val = 0ull;
-	int pend;
-	u8 size;
-
-	if (!(arva))
-		return;
-
-	if (addr) {
-		/* load Abbreviated Virtual Address register with
-		 * the necessary value
-		 */
-		val |= FIELD_PREP(PNV_OCXL_ATSD_AVA_AVA, addr >> (63-51));
-		out_be64(arva + PNV_OCXL_ATSD_AVA, val);
-	}
-
-	/* Write access initiates a shoot down to initiate the
-	 * TLB Invalidate command
-	 */
-	val = PNV_OCXL_ATSD_LNCH_R;
-	val |= FIELD_PREP(PNV_OCXL_ATSD_LNCH_RIC, 0b10);
-	if (addr)
-		val |= FIELD_PREP(PNV_OCXL_ATSD_LNCH_IS, 0b00);
-	else {
-		val |= FIELD_PREP(PNV_OCXL_ATSD_LNCH_IS, 0b01);
-		val |= PNV_OCXL_ATSD_LNCH_OCAPI_SINGLETON;
-	}
-	val |= PNV_OCXL_ATSD_LNCH_PRS;
-	/* Actual Page Size to be invalidated
-	 * 000 4KB
-	 * 101 64KB
-	 * 001 2MB
-	 * 010 1GB
-	 */
-	size = 0b101;
-	if (page_size == 0x1000)
-		size = 0b000;
-	if (page_size == 0x200000)
-		size = 0b001;
-	if (page_size == 0x40000000)
-		size = 0b010;
-	val |= FIELD_PREP(PNV_OCXL_ATSD_LNCH_AP, size);
-	val |= FIELD_PREP(PNV_OCXL_ATSD_LNCH_PID, pid);
-	out_be64(arva + PNV_OCXL_ATSD_LNCH, val);
-
-	/* Poll the ATSD status register to determine when the
-	 * TLB Invalidate has been completed.
-	 */
-	val = in_be64(arva + PNV_OCXL_ATSD_STAT);
-	pend = val >> 63;
-
-	while (pend) {
-		if (time_after_eq(jiffies, timeout)) {
-			pr_err("%s - Timeout while reading XTS MMIO ATSD status register (val=%#llx, pidr=0x%lx)\n",
-			       __func__, val, pid);
-			return;
-		}
-		cpu_relax();
-		val = in_be64(arva + PNV_OCXL_ATSD_STAT);
-		pend = val >> 63;
-	}
-}
-EXPORT_SYMBOL_GPL(pnv_ocxl_tlb_invalidate);
+EXPORT_SYMBOL_GPL(pnv_ocxl_spa_remove_pe_from_cache);

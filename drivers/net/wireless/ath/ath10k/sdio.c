@@ -3,7 +3,6 @@
  * Copyright (c) 2004-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2012,2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2016-2017 Erik Stromdahl <erik.stromdahl@gmail.com>
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -562,7 +561,7 @@ static int ath10k_sdio_mbox_rx_alloc(struct ath10k *ar,
 				    ATH10K_HTC_MBOX_MAX_PAYLOAD_LENGTH);
 			ret = -ENOMEM;
 
-			ath10k_core_start_recovery(ar);
+			queue_work(ar->workqueue, &ar->restart_work);
 			ath10k_warn(ar, "exceeds length, start recovery\n");
 
 			goto err;
@@ -961,7 +960,7 @@ static int ath10k_sdio_mbox_read_int_status(struct ath10k *ar,
 	ret = ath10k_sdio_read(ar, MBOX_HOST_INT_STATUS_ADDRESS,
 			       irq_proc_reg, sizeof(*irq_proc_reg));
 	if (ret) {
-		ath10k_core_start_recovery(ar);
+		queue_work(ar->workqueue, &ar->restart_work);
 		ath10k_warn(ar, "read int status fail, start recovery\n");
 		goto out;
 	}
@@ -1058,7 +1057,7 @@ static int ath10k_sdio_mbox_proc_pending_irqs(struct ath10k *ar,
 
 out:
 	/* An optimization to bypass reading the IRQ status registers
-	 * unnecessarily which can re-wake the target, if upper layers
+	 * unecessarily which can re-wake the target, if upper layers
 	 * determine that we are in a low-throughput mode, we can rely on
 	 * taking another interrupt rather than re-checking the status
 	 * registers which can re-wake the target.
@@ -1249,7 +1248,7 @@ static int ath10k_sdio_bmi_exchange_msg(struct ath10k *ar,
 	 *        Wait for first 4 bytes to be in FIFO
 	 *        If CONSERVATIVE_BMI_READ is enabled, also wait for
 	 *        a BMI command credit, which indicates that the ENTIRE
-	 *        response is available in the FIFO
+	 *        response is available in the the FIFO
 	 *
 	 *  CASE 3: length > 128
 	 *        Wait for the first 4 bytes to be in FIFO
@@ -1447,8 +1446,7 @@ release:
 
 static void ath10k_sdio_sleep_timer_handler(struct timer_list *t)
 {
-	struct ath10k_sdio *ar_sdio = timer_container_of(ar_sdio, t,
-							 sleep_timer);
+	struct ath10k_sdio *ar_sdio = from_timer(ar_sdio, t, sleep_timer);
 
 	ar_sdio->mbox_state = SDIO_MBOX_REQUEST_TO_SLEEP_STATE;
 	queue_work(ar_sdio->workqueue, &ar_sdio->wr_async_work);
@@ -1622,7 +1620,7 @@ static void ath10k_sdio_hif_power_down(struct ath10k *ar)
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "sdio power off\n");
 
-	timer_delete_sync(&ar_sdio->sleep_timer);
+	del_timer_sync(&ar_sdio->sleep_timer);
 	ath10k_sdio_set_mbox_sleep(ar, true);
 
 	/* Disable the card */
@@ -1635,7 +1633,7 @@ static void ath10k_sdio_hif_power_down(struct ath10k *ar)
 		return;
 	}
 
-	ret = mmc_hw_reset(ar_sdio->func->card);
+	ret = mmc_hw_reset(ar_sdio->func->card->host);
 	if (ret)
 		ath10k_warn(ar, "unable to reset sdio: %d\n", ret);
 
@@ -1845,7 +1843,7 @@ static int ath10k_sdio_get_htt_tx_complete(struct ath10k *ar)
 	ret = ath10k_sdio_diag_read32(ar, addr, &val);
 	if (ret) {
 		ath10k_warn(ar,
-			    "unable to read hi_acs_flags for htt tx complete: %d\n", ret);
+			    "unable to read hi_acs_flags for htt tx comple : %d\n", ret);
 		return ret;
 	}
 
@@ -1864,7 +1862,7 @@ static int ath10k_sdio_hif_start(struct ath10k *ar)
 	struct ath10k_sdio *ar_sdio = ath10k_sdio_priv(ar);
 	int ret;
 
-	ath10k_core_napi_enable(ar);
+	napi_enable(&ar->napi);
 
 	/* Sleep 20 ms before HIF interrupts are disabled.
 	 * This will give target plenty of time to process the BMI done
@@ -1967,14 +1965,8 @@ static void ath10k_sdio_hif_stop(struct ath10k *ar)
 {
 	struct ath10k_sdio_bus_request *req, *tmp_req;
 	struct ath10k_sdio *ar_sdio = ath10k_sdio_priv(ar);
-	struct sk_buff *skb;
 
 	ath10k_sdio_irq_disable(ar);
-
-	cancel_work_sync(&ar_sdio->async_work_rx);
-
-	while ((skb = skb_dequeue(&ar_sdio->rx_head)))
-		dev_kfree_skb_any(skb);
 
 	cancel_work_sync(&ar_sdio->wr_async_work);
 
@@ -1997,7 +1989,8 @@ static void ath10k_sdio_hif_stop(struct ath10k *ar)
 
 	spin_unlock_bh(&ar_sdio->wr_async_lock);
 
-	ath10k_core_napi_sync_disable(ar);
+	napi_synchronize(&ar->napi);
+	napi_disable(&ar->napi);
 }
 
 #ifdef CONFIG_PM
@@ -2241,7 +2234,7 @@ static bool ath10k_sdio_is_fast_dump_supported(struct ath10k *ar)
 
 	ath10k_dbg(ar, ATH10K_DBG_SDIO, "sdio hi_option_flag2 %x\n", param);
 
-	return !!(param & HI_OPTION_SDIO_CRASH_DUMP_ENHANCEMENT_FW);
+	return param & HI_OPTION_SDIO_CRASH_DUMP_ENHANCEMENT_FW;
 }
 
 static void ath10k_sdio_dump_registers(struct ath10k *ar,
@@ -2317,8 +2310,8 @@ static int ath10k_sdio_dump_memory_section(struct ath10k *ar,
 	}
 
 	count = 0;
-	i = 0;
-	for (; cur_section; cur_section = next_section) {
+
+	for (i = 0; cur_section; i++) {
 		section_size = cur_section->end - cur_section->start;
 
 		if (section_size <= 0) {
@@ -2328,7 +2321,7 @@ static int ath10k_sdio_dump_memory_section(struct ath10k *ar,
 			break;
 		}
 
-		if (++i == mem_region->section_table.size) {
+		if ((i + 1) == mem_region->section_table.size) {
 			/* last section */
 			next_section = NULL;
 			skip_size = 0;
@@ -2371,6 +2364,12 @@ static int ath10k_sdio_dump_memory_section(struct ath10k *ar,
 		}
 
 		count += skip_size;
+
+		if (!next_section)
+			/* this was the last section */
+			break;
+
+		cur_section = next_section;
 	}
 
 	return count;
@@ -2391,7 +2390,7 @@ static int ath10k_sdio_dump_memory_generic(struct ath10k *ar,
 						      buf,
 						      current_region->len);
 
-	/* No individual memory sections defined so we can
+	/* No individiual memory sections defined so we can
 	 * copy the entire memory region.
 	 */
 	if (fast_dump)
@@ -2505,7 +2504,7 @@ void ath10k_sdio_fw_crashed_dump(struct ath10k *ar)
 
 	ath10k_sdio_enable_intrs(ar);
 
-	ath10k_core_start_recovery(ar);
+	queue_work(ar->workqueue, &ar->restart_work);
 }
 
 static int ath10k_sdio_probe(struct sdio_func *func,
@@ -2533,7 +2532,8 @@ static int ath10k_sdio_probe(struct sdio_func *func,
 		return -ENOMEM;
 	}
 
-	netif_napi_add(ar->napi_dev, &ar->napi, ath10k_sdio_napi_poll);
+	netif_napi_add(&ar->napi_dev, &ar->napi, ath10k_sdio_napi_poll,
+		       ATH10K_NAPI_BUDGET);
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT,
 		   "sdio new func %d vendor 0x%x device 0x%x block 0x%x/0x%x\n",
@@ -2649,9 +2649,9 @@ static void ath10k_sdio_remove(struct sdio_func *func)
 
 	netif_napi_del(&ar->napi);
 
-	destroy_workqueue(ar_sdio->workqueue);
-
 	ath10k_core_destroy(ar);
+
+	destroy_workqueue(ar_sdio->workqueue);
 }
 
 static const struct sdio_device_id ath10k_sdio_devices[] = {
@@ -2668,10 +2668,29 @@ static struct sdio_driver ath10k_sdio_driver = {
 	.probe = ath10k_sdio_probe,
 	.remove = ath10k_sdio_remove,
 	.drv = {
+		.owner = THIS_MODULE,
 		.pm = ATH10K_SDIO_PM_OPS,
 	},
 };
-module_sdio_driver(ath10k_sdio_driver);
+
+static int __init ath10k_sdio_init(void)
+{
+	int ret;
+
+	ret = sdio_register_driver(&ath10k_sdio_driver);
+	if (ret)
+		pr_err("sdio driver registration failed: %d\n", ret);
+
+	return ret;
+}
+
+static void __exit ath10k_sdio_exit(void)
+{
+	sdio_unregister_driver(&ath10k_sdio_driver);
+}
+
+module_init(ath10k_sdio_init);
+module_exit(ath10k_sdio_exit);
 
 MODULE_AUTHOR("Qualcomm Atheros");
 MODULE_DESCRIPTION("Driver support for Qualcomm Atheros 802.11ac WLAN SDIO devices");

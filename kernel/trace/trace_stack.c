@@ -32,7 +32,7 @@ static arch_spinlock_t stack_trace_max_lock =
 DEFINE_PER_CPU(int, disable_stack_tracer);
 static DEFINE_MUTEX(stack_sysctl_mutex);
 
-static int stack_tracer_enabled;
+int stack_tracer_enabled;
 
 static void print_max_stack(void)
 {
@@ -290,7 +290,7 @@ static void check_stack(unsigned long ip, unsigned long *stack)
 
 static void
 stack_trace_call(unsigned long ip, unsigned long parent_ip,
-		 struct ftrace_ops *op, struct ftrace_regs *fregs)
+		 struct ftrace_ops *op, struct pt_regs *pt_regs)
 {
 	unsigned long stack;
 
@@ -318,6 +318,7 @@ stack_trace_call(unsigned long ip, unsigned long parent_ip,
 static struct ftrace_ops trace_ops __read_mostly =
 {
 	.func = stack_trace_call,
+	.flags = FTRACE_OPS_FL_RECURSION_SAFE,
 };
 
 static ssize_t
@@ -514,24 +515,26 @@ static const struct file_operations stack_trace_filter_fops = {
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
 int
-stack_trace_sysctl(const struct ctl_table *table, int write, void *buffer,
+stack_trace_sysctl(struct ctl_table *table, int write, void *buffer,
 		   size_t *lenp, loff_t *ppos)
 {
 	int was_enabled;
 	int ret;
 
-	guard(mutex)(&stack_sysctl_mutex);
+	mutex_lock(&stack_sysctl_mutex);
 	was_enabled = !!stack_tracer_enabled;
 
 	ret = proc_dointvec(table, write, buffer, lenp, ppos);
 
 	if (ret || !write || (was_enabled == !!stack_tracer_enabled))
-		return ret;
+		goto out;
 
 	if (stack_tracer_enabled)
 		register_ftrace_function(&trace_ops);
 	else
 		unregister_ftrace_function(&trace_ops);
+ out:
+	mutex_unlock(&stack_sysctl_mutex);
 	return ret;
 }
 
@@ -542,7 +545,7 @@ static __init int enable_stacktrace(char *str)
 	int len;
 
 	if ((len = str_has_prefix(str, "_filter=")))
-		strscpy(stack_trace_filter_buf, str + len);
+		strncpy(stack_trace_filter_buf, str + len, COMMAND_LINE_SIZE);
 
 	stack_tracer_enabled = 1;
 	return 1;
@@ -557,14 +560,14 @@ static __init int stack_trace_init(void)
 	if (ret)
 		return 0;
 
-	trace_create_file("stack_max_size", TRACE_MODE_WRITE, NULL,
+	trace_create_file("stack_max_size", 0644, NULL,
 			&stack_trace_max_size, &stack_max_size_fops);
 
-	trace_create_file("stack_trace", TRACE_MODE_READ, NULL,
+	trace_create_file("stack_trace", 0444, NULL,
 			NULL, &stack_trace_fops);
 
 #ifdef CONFIG_DYNAMIC_FTRACE
-	trace_create_file("stack_trace_filter", TRACE_MODE_WRITE, NULL,
+	trace_create_file("stack_trace_filter", 0644, NULL,
 			  &trace_ops, &stack_trace_filter_fops);
 #endif
 
@@ -578,23 +581,3 @@ static __init int stack_trace_init(void)
 }
 
 device_initcall(stack_trace_init);
-
-
-static const struct ctl_table trace_stack_sysctl_table[] = {
-	{
-		.procname	= "stack_tracer_enabled",
-		.data		= &stack_tracer_enabled,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= stack_trace_sysctl,
-	},
-};
-
-static int __init init_trace_stack_sysctls(void)
-{
-	register_sysctl_init("kernel", trace_stack_sysctl_table);
-	return 0;
-}
-subsys_initcall(init_trace_stack_sysctls);
-
-

@@ -186,7 +186,7 @@ int cxgb4_config_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 	link_uhtid = TC_U32_USERHTID(cls->knode.link_handle);
 
 	/* Ensure that uhtid is either root u32 (i.e. 0x800)
-	 * or a valid linked bucket.
+	 * or a a valid linked bucket.
 	 */
 	if (uhtid != 0x800 && uhtid >= t->size)
 		return -EINVAL;
@@ -422,7 +422,7 @@ int cxgb4_delete_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 	uhtid = TC_U32_USERHTID(cls->knode.handle);
 
 	/* Ensure that uhtid is either root u32 (i.e. 0x800)
-	 * or a valid linked bucket.
+	 * or a a valid linked bucket.
 	 */
 	if (uhtid != 0x800 && uhtid >= t->size)
 		return -EINVAL;
@@ -524,9 +524,13 @@ struct cxgb4_tc_u32_table *cxgb4_init_tc_u32(struct adapter *adap)
 out_no_mem:
 	for (i = 0; i < t->size; i++) {
 		struct cxgb4_link *link = &t->table[i];
-		kvfree(link->tid_map);
+
+		if (link->tid_map)
+			kvfree(link->tid_map);
 	}
-	kvfree(t);
+
+	if (t)
+		kvfree(t);
 
 	return NULL;
 }

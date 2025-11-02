@@ -24,8 +24,6 @@
 #include "tw5864.h"
 #include "tw5864-reg.h"
 
-#define DRIVER_NAME "tw5864"
-
 MODULE_DESCRIPTION("V4L2 driver module for tw5864-based multimedia capture & encoding devices");
 MODULE_AUTHOR("Bluecherry Maintainers <maintainers@bluecherrydvr.com>");
 MODULE_AUTHOR("Andrey Utkin <andrey.utkin@corp.bluecherry.net>");
@@ -146,7 +144,7 @@ static void tw5864_h264_isr(struct tw5864_dev *dev)
 		cur_frame->gop_seqno = input->frame_gop_seqno;
 
 		dev->h264_buf_w_index = next_frame_index;
-		queue_work(system_bh_wq, &dev->bh_work);
+		tasklet_schedule(&dev->tasklet);
 
 		cur_frame = next_frame;
 
@@ -248,8 +246,7 @@ static int tw5864_initdev(struct pci_dev *pci_dev,
 	if (!dev)
 		return -ENOMEM;
 
-	snprintf(dev->name, sizeof(dev->name), "%s:%s", DRIVER_NAME,
-		 pci_name(pci_dev));
+	snprintf(dev->name, sizeof(dev->name), "tw5864:%s", pci_name(pci_dev));
 
 	err = v4l2_device_register(&pci_dev->dev, &dev->v4l2_dev);
 	if (err)
@@ -257,26 +254,31 @@ static int tw5864_initdev(struct pci_dev *pci_dev,
 
 	/* pci init */
 	dev->pci = pci_dev;
-	err = pcim_enable_device(pci_dev);
+	err = pci_enable_device(pci_dev);
 	if (err) {
-		dev_err(&dev->pci->dev, "pcim_enable_device() failed\n");
+		dev_err(&dev->pci->dev, "pci_enable_device() failed\n");
 		goto unreg_v4l2;
 	}
 
 	pci_set_master(pci_dev);
 
-	err = dma_set_mask(&pci_dev->dev, DMA_BIT_MASK(32));
+	err = pci_set_dma_mask(pci_dev, DMA_BIT_MASK(32));
 	if (err) {
 		dev_err(&dev->pci->dev, "32 bit PCI DMA is not supported\n");
-		goto unreg_v4l2;
+		goto disable_pci;
 	}
 
 	/* get mmio */
-	dev->mmio = pcim_iomap_region(pci_dev, 0, DRIVER_NAME);
-	err = PTR_ERR_OR_ZERO(dev->mmio);
+	err = pci_request_regions(pci_dev, dev->name);
 	if (err) {
 		dev_err(&dev->pci->dev, "Cannot request regions for MMIO\n");
-		goto unreg_v4l2;
+		goto disable_pci;
+	}
+	dev->mmio = pci_ioremap_bar(pci_dev, 0);
+	if (!dev->mmio) {
+		err = -EIO;
+		dev_err(&dev->pci->dev, "can't ioremap() MMIO memory\n");
+		goto release_mmio;
 	}
 
 	spin_lock_init(&dev->slock);
@@ -289,11 +291,11 @@ static int tw5864_initdev(struct pci_dev *pci_dev,
 
 	err = tw5864_video_init(dev, video_nr);
 	if (err)
-		goto unreg_v4l2;
+		goto unmap_mmio;
 
 	/* get irq */
 	err = devm_request_irq(&pci_dev->dev, pci_dev->irq, tw5864_isr,
-			       IRQF_SHARED, DRIVER_NAME, dev);
+			       IRQF_SHARED, "tw5864", dev);
 	if (err < 0) {
 		dev_err(&dev->pci->dev, "can't get IRQ %d\n", pci_dev->irq);
 		goto fini_video;
@@ -306,6 +308,12 @@ static int tw5864_initdev(struct pci_dev *pci_dev,
 
 fini_video:
 	tw5864_video_fini(dev);
+unmap_mmio:
+	iounmap(dev->mmio);
+release_mmio:
+	pci_release_regions(pci_dev);
+disable_pci:
+	pci_disable_device(pci_dev);
 unreg_v4l2:
 	v4l2_device_unregister(&dev->v4l2_dev);
 	return err;
@@ -323,11 +331,17 @@ static void tw5864_finidev(struct pci_dev *pci_dev)
 	/* unregister */
 	tw5864_video_fini(dev);
 
+	/* release resources */
+	iounmap(dev->mmio);
+	release_mem_region(pci_resource_start(pci_dev, 0),
+			   pci_resource_len(pci_dev, 0));
+
 	v4l2_device_unregister(&dev->v4l2_dev);
+	devm_kfree(&pci_dev->dev, dev);
 }
 
 static struct pci_driver tw5864_pci_driver = {
-	.name = DRIVER_NAME,
+	.name = "tw5864",
 	.id_table = tw5864_pci_tbl,
 	.probe = tw5864_initdev,
 	.remove = tw5864_finidev,

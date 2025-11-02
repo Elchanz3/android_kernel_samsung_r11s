@@ -7,7 +7,7 @@
 
 #include "digi00x.h"
 
-#define READY_TIMEOUT_MS	200
+#define CALLBACK_TIMEOUT 500
 
 const unsigned int snd_dg00x_stream_rates[SND_DG00X_RATE_COUNT] = {
 	[SND_DG00X_RATE_44100] = 44100,
@@ -377,15 +377,14 @@ int snd_dg00x_stream_start_duplex(struct snd_dg00x *dg00x)
 		if (err < 0)
 			goto error;
 
-		// NOTE: The device doesn't start packet transmission till receiving any packet.
-		// It ignores presentation time expressed by the value of syt field of CIP header
-		// in received packets. The sequence of the number of data blocks per packet is
-		// important for media clock recovery.
-		err = amdtp_domain_start(&dg00x->domain, 0, true, true);
+		err = amdtp_domain_start(&dg00x->domain, 0);
 		if (err < 0)
 			goto error;
 
-		if (!amdtp_domain_wait_ready(&dg00x->domain, READY_TIMEOUT_MS)) {
+		if (!amdtp_stream_wait_callback(&dg00x->rx_stream,
+						CALLBACK_TIMEOUT) ||
+		    !amdtp_stream_wait_callback(&dg00x->tx_stream,
+						CALLBACK_TIMEOUT)) {
 			err = -ETIMEDOUT;
 			goto error;
 		}
@@ -427,24 +426,33 @@ void snd_dg00x_stream_lock_changed(struct snd_dg00x *dg00x)
 
 int snd_dg00x_stream_lock_try(struct snd_dg00x *dg00x)
 {
-	guard(spinlock_irq)(&dg00x->lock);
+	int err;
+
+	spin_lock_irq(&dg00x->lock);
 
 	/* user land lock this */
-	if (dg00x->dev_lock_count < 0)
-		return -EBUSY;
+	if (dg00x->dev_lock_count < 0) {
+		err = -EBUSY;
+		goto end;
+	}
 
 	/* this is the first time */
 	if (dg00x->dev_lock_count++ == 0)
 		snd_dg00x_stream_lock_changed(dg00x);
-	return 0;
+	err = 0;
+end:
+	spin_unlock_irq(&dg00x->lock);
+	return err;
 }
 
 void snd_dg00x_stream_lock_release(struct snd_dg00x *dg00x)
 {
-	guard(spinlock_irq)(&dg00x->lock);
+	spin_lock_irq(&dg00x->lock);
 
 	if (WARN_ON(dg00x->dev_lock_count <= 0))
-		return;
+		goto end;
 	if (--dg00x->dev_lock_count == 0)
 		snd_dg00x_stream_lock_changed(dg00x);
+end:
+	spin_unlock_irq(&dg00x->lock);
 }

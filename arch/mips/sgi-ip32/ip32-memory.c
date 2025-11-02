@@ -15,7 +15,6 @@
 #include <asm/ip32/crime.h>
 #include <asm/bootinfo.h>
 #include <asm/page.h>
-#include <asm/sgialib.h>
 
 extern void crime_init(void);
 
@@ -40,4 +39,9 @@ void __init prom_meminit(void)
 			bank, base, size >> 20);
 		memblock_add(base, size);
 	}
+}
+
+
+void __init prom_free_prom_memory(void)
+{
 }

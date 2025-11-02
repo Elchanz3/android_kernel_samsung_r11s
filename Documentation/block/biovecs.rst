@@ -40,8 +40,6 @@ normal code doesn't have to deal with bi_bvec_done.
    There is a lower level advance function - bvec_iter_advance() - which takes
    a pointer to a biovec, not a bio; this is used by the bio integrity code.
 
-As of 5.12 bvec segments with zero bv_len are not supported.
-
 What's all this get us?
 =======================
 
@@ -134,7 +132,6 @@ Usage of helpers:
 	bio_for_each_bvec_all()
 	bio_first_bvec_all()
 	bio_first_page_all()
-	bio_first_folio_all()
 	bio_last_bvec_all()
 
 * The following helpers iterate over single-page segment. The passed 'struct

@@ -10,11 +10,12 @@
 #include <linux/blk-mq.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/genhd.h>
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <net/net_namespace.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include <linux/uio.h>
 #include "aoe.h"
 
@@ -121,7 +122,7 @@ newtag(struct aoedev *d)
 	register ulong n;
 
 	n = jiffies & 0xffff;
-	return n | (++d->lasttag & 0x7fff) << 16;
+	return n |= (++d->lasttag & 0x7fff) << 16;
 }
 
 static u32
@@ -361,7 +362,6 @@ ata_rw_frameinit(struct frame *f)
 	}
 
 	ah->cmdstat = ATA_CMD_PIO_READ | writebit | extbit;
-	dev_hold(t->ifp->nd);
 	skb->dev = t->ifp->nd;
 }
 
@@ -402,8 +402,6 @@ aoecmd_ata_rw(struct aoedev *d)
 		__skb_queue_head_init(&queue);
 		__skb_queue_tail(&queue, skb);
 		aoenet_xmit(&queue);
-	} else {
-		dev_put(f->t->ifp->nd);
 	}
 	return 1;
 }
@@ -486,13 +484,10 @@ resend(struct aoedev *d, struct frame *f)
 	memcpy(h->dst, t->addr, sizeof h->dst);
 	memcpy(h->src, t->ifp->nd->dev_addr, sizeof h->src);
 
-	dev_hold(t->ifp->nd);
 	skb->dev = t->ifp->nd;
 	skb = skb_clone(skb, GFP_ATOMIC);
-	if (skb == NULL) {
-		dev_put(t->ifp->nd);
+	if (skb == NULL)
 		return;
-	}
 	f->sent = ktime_get();
 	__skb_queue_head_init(&queue);
 	__skb_queue_tail(&queue, skb);
@@ -623,8 +618,6 @@ probe(struct aoetgt *t)
 		__skb_queue_head_init(&queue);
 		__skb_queue_tail(&queue, skb);
 		aoenet_xmit(&queue);
-	} else {
-		dev_put(f->t->ifp->nd);
 	}
 }
 
@@ -745,7 +738,7 @@ rexmit_timer(struct timer_list *timer)
 	int utgts;	/* number of aoetgt descriptors (not slots) */
 	int since;
 
-	d = timer_container_of(d, timer, timer);
+	d = from_timer(d, timer, timer);
 
 	spin_lock_irqsave(&d->lock, flags);
 
@@ -754,7 +747,7 @@ rexmit_timer(struct timer_list *timer)
 
 	utgts = count_targets(d, NULL);
 
-	if (d->flags & (DEVFL_TKILL | DEVFL_DEAD)) {
+	if (d->flags & DEVFL_TKILL) {
 		spin_unlock_irqrestore(&d->lock, flags);
 		return;
 	}
@@ -786,8 +779,7 @@ rexmit_timer(struct timer_list *timer)
 			 * to clean up.
 			 */
 			list_splice(&flist, &d->factive[0]);
-			d->flags |= DEVFL_DEAD;
-			queue_work(aoe_wq, &d->work);
+			aoedev_downdev(d);
 			goto out;
 		}
 
@@ -898,16 +890,19 @@ void
 aoecmd_sleepwork(struct work_struct *work)
 {
 	struct aoedev *d = container_of(work, struct aoedev, work);
-
-	if (d->flags & DEVFL_DEAD)
-		aoedev_downdev(d);
+	struct block_device *bd;
+	u64 ssize;
 
 	if (d->flags & DEVFL_GDALLOC)
 		aoeblk_gdalloc(d);
 
 	if (d->flags & DEVFL_NEWSIZE) {
-		set_capacity_and_notify(d->gd, d->ssize);
-
+		ssize = get_capacity(d->gd);
+		bd = bdget_disk(d->gd, 0);
+		if (bd) {
+			bd_set_nr_sectors(bd, ssize);
+			bdput(bd);
+		}
 		spin_lock_irq(&d->lock);
 		d->flags |= DEVFL_UP;
 		d->flags &= ~DEVFL_NEWSIZE;
@@ -976,11 +971,12 @@ ataid_complete(struct aoedev *d, struct aoetgt *t, unsigned char *id)
 	d->geo.start = 0;
 	if (d->flags & (DEVFL_GDALLOC|DEVFL_NEWSIZE))
 		return;
-	if (d->gd != NULL)
+	if (d->gd != NULL) {
+		set_capacity(d->gd, ssize);
 		d->flags |= DEVFL_NEWSIZE;
-	else
+	} else
 		d->flags |= DEVFL_GDALLOC;
-	queue_work(aoe_wq, &d->work);
+	schedule_work(&d->work);
 }
 
 static void
@@ -1030,9 +1026,9 @@ bvcpy(struct sk_buff *skb, struct bio *bio, struct bvec_iter iter, long cnt)
 	iter.bi_size = cnt;
 
 	__bio_for_each_segment(bv, bio, iter, iter) {
-		char *p = bvec_kmap_local(&bv);
+		char *p = kmap_atomic(bv.bv_page) + bv.bv_offset;
 		skb_copy_bits(skb, soff, p, bv.bv_len);
-		kunmap_local(p);
+		kunmap_atomic(p);
 		soff += bv.bv_len;
 	}
 }
@@ -1057,7 +1053,7 @@ aoe_end_request(struct aoedev *d, struct request *rq, int fastfail)
 
 	__blk_mq_end_request(rq, err);
 
-	/* cf. https://lore.kernel.org/lkml/20061031071040.GS14055@kernel.dk/ */
+	/* cf. http://lkml.org/lkml/2006/10/31/28 */
 	if (!fastfail)
 		blk_mq_run_hw_queues(q, true);
 }
@@ -1407,7 +1403,6 @@ aoecmd_ata_id(struct aoedev *d)
 	ah->cmdstat = ATA_CMD_ID_ATA;
 	ah->lba3 = 0xa0;
 
-	dev_hold(t->ifp->nd);
 	skb->dev = t->ifp->nd;
 
 	d->rttavg = RTTAVG_INIT;
@@ -1417,8 +1412,6 @@ aoecmd_ata_id(struct aoedev *d)
 	skb = skb_clone(skb, GFP_ATOMIC);
 	if (skb)
 		f->sent = ktime_get();
-	else
-		dev_put(t->ifp->nd);
 
 	return skb;
 }
@@ -1715,6 +1708,8 @@ aoecmd_init(void)
 		goto ktiowq_fail;
 	}
 
+	mutex_init(&ktio_spawn_lock);
+
 	for (i = 0; i < ncpus; i++) {
 		INIT_LIST_HEAD(&iocq[i].head);
 		spin_lock_init(&iocq[i].lock);
@@ -1761,6 +1756,6 @@ aoecmd_exit(void)
 	kfree(kts);
 	kfree(ktiowq);
 
-	__free_page(empty_page);
+	free_page((unsigned long) page_address(empty_page));
 	empty_page = NULL;
 }

@@ -10,8 +10,6 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/spi/spi.h>
-#include <linux/of.h>
-
 
 #define SPIS_IRQ_EN_REG		0x0
 #define SPIS_IRQ_CLR_REG	0x4
@@ -63,34 +61,19 @@
 #define SPIS_DMA_ADDR_EN	BIT(1)
 #define SPIS_SOFT_RST		BIT(0)
 
+#define MTK_SPI_SLAVE_MAX_FIFO_SIZE 512U
+
 struct mtk_spi_slave {
 	struct device *dev;
 	void __iomem *base;
 	struct clk *spi_clk;
 	struct completion xfer_done;
 	struct spi_transfer *cur_transfer;
-	bool target_aborted;
-	const struct mtk_spi_compatible *dev_comp;
-};
-
-struct mtk_spi_compatible {
-	const u32 max_fifo_size;
-	bool must_rx;
-};
-
-static const struct mtk_spi_compatible mt2712_compat = {
-	.max_fifo_size = 512,
-};
-static const struct mtk_spi_compatible mt8195_compat = {
-	.max_fifo_size = 128,
-	.must_rx = true,
+	bool slave_aborted;
 };
 
 static const struct of_device_id mtk_spi_slave_of_match[] = {
-	{ .compatible = "mediatek,mt2712-spi-slave",
-	  .data = (void *)&mt2712_compat,},
-	{ .compatible = "mediatek,mt8195-spi-slave",
-	  .data = (void *)&mt8195_compat,},
+	{ .compatible = "mediatek,mt2712-spi-slave", },
 	{}
 };
 MODULE_DEVICE_TABLE(of, mtk_spi_slave_of_match);
@@ -118,7 +101,7 @@ static void mtk_spi_slave_disable_xfer(struct mtk_spi_slave *mdata)
 static int mtk_spi_slave_wait_for_completion(struct mtk_spi_slave *mdata)
 {
 	if (wait_for_completion_interruptible(&mdata->xfer_done) ||
-	    mdata->target_aborted) {
+	    mdata->slave_aborted) {
 		dev_err(mdata->dev, "interrupted\n");
 		return -EINTR;
 	}
@@ -286,10 +269,10 @@ static int mtk_spi_slave_transfer_one(struct spi_controller *ctlr,
 	struct mtk_spi_slave *mdata = spi_controller_get_devdata(ctlr);
 
 	reinit_completion(&mdata->xfer_done);
-	mdata->target_aborted = false;
+	mdata->slave_aborted = false;
 	mdata->cur_transfer = xfer;
 
-	if (xfer->len > mdata->dev_comp->max_fifo_size)
+	if (xfer->len > MTK_SPI_SLAVE_MAX_FIFO_SIZE)
 		return mtk_spi_slave_dma_transfer(ctlr, spi, xfer);
 	else
 		return mtk_spi_slave_fifo_transfer(ctlr, spi, xfer);
@@ -297,7 +280,7 @@ static int mtk_spi_slave_transfer_one(struct spi_controller *ctlr,
 
 static int mtk_spi_slave_setup(struct spi_device *spi)
 {
-	struct mtk_spi_slave *mdata = spi_controller_get_devdata(spi->controller);
+	struct mtk_spi_slave *mdata = spi_controller_get_devdata(spi->master);
 	u32 reg_val;
 
 	reg_val = DMA_DONE_EN | DATA_DONE_EN |
@@ -314,11 +297,11 @@ static int mtk_spi_slave_setup(struct spi_device *spi)
 	return 0;
 }
 
-static int mtk_target_abort(struct spi_controller *ctlr)
+static int mtk_slave_abort(struct spi_controller *ctlr)
 {
 	struct mtk_spi_slave *mdata = spi_controller_get_devdata(ctlr);
 
-	mdata->target_aborted = true;
+	mdata->slave_aborted = true;
 	complete(&mdata->xfer_done);
 
 	return 0;
@@ -386,11 +369,10 @@ static int mtk_spi_slave_probe(struct platform_device *pdev)
 	struct spi_controller *ctlr;
 	struct mtk_spi_slave *mdata;
 	int irq, ret;
-	const struct of_device_id *of_id;
 
-	ctlr = spi_alloc_target(&pdev->dev, sizeof(*mdata));
+	ctlr = spi_alloc_slave(&pdev->dev, sizeof(*mdata));
 	if (!ctlr) {
-		dev_err(&pdev->dev, "failed to alloc spi target\n");
+		dev_err(&pdev->dev, "failed to alloc spi slave\n");
 		return -ENOMEM;
 	}
 
@@ -402,19 +384,9 @@ static int mtk_spi_slave_probe(struct platform_device *pdev)
 	ctlr->prepare_message = mtk_spi_slave_prepare_message;
 	ctlr->transfer_one = mtk_spi_slave_transfer_one;
 	ctlr->setup = mtk_spi_slave_setup;
-	ctlr->target_abort = mtk_target_abort;
+	ctlr->slave_abort = mtk_slave_abort;
 
-	of_id = of_match_node(mtk_spi_slave_of_match, pdev->dev.of_node);
-	if (!of_id) {
-		dev_err(&pdev->dev, "failed to probe of_node\n");
-		ret = -EINVAL;
-		goto err_put_ctlr;
-	}
 	mdata = spi_controller_get_devdata(ctlr);
-	mdata->dev_comp = of_id->data;
-
-	if (mdata->dev_comp->must_rx)
-		ctlr->flags = SPI_CONTROLLER_MUST_RX;
 
 	platform_set_drvdata(pdev, ctlr);
 
@@ -455,12 +427,14 @@ static int mtk_spi_slave_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 
 	ret = devm_spi_register_controller(&pdev->dev, ctlr);
-	clk_disable_unprepare(mdata->spi_clk);
 	if (ret) {
 		dev_err(&pdev->dev,
 			"failed to register slave controller(%d)\n", ret);
+		clk_disable_unprepare(mdata->spi_clk);
 		goto err_disable_runtime_pm;
 	}
+
+	clk_disable_unprepare(mdata->spi_clk);
 
 	return 0;
 
@@ -472,9 +446,11 @@ err_put_ctlr:
 	return ret;
 }
 
-static void mtk_spi_slave_remove(struct platform_device *pdev)
+static int mtk_spi_slave_remove(struct platform_device *pdev)
 {
 	pm_runtime_disable(&pdev->dev);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

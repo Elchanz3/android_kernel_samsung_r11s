@@ -56,6 +56,9 @@
 MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de>");
 MODULE_DESCRIPTION("C-Media CMI8788 driver");
 MODULE_LICENSE("GPL v2");
+MODULE_SUPPORTED_DEVICE("{{C-Media,CMI8786}"
+			",{C-Media,CMI8787}"
+			",{C-Media,CMI8788}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
@@ -450,7 +453,7 @@ static int rolloff_put(struct snd_kcontrol *ctl,
 	int changed;
 	u8 reg;
 
-	guard(mutex)(&chip->mutex);
+	mutex_lock(&chip->mutex);
 	reg = data->ak4396_regs[0][AK4396_CONTROL_2];
 	if (value->value.enumerated.item[0])
 		reg |= AK4396_SLOW;
@@ -461,6 +464,7 @@ static int rolloff_put(struct snd_kcontrol *ctl,
 		for (i = 0; i < data->dacs; ++i)
 			ak4396_write(chip, i, AK4396_CONTROL_2, reg);
 	}
+	mutex_unlock(&chip->mutex);
 	return changed;
 }
 
@@ -498,13 +502,14 @@ static int hpf_put(struct snd_kcontrol *ctl, struct snd_ctl_elem_value *value)
 	unsigned int reg;
 	int changed;
 
-	guard(mutex)(&chip->mutex);
+	mutex_lock(&chip->mutex);
 	reg = data->wm8785_regs[WM8785_R2] & ~(WM8785_HPFR | WM8785_HPFL);
 	if (value->value.enumerated.item[0])
 		reg |= WM8785_HPFR | WM8785_HPFL;
 	changed = reg != data->wm8785_regs[WM8785_R2];
 	if (changed)
 		wm8785_write(chip, WM8785_R2, reg);
+	mutex_unlock(&chip->mutex);
 	return changed;
 }
 
@@ -561,7 +566,7 @@ static int meridian_dig_source_put(struct snd_kcontrol *ctl,
 	u16 old_reg, new_reg;
 	int changed;
 
-	guard(mutex)(&chip->mutex);
+	mutex_lock(&chip->mutex);
 	old_reg = oxygen_read16(chip, OXYGEN_GPIO_DATA);
 	new_reg = old_reg & ~GPIO_MERIDIAN_DIG_MASK;
 	if (value->value.enumerated.item[0] == 0)
@@ -571,6 +576,7 @@ static int meridian_dig_source_put(struct snd_kcontrol *ctl,
 	changed = new_reg != old_reg;
 	if (changed)
 		oxygen_write16(chip, OXYGEN_GPIO_DATA, new_reg);
+	mutex_unlock(&chip->mutex);
 	return changed;
 }
 
@@ -581,7 +587,7 @@ static int claro_dig_source_put(struct snd_kcontrol *ctl,
 	u16 old_reg, new_reg;
 	int changed;
 
-	guard(mutex)(&chip->mutex);
+	mutex_lock(&chip->mutex);
 	old_reg = oxygen_read16(chip, OXYGEN_GPIO_DATA);
 	new_reg = old_reg & ~GPIO_CLARO_DIG_COAX;
 	if (value->value.enumerated.item[0])
@@ -589,6 +595,7 @@ static int claro_dig_source_put(struct snd_kcontrol *ctl,
 	changed = new_reg != old_reg;
 	if (changed)
 		oxygen_write16(chip, OXYGEN_GPIO_DATA, new_reg);
+	mutex_unlock(&chip->mutex);
 	return changed;
 }
 
@@ -850,9 +857,12 @@ static struct pci_driver oxygen_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = oxygen_ids,
 	.probe = generic_oxygen_probe,
+	.remove = oxygen_pci_remove,
+#ifdef CONFIG_PM_SLEEP
 	.driver = {
-		.pm = pm_sleep_ptr(&oxygen_pci_pm),
+		.pm = &oxygen_pci_pm,
 	},
+#endif
 };
 
 module_pci_driver(oxygen_driver);

@@ -3,6 +3,7 @@
  * Copyright(c) 2013-2015 Intel Corporation. All rights reserved.
  */
 #include <linux/libnvdimm.h>
+#include <linux/badblocks.h>
 #include <linux/suspend.h>
 #include <linux/export.h>
 #include <linux/module.h>
@@ -141,8 +142,9 @@ static void nvdimm_map_put(void *data)
 	struct nvdimm_map *nvdimm_map = data;
 	struct nvdimm_bus *nvdimm_bus = nvdimm_map->nvdimm_bus;
 
-	guard(nvdimm_bus)(&nvdimm_bus->dev);
+	nvdimm_bus_lock(&nvdimm_bus->dev);
 	kref_put(&nvdimm_map->kref, nvdimm_map_release);
+	nvdimm_bus_unlock(&nvdimm_bus->dev);
 }
 
 /**
@@ -157,13 +159,13 @@ void *devm_nvdimm_memremap(struct device *dev, resource_size_t offset,
 {
 	struct nvdimm_map *nvdimm_map;
 
-	scoped_guard(nvdimm_bus, dev) {
-		nvdimm_map = find_nvdimm_map(dev, offset);
-		if (!nvdimm_map)
-			nvdimm_map = alloc_nvdimm_map(dev, offset, size, flags);
-		else
-			kref_get(&nvdimm_map->kref);
-	}
+	nvdimm_bus_lock(dev);
+	nvdimm_map = find_nvdimm_map(dev, offset);
+	if (!nvdimm_map)
+		nvdimm_map = alloc_nvdimm_map(dev, offset, size, flags);
+	else
+		kref_get(&nvdimm_map->kref);
+	nvdimm_bus_unlock(dev);
 
 	if (!nvdimm_map)
 		return NULL;
@@ -205,6 +207,38 @@ struct device *to_nvdimm_bus_dev(struct nvdimm_bus *nvdimm_bus)
 }
 EXPORT_SYMBOL_GPL(to_nvdimm_bus_dev);
 
+static bool is_uuid_sep(char sep)
+{
+	if (sep == '\n' || sep == '-' || sep == ':' || sep == '\0')
+		return true;
+	return false;
+}
+
+static int nd_uuid_parse(struct device *dev, u8 *uuid_out, const char *buf,
+		size_t len)
+{
+	const char *str = buf;
+	u8 uuid[16];
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		if (!isxdigit(str[0]) || !isxdigit(str[1])) {
+			dev_dbg(dev, "pos: %d buf[%zd]: %c buf[%zd]: %c\n",
+					i, str - buf, str[0],
+					str + 1 - buf, str[1]);
+			return -EINVAL;
+		}
+
+		uuid[i] = (hex_to_bin(str[0]) << 4) | hex_to_bin(str[1]);
+		str += 2;
+		if (is_uuid_sep(*str))
+			str++;
+	}
+
+	memcpy(uuid_out, uuid, sizeof(uuid));
+	return 0;
+}
+
 /**
  * nd_uuid_store: common implementation for writing 'uuid' sysfs attributes
  * @dev: container device for the uuid property
@@ -213,23 +247,23 @@ EXPORT_SYMBOL_GPL(to_nvdimm_bus_dev);
  *
  * Enforce that uuids can only be changed while the device is disabled
  * (driver detached)
- * LOCKING: expects device_lock() is held on entry
+ * LOCKING: expects nd_device_lock() is held on entry
  */
-int nd_uuid_store(struct device *dev, uuid_t **uuid_out, const char *buf,
+int nd_uuid_store(struct device *dev, u8 **uuid_out, const char *buf,
 		size_t len)
 {
-	uuid_t uuid;
+	u8 uuid[16];
 	int rc;
 
 	if (dev->driver)
 		return -EBUSY;
 
-	rc = uuid_parse(buf, &uuid);
+	rc = nd_uuid_parse(dev, uuid, buf, len);
 	if (rc)
 		return rc;
 
 	kfree(*uuid_out);
-	*uuid_out = kmemdup(&uuid, sizeof(uuid), GFP_KERNEL);
+	*uuid_out = kmemdup(uuid, sizeof(uuid), GFP_KERNEL);
 	if (!(*uuid_out))
 		return -ENOMEM;
 
@@ -314,15 +348,15 @@ static DEVICE_ATTR_RO(provider);
 
 static int flush_namespaces(struct device *dev, void *data)
 {
-	device_lock(dev);
-	device_unlock(dev);
+	nd_device_lock(dev);
+	nd_device_unlock(dev);
 	return 0;
 }
 
 static int flush_regions_dimms(struct device *dev, void *data)
 {
-	device_lock(dev);
-	device_unlock(dev);
+	nd_device_lock(dev);
+	nd_device_unlock(dev);
 	device_for_each_child(dev, NULL, flush_namespaces);
 	return 0;
 }
@@ -506,6 +540,35 @@ int nvdimm_bus_add_badrange(struct nvdimm_bus *nvdimm_bus, u64 addr, u64 length)
 }
 EXPORT_SYMBOL_GPL(nvdimm_bus_add_badrange);
 
+#ifdef CONFIG_BLK_DEV_INTEGRITY
+int nd_integrity_init(struct gendisk *disk, unsigned long meta_size)
+{
+	struct blk_integrity bi;
+
+	if (meta_size == 0)
+		return 0;
+
+	memset(&bi, 0, sizeof(bi));
+
+	bi.tuple_size = meta_size;
+	bi.tag_size = meta_size;
+
+	blk_integrity_register(disk, &bi);
+	blk_queue_max_integrity_segments(disk->queue, 1);
+
+	return 0;
+}
+EXPORT_SYMBOL(nd_integrity_init);
+
+#else /* CONFIG_BLK_DEV_INTEGRITY */
+int nd_integrity_init(struct gendisk *disk, unsigned long meta_size)
+{
+	return 0;
+}
+EXPORT_SYMBOL(nd_integrity_init);
+
+#endif
+
 static __init int libnvdimm_init(void)
 {
 	int rc;
@@ -539,7 +602,6 @@ static __exit void libnvdimm_exit(void)
 	nvdimm_devs_exit();
 }
 
-MODULE_DESCRIPTION("NVDIMM (Non-Volatile Memory Device) core");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Intel Corporation");
 subsys_initcall(libnvdimm_init);

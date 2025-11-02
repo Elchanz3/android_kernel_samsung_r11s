@@ -14,13 +14,16 @@
 #define XICS_MFRR		0xc
 #define XICS_IPI		2	/* interrupt source # for IPIs */
 
+/* LPIDs we support with this build -- runtime limit may be lower */
+#define KVMPPC_NR_LPIDS			(LPID_RSVD + 1)
+
 /* Maximum number of threads per physical core */
 #define MAX_SMT_THREADS		8
 
 /* Maximum number of subcores per physical core */
 #define MAX_SUBCORES		4
 
-#ifdef __ASSEMBLER__
+#ifdef __ASSEMBLY__
 
 #ifdef CONFIG_KVM_BOOK3S_HANDLER
 
@@ -58,7 +61,7 @@ kvmppc_resume_\intno:
 
 #endif /* CONFIG_KVM_BOOK3S_HANDLER */
 
-#else  /*__ASSEMBLER__ */
+#else  /*__ASSEMBLY__ */
 
 struct kvmppc_vcore;
 
@@ -71,6 +74,16 @@ struct kvm_split_mode {
 	u8		do_nap;
 	u8		napped[MAX_SMT_THREADS];
 	struct kvmppc_vcore *vc[MAX_SUBCORES];
+	/* Bits for changing lpcr on P9 */
+	unsigned long	lpcr_req;
+	unsigned long	lpidr_req;
+	unsigned long	host_lpcr;
+	u32		do_set;
+	u32		do_restore;
+	union {
+		u32	allphases;
+		u8	phase[4];
+	} lpcr_sync;
 };
 
 /*
@@ -97,6 +110,7 @@ struct kvmppc_host_state {
 	u8 hwthread_state;
 	u8 host_ipi;
 	u8 ptid;		/* thread number within subcore when split */
+	u8 tid;			/* thread number within whole core */
 	u8 fake_suspend;
 	struct kvm_vcpu *kvm_vcpu;
 	struct kvmppc_vcore *kvm_vcore;
@@ -105,7 +119,7 @@ struct kvmppc_host_state {
 	void __iomem *xive_tima_virt;
 	u32 saved_xirr;
 	u64 dabr;
-	u64 host_mmcr[7];	/* MMCR 0,1,A, SIAR, SDAR, MMCR2, SIER */
+	u64 host_mmcr[10];	/* MMCR 0,1,A, SIAR, SDAR, MMCR2, SIER, MMCR3, SIER2/3 */
 	u32 host_pmc[8];
 	u64 host_purr;
 	u64 host_spurr;
@@ -150,7 +164,7 @@ struct kvmppc_book3s_shadow_vcpu {
 #endif
 };
 
-#endif /*__ASSEMBLER__ */
+#endif /*__ASSEMBLY__ */
 
 /* Values for kvm_state */
 #define KVM_HWTHREAD_IN_KERNEL	0

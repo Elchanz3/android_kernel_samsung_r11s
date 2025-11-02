@@ -64,10 +64,9 @@ bool bios_is_accelerated_mode(
 
 
 void bios_set_scratch_acc_mode_change(
-	struct dc_bios *bios,
-	uint32_t state)
+	struct dc_bios *bios)
 {
-	REG_UPDATE(BIOS_SCRATCH_6, S6_ACC_MODE, state);
+	REG_UPDATE(BIOS_SCRATCH_6, S6_ACC_MODE, 1);
 }
 
 
@@ -78,3 +77,13 @@ void bios_set_scratch_critical_state(
 	uint32_t critial_state = state ? 1 : 0;
 	REG_UPDATE(BIOS_SCRATCH_6, S6_CRITICAL_STATE, critial_state);
 }
+
+uint32_t bios_get_vga_enabled_displays(
+	struct dc_bios *bios)
+{
+	uint32_t active_disp = 1;
+
+	active_disp = REG_READ(BIOS_SCRATCH_3) & 0XFFFF;
+	return active_disp;
+}
+

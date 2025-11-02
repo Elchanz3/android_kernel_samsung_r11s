@@ -91,16 +91,12 @@ static int memconsole_probe(struct coreboot_device *dev)
 	return memconsole_sysfs_init();
 }
 
-static void memconsole_remove(struct coreboot_device *dev)
+static int memconsole_remove(struct coreboot_device *dev)
 {
 	memconsole_exit();
-}
 
-static const struct coreboot_device_id memconsole_ids[] = {
-	{ .tag = CB_TAG_CBMEM_CONSOLE },
-	{ /* sentinel */ }
-};
-MODULE_DEVICE_TABLE(coreboot, memconsole_ids);
+	return 0;
+}
 
 static struct coreboot_driver memconsole_driver = {
 	.probe = memconsole_probe,
@@ -108,10 +104,9 @@ static struct coreboot_driver memconsole_driver = {
 	.drv = {
 		.name = "memconsole",
 	},
-	.id_table = memconsole_ids,
+	.tag = CB_TAG_CBMEM_CONSOLE,
 };
 module_coreboot_driver(memconsole_driver);
 
 MODULE_AUTHOR("Google, Inc.");
-MODULE_DESCRIPTION("Memory based BIOS console accessed through coreboot table");
 MODULE_LICENSE("GPL");

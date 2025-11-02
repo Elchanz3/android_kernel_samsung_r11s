@@ -61,7 +61,9 @@ struct us_unusual_dev {
 #define US_FLIDX_SCAN_PENDING	6	/* scanning not yet done    */
 #define US_FLIDX_REDO_READ10	7	/* redo READ(10) command    */
 #define US_FLIDX_READ10_WORKED	8	/* previous READ(10) succeeded */
-
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+#define US_FLIDX_MUTEX_LOCK		9	/* pre reset lock */
+#endif
 #define USB_STOR_STRING_LEN 32
 
 /*
@@ -95,7 +97,7 @@ struct us_data {
 	struct usb_interface	*pusb_intf;	 /* this interface */
 	const struct us_unusual_dev   *unusual_dev;
 						/* device-filter entry     */
-	u64			fflags;		 /* fixed flags from filter */
+	unsigned long		fflags;		 /* fixed flags from filter */
 	unsigned long		dflags;		 /* dynamic atomic bitflags */
 	unsigned int		send_bulk_pipe;	 /* cached pipe values */
 	unsigned int		recv_bulk_pipe;
@@ -187,12 +189,12 @@ extern int usb_stor_probe1(struct us_data **pus,
 		struct usb_interface *intf,
 		const struct usb_device_id *id,
 		const struct us_unusual_dev *unusual_dev,
-		const struct scsi_host_template *sht);
+		struct scsi_host_template *sht);
 extern int usb_stor_probe2(struct us_data *us);
 extern void usb_stor_disconnect(struct usb_interface *intf);
 
 extern void usb_stor_adjust_quirks(struct usb_device *dev,
-		u64 *fflags);
+		unsigned long *fflags);
 
 #define module_usb_stor_driver(__driver, __sht, __name) \
 static int __init __driver##_init(void) \

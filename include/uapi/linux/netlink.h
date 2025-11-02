@@ -32,6 +32,10 @@
 
 #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
 
+/*#ifdef CONFIG_SAMSUNG_FREECESS*/
+#define NETLINK_KFREECESS       27
+/*#endif*/
+
 #define MAX_LINKS 32		
 
 struct sockaddr_nl {
@@ -41,20 +45,12 @@ struct sockaddr_nl {
        	__u32		nl_groups;	/* multicast groups mask */
 };
 
-/**
- * struct nlmsghdr - fixed format metadata header of Netlink messages
- * @nlmsg_len:   Length of message including header
- * @nlmsg_type:  Message content type
- * @nlmsg_flags: Additional flags
- * @nlmsg_seq:   Sequence number
- * @nlmsg_pid:   Sending process port ID
- */
 struct nlmsghdr {
-	__u32		nlmsg_len;
-	__u16		nlmsg_type;
-	__u16		nlmsg_flags;
-	__u32		nlmsg_seq;
-	__u32		nlmsg_pid;
+	__u32		nlmsg_len;	/* Length of message including header */
+	__u16		nlmsg_type;	/* Message content */
+	__u16		nlmsg_flags;	/* Additional flags */
+	__u32		nlmsg_seq;	/* Sequence number */
+	__u32		nlmsg_pid;	/* Sending process port ID */
 };
 
 /* Flags values */
@@ -62,7 +58,7 @@ struct nlmsghdr {
 #define NLM_F_REQUEST		0x01	/* It is request message. 	*/
 #define NLM_F_MULTI		0x02	/* Multipart message, terminated by NLMSG_DONE */
 #define NLM_F_ACK		0x04	/* Reply with ack, with zero or error code */
-#define NLM_F_ECHO		0x08	/* Receive resulting notifications */
+#define NLM_F_ECHO		0x08	/* Echo this request 		*/
 #define NLM_F_DUMP_INTR		0x10	/* Dump was inconsistent due to sequence change */
 #define NLM_F_DUMP_FILTERED	0x20	/* Dump was filtered as requested */
 
@@ -80,7 +76,6 @@ struct nlmsghdr {
 
 /* Modifiers to DELETE request */
 #define NLM_F_NONREC	0x100	/* Do not delete recursively	*/
-#define NLM_F_BULK	0x200	/* Delete multiple objects	*/
 
 /* Flags for ACK message */
 #define NLM_F_CAPPED	0x100	/* request was capped */
@@ -100,10 +95,9 @@ struct nlmsghdr {
 #define NLMSG_HDRLEN	 ((int) NLMSG_ALIGN(sizeof(struct nlmsghdr)))
 #define NLMSG_LENGTH(len) ((len) + NLMSG_HDRLEN)
 #define NLMSG_SPACE(len) NLMSG_ALIGN(NLMSG_LENGTH(len))
-#define NLMSG_DATA(nlh)  ((void *)(((char *)nlh) + NLMSG_HDRLEN))
+#define NLMSG_DATA(nlh)  ((void*)(((char*)nlh) + NLMSG_LENGTH(0)))
 #define NLMSG_NEXT(nlh,len)	 ((len) -= NLMSG_ALIGN((nlh)->nlmsg_len), \
-				  (struct nlmsghdr *)(((char *)(nlh)) + \
-				  NLMSG_ALIGN((nlh)->nlmsg_len)))
+				  (struct nlmsghdr*)(((char*)(nlh)) + NLMSG_ALIGN((nlh)->nlmsg_len)))
 #define NLMSG_OK(nlh,len) ((len) >= (int)sizeof(struct nlmsghdr) && \
 			   (nlh)->nlmsg_len >= sizeof(struct nlmsghdr) && \
 			   (nlh)->nlmsg_len <= (len))
@@ -140,10 +134,6 @@ struct nlmsgerr {
  *	be used - in the success case - to identify a created
  *	object or operation or similar (binary)
  * @NLMSGERR_ATTR_POLICY: policy for a rejected attribute
- * @NLMSGERR_ATTR_MISS_TYPE: type of a missing required attribute,
- *	%NLMSGERR_ATTR_MISS_NEST will not be present if the attribute was
- *	missing at the message level
- * @NLMSGERR_ATTR_MISS_NEST: offset of the nest where attribute was missing
  * @__NLMSGERR_ATTR_MAX: number of attributes
  * @NLMSGERR_ATTR_MAX: highest attribute number
  */
@@ -153,8 +143,6 @@ enum nlmsgerr_attrs {
 	NLMSGERR_ATTR_OFFS,
 	NLMSGERR_ATTR_COOKIE,
 	NLMSGERR_ATTR_POLICY,
-	NLMSGERR_ATTR_MISS_TYPE,
-	NLMSGERR_ATTR_MISS_NEST,
 
 	__NLMSGERR_ATTR_MAX,
 	NLMSGERR_ATTR_MAX = __NLMSGERR_ATTR_MAX - 1
@@ -298,8 +286,6 @@ struct nla_bitfield32 {
  *	entry has attributes again, the policy for those inner ones
  *	and the corresponding maxtype may be specified.
  * @NL_ATTR_TYPE_BITFIELD32: &struct nla_bitfield32 attribute
- * @NL_ATTR_TYPE_SINT: 32-bit or 64-bit signed attribute, aligned to 4B
- * @NL_ATTR_TYPE_UINT: 32-bit or 64-bit unsigned attribute, aligned to 4B
  */
 enum netlink_attribute_type {
 	NL_ATTR_TYPE_INVALID,
@@ -324,9 +310,6 @@ enum netlink_attribute_type {
 	NL_ATTR_TYPE_NESTED_ARRAY,
 
 	NL_ATTR_TYPE_BITFIELD32,
-
-	NL_ATTR_TYPE_SINT,
-	NL_ATTR_TYPE_UINT,
 };
 
 /**
@@ -356,9 +339,6 @@ enum netlink_attribute_type {
  *	bitfield32 type (U32)
  * @NL_POLICY_TYPE_ATTR_MASK: mask of valid bits for unsigned integers (U64)
  * @NL_POLICY_TYPE_ATTR_PAD: pad attribute for 64-bit alignment
- *
- * @__NL_POLICY_TYPE_ATTR_MAX: number of attributes
- * @NL_POLICY_TYPE_ATTR_MAX: highest attribute number
  */
 enum netlink_policy_type_attr {
 	NL_POLICY_TYPE_ATTR_UNSPEC,

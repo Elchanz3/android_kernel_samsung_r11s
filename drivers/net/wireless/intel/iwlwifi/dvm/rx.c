@@ -3,17 +3,22 @@
  *
  * Copyright(c) 2003 - 2014 Intel Corporation. All rights reserved.
  * Copyright(c) 2015 Intel Deutschland GmbH
- * Copyright(c) 2018, 2020-2021, 2025 Intel Corporation
+ * Copyright(c) 2018 Intel Corporation
  *
  * Portions of this file are derived from the ipw3945 project, as well
  * as portionhelp of the ieee80211 subsystem header files.
+ *
+ * Contact Information:
+ *  Intel Linux Wireless <linuxwifi@intel.com>
+ * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
+ *
  *****************************************************************************/
 
 #include <linux/etherdevice.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <net/mac80211.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #include "iwl-trans.h"
 #include "iwl-io.h"
@@ -50,7 +55,7 @@ static void iwlagn_rx_csa(struct iwl_priv *priv, struct iwl_rx_cmd_buffer *rxb)
 	 * See iwlagn_mac_channel_switch.
 	 */
 	struct iwl_rxon_context *ctx = &priv->contexts[IWL_RXON_CTX_BSS];
-	struct iwl_rxon_cmd *rxon = (void *)(uintptr_t)&ctx->active;
+	struct iwl_rxon_cmd *rxon = (void *)&ctx->active;
 
 	if (!test_bit(STATUS_CHANNEL_SWITCH_PENDING, &priv->status))
 		return;
@@ -313,7 +318,7 @@ iwlagn_accumulative_statistics(struct iwl_priv *priv,
 		    (__le32 *)&priv->delta_stats._name,		\
 		    (__le32 *)&priv->max_delta_stats._name,	\
 		    (__le32 *)&priv->accum_stats._name,		\
-		    sizeof(*_name))
+		    sizeof(*_name));
 
 	ACCUM(common);
 	ACCUM(rx_non_phy);
@@ -429,7 +434,7 @@ static void iwlagn_rx_statistics(struct iwl_priv *priv,
 	 * thermal update even if the uCode doesn't give
 	 * us one */
 	mod_timer(&priv->statistics_periodic, jiffies +
-		  secs_to_jiffies(reg_recalib_period));
+		  msecs_to_jiffies(reg_recalib_period * 1000));
 
 	if (unlikely(!test_bit(STATUS_SCANNING, &priv->status)) &&
 	    (pkt->hdr.cmd == STATISTICS_NOTIFICATION)) {
@@ -577,7 +582,7 @@ static int iwlagn_set_decrypted_flag(struct iwl_priv *priv,
 		if ((decrypt_res & RX_RES_STATUS_DECRYPT_TYPE_MSK) ==
 		    RX_RES_STATUS_BAD_KEY_TTAK)
 			break;
-		fallthrough;
+		/* fall through */
 	case RX_RES_STATUS_SEC_TYPE_WEP:
 		if ((decrypt_res & RX_RES_STATUS_DECRYPT_TYPE_MSK) ==
 		    RX_RES_STATUS_BAD_ICV_MIC) {
@@ -586,7 +591,7 @@ static int iwlagn_set_decrypted_flag(struct iwl_priv *priv,
 			IWL_DEBUG_RX(priv, "Packet destroyed\n");
 			return -1;
 		}
-		fallthrough;
+		/* fall through */
 	case RX_RES_STATUS_SEC_TYPE_CCMP:
 		if ((decrypt_res & RX_RES_STATUS_DECRYPT_TYPE_MSK) ==
 		    RX_RES_STATUS_DECRYPT_OK) {
@@ -643,8 +648,8 @@ static void iwlagn_pass_packet_to_mac80211(struct iwl_priv *priv,
 	fraglen = len - hdrlen;
 
 	if (fraglen) {
-		int offset = (u8 *)hdr + hdrlen -
-			     (u8 *)rxb_addr(rxb) + rxb_offset(rxb);
+		int offset = (void *)hdr + hdrlen -
+			     rxb_addr(rxb) + rxb_offset(rxb);
 
 		skb_add_rx_frag(skb, 0, rxb_steal_page(rxb), offset,
 				fraglen, rxb->truesize);
@@ -715,7 +720,7 @@ static u32 iwlagn_translate_rx_status(struct iwl_priv *priv, u32 decrypt_in)
 			decrypt_out |= RX_RES_STATUS_BAD_KEY_TTAK;
 			break;
 		}
-		fallthrough;
+		/* fall through */
 	default:
 		if (!(decrypt_in & RX_MPDU_RES_STATUS_ICV_OK))
 			decrypt_out |= RX_RES_STATUS_BAD_ICV_MIC;
@@ -781,7 +786,7 @@ static void iwlagn_rx_reply_rx(struct iwl_priv *priv,
 	struct iwl_rx_phy_res *phy_res;
 	__le32 rx_pkt_status;
 	struct iwl_rx_mpdu_res_start *amsdu;
-	u32 len, pkt_len = iwl_rx_packet_len(pkt);
+	u32 len;
 	u32 ampdu_status;
 	u32 rate_n_flags;
 
@@ -789,22 +794,10 @@ static void iwlagn_rx_reply_rx(struct iwl_priv *priv,
 		IWL_ERR(priv, "MPDU frame without cached PHY data\n");
 		return;
 	}
-
-	if (unlikely(pkt_len < sizeof(*amsdu))) {
-		IWL_DEBUG_DROP(priv, "Bad REPLY_RX_MPDU_CMD size\n");
-		return;
-	}
-
 	phy_res = &priv->last_phy_res;
 	amsdu = (struct iwl_rx_mpdu_res_start *)pkt->data;
 	header = (struct ieee80211_hdr *)(pkt->data + sizeof(*amsdu));
 	len = le16_to_cpu(amsdu->byte_count);
-
-	if (unlikely(len + sizeof(*amsdu) + sizeof(__le32) > pkt_len)) {
-		IWL_DEBUG_DROP(priv, "FW lied about packet len\n");
-		return;
-	}
-
 	rx_pkt_status = *(__le32 *)(pkt->data + sizeof(*amsdu) + len);
 	ampdu_status = iwlagn_translate_rx_status(priv,
 						  le32_to_cpu(rx_pkt_status));
@@ -915,7 +908,7 @@ static void iwlagn_rx_noa_notification(struct iwl_priv *priv,
 		len += 1 + 2;
 		copylen += 1 + 2;
 
-		new_data = kmalloc(struct_size(new_data, data, len), GFP_ATOMIC);
+		new_data = kmalloc(sizeof(*new_data) + len, GFP_ATOMIC);
 		if (new_data) {
 			new_data->length = len;
 			new_data->data[0] = WLAN_EID_VENDOR_SPECIFIC;
@@ -1015,7 +1008,8 @@ void iwl_rx_dispatch(struct iwl_op_mode *op_mode, struct napi_struct *napi,
 		/* No handling needed */
 		IWL_DEBUG_RX(priv, "No handler needed for %s, 0x%02x\n",
 			     iwl_get_cmd_string(priv->trans,
-						WIDE_ID(0, pkt->hdr.cmd)),
+						iwl_cmd_id(pkt->hdr.cmd,
+							   0, 0)),
 			     pkt->hdr.cmd);
 	}
 }

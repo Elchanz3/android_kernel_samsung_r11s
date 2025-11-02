@@ -558,9 +558,6 @@ static int _calc_rate(struct clk_hw *hw, struct tegra_clk_pll_freq_table *cfg,
 	u32 p_div = 0;
 	int ret;
 
-	if (!rate)
-		return -EINVAL;
-
 	switch (parent_rate) {
 	case 12000000:
 	case 26000000:
@@ -840,8 +837,8 @@ static int clk_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	return ret;
 }
 
-static int clk_pll_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long clk_pll_round_rate(struct clk_hw *hw, unsigned long rate,
+			unsigned long *prate)
 {
 	struct tegra_clk_pll *pll = to_clk_pll(hw);
 	struct tegra_clk_pll_freq_table cfg;
@@ -849,20 +846,15 @@ static int clk_pll_determine_rate(struct clk_hw *hw,
 	if (pll->params->flags & TEGRA_PLL_FIXED) {
 		/* PLLM/MB are used for memory; we do not change rate */
 		if (pll->params->flags & (TEGRA_PLLM | TEGRA_PLLMB))
-			req->rate = clk_hw_get_rate(hw);
-		else
-			req->rate = pll->params->fixed_rate;
-
-		return 0;
+			return clk_hw_get_rate(hw);
+		return pll->params->fixed_rate;
 	}
 
-	if (_get_table_rate(hw, &cfg, req->rate, req->best_parent_rate) &&
-	    pll->params->calc_rate(hw, &cfg, req->rate, req->best_parent_rate))
+	if (_get_table_rate(hw, &cfg, rate, *prate) &&
+	    pll->params->calc_rate(hw, &cfg, rate, *prate))
 		return -EINVAL;
 
-	req->rate = cfg.output_rate;
-
-	return 0;
+	return cfg.output_rate;
 }
 
 static unsigned long clk_pll_recalc_rate(struct clk_hw *hw,
@@ -1062,7 +1054,7 @@ const struct clk_ops tegra_clk_pll_ops = {
 	.enable = clk_pll_enable,
 	.disable = clk_pll_disable,
 	.recalc_rate = clk_pll_recalc_rate,
-	.determine_rate = clk_pll_determine_rate,
+	.round_rate = clk_pll_round_rate,
 	.set_rate = clk_pll_set_rate,
 	.restore_context = tegra_clk_pll_restore_context,
 };
@@ -1200,7 +1192,7 @@ static const struct clk_ops tegra_clk_pllu_ops = {
 	.enable = clk_pllu_enable,
 	.disable = clk_pll_disable,
 	.recalc_rate = clk_pll_recalc_rate,
-	.determine_rate = clk_pll_determine_rate,
+	.round_rate = clk_pll_round_rate,
 	.set_rate = clk_pll_set_rate,
 };
 
@@ -1358,15 +1350,15 @@ static int clk_pllxc_set_rate(struct clk_hw *hw, unsigned long rate,
 	return ret;
 }
 
-static int clk_pll_ramp_determine_rate(struct clk_hw *hw,
-				       struct clk_rate_request *req)
+static long clk_pll_ramp_round_rate(struct clk_hw *hw, unsigned long rate,
+				unsigned long *prate)
 {
 	struct tegra_clk_pll *pll = to_clk_pll(hw);
 	struct tegra_clk_pll_freq_table cfg;
 	int ret, p_div;
-	u64 output_rate = req->best_parent_rate;
+	u64 output_rate = *prate;
 
-	ret = _pll_ramp_calc_pll(hw, &cfg, req->rate, req->best_parent_rate);
+	ret = _pll_ramp_calc_pll(hw, &cfg, rate, *prate);
 	if (ret < 0)
 		return ret;
 
@@ -1380,9 +1372,7 @@ static int clk_pll_ramp_determine_rate(struct clk_hw *hw,
 	output_rate *= cfg.n;
 	do_div(output_rate, cfg.m * p_div);
 
-	req->rate = output_rate;
-
-	return 0;
+	return output_rate;
 }
 
 static void _pllcx_strobe(struct tegra_clk_pll *pll)
@@ -1605,15 +1595,12 @@ static unsigned long clk_pllre_recalc_rate(struct clk_hw *hw,
 	return rate;
 }
 
-static int clk_pllre_determine_rate(struct clk_hw *hw,
-				    struct clk_rate_request *req)
+static long clk_pllre_round_rate(struct clk_hw *hw, unsigned long rate,
+				 unsigned long *prate)
 {
 	struct tegra_clk_pll *pll = to_clk_pll(hw);
 
-	req->rate = _pllre_calc_rate(pll, NULL, req->rate,
-				     req->best_parent_rate);
-
-	return 0;
+	return _pllre_calc_rate(pll, NULL, rate, *prate);
 }
 
 static int clk_plle_tegra114_enable(struct clk_hw *hw)
@@ -1924,7 +1911,7 @@ static struct clk *_tegra_clk_register_pll(struct tegra_clk_pll *pll,
 	/* Data in .init is copied by clk_register(), so stack variable OK */
 	pll->hw.init = &init;
 
-	return tegra_clk_dev_register(&pll->hw);
+	return clk_register(NULL, &pll->hw);
 }
 
 struct clk *tegra_clk_register_pll(const char *name, const char *parent_name,
@@ -2013,7 +2000,7 @@ static const struct clk_ops tegra_clk_pllxc_ops = {
 	.enable = clk_pll_enable,
 	.disable = clk_pll_disable,
 	.recalc_rate = clk_pll_recalc_rate,
-	.determine_rate = clk_pll_ramp_determine_rate,
+	.round_rate = clk_pll_ramp_round_rate,
 	.set_rate = clk_pllxc_set_rate,
 };
 
@@ -2022,7 +2009,7 @@ static const struct clk_ops tegra_clk_pllc_ops = {
 	.enable = clk_pllc_enable,
 	.disable = clk_pllc_disable,
 	.recalc_rate = clk_pll_recalc_rate,
-	.determine_rate = clk_pll_ramp_determine_rate,
+	.round_rate = clk_pll_ramp_round_rate,
 	.set_rate = clk_pllc_set_rate,
 };
 
@@ -2031,7 +2018,7 @@ static const struct clk_ops tegra_clk_pllre_ops = {
 	.enable = clk_pll_enable,
 	.disable = clk_pll_disable,
 	.recalc_rate = clk_pllre_recalc_rate,
-	.determine_rate = clk_pllre_determine_rate,
+	.round_rate = clk_pllre_round_rate,
 	.set_rate = clk_pllre_set_rate,
 };
 
@@ -2331,7 +2318,7 @@ static const struct clk_ops tegra_clk_pllss_ops = {
 	.enable = clk_pll_enable,
 	.disable = clk_pll_disable,
 	.recalc_rate = clk_pll_recalc_rate,
-	.determine_rate = clk_pll_ramp_determine_rate,
+	.round_rate = clk_pll_ramp_round_rate,
 	.set_rate = clk_pllxc_set_rate,
 	.restore_context = tegra_clk_pll_restore_context,
 };
@@ -2526,6 +2513,18 @@ static int clk_plle_tegra210_enable(struct clk_hw *hw)
 	val &= ~PLLE_SS_CNTL_INTERP_RESET;
 	pll_writel(val, PLLE_SS_CTRL, pll);
 	udelay(1);
+
+	val = pll_readl_misc(pll);
+	val &= ~PLLE_MISC_IDDQ_SW_CTRL;
+	pll_writel_misc(val, pll);
+
+	val = pll_readl(pll->params->aux_reg, pll);
+	val |= (PLLE_AUX_USE_LOCKDET | PLLE_AUX_SS_SEQ_INCLUDE);
+	val &= ~(PLLE_AUX_ENABLE_SWCTL | PLLE_AUX_SS_SWCTL);
+	pll_writel(val, pll->params->aux_reg, pll);
+	udelay(1);
+	val |= PLLE_AUX_SEQ_ENABLE;
+	pll_writel(val, pll->params->aux_reg, pll);
 
 out:
 	if (pll->lock)

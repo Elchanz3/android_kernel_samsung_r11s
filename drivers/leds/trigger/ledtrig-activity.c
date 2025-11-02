@@ -11,7 +11,6 @@
 #include <linux/kernel_stat.h>
 #include <linux/leds.h>
 #include <linux/module.h>
-#include <linux/panic_notifier.h>
 #include <linux/reboot.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -32,8 +31,8 @@ struct activity_data {
 
 static void led_activity_function(struct timer_list *t)
 {
-	struct activity_data *activity_data = timer_container_of(activity_data,
-								 t, timer);
+	struct activity_data *activity_data = from_timer(activity_data, t,
+							 timer);
 	struct led_classdev *led_cdev = activity_data->led_cdev;
 	unsigned int target;
 	unsigned int usage;
@@ -156,7 +155,7 @@ static ssize_t led_invert_show(struct device *dev,
 {
 	struct activity_data *activity_data = led_trigger_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", activity_data->invert);
+	return sprintf(buf, "%u\n", activity_data->invert);
 }
 
 static ssize_t led_invert_store(struct device *dev,
@@ -208,7 +207,7 @@ static void activity_deactivate(struct led_classdev *led_cdev)
 {
 	struct activity_data *activity_data = led_get_trigger_data(led_cdev);
 
-	timer_shutdown_sync(&activity_data->timer);
+	del_timer_sync(&activity_data->timer);
 	kfree(activity_data);
 	clear_bit(LED_BLINK_SW, &led_cdev->work_flags);
 }

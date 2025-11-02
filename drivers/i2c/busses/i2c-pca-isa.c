@@ -95,7 +95,7 @@ static struct i2c_algo_pca_data pca_isa_data = {
 	/* .data intentionally left NULL, not needed with ISA */
 	.write_byte		= pca_isa_writebyte,
 	.read_byte		= pca_isa_readbyte,
-	.wait_for_completion_cb	= pca_isa_waitforcompletion,
+	.wait_for_completion	= pca_isa_waitforcompletion,
 	.reset_chip		= pca_isa_resetchip,
 };
 
@@ -161,7 +161,7 @@ static int pca_isa_probe(struct device *dev, unsigned int id)
 	return -ENODEV;
 }
 
-static void pca_isa_remove(struct device *dev, unsigned int id)
+static int pca_isa_remove(struct device *dev, unsigned int id)
 {
 	i2c_del_adapter(&pca_isa_ops);
 
@@ -170,6 +170,8 @@ static void pca_isa_remove(struct device *dev, unsigned int id)
 		free_irq(irq, &pca_isa_ops);
 	}
 	release_region(base, IO_SIZE);
+
+	return 0;
 }
 
 static struct isa_driver pca_isa_driver = {

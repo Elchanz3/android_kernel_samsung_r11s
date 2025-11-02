@@ -2,7 +2,6 @@
 // Copyright (c) 2011-2017, The Linux Foundation. All rights reserved.
 // Copyright (c) 2018, Linaro Limited
 
-#include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/uaccess.h>
@@ -35,8 +34,6 @@
 #define AFE_MODULE_TDM			0x0001028A
 
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
-#define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
-#define AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT 0x000102AA
 
 #define AFE_PARAM_ID_LPAIF_CLK_CONFIG	0x00010238
 #define AFE_PARAM_ID_INT_DIGITAL_CDC_CLK_CONFIG	0x00010239
@@ -46,7 +43,6 @@
 #define AFE_PARAM_ID_TDM_CONFIG	0x0001029D
 #define AFE_PARAM_ID_PORT_SLOT_MAPPING_CONFIG	0x00010297
 #define AFE_PARAM_ID_CODEC_DMA_CONFIG	0x000102B8
-#define AFE_PARAM_ID_USB_AUDIO_CONFIG    0x000102A4
 #define AFE_CMD_REMOTE_LPASS_CORE_HW_VOTE_REQUEST	0x000100f4
 #define AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST   0x000100f5
 #define AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST	0x000100f6
@@ -75,15 +71,11 @@
 #define AFE_PORT_CONFIG_I2S_WS_SRC_INTERNAL	0x1
 #define AFE_LINEAR_PCM_DATA				0x0
 
-#define AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG 0x1
 
 /* Port IDs */
 #define AFE_API_VERSION_HDMI_CONFIG	0x1
 #define AFE_PORT_ID_MULTICHAN_HDMI_RX	0x100E
 #define AFE_PORT_ID_HDMI_OVER_DP_RX	0x6020
-
-/* USB AFE port */
-#define AFE_PORT_ID_USB_RX                       0x7000
 
 #define AFE_API_VERSION_SLIMBUS_CONFIG 0x1
 /* Clock set API version */
@@ -128,8 +120,6 @@
 #define AFE_PORT_ID_TERTIARY_MI2S_TX        0x1005
 #define AFE_PORT_ID_QUATERNARY_MI2S_RX      0x1006
 #define AFE_PORT_ID_QUATERNARY_MI2S_TX      0x1007
-#define AFE_PORT_ID_QUINARY_MI2S_RX	    0x1016
-#define AFE_PORT_ID_QUINARY_MI2S_TX	    0x1017
 
 /* Start of the range of port IDs for TDM devices. */
 #define AFE_PORT_ID_TDM_PORT_RANGE_START	0x9000
@@ -366,7 +356,7 @@
 #define AFE_API_VERSION_SLOT_MAPPING_CONFIG	1
 #define AFE_API_VERSION_CODEC_DMA_CONFIG	1
 
-#define TIMEOUT_MS 3000
+#define TIMEOUT_MS 1000
 #define AFE_CMD_RESP_AVAIL	0
 #define AFE_CMD_RESP_NONE	1
 #define AFE_CLK_TOKEN		1024
@@ -520,96 +510,12 @@ struct afe_param_id_cdc_dma_cfg {
 	u16	active_channels_mask;
 } __packed;
 
-struct afe_param_id_usb_cfg {
-/* Minor version used for tracking USB audio device configuration.
- * Supported values: AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG
- */
-	u32	cfg_minor_version;
-/* Sampling rate of the port.
- * Supported values:
- * - AFE_PORT_SAMPLE_RATE_8K
- * - AFE_PORT_SAMPLE_RATE_11025
- * - AFE_PORT_SAMPLE_RATE_12K
- * - AFE_PORT_SAMPLE_RATE_16K
- * - AFE_PORT_SAMPLE_RATE_22050
- * - AFE_PORT_SAMPLE_RATE_24K
- * - AFE_PORT_SAMPLE_RATE_32K
- * - AFE_PORT_SAMPLE_RATE_44P1K
- * - AFE_PORT_SAMPLE_RATE_48K
- * - AFE_PORT_SAMPLE_RATE_96K
- * - AFE_PORT_SAMPLE_RATE_192K
- */
-	u32	sample_rate;
-/* Bit width of the sample.
- * Supported values: 16, 24
- */
-	u16	bit_width;
-/* Number of channels.
- * Supported values: 1 and 2
- */
-	u16	num_channels;
-/* Data format supported by the USB. The supported value is
- * 0 (#AFE_USB_AUDIO_DATA_FORMAT_LINEAR_PCM).
- */
-	u16	data_format;
-/* this field must be 0 */
-	u16	reserved;
-/* device token of actual end USB audio device */
-	u32	dev_token;
-/* endianness of this interface */
-	u32	endian;
-/* service interval */
-	u32	service_interval;
-} __packed;
-
-/**
- * struct afe_param_id_usb_audio_dev_params
- * @cfg_minor_version: Minor version used for tracking USB audio device
- * configuration.
- * Supported values:
- *     AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG
- * @dev_token: device token of actual end USB audio device
- **/
-struct afe_param_id_usb_audio_dev_params {
-	u32	cfg_minor_version;
-	u32	dev_token;
-} __packed;
-
-/**
- * struct afe_param_id_usb_audio_dev_lpcm_fmt
- * @cfg_minor_version: Minor version used for tracking USB audio device
- * configuration.
- * Supported values:
- *     AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG
- * @endian: endianness of this interface
- **/
-struct afe_param_id_usb_audio_dev_lpcm_fmt {
-	u32	cfg_minor_version;
-	u32	endian;
-} __packed;
-
-#define AFE_PARAM_ID_USB_AUDIO_SVC_INTERVAL     0x000102B7
-
-/**
- * struct afe_param_id_usb_audio_svc_interval
- * @cfg_minor_version: Minor version used for tracking USB audio device
- * configuration.
- * Supported values:
- *     AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG
- * @svc_interval: service interval
- **/
-struct afe_param_id_usb_audio_svc_interval {
-	u32	cfg_minor_version;
-	u32	svc_interval;
-} __packed;
-
 union afe_port_config {
 	struct afe_param_id_hdmi_multi_chan_audio_cfg hdmi_multi_ch;
 	struct afe_param_id_slimbus_cfg           slim_cfg;
 	struct afe_param_id_i2s_cfg	i2s_cfg;
 	struct afe_param_id_tdm_cfg	tdm_cfg;
 	struct afe_param_id_cdc_dma_cfg	dma_cfg;
-	struct afe_param_id_usb_cfg usb_cfg;
 } __packed;
 
 
@@ -644,13 +550,13 @@ struct q6afe_port {
 };
 
 struct afe_cmd_remote_lpass_core_hw_vote_request {
-	uint32_t  hw_block_id;
-	char client_name[8];
+        uint32_t  hw_block_id;
+        char client_name[8];
 } __packed;
 
 struct afe_cmd_remote_lpass_core_hw_devote_request {
-	uint32_t  hw_block_id;
-	uint32_t client_handle;
+        uint32_t  hw_block_id;
+        uint32_t client_handle;
 } __packed;
 
 
@@ -714,10 +620,6 @@ static struct afe_port_map port_maps[AFE_PORT_MAX] = {
 				QUATERNARY_MI2S_RX, 1, 1},
 	[QUATERNARY_MI2S_TX] = { AFE_PORT_ID_QUATERNARY_MI2S_TX,
 				QUATERNARY_MI2S_TX, 0, 1},
-	[QUINARY_MI2S_RX]  =  { AFE_PORT_ID_QUINARY_MI2S_RX,
-				QUINARY_MI2S_RX, 1, 1},
-	[QUINARY_MI2S_TX] =   { AFE_PORT_ID_QUINARY_MI2S_TX,
-				QUINARY_MI2S_TX, 0, 1},
 	[PRIMARY_TDM_RX_0] =  { AFE_PORT_ID_PRIMARY_TDM_RX,
 				PRIMARY_TDM_RX_0, 1, 1},
 	[PRIMARY_TDM_TX_0] =  { AFE_PORT_ID_PRIMARY_TDM_TX,
@@ -924,7 +826,6 @@ static struct afe_port_map port_maps[AFE_PORT_MAX] = {
 				RX_CODEC_DMA_RX_6, 1, 1},
 	[RX_CODEC_DMA_RX_7] = { AFE_PORT_ID_RX_CODEC_DMA_RX_7,
 				RX_CODEC_DMA_RX_7, 1, 1},
-	[USB_RX] = { AFE_PORT_ID_USB_RX, USB_RX, 1, 1},
 };
 
 static void q6afe_port_free(struct kref *ref)
@@ -944,7 +845,7 @@ static void q6afe_port_free(struct kref *ref)
 
 static struct q6afe_port *q6afe_find_port(struct q6afe *afe, int token)
 {
-	struct q6afe_port *p;
+	struct q6afe_port *p = NULL;
 	struct q6afe_port *ret = NULL;
 	unsigned long flags;
 
@@ -1029,7 +930,7 @@ EXPORT_SYMBOL_GPL(q6afe_get_port_id);
 static int afe_apr_send_pkt(struct q6afe *afe, struct apr_pkt *pkt,
 			    struct q6afe_port *port, uint32_t rsp_opcode)
 {
-	wait_queue_head_t *wait;
+	wait_queue_head_t *wait = &port->wait;
 	struct aprv2_ibasic_rsp_result_t *result;
 	int ret;
 
@@ -1287,6 +1188,7 @@ int q6afe_port_stop(struct q6afe_port *port)
 	int index, pkt_size;
 	void *p;
 
+	port_id = port->id;
 	index = port->token;
 	if (index < 0 || index >= AFE_PORT_MAX) {
 		dev_err(afe->dev, "AFE port index[%d] invalid!\n", index);
@@ -1383,99 +1285,6 @@ void q6afe_tdm_port_prepare(struct q6afe_port *port,
 EXPORT_SYMBOL_GPL(q6afe_tdm_port_prepare);
 
 /**
- * afe_port_send_usb_dev_param() - Send USB dev token
- *
- * @port: Instance of afe port
- * @cardidx: USB SND card index to reference
- * @pcmidx: USB SND PCM device index to reference
- *
- * The USB dev token carries information about which USB SND card instance and
- * PCM device to execute the offload on.  This information is carried through
- * to the stream enable QMI request, which is handled by the offload class
- * driver.  The information is parsed to determine which USB device to query
- * the required resources for.
- */
-int afe_port_send_usb_dev_param(struct q6afe_port *port, int cardidx, int pcmidx)
-{
-	struct afe_param_id_usb_audio_dev_params usb_dev;
-	int ret;
-
-	memset(&usb_dev, 0, sizeof(usb_dev));
-
-	usb_dev.cfg_minor_version = AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG;
-	usb_dev.dev_token = (cardidx << 16) | (pcmidx << 8);
-	ret = q6afe_port_set_param_v2(port, &usb_dev,
-				      AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS,
-				      AFE_MODULE_AUDIO_DEV_INTERFACE,
-				      sizeof(usb_dev));
-	if (ret)
-		dev_err(port->afe->dev, "%s: AFE device param cmd failed %d\n",
-			__func__, ret);
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(afe_port_send_usb_dev_param);
-
-static int afe_port_send_usb_params(struct q6afe_port *port, struct q6afe_usb_cfg *cfg)
-{
-	union afe_port_config *pcfg = &port->port_cfg;
-	struct afe_param_id_usb_audio_dev_lpcm_fmt lpcm_fmt;
-	struct afe_param_id_usb_audio_svc_interval svc_int;
-	int ret;
-
-	if (!pcfg) {
-		dev_err(port->afe->dev, "%s: Error, no configuration data\n", __func__);
-		return -EINVAL;
-	}
-
-	memset(&lpcm_fmt, 0, sizeof(lpcm_fmt));
-	memset(&svc_int, 0, sizeof(svc_int));
-
-	lpcm_fmt.cfg_minor_version = AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG;
-	lpcm_fmt.endian = pcfg->usb_cfg.endian;
-	ret = q6afe_port_set_param_v2(port, &lpcm_fmt,
-				      AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT,
-				      AFE_MODULE_AUDIO_DEV_INTERFACE, sizeof(lpcm_fmt));
-	if (ret) {
-		dev_err(port->afe->dev, "%s: AFE device param cmd LPCM_FMT failed %d\n",
-			__func__, ret);
-		return ret;
-	}
-
-	svc_int.cfg_minor_version = AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG;
-	svc_int.svc_interval = pcfg->usb_cfg.service_interval;
-	ret = q6afe_port_set_param_v2(port, &svc_int,
-				      AFE_PARAM_ID_USB_AUDIO_SVC_INTERVAL,
-				      AFE_MODULE_AUDIO_DEV_INTERFACE, sizeof(svc_int));
-	if (ret)
-		dev_err(port->afe->dev, "%s: AFE device param cmd svc_interval failed %d\n",
-			__func__, ret);
-
-	return ret;
-}
-
-/**
- * q6afe_usb_port_prepare() - Prepare usb afe port.
- *
- * @port: Instance of afe port
- * @cfg: USB configuration for the afe port
- *
- */
-void q6afe_usb_port_prepare(struct q6afe_port *port,
-			    struct q6afe_usb_cfg *cfg)
-{
-	union afe_port_config *pcfg = &port->port_cfg;
-
-	pcfg->usb_cfg.cfg_minor_version = AFE_API_MINOR_VERSION_USB_AUDIO_CONFIG;
-	pcfg->usb_cfg.sample_rate = cfg->sample_rate;
-	pcfg->usb_cfg.num_channels = cfg->num_channels;
-	pcfg->usb_cfg.bit_width = cfg->bit_width;
-
-	afe_port_send_usb_params(port, cfg);
-}
-EXPORT_SYMBOL_GPL(q6afe_usb_port_prepare);
-
-/**
  * q6afe_hdmi_port_prepare() - Prepare hdmi afe port.
  *
  * @port: Instance of afe port
@@ -1514,11 +1323,11 @@ int q6afe_i2s_port_prepare(struct q6afe_port *port, struct q6afe_i2s_cfg *cfg)
 	pcfg->i2s_cfg.bit_width = cfg->bit_width;
 	pcfg->i2s_cfg.data_format = AFE_LINEAR_PCM_DATA;
 
-	switch (cfg->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_BP_FP:
+	switch (cfg->fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBS_CFS:
 		pcfg->i2s_cfg.ws_src = AFE_PORT_CONFIG_I2S_WS_SRC_INTERNAL;
 		break;
-	case SND_SOC_DAIFMT_BC_FC:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		/* CPU is slave */
 		pcfg->i2s_cfg.ws_src = AFE_PORT_CONFIG_I2S_WS_SRC_EXTERNAL;
 		break;
@@ -1640,7 +1449,7 @@ int q6afe_i2s_port_prepare(struct q6afe_port *port, struct q6afe_i2s_cfg *cfg)
 EXPORT_SYMBOL_GPL(q6afe_i2s_port_prepare);
 
 /**
- * q6afe_cdc_dma_port_prepare() - Prepare dma afe port.
+ * q6afe_dam_port_prepare() - Prepare dma afe port.
  *
  * @port: Instance of afe port
  * @cfg: DMA configuration for the afe port
@@ -1788,8 +1597,6 @@ struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id)
 	case AFE_PORT_ID_TERTIARY_MI2S_TX:
 	case AFE_PORT_ID_QUATERNARY_MI2S_RX:
 	case AFE_PORT_ID_QUATERNARY_MI2S_TX:
-	case AFE_PORT_ID_QUINARY_MI2S_RX:
-	case AFE_PORT_ID_QUINARY_MI2S_TX:
 		cfg_type = AFE_PARAM_ID_I2S_CONFIG;
 		break;
 	case AFE_PORT_ID_PRIMARY_TDM_RX ... AFE_PORT_ID_QUINARY_TDM_TX_7:
@@ -1797,10 +1604,7 @@ struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id)
 		break;
 	case AFE_PORT_ID_WSA_CODEC_DMA_RX_0 ... AFE_PORT_ID_RX_CODEC_DMA_RX_7:
 		cfg_type = AFE_PARAM_ID_CODEC_DMA_CONFIG;
-		break;
-	case AFE_PORT_ID_USB_RX:
-		cfg_type = AFE_PARAM_ID_USB_AUDIO_CONFIG;
-		break;
+	break;
 	default:
 		dev_err(dev, "Invalid port id 0x%x\n", port_id);
 		return ERR_PTR(-EINVAL);
@@ -1877,7 +1681,7 @@ int q6afe_unvote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
 EXPORT_SYMBOL(q6afe_unvote_lpass_core_hw);
 
 int q6afe_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
-			     const char *client_name, uint32_t *client_handle)
+			     char *client_name, uint32_t *client_handle)
 {
 	struct q6afe *afe = dev_get_drvdata(dev->parent);
 	struct afe_cmd_remote_lpass_core_hw_vote_request *vote_cfg;
@@ -1903,7 +1707,7 @@ int q6afe_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
 	pkt->hdr.token = hw_block_id;
 	pkt->hdr.opcode = AFE_CMD_REMOTE_LPASS_CORE_HW_VOTE_REQUEST;
 	vote_cfg->hw_block_id = hw_block_id;
-	strscpy(vote_cfg->client_name, client_name,
+	strlcpy(vote_cfg->client_name, client_name,
 			sizeof(vote_cfg->client_name));
 
 	ret = afe_apr_send_pkt(afe, pkt, NULL,
@@ -1936,7 +1740,14 @@ static int q6afe_probe(struct apr_device *adev)
 
 	dev_set_drvdata(dev, afe);
 
-	return devm_of_platform_populate(dev);
+	return of_platform_populate(dev->of_node, NULL, NULL, dev);
+}
+
+static int q6afe_remove(struct apr_device *adev)
+{
+	of_platform_depopulate(&adev->dev);
+
+	return 0;
 }
 
 #ifdef CONFIG_OF
@@ -1949,6 +1760,7 @@ MODULE_DEVICE_TABLE(of, q6afe_device_id);
 
 static struct apr_driver qcom_q6afe_driver = {
 	.probe = q6afe_probe,
+	.remove = q6afe_remove,
 	.callback = q6afe_callback,
 	.driver = {
 		.name = "qcom-q6afe",

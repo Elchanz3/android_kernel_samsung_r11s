@@ -41,8 +41,6 @@
 
 #include <drm/drm_device.h>
 #include <drm/drm_vblank.h>
-#include <drm/drm_fourcc.h>
-#include <drm/drm_framebuffer.h>
 
 #include "atom.h"
 #include "radeon.h"
@@ -54,7 +52,8 @@
 static void rs600_gpu_init(struct radeon_device *rdev);
 int rs600_mc_wait_for_idle(struct radeon_device *rdev);
 
-static const u32 crtc_offsets[2] = {
+static const u32 crtc_offsets[2] =
+{
 	0,
 	AVIVO_D2CRTC_H_TOTAL - AVIVO_D1CRTC_H_TOTAL
 };
@@ -119,7 +118,6 @@ void avivo_wait_for_vblank(struct radeon_device *rdev, int crtc)
 void rs600_page_flip(struct radeon_device *rdev, int crtc_id, u64 crtc_base, bool async)
 {
 	struct radeon_crtc *radeon_crtc = rdev->mode_info.crtcs[crtc_id];
-	struct drm_framebuffer *fb = radeon_crtc->base.primary->fb;
 	u32 tmp = RREG32(AVIVO_D1GRPH_UPDATE + radeon_crtc->crtc_offset);
 	int i;
 
@@ -127,13 +125,9 @@ void rs600_page_flip(struct radeon_device *rdev, int crtc_id, u64 crtc_base, boo
 	tmp |= AVIVO_D1GRPH_UPDATE_LOCK;
 	WREG32(AVIVO_D1GRPH_UPDATE + radeon_crtc->crtc_offset, tmp);
 
-	/* flip at hsync for async, default is vsync */
+	/* update the scanout addresses */
 	WREG32(AVIVO_D1GRPH_FLIP_CONTROL + radeon_crtc->crtc_offset,
 	       async ? AVIVO_D1GRPH_SURFACE_UPDATE_H_RETRACE_EN : 0);
-	/* update pitch */
-	WREG32(AVIVO_D1GRPH_PITCH + radeon_crtc->crtc_offset,
-	       fb->pitches[0] / fb->format->cpp[0]);
-	/* update the scanout addresses */
 	WREG32(AVIVO_D1GRPH_SECONDARY_SURFACE_ADDRESS + radeon_crtc->crtc_offset,
 	       (u32)crtc_base);
 	WREG32(AVIVO_D1GRPH_PRIMARY_SURFACE_ADDRESS + radeon_crtc->crtc_offset,
@@ -321,7 +315,7 @@ void rs600_pm_misc(struct radeon_device *rdev)
 
 void rs600_pm_prepare(struct radeon_device *rdev)
 {
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_device *ddev = rdev->ddev;
 	struct drm_crtc *crtc;
 	struct radeon_crtc *radeon_crtc;
 	u32 tmp;
@@ -339,7 +333,7 @@ void rs600_pm_prepare(struct radeon_device *rdev)
 
 void rs600_pm_finish(struct radeon_device *rdev)
 {
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_device *ddev = rdev->ddev;
 	struct drm_crtc *crtc;
 	struct radeon_crtc *radeon_crtc;
 	u32 tmp;
@@ -408,7 +402,7 @@ void rs600_hpd_set_polarity(struct radeon_device *rdev,
 
 void rs600_hpd_init(struct radeon_device *rdev)
 {
-	struct drm_device *dev = rdev_to_drm(rdev);
+	struct drm_device *dev = rdev->ddev;
 	struct drm_connector *connector;
 	unsigned enable = 0;
 
@@ -435,7 +429,7 @@ void rs600_hpd_init(struct radeon_device *rdev)
 
 void rs600_hpd_fini(struct radeon_device *rdev)
 {
-	struct drm_device *dev = rdev_to_drm(rdev);
+	struct drm_device *dev = rdev->ddev;
 	struct drm_connector *connector;
 	unsigned disable = 0;
 
@@ -797,7 +791,7 @@ int rs600_irq_process(struct radeon_device *rdev)
 		/* Vertical blank interrupts */
 		if (G_007EDC_LB_D1_VBLANK_INTERRUPT(rdev->irq.stat_regs.r500.disp_int)) {
 			if (rdev->irq.crtc_vblank_int[0]) {
-				drm_handle_vblank(rdev_to_drm(rdev), 0);
+				drm_handle_vblank(rdev->ddev, 0);
 				rdev->pm.vblank_sync = true;
 				wake_up(&rdev->irq.vblank_queue);
 			}
@@ -806,7 +800,7 @@ int rs600_irq_process(struct radeon_device *rdev)
 		}
 		if (G_007EDC_LB_D2_VBLANK_INTERRUPT(rdev->irq.stat_regs.r500.disp_int)) {
 			if (rdev->irq.crtc_vblank_int[1]) {
-				drm_handle_vblank(rdev_to_drm(rdev), 1);
+				drm_handle_vblank(rdev->ddev, 1);
 				rdev->pm.vblank_sync = true;
 				wake_up(&rdev->irq.vblank_queue);
 			}
@@ -949,6 +943,12 @@ void rs600_mc_wreg(struct radeon_device *rdev, uint32_t reg, uint32_t v)
 		S_000070_MC_IND_CITF_ARB0(1) | S_000070_MC_IND_WR_EN(1));
 	WREG32(R_000074_MC_IND_DATA, v);
 	spin_unlock_irqrestore(&rdev->mc_idx_lock, flags);
+}
+
+static void rs600_debugfs(struct radeon_device *rdev)
+{
+	if (r100_debugfs_rbbm_init(rdev))
+		DRM_ERROR("Failed to register debugfs file for RBBM !\n");
 }
 
 void rs600_set_safe_registers(struct radeon_device *rdev)
@@ -1133,12 +1133,14 @@ int rs600_init(struct radeon_device *rdev)
 		return -EINVAL;
 
 	/* Initialize clocks */
-	radeon_get_clock_info(rdev_to_drm(rdev));
+	radeon_get_clock_info(rdev->ddev);
 	/* initialize memory controller */
 	rs600_mc_init(rdev);
-	r100_debugfs_rbbm_init(rdev);
+	rs600_debugfs(rdev);
 	/* Fence driver */
-	radeon_fence_driver_init(rdev);
+	r = radeon_fence_driver_init(rdev);
+	if (r)
+		return r;
 	/* Memory manager */
 	r = radeon_bo_init(rdev);
 	if (r)

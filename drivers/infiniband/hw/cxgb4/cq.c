@@ -767,7 +767,7 @@ static int __c4iw_poll_cq_one(struct c4iw_cq *chp, struct c4iw_qp *qhp,
 		goto out;
 
 	wc->wr_id = cookie;
-	wc->qp = &qhp->ibqp;
+	wc->qp = qhp ? &qhp->ibqp : NULL;
 	wc->vendor_err = CQE_STATUS(&cqe);
 	wc->wc_flags = 0;
 
@@ -967,12 +967,6 @@ int c4iw_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *wc)
 	return !err || err == -ENODATA ? npolled : err;
 }
 
-void c4iw_cq_rem_ref(struct c4iw_cq *chp)
-{
-	if (refcount_dec_and_test(&chp->refcnt))
-		complete(&chp->cq_rel_comp);
-}
-
 int c4iw_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata)
 {
 	struct c4iw_cq *chp;
@@ -982,8 +976,8 @@ int c4iw_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata)
 	chp = to_c4iw_cq(ib_cq);
 
 	xa_erase_irq(&chp->rhp->cqs, chp->cq.cqid);
-	c4iw_cq_rem_ref(chp);
-	wait_for_completion(&chp->cq_rel_comp);
+	atomic_dec(&chp->refcnt);
+	wait_event(chp->wait, !atomic_read(&chp->refcnt));
 
 	ucontext = rdma_udata_to_drv_context(udata, struct c4iw_ucontext,
 					     ibucontext);
@@ -995,9 +989,8 @@ int c4iw_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata)
 }
 
 int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		   struct uverbs_attr_bundle *attrs)
+		   struct ib_udata *udata)
 {
-	struct ib_udata *udata = &attrs->driver_udata;
 	struct ib_device *ibdev = ibcq->device;
 	int entries = attr->cqe;
 	int vector = attr->comp_vector;
@@ -1013,7 +1006,7 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 
 	pr_debug("ib_dev %p entries %d\n", ibdev, entries);
 	if (attr->flags)
-		return -EOPNOTSUPP;
+		return -EINVAL;
 
 	if (entries < 1 || entries > ibdev->attrs.max_cqe)
 		return -EINVAL;
@@ -1087,8 +1080,8 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	chp->ibcq.cqe = entries - 2;
 	spin_lock_init(&chp->lock);
 	spin_lock_init(&chp->comp_handler_lock);
-	refcount_set(&chp->refcnt, 1);
-	init_completion(&chp->cq_rel_comp);
+	atomic_set(&chp->refcnt, 1);
+	init_waitqueue_head(&chp->wait);
 	ret = xa_insert_irq(&rhp->cqs, chp->cq.cqid, chp, GFP_KERNEL);
 	if (ret)
 		goto err_destroy_cq;
@@ -1126,19 +1119,13 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 			goto err_free_mm2;
 
 		mm->key = uresp.key;
-		mm->addr = 0;
-		mm->vaddr = chp->cq.queue;
-		mm->dma_addr = chp->cq.dma_addr;
+		mm->addr = virt_to_phys(chp->cq.queue);
 		mm->len = chp->cq.memsize;
-		insert_flag_to_mmap(&rhp->rdev, mm, mm->addr);
 		insert_mmap(ucontext, mm);
 
 		mm2->key = uresp.gts_key;
 		mm2->addr = chp->cq.bar2_pa;
 		mm2->len = PAGE_SIZE;
-		mm2->vaddr = NULL;
-		mm2->dma_addr = 0;
-		insert_flag_to_mmap(&rhp->rdev, mm2, mm2->addr);
 		insert_mmap(ucontext, mm2);
 	}
 

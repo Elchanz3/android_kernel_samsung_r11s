@@ -7,10 +7,10 @@
  *
  * Register value to celsius temperature formulas:
  *	Read_Val	    m * U
- * U = ---------, uptat = ---------
+ * U = ---------, Uptat = ---------
  *	2^16		  1 + n * U
  *
- * Temperature = A * ( uptat + u_efuse / 2^16 )- B
+ * Temperature = A * ( Uptat + u_efuse / 2^16 )- B
  *
  *  A B m n : calibration parameters
  *  u_efuse : fused calibration value, it's a signed 16 bits value
@@ -22,11 +22,13 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/thermal.h>
 
-#include "thermal_hwmon.h"
+#include "thermal_core.h"
 
 #define TSENSOR_CFG_REG1			0x4
 	#define TSENSOR_CFG_REG1_RSET_VBG	BIT(12)
@@ -112,7 +114,7 @@ static int amlogic_thermal_code_to_millicelsius(struct amlogic_thermal *pdata,
 	const struct amlogic_thermal_soc_calib_data *param =
 					pdata->data->calibration_parameters;
 	int temp;
-	s64 factor, uptat, uefuse;
+	s64 factor, Uptat, uefuse;
 
 	uefuse = pdata->trim_info & TSENSOR_TRIM_SIGN_MASK ?
 			     ~(pdata->trim_info & TSENSOR_TRIM_TEMP_MASK) + 1 :
@@ -121,12 +123,12 @@ static int amlogic_thermal_code_to_millicelsius(struct amlogic_thermal *pdata,
 	factor = param->n * temp_code;
 	factor = div_s64(factor, 100);
 
-	uptat = temp_code * param->m;
-	uptat = div_s64(uptat, 100);
-	uptat = uptat * BIT(16);
-	uptat = div_s64(uptat, BIT(16) + factor);
+	Uptat = temp_code * param->m;
+	Uptat = div_s64(Uptat, 100);
+	Uptat = Uptat * BIT(16);
+	Uptat = div_s64(Uptat, BIT(16) + factor);
 
-	temp = (uptat + uefuse) * param->A;
+	temp = (Uptat + uefuse) * param->A;
 	temp = div_s64(temp, BIT(16));
 	temp = (temp - param->B) * 100;
 
@@ -167,19 +169,21 @@ static int amlogic_thermal_enable(struct amlogic_thermal *data)
 	return 0;
 }
 
-static void amlogic_thermal_disable(struct amlogic_thermal *data)
+static int amlogic_thermal_disable(struct amlogic_thermal *data)
 {
 	regmap_update_bits(data->regmap, TSENSOR_CFG_REG1,
 			   TSENSOR_CFG_REG1_ENABLE, 0);
 	clk_disable_unprepare(data->clk);
+
+	return 0;
 }
 
-static int amlogic_thermal_get_temp(struct thermal_zone_device *tz, int *temp)
+static int amlogic_thermal_get_temp(void *data, int *temp)
 {
 	unsigned int tval;
-	struct amlogic_thermal *pdata = thermal_zone_device_priv(tz);
+	struct amlogic_thermal *pdata = data;
 
-	if (!pdata)
+	if (!data)
 		return -EINVAL;
 
 	regmap_read(pdata->regmap, TSENSOR_STAT0, &tval);
@@ -190,7 +194,7 @@ static int amlogic_thermal_get_temp(struct thermal_zone_device *tz, int *temp)
 	return 0;
 }
 
-static const struct thermal_zone_device_ops amlogic_thermal_ops = {
+static const struct thermal_zone_of_device_ops amlogic_thermal_ops = {
 	.get_temp	= amlogic_thermal_get_temp,
 };
 
@@ -220,12 +224,6 @@ static const struct amlogic_thermal_data amlogic_thermal_g12a_ddr_param = {
 	.regmap_config = &amlogic_thermal_regmap_config_g12a,
 };
 
-static const struct amlogic_thermal_data amlogic_thermal_a1_cpu_param = {
-	.u_efuse_off = 0x114,
-	.calibration_parameters = &amlogic_thermal_g12a,
-	.regmap_config = &amlogic_thermal_regmap_config_g12a,
-};
-
 static const struct of_device_id of_amlogic_thermal_match[] = {
 	{
 		.compatible = "amlogic,g12a-ddr-thermal",
@@ -234,10 +232,6 @@ static const struct of_device_id of_amlogic_thermal_match[] = {
 	{
 		.compatible = "amlogic,g12a-cpu-thermal",
 		.data = &amlogic_thermal_g12a_cpu_param,
-	},
-	{
-		.compatible = "amlogic,a1-cpu-thermal",
-		.data = &amlogic_thermal_a1_cpu_param,
 	},
 	{ /* sentinel */ }
 };
@@ -259,8 +253,10 @@ static int amlogic_thermal_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, pdata);
 
 	base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(base))
+	if (IS_ERR(base)) {
+		dev_err(dev, "failed to get io address\n");
 		return PTR_ERR(base);
+	}
 
 	pdata->regmap = devm_regmap_init_mmio(dev, base,
 					      pdata->data->regmap_config);
@@ -268,8 +264,11 @@ static int amlogic_thermal_probe(struct platform_device *pdev)
 		return PTR_ERR(pdata->regmap);
 
 	pdata->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(pdata->clk))
-		return dev_err_probe(dev, PTR_ERR(pdata->clk), "failed to get clock\n");
+	if (IS_ERR(pdata->clk)) {
+		if (PTR_ERR(pdata->clk) != -EPROBE_DEFER)
+			dev_err(dev, "failed to get clock\n");
+		return PTR_ERR(pdata->clk);
+	}
 
 	pdata->sec_ao_map = syscon_regmap_lookup_by_phandle
 		(pdev->dev.of_node, "amlogic,ao-secure");
@@ -278,17 +277,15 @@ static int amlogic_thermal_probe(struct platform_device *pdev)
 		return PTR_ERR(pdata->sec_ao_map);
 	}
 
-	pdata->tzd = devm_thermal_of_zone_register(&pdev->dev,
-						   0,
-						   pdata,
-						   &amlogic_thermal_ops);
+	pdata->tzd = devm_thermal_zone_of_sensor_register(&pdev->dev,
+							  0,
+							  pdata,
+							  &amlogic_thermal_ops);
 	if (IS_ERR(pdata->tzd)) {
 		ret = PTR_ERR(pdata->tzd);
 		dev_err(dev, "Failed to register tsensor: %d\n", ret);
 		return ret;
 	}
-
-	devm_thermal_add_hwmon_sysfs(&pdev->dev, pdata->tzd);
 
 	ret = amlogic_thermal_initialize(pdata);
 	if (ret)
@@ -299,41 +296,38 @@ static int amlogic_thermal_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static void amlogic_thermal_remove(struct platform_device *pdev)
+static int amlogic_thermal_remove(struct platform_device *pdev)
 {
 	struct amlogic_thermal *data = platform_get_drvdata(pdev);
 
-	amlogic_thermal_disable(data);
+	return amlogic_thermal_disable(data);
 }
 
-static int amlogic_thermal_suspend(struct device *dev)
+static int __maybe_unused amlogic_thermal_suspend(struct device *dev)
 {
 	struct amlogic_thermal *data = dev_get_drvdata(dev);
 
-	amlogic_thermal_disable(data);
-
-	return 0;
+	return amlogic_thermal_disable(data);
 }
 
-static int amlogic_thermal_resume(struct device *dev)
+static int __maybe_unused amlogic_thermal_resume(struct device *dev)
 {
 	struct amlogic_thermal *data = dev_get_drvdata(dev);
 
 	return amlogic_thermal_enable(data);
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(amlogic_thermal_pm_ops,
-				amlogic_thermal_suspend,
-				amlogic_thermal_resume);
+static SIMPLE_DEV_PM_OPS(amlogic_thermal_pm_ops,
+			 amlogic_thermal_suspend, amlogic_thermal_resume);
 
 static struct platform_driver amlogic_thermal_driver = {
 	.driver = {
 		.name		= "amlogic_thermal",
-		.pm		= pm_ptr(&amlogic_thermal_pm_ops),
+		.pm		= &amlogic_thermal_pm_ops,
 		.of_match_table = of_amlogic_thermal_match,
 	},
-	.probe = amlogic_thermal_probe,
-	.remove = amlogic_thermal_remove,
+	.probe	= amlogic_thermal_probe,
+	.remove	= amlogic_thermal_remove,
 };
 
 module_platform_driver(amlogic_thermal_driver);

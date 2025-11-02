@@ -25,8 +25,6 @@
 #include <asm/machdep.h>
 #include <asm/MC68VZ328.h>
 
-#include "m68328.h"
-
 /***************************************************************************/
 
 #if defined(CONFIG_DRAGEN2)
@@ -54,6 +52,7 @@
 #endif
 
 static u32 m68328_tick_cnt;
+static irq_handler_t timer_interrupt;
 
 /***************************************************************************/
 
@@ -63,8 +62,7 @@ static irqreturn_t hw_tick(int irq, void *dummy)
 	TSTAT &= 0;
 
 	m68328_tick_cnt += TICKS_PER_JIFFY;
-	legacy_timer_tick(1);
-	return IRQ_HANDLED;
+	return timer_interrupt(irq, dummy);
 }
 
 /***************************************************************************/
@@ -93,7 +91,7 @@ static struct clocksource m68328_clk = {
 
 /***************************************************************************/
 
-void hw_timer_init(void)
+void hw_timer_init(irq_handler_t handler)
 {
 	int ret;
 
@@ -115,6 +113,7 @@ void hw_timer_init(void)
 	/* Enable timer 1 */
 	TCTL |= TCTL_TEN;
 	clocksource_register_hz(&m68328_clk, TICKS_PER_JIFFY*HZ);
+	timer_interrupt = handler;
 }
 
 /***************************************************************************/

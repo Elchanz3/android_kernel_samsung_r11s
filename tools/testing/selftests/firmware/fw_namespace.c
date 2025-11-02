@@ -17,6 +17,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifndef CLONE_NEWNS
+# define CLONE_NEWNS 0x00020000
+#endif
+
 static char *fw_path = NULL;
 
 static void die(char *fmt, ...)
@@ -91,7 +95,7 @@ static bool test_fw_in_ns(const char *fw_name, const char *sys_path, bool block_
 		}
 		if (block_fw_in_parent_ns)
 			umount("/lib/firmware");
-		return WEXITSTATUS(status) == EXIT_SUCCESS;
+		return WEXITSTATUS(status) == EXIT_SUCCESS ? true : false;
 	}
 
 	if (unshare(CLONE_NEWNS) != 0) {

@@ -20,7 +20,6 @@
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/console.h>
-#include <linux/platform_device.h>
 #include <linux/sysrq.h>
 #include <linux/device.h>
 #include <linux/tty.h>
@@ -37,10 +36,13 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/sizes.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
+
+#include "amba-pl011.h"
 
 #define UART_NR			14
 
@@ -50,38 +52,8 @@
 
 #define AMBA_ISR_PASS_LIMIT	256
 
-#define UART_DR_ERROR		(UART011_DR_OE | UART011_DR_BE | UART011_DR_PE | UART011_DR_FE)
-#define UART_DUMMY_DR_RX	BIT(16)
-
-enum {
-	REG_DR,
-	REG_ST_DMAWM,
-	REG_ST_TIMEOUT,
-	REG_FR,
-	REG_LCRH_RX,
-	REG_LCRH_TX,
-	REG_IBRD,
-	REG_FBRD,
-	REG_CR,
-	REG_IFLS,
-	REG_IMSC,
-	REG_RIS,
-	REG_MIS,
-	REG_ICR,
-	REG_DMACR,
-	REG_ST_XFCR,
-	REG_ST_XON1,
-	REG_ST_XON2,
-	REG_ST_XOFF1,
-	REG_ST_XOFF2,
-	REG_ST_ITCR,
-	REG_ST_ITIP,
-	REG_ST_ABCR,
-	REG_ST_ABIMSC,
-
-	/* The size of the array - must be last */
-	REG_ARRAY_SIZE,
-};
+#define UART_DR_ERROR		(UART011_DR_OE|UART011_DR_BE|UART011_DR_PE|UART011_DR_FE)
+#define UART_DUMMY_DR_RX	(1 << 16)
 
 static u16 pl011_std_offsets[REG_ARRAY_SIZE] = {
 	[REG_DR] = UART01x_DR,
@@ -125,7 +97,7 @@ static unsigned int get_fifosize_arm(struct amba_device *dev)
 
 static struct vendor_data vendor_arm = {
 	.reg_offset		= pl011_std_offsets,
-	.ifls			= UART011_IFLS_RX4_8 | UART011_IFLS_TX4_8,
+	.ifls			= UART011_IFLS_RX4_8|UART011_IFLS_TX4_8,
 	.fr_busy		= UART01x_FR_BUSY,
 	.fr_dsr			= UART01x_FR_DSR,
 	.fr_cts			= UART01x_FR_CTS,
@@ -203,7 +175,7 @@ static unsigned int get_fifosize_st(struct amba_device *dev)
 
 static struct vendor_data vendor_st = {
 	.reg_offset		= pl011_st_offsets,
-	.ifls			= UART011_IFLS_RX_HALF | UART011_IFLS_TX_HALF,
+	.ifls			= UART011_IFLS_RX_HALF|UART011_IFLS_TX_HALF,
 	.fr_busy		= UART01x_FR_BUSY,
 	.fr_dsr			= UART01x_FR_DSR,
 	.fr_cts			= UART01x_FR_CTS,
@@ -214,6 +186,38 @@ static struct vendor_data vendor_st = {
 	.always_enabled		= false,
 	.fixed_options		= false,
 	.get_fifosize		= get_fifosize_st,
+};
+
+static const u16 pl011_zte_offsets[REG_ARRAY_SIZE] = {
+	[REG_DR] = ZX_UART011_DR,
+	[REG_FR] = ZX_UART011_FR,
+	[REG_LCRH_RX] = ZX_UART011_LCRH,
+	[REG_LCRH_TX] = ZX_UART011_LCRH,
+	[REG_IBRD] = ZX_UART011_IBRD,
+	[REG_FBRD] = ZX_UART011_FBRD,
+	[REG_CR] = ZX_UART011_CR,
+	[REG_IFLS] = ZX_UART011_IFLS,
+	[REG_IMSC] = ZX_UART011_IMSC,
+	[REG_RIS] = ZX_UART011_RIS,
+	[REG_MIS] = ZX_UART011_MIS,
+	[REG_ICR] = ZX_UART011_ICR,
+	[REG_DMACR] = ZX_UART011_DMACR,
+};
+
+static unsigned int get_fifosize_zte(struct amba_device *dev)
+{
+	return 16;
+}
+
+static struct vendor_data vendor_zte = {
+	.reg_offset		= pl011_zte_offsets,
+	.access_32b		= true,
+	.ifls			= UART011_IFLS_RX4_8|UART011_IFLS_TX4_8,
+	.fr_busy		= ZX_UART01x_FR_BUSY,
+	.fr_dsr			= ZX_UART01x_FR_DSR,
+	.fr_cts			= ZX_UART01x_FR_CTS,
+	.fr_ri			= ZX_UART011_FR_RI,
+	.get_fifosize		= get_fifosize_zte,
 };
 
 /* Deals with DMA transactions */
@@ -248,13 +252,6 @@ struct pl011_dmatx_data {
 	bool			queued;
 };
 
-enum pl011_rs485_tx_state {
-	OFF,
-	WAIT_AFTER_RTS,
-	SEND,
-	WAIT_AFTER_SEND,
-};
-
 /*
  * We wrap our port structure around the generic uart_port.
  */
@@ -263,19 +260,15 @@ struct uart_amba_port {
 	const u16		*reg_offset;
 	struct clk		*clk;
 	const struct vendor_data *vendor;
+	unsigned int		dmacr;		/* dma control reg */
 	unsigned int		im;		/* interrupt mask */
 	unsigned int		old_status;
 	unsigned int		fifosize;	/* vendor-specific */
+	unsigned int		old_cr;		/* state during shutdown */
 	unsigned int		fixed_baud;	/* vendor-set fixed baud rate */
 	char			type[12];
-	ktime_t			rs485_tx_drain_interval; /* nano */
-	enum pl011_rs485_tx_state	rs485_tx_state;
-	struct hrtimer		trigger_start_tx;
-	struct hrtimer		trigger_stop_tx;
-	bool			console_line_ended;
 #ifdef CONFIG_DMA_ENGINE
 	/* DMA stuff */
-	unsigned int		dmacr;		/* dma control reg */
 	bool			using_tx_dma;
 	bool			using_rx_dma;
 	struct pl011_dmarx_data dmarx;
@@ -284,16 +277,14 @@ struct uart_amba_port {
 #endif
 };
 
-static unsigned int pl011_tx_empty(struct uart_port *port);
-
 static unsigned int pl011_reg_to_offset(const struct uart_amba_port *uap,
-					unsigned int reg)
+	unsigned int reg)
 {
 	return uap->reg_offset[reg];
 }
 
 static unsigned int pl011_read(const struct uart_amba_port *uap,
-			       unsigned int reg)
+	unsigned int reg)
 {
 	void __iomem *addr = uap->port.membase + pl011_reg_to_offset(uap, reg);
 
@@ -302,7 +293,7 @@ static unsigned int pl011_read(const struct uart_amba_port *uap,
 }
 
 static void pl011_write(unsigned int val, const struct uart_amba_port *uap,
-			unsigned int reg)
+	unsigned int reg)
 {
 	void __iomem *addr = uap->port.membase + pl011_reg_to_offset(uap, reg);
 
@@ -319,10 +310,9 @@ static void pl011_write(unsigned int val, const struct uart_amba_port *uap,
  */
 static int pl011_fifo_to_tty(struct uart_amba_port *uap)
 {
-	unsigned int ch, fifotaken;
+	unsigned int ch, flag, fifotaken;
 	int sysrq;
 	u16 status;
-	u8 flag;
 
 	for (fifotaken = 0; fifotaken != 256; fifotaken++) {
 		status = pl011_read(uap, REG_FR);
@@ -340,11 +330,10 @@ static int pl011_fifo_to_tty(struct uart_amba_port *uap)
 				uap->port.icount.brk++;
 				if (uart_handle_break(&uap->port))
 					continue;
-			} else if (ch & UART011_DR_PE) {
+			} else if (ch & UART011_DR_PE)
 				uap->port.icount.parity++;
-			} else if (ch & UART011_DR_FE) {
+			else if (ch & UART011_DR_FE)
 				uap->port.icount.frame++;
-			}
 			if (ch & UART011_DR_OE)
 				uap->port.icount.overrun++;
 
@@ -358,13 +347,17 @@ static int pl011_fifo_to_tty(struct uart_amba_port *uap)
 				flag = TTY_FRAME;
 		}
 
-		sysrq = uart_prepare_sysrq_char(&uap->port, ch & 255);
+		spin_unlock(&uap->port.lock);
+		sysrq = uart_handle_sysrq_char(&uap->port, ch & 255);
+		spin_lock(&uap->port.lock);
+
 		if (!sysrq)
 			uart_insert_char(&uap->port, ch, UART011_DR_OE, ch, flag);
 	}
 
 	return fifotaken;
 }
+
 
 /*
  * All the DMA operation mode stuff goes inside this ifdef.
@@ -376,7 +369,7 @@ static int pl011_fifo_to_tty(struct uart_amba_port *uap)
 #define PL011_DMA_BUFFER_SIZE PAGE_SIZE
 
 static int pl011_dmabuf_init(struct dma_chan *chan, struct pl011_dmabuf *db,
-			     enum dma_data_direction dir)
+	enum dma_data_direction dir)
 {
 	db->buf = dma_alloc_coherent(chan->device->dev, PL011_DMA_BUFFER_SIZE,
 				     &db->dma, GFP_KERNEL);
@@ -388,7 +381,7 @@ static int pl011_dmabuf_init(struct dma_chan *chan, struct pl011_dmabuf *db,
 }
 
 static void pl011_dmabuf_free(struct dma_chan *chan, struct pl011_dmabuf *db,
-			      enum dma_data_direction dir)
+	enum dma_data_direction dir)
 {
 	if (db->buf) {
 		dma_free_coherent(chan->device->dev,
@@ -422,7 +415,7 @@ static void pl011_dma_probe(struct uart_amba_port *uap)
 
 		/* We need platform data */
 		if (!plat || !plat->dma_filter) {
-			dev_dbg(uap->port.dev, "no DMA platform data\n");
+			dev_info(uap->port.dev, "no DMA platform data\n");
 			return;
 		}
 
@@ -431,7 +424,7 @@ static void pl011_dma_probe(struct uart_amba_port *uap)
 		dma_cap_set(DMA_SLAVE, mask);
 
 		chan = dma_request_channel(mask, plat->dma_filter,
-					   plat->dma_tx_param);
+						plat->dma_tx_param);
 		if (!chan) {
 			dev_err(uap->port.dev, "no TX DMA channel!\n");
 			return;
@@ -445,9 +438,9 @@ static void pl011_dma_probe(struct uart_amba_port *uap)
 		 dma_chan_name(uap->dmatx.chan));
 
 	/* Optionally make use of an RX channel as well */
-	chan = dma_request_chan(dev, "rx");
+	chan = dma_request_slave_channel(dev, "rx");
 
-	if (IS_ERR(chan) && plat && plat->dma_rx_param) {
+	if (!chan && plat && plat->dma_rx_param) {
 		chan = dma_request_channel(mask, plat->dma_filter, plat->dma_rx_param);
 
 		if (!chan) {
@@ -456,7 +449,7 @@ static void pl011_dma_probe(struct uart_amba_port *uap)
 		}
 	}
 
-	if (!IS_ERR(chan)) {
+	if (chan) {
 		struct dma_slave_config rx_conf = {
 			.src_addr = uap->port.mapbase +
 				pl011_reg_to_offset(uap, REG_DR),
@@ -472,12 +465,12 @@ static void pl011_dma_probe(struct uart_amba_port *uap)
 		 * If the controller does, check for suitable residue processing
 		 * otherwise assime all is well.
 		 */
-		if (dma_get_slave_caps(chan, &caps) == 0) {
+		if (0 == dma_get_slave_caps(chan, &caps)) {
 			if (caps.residue_granularity ==
 					DMA_RESIDUE_GRANULARITY_DESCRIPTOR) {
 				dma_release_channel(chan);
 				dev_info(uap->port.dev,
-					 "RX DMA disabled - no residue processing\n");
+					"RX DMA disabled - no residue processing\n");
 				return;
 			}
 		}
@@ -506,16 +499,18 @@ static void pl011_dma_probe(struct uart_amba_port *uap)
 			else
 				uap->dmarx.poll_timeout = 3000;
 		} else if (!plat && dev->of_node) {
-			uap->dmarx.auto_poll_rate =
-					of_property_read_bool(dev->of_node, "auto-poll");
+			uap->dmarx.auto_poll_rate = of_property_read_bool(
+						dev->of_node, "auto-poll");
 			if (uap->dmarx.auto_poll_rate) {
 				u32 x;
 
-				if (of_property_read_u32(dev->of_node, "poll-rate-ms", &x) == 0)
+				if (0 == of_property_read_u32(dev->of_node,
+						"poll-rate-ms", &x))
 					uap->dmarx.poll_rate = x;
 				else
 					uap->dmarx.poll_rate = 100;
-				if (of_property_read_u32(dev->of_node, "poll-timeout-ms", &x) == 0)
+				if (0 == of_property_read_u32(dev->of_node,
+						"poll-timeout-ms", &x))
 					uap->dmarx.poll_timeout = x;
 				else
 					uap->dmarx.poll_timeout = 3000;
@@ -545,15 +540,14 @@ static void pl011_start_tx_pio(struct uart_amba_port *uap);
 static void pl011_dma_tx_callback(void *data)
 {
 	struct uart_amba_port *uap = data;
-	struct tty_port *tport = &uap->port.state->port;
 	struct pl011_dmatx_data *dmatx = &uap->dmatx;
 	unsigned long flags;
 	u16 dmacr;
 
-	uart_port_lock_irqsave(&uap->port, &flags);
+	spin_lock_irqsave(&uap->port.lock, flags);
 	if (uap->dmatx.queued)
 		dma_unmap_single(dmatx->chan->device->dev, dmatx->dma,
-				 dmatx->len, DMA_TO_DEVICE);
+				dmatx->len, DMA_TO_DEVICE);
 
 	dmacr = uap->dmacr;
 	uap->dmacr = dmacr & ~UART011_TXDMAE;
@@ -569,9 +563,9 @@ static void pl011_dma_tx_callback(void *data)
 	 * get further refills (hence we check dmacr).
 	 */
 	if (!(dmacr & UART011_TXDMAE) || uart_tx_stopped(&uap->port) ||
-	    kfifo_is_empty(&tport->xmit_fifo)) {
+	    uart_circ_empty(&uap->port.state->xmit)) {
 		uap->dmatx.queued = false;
-		uart_port_unlock_irqrestore(&uap->port, flags);
+		spin_unlock_irqrestore(&uap->port.lock, flags);
 		return;
 	}
 
@@ -582,7 +576,7 @@ static void pl011_dma_tx_callback(void *data)
 		 */
 		pl011_start_tx_pio(uap);
 
-	uart_port_unlock_irqrestore(&uap->port, flags);
+	spin_unlock_irqrestore(&uap->port.lock, flags);
 }
 
 /*
@@ -599,7 +593,7 @@ static int pl011_dma_tx_refill(struct uart_amba_port *uap)
 	struct dma_chan *chan = dmatx->chan;
 	struct dma_device *dma_dev = chan->device;
 	struct dma_async_tx_descriptor *desc;
-	struct tty_port *tport = &uap->port.state->port;
+	struct circ_buf *xmit = &uap->port.state->xmit;
 	unsigned int count;
 
 	/*
@@ -608,7 +602,7 @@ static int pl011_dma_tx_refill(struct uart_amba_port *uap)
 	 * the standard interrupt handling.  This ensures that we
 	 * issue a uart_write_wakeup() at the appropriate time.
 	 */
-	count = kfifo_len(&tport->xmit_fifo);
+	count = uart_circ_chars_pending(xmit);
 	if (count < (uap->fifosize >> 1)) {
 		uap->dmatx.queued = false;
 		return 0;
@@ -624,7 +618,21 @@ static int pl011_dma_tx_refill(struct uart_amba_port *uap)
 	if (count > PL011_DMA_BUFFER_SIZE)
 		count = PL011_DMA_BUFFER_SIZE;
 
-	count = kfifo_out_peek(&tport->xmit_fifo, dmatx->buf, count);
+	if (xmit->tail < xmit->head)
+		memcpy(&dmatx->buf[0], &xmit->buf[xmit->tail], count);
+	else {
+		size_t first = UART_XMIT_SIZE - xmit->tail;
+		size_t second;
+
+		if (first > count)
+			first = count;
+		second = count - first;
+
+		memcpy(&dmatx->buf[0], &xmit->buf[xmit->tail], first);
+		if (second)
+			memcpy(&dmatx->buf[first], &xmit->buf[0], second);
+	}
+
 	dmatx->len = count;
 	dmatx->dma = dma_map_single(dma_dev->dev, dmatx->buf, count,
 				    DMA_TO_DEVICE);
@@ -635,7 +643,7 @@ static int pl011_dma_tx_refill(struct uart_amba_port *uap)
 	}
 
 	desc = dmaengine_prep_slave_single(chan, dmatx->dma, dmatx->len, DMA_MEM_TO_DEV,
-					   DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+					     DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	if (!desc) {
 		dma_unmap_single(dma_dev->dev, dmatx->dma, dmatx->len, DMA_TO_DEVICE);
 		uap->dmatx.queued = false;
@@ -665,9 +673,10 @@ static int pl011_dma_tx_refill(struct uart_amba_port *uap)
 	 * Now we know that DMA will fire, so advance the ring buffer
 	 * with the stuff we just dispatched.
 	 */
-	uart_xmit_advance(&uap->port, count);
+	xmit->tail = (xmit->tail + count) & (UART_XMIT_SIZE - 1);
+	uap->port.icount.tx += count;
 
-	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
 		uart_write_wakeup(&uap->port);
 
 	return 1;
@@ -746,9 +755,8 @@ static inline bool pl011_dma_tx_start(struct uart_amba_port *uap)
 			if (pl011_dma_tx_refill(uap) > 0) {
 				uap->im &= ~UART011_TXIM;
 				pl011_write(uap->im, uap, REG_IMSC);
-			} else {
+			} else
 				ret = false;
-			}
 		} else if (!(uap->dmacr & UART011_TXDMAE)) {
 			uap->dmacr |= UART011_TXDMAE;
 			pl011_write(uap->dmacr, uap, REG_DMACR);
@@ -825,8 +833,8 @@ static int pl011_dma_rx_trigger_dma(struct uart_amba_port *uap)
 	dbuf = uap->dmarx.use_buf_b ?
 		&uap->dmarx.dbuf_b : &uap->dmarx.dbuf_a;
 	desc = dmaengine_prep_slave_single(rxchan, dbuf->dma, dbuf->len,
-					   DMA_DEV_TO_MEM,
-					   DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+					DMA_DEV_TO_MEM,
+					DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	/*
 	 * If the DMA engine is busy and cannot prepare a
 	 * channel, no big deal, the driver will fall back
@@ -882,12 +890,14 @@ static void pl011_dma_rx_chars(struct uart_amba_port *uap,
 
 	/* Pick the remain data from the DMA */
 	if (pending) {
+
 		/*
 		 * First take all chars in the DMA pipe, then look in the FIFO.
 		 * Note that tty_insert_flip_buf() tries to take as many chars
 		 * as it can.
 		 */
-		dma_count = tty_insert_flip_string(port, dbuf->buf + dmataken, pending);
+		dma_count = tty_insert_flip_string(port, dbuf->buf + dmataken,
+				pending);
 
 		uap->port.icount.rx += dma_count;
 		if (dma_count < pending)
@@ -922,10 +932,12 @@ static void pl011_dma_rx_chars(struct uart_amba_port *uap,
 		fifotaken = pl011_fifo_to_tty(uap);
 	}
 
+	spin_unlock(&uap->port.lock);
 	dev_vdbg(uap->port.dev,
 		 "Took %d chars from DMA buffer and %d chars from the FIFO\n",
 		 dma_count, fifotaken);
 	tty_flip_buffer_push(port);
+	spin_lock(&uap->port.lock);
 }
 
 static void pl011_dma_rx_irq(struct uart_amba_port *uap)
@@ -969,8 +981,8 @@ static void pl011_dma_rx_irq(struct uart_amba_port *uap)
 	/* Switch buffer & re-trigger DMA job */
 	dmarx->use_buf_b = !dmarx->use_buf_b;
 	if (pl011_dma_rx_trigger_dma(uap)) {
-		dev_dbg(uap->port.dev,
-			"could not retrigger RX DMA job fall back to interrupt mode\n");
+		dev_dbg(uap->port.dev, "could not retrigger RX DMA job "
+			"fall back to interrupt mode\n");
 		uap->im |= UART011_RXIM;
 		pl011_write(uap->im, uap, REG_IMSC);
 	}
@@ -995,7 +1007,7 @@ static void pl011_dma_rx_callback(void *data)
 	 * routine to flush out the secondary DMA buffer while
 	 * we immediately trigger the next DMA job.
 	 */
-	uart_port_lock_irq(&uap->port);
+	spin_lock_irq(&uap->port.lock);
 	/*
 	 * Rx data can be taken by the UART interrupts during
 	 * the DMA irq handler. So we check the residue here.
@@ -1011,14 +1023,14 @@ static void pl011_dma_rx_callback(void *data)
 	ret = pl011_dma_rx_trigger_dma(uap);
 
 	pl011_dma_rx_chars(uap, pending, lastbuf, false);
-	uart_unlock_and_check_sysrq(&uap->port);
+	spin_unlock_irq(&uap->port.lock);
 	/*
 	 * Do this check after we picked the DMA chars so we don't
 	 * get some IRQ immediately from RX.
 	 */
 	if (ret) {
-		dev_dbg(uap->port.dev,
-			"could not retrigger RX DMA job fall back to interrupt mode\n");
+		dev_dbg(uap->port.dev, "could not retrigger RX DMA job "
+			"fall back to interrupt mode\n");
 		uap->im |= UART011_RXIM;
 		pl011_write(uap->im, uap, REG_IMSC);
 	}
@@ -1046,11 +1058,11 @@ static inline void pl011_dma_rx_stop(struct uart_amba_port *uap)
  */
 static void pl011_dma_rx_poll(struct timer_list *t)
 {
-	struct uart_amba_port *uap = timer_container_of(uap, t, dmarx.timer);
+	struct uart_amba_port *uap = from_timer(uap, t, dmarx.timer);
 	struct tty_port *port = &uap->port.state->port;
 	struct pl011_dmarx_data *dmarx = &uap->dmarx;
 	struct dma_chan *rxchan = uap->dmarx.chan;
-	unsigned long flags;
+	unsigned long flags = 0;
 	unsigned int dmataken = 0;
 	unsigned int size = 0;
 	struct pl011_dmabuf *dbuf;
@@ -1063,7 +1075,7 @@ static void pl011_dma_rx_poll(struct timer_list *t)
 		dmataken = dbuf->len - dmarx->last_residue;
 		size = dmarx->last_residue - state.residue;
 		dma_count = tty_insert_flip_string(port, dbuf->buf + dmataken,
-						   size);
+				size);
 		if (dma_count == size)
 			dmarx->last_residue =  state.residue;
 		dmarx->last_jiffies = jiffies;
@@ -1076,18 +1088,19 @@ static void pl011_dma_rx_poll(struct timer_list *t)
 	 */
 	if (jiffies_to_msecs(jiffies - dmarx->last_jiffies)
 			> uap->dmarx.poll_timeout) {
-		uart_port_lock_irqsave(&uap->port, &flags);
+
+		spin_lock_irqsave(&uap->port.lock, flags);
 		pl011_dma_rx_stop(uap);
 		uap->im |= UART011_RXIM;
 		pl011_write(uap->im, uap, REG_IMSC);
-		uart_port_unlock_irqrestore(&uap->port, flags);
+		spin_unlock_irqrestore(&uap->port.lock, flags);
 
 		uap->dmarx.running = false;
 		dmaengine_terminate_all(rxchan);
-		timer_delete(&uap->dmarx.timer);
+		del_timer(&uap->dmarx.timer);
 	} else {
 		mod_timer(&uap->dmarx.timer,
-			  jiffies + msecs_to_jiffies(uap->dmarx.poll_rate));
+			jiffies + msecs_to_jiffies(uap->dmarx.poll_rate));
 	}
 }
 
@@ -1103,6 +1116,7 @@ static void pl011_dma_startup(struct uart_amba_port *uap)
 
 	uap->dmatx.buf = kmalloc(PL011_DMA_BUFFER_SIZE, GFP_KERNEL | __GFP_DMA);
 	if (!uap->dmatx.buf) {
+		dev_err(uap->port.dev, "no memory for DMA TX buffer\n");
 		uap->port.fifosize = uap->fifosize;
 		return;
 	}
@@ -1118,7 +1132,7 @@ static void pl011_dma_startup(struct uart_amba_port *uap)
 
 	/* Allocate and map DMA RX buffers */
 	ret = pl011_dmabuf_init(uap->dmarx.chan, &uap->dmarx.dbuf_a,
-				DMA_FROM_DEVICE);
+			       DMA_FROM_DEVICE);
 	if (ret) {
 		dev_err(uap->port.dev, "failed to init DMA %s: %d\n",
 			"RX buffer A", ret);
@@ -1126,12 +1140,12 @@ static void pl011_dma_startup(struct uart_amba_port *uap)
 	}
 
 	ret = pl011_dmabuf_init(uap->dmarx.chan, &uap->dmarx.dbuf_b,
-				DMA_FROM_DEVICE);
+			       DMA_FROM_DEVICE);
 	if (ret) {
 		dev_err(uap->port.dev, "failed to init DMA %s: %d\n",
 			"RX buffer B", ret);
 		pl011_dmabuf_free(uap->dmarx.chan, &uap->dmarx.dbuf_a,
-				  DMA_FROM_DEVICE);
+				 DMA_FROM_DEVICE);
 		goto skip_rx;
 	}
 
@@ -1153,12 +1167,13 @@ skip_rx:
 
 	if (uap->using_rx_dma) {
 		if (pl011_dma_rx_trigger_dma(uap))
-			dev_dbg(uap->port.dev,
-				"could not trigger initial RX DMA job, fall back to interrupt mode\n");
+			dev_dbg(uap->port.dev, "could not trigger initial "
+				"RX DMA job, fall back to interrupt mode\n");
 		if (uap->dmarx.poll_rate) {
 			timer_setup(&uap->dmarx.timer, pl011_dma_rx_poll, 0);
 			mod_timer(&uap->dmarx.timer,
-				  jiffies + msecs_to_jiffies(uap->dmarx.poll_rate));
+				jiffies +
+				msecs_to_jiffies(uap->dmarx.poll_rate));
 			uap->dmarx.last_residue = PL011_DMA_BUFFER_SIZE;
 			uap->dmarx.last_jiffies = jiffies;
 		}
@@ -1174,10 +1189,10 @@ static void pl011_dma_shutdown(struct uart_amba_port *uap)
 	while (pl011_read(uap, REG_FR) & uap->vendor->fr_busy)
 		cpu_relax();
 
-	uart_port_lock_irq(&uap->port);
+	spin_lock_irq(&uap->port.lock);
 	uap->dmacr &= ~(UART011_DMAONERR | UART011_RXDMAE | UART011_TXDMAE);
 	pl011_write(uap->dmacr, uap, REG_DMACR);
-	uart_port_unlock_irq(&uap->port);
+	spin_unlock_irq(&uap->port.lock);
 
 	if (uap->using_tx_dma) {
 		/* In theory, this should already be done by pl011_dma_flush_buffer */
@@ -1199,7 +1214,7 @@ static void pl011_dma_shutdown(struct uart_amba_port *uap)
 		pl011_dmabuf_free(uap->dmarx.chan, &uap->dmarx.dbuf_a, DMA_FROM_DEVICE);
 		pl011_dmabuf_free(uap->dmarx.chan, &uap->dmarx.dbuf_b, DMA_FROM_DEVICE);
 		if (uap->dmarx.poll_rate)
-			timer_delete_sync(&uap->dmarx.timer);
+			del_timer_sync(&uap->dmarx.timer);
 		uap->using_rx_dma = false;
 	}
 }
@@ -1268,66 +1283,14 @@ static inline bool pl011_dma_rx_running(struct uart_amba_port *uap)
 #define pl011_dma_flush_buffer	NULL
 #endif
 
-static void pl011_rs485_tx_stop(struct uart_amba_port *uap)
-{
-	struct uart_port *port = &uap->port;
-	u32 cr;
-
-	if (uap->rs485_tx_state == SEND)
-		uap->rs485_tx_state = WAIT_AFTER_SEND;
-
-	if (uap->rs485_tx_state == WAIT_AFTER_SEND) {
-		/* Schedule hrtimer if tx queue not empty */
-		if (!pl011_tx_empty(port)) {
-			hrtimer_start(&uap->trigger_stop_tx,
-				      uap->rs485_tx_drain_interval,
-				      HRTIMER_MODE_REL);
-			return;
-		}
-		if (port->rs485.delay_rts_after_send > 0) {
-			hrtimer_start(&uap->trigger_stop_tx,
-				      ms_to_ktime(port->rs485.delay_rts_after_send),
-				      HRTIMER_MODE_REL);
-			return;
-		}
-		/* Continue without any delay */
-	} else if (uap->rs485_tx_state == WAIT_AFTER_RTS) {
-		hrtimer_try_to_cancel(&uap->trigger_start_tx);
-	}
-
-	cr = pl011_read(uap, REG_CR);
-
-	if (port->rs485.flags & SER_RS485_RTS_AFTER_SEND)
-		cr &= ~UART011_CR_RTS;
-	else
-		cr |= UART011_CR_RTS;
-
-	/* Disable the transmitter and reenable the transceiver */
-	cr &= ~UART011_CR_TXE;
-	cr |= UART011_CR_RXE;
-	pl011_write(cr, uap, REG_CR);
-
-	uap->rs485_tx_state = OFF;
-}
-
 static void pl011_stop_tx(struct uart_port *port)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 
-	if (port->rs485.flags & SER_RS485_ENABLED &&
-	    uap->rs485_tx_state == WAIT_AFTER_RTS) {
-		pl011_rs485_tx_stop(uap);
-		return;
-	}
-
 	uap->im &= ~UART011_TXIM;
 	pl011_write(uap->im, uap, REG_IMSC);
 	pl011_dma_tx_stop(uap);
-
-	if (port->rs485.flags & SER_RS485_ENABLED &&
-	    uap->rs485_tx_state != OFF)
-		pl011_rs485_tx_stop(uap);
 }
 
 static bool pl011_tx_chars(struct uart_amba_port *uap, bool from_irq);
@@ -1341,87 +1304,13 @@ static void pl011_start_tx_pio(struct uart_amba_port *uap)
 	}
 }
 
-static void pl011_rs485_tx_start(struct uart_amba_port *uap)
-{
-	struct uart_port *port = &uap->port;
-	u32 cr;
-
-	if (uap->rs485_tx_state == WAIT_AFTER_RTS) {
-		uap->rs485_tx_state = SEND;
-		return;
-	}
-	if (uap->rs485_tx_state == WAIT_AFTER_SEND) {
-		hrtimer_try_to_cancel(&uap->trigger_stop_tx);
-		uap->rs485_tx_state = SEND;
-		return;
-	}
-	/* uap->rs485_tx_state == OFF */
-	/* Enable transmitter */
-	cr = pl011_read(uap, REG_CR);
-	cr |= UART011_CR_TXE;
-	/* Disable receiver if half-duplex */
-	if (!(port->rs485.flags & SER_RS485_RX_DURING_TX))
-		cr &= ~UART011_CR_RXE;
-
-	if (port->rs485.flags & SER_RS485_RTS_ON_SEND)
-		cr &= ~UART011_CR_RTS;
-	else
-		cr |= UART011_CR_RTS;
-
-	pl011_write(cr, uap, REG_CR);
-
-	if (port->rs485.delay_rts_before_send > 0) {
-		uap->rs485_tx_state = WAIT_AFTER_RTS;
-		hrtimer_start(&uap->trigger_start_tx,
-			      ms_to_ktime(port->rs485.delay_rts_before_send),
-			      HRTIMER_MODE_REL);
-	} else {
-		uap->rs485_tx_state = SEND;
-	}
-}
-
 static void pl011_start_tx(struct uart_port *port)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 
-	if ((uap->port.rs485.flags & SER_RS485_ENABLED) &&
-	    uap->rs485_tx_state != SEND) {
-		pl011_rs485_tx_start(uap);
-		if (uap->rs485_tx_state == WAIT_AFTER_RTS)
-			return;
-	}
-
 	if (!pl011_dma_tx_start(uap))
 		pl011_start_tx_pio(uap);
-}
-
-static enum hrtimer_restart pl011_trigger_start_tx(struct hrtimer *t)
-{
-	struct uart_amba_port *uap =
-	    container_of(t, struct uart_amba_port, trigger_start_tx);
-	unsigned long flags;
-
-	uart_port_lock_irqsave(&uap->port, &flags);
-	if (uap->rs485_tx_state == WAIT_AFTER_RTS)
-		pl011_start_tx(&uap->port);
-	uart_port_unlock_irqrestore(&uap->port, flags);
-
-	return HRTIMER_NORESTART;
-}
-
-static enum hrtimer_restart pl011_trigger_stop_tx(struct hrtimer *t)
-{
-	struct uart_amba_port *uap =
-	    container_of(t, struct uart_amba_port, trigger_stop_tx);
-	unsigned long flags;
-
-	uart_port_lock_irqsave(&uap->port, &flags);
-	if (uap->rs485_tx_state == WAIT_AFTER_SEND)
-		pl011_rs485_tx_stop(uap);
-	uart_port_unlock_irqrestore(&uap->port, flags);
-
-	return HRTIMER_NORESTART;
 }
 
 static void pl011_stop_rx(struct uart_port *port)
@@ -1429,8 +1318,8 @@ static void pl011_stop_rx(struct uart_port *port)
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 
-	uap->im &= ~(UART011_RXIM | UART011_RTIM | UART011_FEIM |
-		     UART011_PEIM | UART011_BEIM | UART011_OEIM);
+	uap->im &= ~(UART011_RXIM|UART011_RTIM|UART011_FEIM|
+		     UART011_PEIM|UART011_BEIM|UART011_OEIM);
 	pl011_write(uap->im, uap, REG_IMSC);
 
 	pl011_dma_rx_stop(uap);
@@ -1440,9 +1329,9 @@ static void pl011_throttle_rx(struct uart_port *port)
 {
 	unsigned long flags;
 
-	uart_port_lock_irqsave(port, &flags);
+	spin_lock_irqsave(&port->lock, flags);
 	pl011_stop_rx(port);
-	uart_port_unlock_irqrestore(port, flags);
+	spin_unlock_irqrestore(&port->lock, flags);
 }
 
 static void pl011_enable_ms(struct uart_port *port)
@@ -1450,7 +1339,7 @@ static void pl011_enable_ms(struct uart_port *port)
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 
-	uap->im |= UART011_RIMIM | UART011_CTSMIM | UART011_DCDMIM | UART011_DSRMIM;
+	uap->im |= UART011_RIMIM|UART011_CTSMIM|UART011_DCDMIM|UART011_DSRMIM;
 	pl011_write(uap->im, uap, REG_IMSC);
 }
 
@@ -1460,7 +1349,7 @@ __acquires(&uap->port.lock)
 {
 	pl011_fifo_to_tty(uap);
 
-	uart_port_unlock(&uap->port);
+	spin_unlock(&uap->port.lock);
 	tty_flip_buffer_push(&uap->port.state->port);
 	/*
 	 * If we were temporarily out of DMA mode for a while,
@@ -1468,8 +1357,8 @@ __acquires(&uap->port.lock)
 	 */
 	if (pl011_dma_rx_available(uap)) {
 		if (pl011_dma_rx_trigger_dma(uap)) {
-			dev_dbg(uap->port.dev,
-				"could not trigger RX DMA job fall back to interrupt mode again\n");
+			dev_dbg(uap->port.dev, "could not trigger RX DMA job "
+				"fall back to interrupt mode again\n");
 			uap->im |= UART011_RXIM;
 			pl011_write(uap->im, uap, REG_IMSC);
 		} else {
@@ -1479,12 +1368,13 @@ __acquires(&uap->port.lock)
 				uap->dmarx.last_jiffies = jiffies;
 				uap->dmarx.last_residue	= PL011_DMA_BUFFER_SIZE;
 				mod_timer(&uap->dmarx.timer,
-					  jiffies + msecs_to_jiffies(uap->dmarx.poll_rate));
+					jiffies +
+					msecs_to_jiffies(uap->dmarx.poll_rate));
 			}
 #endif
 		}
 	}
-	uart_port_lock(&uap->port);
+	spin_lock(&uap->port.lock);
 }
 
 static bool pl011_tx_char(struct uart_amba_port *uap, unsigned char c,
@@ -1503,7 +1393,7 @@ static bool pl011_tx_char(struct uart_amba_port *uap, unsigned char c,
 /* Returns true if tx interrupts have to be (kept) enabled  */
 static bool pl011_tx_chars(struct uart_amba_port *uap, bool from_irq)
 {
-	struct tty_port *tport = &uap->port.state->port;
+	struct circ_buf *xmit = &uap->port.state->xmit;
 	int count = uap->fifosize >> 1;
 
 	if (uap->port.x_char) {
@@ -1512,7 +1402,7 @@ static bool pl011_tx_chars(struct uart_amba_port *uap, bool from_irq)
 		uap->port.x_char = 0;
 		--count;
 	}
-	if (kfifo_is_empty(&tport->xmit_fifo) || uart_tx_stopped(&uap->port)) {
+	if (uart_circ_empty(xmit) || uart_tx_stopped(&uap->port)) {
 		pl011_stop_tx(&uap->port);
 		return false;
 	}
@@ -1521,25 +1411,20 @@ static bool pl011_tx_chars(struct uart_amba_port *uap, bool from_irq)
 	if (pl011_dma_tx_irq(uap))
 		return true;
 
-	while (1) {
-		unsigned char c;
-
+	do {
 		if (likely(from_irq) && count-- == 0)
 			break;
 
-		if (!kfifo_peek(&tport->xmit_fifo, &c))
+		if (!pl011_tx_char(uap, xmit->buf[xmit->tail], from_irq))
 			break;
 
-		if (!pl011_tx_char(uap, c, from_irq))
-			break;
+		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+	} while (!uart_circ_empty(xmit));
 
-		kfifo_skip(&tport->xmit_fifo);
-	}
-
-	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
 		uart_write_wakeup(&uap->port);
 
-	if (kfifo_is_empty(&tport->xmit_fifo)) {
+	if (uart_circ_empty(xmit)) {
 		pl011_stop_tx(&uap->port);
 		return false;
 	}
@@ -1591,26 +1476,28 @@ static void check_apply_cts_event_workaround(struct uart_amba_port *uap)
 static irqreturn_t pl011_int(int irq, void *dev_id)
 {
 	struct uart_amba_port *uap = dev_id;
+	unsigned long flags;
 	unsigned int status, pass_counter = AMBA_ISR_PASS_LIMIT;
 	int handled = 0;
 
-	uart_port_lock(&uap->port);
+	spin_lock_irqsave(&uap->port.lock, flags);
 	status = pl011_read(uap, REG_RIS) & uap->im;
 	if (status) {
 		do {
 			check_apply_cts_event_workaround(uap);
 
-			pl011_write(status & ~(UART011_TXIS | UART011_RTIS | UART011_RXIS),
+			pl011_write(status & ~(UART011_TXIS|UART011_RTIS|
+					       UART011_RXIS),
 				    uap, REG_ICR);
 
-			if (status & (UART011_RTIS | UART011_RXIS)) {
+			if (status & (UART011_RTIS|UART011_RXIS)) {
 				if (pl011_dma_rx_running(uap))
 					pl011_dma_rx_irq(uap);
 				else
 					pl011_rx_chars(uap);
 			}
-			if (status & (UART011_DSRMIS | UART011_DCDMIS |
-				      UART011_CTSMIS | UART011_RIMIS))
+			if (status & (UART011_DSRMIS|UART011_DCDMIS|
+				      UART011_CTSMIS|UART011_RIMIS))
 				pl011_modem_status(uap);
 			if (status & UART011_TXIS)
 				pl011_tx_chars(uap, true);
@@ -1623,7 +1510,7 @@ static irqreturn_t pl011_int(int irq, void *dev_id)
 		handled = 1;
 	}
 
-	uart_unlock_and_check_sysrq(&uap->port);
+	spin_unlock_irqrestore(&uap->port.lock, flags);
 
 	return IRQ_RETVAL(handled);
 }
@@ -1640,12 +1527,6 @@ static unsigned int pl011_tx_empty(struct uart_port *port)
 							0 : TIOCSER_TEMT;
 }
 
-static void pl011_maybe_set_bit(bool cond, unsigned int *ptr, unsigned int mask)
-{
-	if (cond)
-		*ptr |= mask;
-}
-
 static unsigned int pl011_get_mctrl(struct uart_port *port)
 {
 	struct uart_amba_port *uap =
@@ -1653,20 +1534,16 @@ static unsigned int pl011_get_mctrl(struct uart_port *port)
 	unsigned int result = 0;
 	unsigned int status = pl011_read(uap, REG_FR);
 
-	pl011_maybe_set_bit(status & UART01x_FR_DCD, &result, TIOCM_CAR);
-	pl011_maybe_set_bit(status & uap->vendor->fr_dsr, &result, TIOCM_DSR);
-	pl011_maybe_set_bit(status & uap->vendor->fr_cts, &result, TIOCM_CTS);
-	pl011_maybe_set_bit(status & uap->vendor->fr_ri, &result, TIOCM_RNG);
+#define TIOCMBIT(uartbit, tiocmbit)	\
+	if (status & uartbit)		\
+		result |= tiocmbit
 
+	TIOCMBIT(UART01x_FR_DCD, TIOCM_CAR);
+	TIOCMBIT(uap->vendor->fr_dsr, TIOCM_DSR);
+	TIOCMBIT(uap->vendor->fr_cts, TIOCM_CTS);
+	TIOCMBIT(uap->vendor->fr_ri, TIOCM_RNG);
+#undef TIOCMBIT
 	return result;
-}
-
-static void pl011_assign_bit(bool cond, unsigned int *ptr, unsigned int mask)
-{
-	if (cond)
-		*ptr |= mask;
-	else
-		*ptr &= ~mask;
 }
 
 static void pl011_set_mctrl(struct uart_port *port, unsigned int mctrl)
@@ -1677,16 +1554,23 @@ static void pl011_set_mctrl(struct uart_port *port, unsigned int mctrl)
 
 	cr = pl011_read(uap, REG_CR);
 
-	pl011_assign_bit(mctrl & TIOCM_RTS, &cr, UART011_CR_RTS);
-	pl011_assign_bit(mctrl & TIOCM_DTR, &cr, UART011_CR_DTR);
-	pl011_assign_bit(mctrl & TIOCM_OUT1, &cr, UART011_CR_OUT1);
-	pl011_assign_bit(mctrl & TIOCM_OUT2, &cr, UART011_CR_OUT2);
-	pl011_assign_bit(mctrl & TIOCM_LOOP, &cr, UART011_CR_LBE);
+#define	TIOCMBIT(tiocmbit, uartbit)		\
+	if (mctrl & tiocmbit)		\
+		cr |= uartbit;		\
+	else				\
+		cr &= ~uartbit
+
+	TIOCMBIT(TIOCM_RTS, UART011_CR_RTS);
+	TIOCMBIT(TIOCM_DTR, UART011_CR_DTR);
+	TIOCMBIT(TIOCM_OUT1, UART011_CR_OUT1);
+	TIOCMBIT(TIOCM_OUT2, UART011_CR_OUT2);
+	TIOCMBIT(TIOCM_LOOP, UART011_CR_LBE);
 
 	if (port->status & UPSTAT_AUTORTS) {
 		/* We need to disable auto-RTS if we want to turn RTS off */
-		pl011_assign_bit(mctrl & TIOCM_RTS, &cr, UART011_CR_RTSEN);
+		TIOCMBIT(TIOCM_RTS, UART011_CR_RTSEN);
 	}
+#undef TIOCMBIT
 
 	pl011_write(cr, uap, REG_CR);
 }
@@ -1698,14 +1582,14 @@ static void pl011_break_ctl(struct uart_port *port, int break_state)
 	unsigned long flags;
 	unsigned int lcr_h;
 
-	uart_port_lock_irqsave(&uap->port, &flags);
+	spin_lock_irqsave(&uap->port.lock, flags);
 	lcr_h = pl011_read(uap, REG_LCRH_TX);
 	if (break_state == -1)
 		lcr_h |= UART01x_LCRH_BRK;
 	else
 		lcr_h &= ~UART01x_LCRH_BRK;
 	pl011_write(lcr_h, uap, REG_LCRH_TX);
-	uart_port_unlock_irqrestore(&uap->port, flags);
+	spin_unlock_irqrestore(&uap->port.lock, flags);
 }
 
 #ifdef CONFIG_CONSOLE_POLL
@@ -1752,7 +1636,8 @@ static int pl011_get_poll_char(struct uart_port *port)
 	return pl011_read(uap, REG_DR);
 }
 
-static void pl011_put_poll_char(struct uart_port *port, unsigned char ch)
+static void pl011_put_poll_char(struct uart_port *port,
+			 unsigned char ch)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
@@ -1843,7 +1728,7 @@ static void pl011_enable_interrupts(struct uart_amba_port *uap)
 	unsigned long flags;
 	unsigned int i;
 
-	uart_port_lock_irqsave(&uap->port, &flags);
+	spin_lock_irqsave(&uap->port.lock, flags);
 
 	/* Clear out any spuriously appearing RX interrupts */
 	pl011_write(UART011_RTIS | UART011_RXIS, uap, REG_ICR);
@@ -1865,7 +1750,7 @@ static void pl011_enable_interrupts(struct uart_amba_port *uap)
 	if (!pl011_dma_rx_running(uap))
 		uap->im |= UART011_RXIM;
 	pl011_write(uap->im, uap, REG_IMSC);
-	uart_port_unlock_irqrestore(&uap->port, flags);
+	spin_unlock_irqrestore(&uap->port.lock, flags);
 }
 
 static void pl011_unthrottle_rx(struct uart_port *port)
@@ -1873,7 +1758,7 @@ static void pl011_unthrottle_rx(struct uart_port *port)
 	struct uart_amba_port *uap = container_of(port, struct uart_amba_port, port);
 	unsigned long flags;
 
-	uart_port_lock_irqsave(&uap->port, &flags);
+	spin_lock_irqsave(&uap->port.lock, flags);
 
 	uap->im = UART011_RTIM;
 	if (!pl011_dma_rx_running(uap))
@@ -1881,14 +1766,7 @@ static void pl011_unthrottle_rx(struct uart_port *port)
 
 	pl011_write(uap->im, uap, REG_IMSC);
 
-#ifdef CONFIG_DMA_ENGINE
-	if (uap->using_rx_dma) {
-		uap->dmacr |= UART011_RXDMAE;
-		pl011_write(uap->dmacr, uap, REG_DMACR);
-	}
-#endif
-
-	uart_port_unlock_irqrestore(&uap->port, flags);
+	spin_unlock_irqrestore(&uap->port.lock, flags);
 }
 
 static int pl011_startup(struct uart_port *port)
@@ -1908,18 +1786,14 @@ static int pl011_startup(struct uart_port *port)
 
 	pl011_write(uap->vendor->ifls, uap, REG_IFLS);
 
-	uart_port_lock_irq(&uap->port);
+	spin_lock_irq(&uap->port.lock);
 
-	cr = pl011_read(uap, REG_CR);
-	cr &= UART011_CR_RTS | UART011_CR_DTR;
-	cr |= UART01x_CR_UARTEN | UART011_CR_RXE;
-
-	if (!(port->rs485.flags & SER_RS485_ENABLED))
-		cr |= UART011_CR_TXE;
-
+	/* restore RTS and DTR */
+	cr = uap->old_cr & (UART011_CR_RTS | UART011_CR_DTR);
+	cr |= UART01x_CR_UARTEN | UART011_CR_RXE | UART011_CR_TXE;
 	pl011_write(cr, uap, REG_CR);
 
-	uart_port_unlock_irq(&uap->port);
+	spin_unlock_irq(&uap->port.lock);
 
 	/*
 	 * initialise the old status of the modem signals
@@ -1960,13 +1834,14 @@ static int sbsa_uart_startup(struct uart_port *port)
 	return 0;
 }
 
-static void pl011_shutdown_channel(struct uart_amba_port *uap, unsigned int lcrh)
+static void pl011_shutdown_channel(struct uart_amba_port *uap,
+					unsigned int lcrh)
 {
-	unsigned long val;
+      unsigned long val;
 
-	val = pl011_read(uap, lcrh);
-	val &= ~(UART01x_LCRH_BRK | UART01x_LCRH_FEN);
-	pl011_write(val, uap, lcrh);
+      val = pl011_read(uap, lcrh);
+      val &= ~(UART01x_LCRH_BRK | UART01x_LCRH_FEN);
+      pl011_write(val, uap, lcrh);
 }
 
 /*
@@ -1979,12 +1854,13 @@ static void pl011_disable_uart(struct uart_amba_port *uap)
 	unsigned int cr;
 
 	uap->port.status &= ~(UPSTAT_AUTOCTS | UPSTAT_AUTORTS);
-	uart_port_lock_irq(&uap->port);
+	spin_lock_irq(&uap->port.lock);
 	cr = pl011_read(uap, REG_CR);
+	uap->old_cr = cr;
 	cr &= UART011_CR_RTS | UART011_CR_DTR;
 	cr |= UART01x_CR_UARTEN | UART011_CR_TXE;
 	pl011_write(cr, uap, REG_CR);
-	uart_port_unlock_irq(&uap->port);
+	spin_unlock_irq(&uap->port.lock);
 
 	/*
 	 * disable break condition and fifos
@@ -1996,14 +1872,14 @@ static void pl011_disable_uart(struct uart_amba_port *uap)
 
 static void pl011_disable_interrupts(struct uart_amba_port *uap)
 {
-	uart_port_lock_irq(&uap->port);
+	spin_lock_irq(&uap->port.lock);
 
 	/* mask all interrupts and clear all pending ones */
 	uap->im = 0;
 	pl011_write(uap->im, uap, REG_IMSC);
 	pl011_write(0xffff, uap, REG_ICR);
 
-	uart_port_unlock_irq(&uap->port);
+	spin_unlock_irq(&uap->port.lock);
 }
 
 static void pl011_shutdown(struct uart_port *port)
@@ -2014,9 +1890,6 @@ static void pl011_shutdown(struct uart_port *port)
 	pl011_disable_interrupts(uap);
 
 	pl011_dma_shutdown(uap);
-
-	if ((port->rs485.flags & SER_RS485_ENABLED && uap->rs485_tx_state != OFF))
-		pl011_rs485_tx_stop(uap);
 
 	free_irq(uap->port.irq, uap);
 
@@ -2088,14 +1961,13 @@ pl011_setup_status_masks(struct uart_port *port, struct ktermios *termios)
 
 static void
 pl011_set_termios(struct uart_port *port, struct ktermios *termios,
-		  const struct ktermios *old)
+		     struct ktermios *old)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 	unsigned int lcr_h, old_cr;
 	unsigned long flags;
 	unsigned int baud, quot, clkdiv;
-	unsigned int bits;
 
 	if (uap->vendor->oversampling)
 		clkdiv = 8;
@@ -2115,7 +1987,7 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 		uap->dmarx.poll_rate = DIV_ROUND_UP(10000000, baud);
 #endif
 
-	if (baud > port->uartclk / 16)
+	if (baud > port->uartclk/16)
 		quot = DIV_ROUND_CLOSEST(port->uartclk * 8, baud);
 	else
 		quot = DIV_ROUND_CLOSEST(port->uartclk * 4, baud);
@@ -2146,31 +2018,21 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 	if (uap->fifosize > 1)
 		lcr_h |= UART01x_LCRH_FEN;
 
-	bits = tty_get_frame_size(termios->c_cflag);
-
-	uart_port_lock_irqsave(port, &flags);
+	spin_lock_irqsave(&port->lock, flags);
 
 	/*
 	 * Update the per-port timeout.
 	 */
 	uart_update_timeout(port, termios->c_cflag, baud);
 
-	/*
-	 * Calculate the approximated time it takes to transmit one character
-	 * with the given baud rate. We use this as the poll interval when we
-	 * wait for the tx queue to empty.
-	 */
-	uap->rs485_tx_drain_interval = ns_to_ktime(DIV_ROUND_UP(bits * NSEC_PER_SEC, baud));
-
 	pl011_setup_status_masks(port, termios);
 
 	if (UART_ENABLE_MS(port, termios->c_cflag))
 		pl011_enable_ms(port);
 
-	if (port->rs485.flags & SER_RS485_ENABLED)
-		termios->c_cflag &= ~CRTSCTS;
-
+	/* first, disable everything */
 	old_cr = pl011_read(uap, REG_CR);
+	pl011_write(0, uap, REG_CR);
 
 	if (termios->c_cflag & CRTSCTS) {
 		if (old_cr & UART011_CR_RTS)
@@ -2197,9 +2059,9 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 	 * else we see data corruption.
 	 */
 	if (uap->vendor->oversampling) {
-		if (baud >= 3000000 && baud < 3250000 && quot > 1)
+		if ((baud >= 3000000) && (baud < 3250000) && (quot > 1))
 			quot -= 1;
-		else if (baud > 3250000 && quot > 2)
+		else if ((baud > 3250000) && (quot > 2))
 			quot -= 2;
 	}
 	/* Set baud rate */
@@ -2213,21 +2075,14 @@ pl011_set_termios(struct uart_port *port, struct ktermios *termios,
 	 * ----------^----------^----------^----------^-----
 	 */
 	pl011_write_lcr_h(uap, lcr_h);
-
-	/*
-	 * Receive was disabled by pl011_disable_uart during shutdown.
-	 * Need to reenable receive if you need to use a tty_driver
-	 * returns from tty_find_polling_driver() after a port shutdown.
-	 */
-	old_cr |= UART011_CR_RXE;
 	pl011_write(old_cr, uap, REG_CR);
 
-	uart_port_unlock_irqrestore(port, flags);
+	spin_unlock_irqrestore(&port->lock, flags);
 }
 
 static void
 sbsa_uart_set_termios(struct uart_port *port, struct ktermios *termios,
-		      const struct ktermios *old)
+		      struct ktermios *old)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
@@ -2240,10 +2095,10 @@ sbsa_uart_set_termios(struct uart_port *port, struct ktermios *termios,
 	termios->c_cflag &= ~(CMSPAR | CRTSCTS);
 	termios->c_cflag |= CS8 | CLOCAL;
 
-	uart_port_lock_irqsave(port, &flags);
+	spin_lock_irqsave(&port->lock, flags);
 	uart_update_timeout(port, CS8, uap->fixed_baud);
 	pl011_setup_status_masks(port, termios);
-	uart_port_unlock_irqrestore(port, flags);
+	spin_unlock_irqrestore(&port->lock, flags);
 }
 
 static const char *pl011_type(struct uart_port *port)
@@ -2268,37 +2123,15 @@ static void pl011_config_port(struct uart_port *port, int flags)
 static int pl011_verify_port(struct uart_port *port, struct serial_struct *ser)
 {
 	int ret = 0;
-
 	if (ser->type != PORT_UNKNOWN && ser->type != PORT_AMBA)
 		ret = -EINVAL;
-	if (ser->irq < 0 || ser->irq >= irq_get_nr_irqs())
+	if (ser->irq < 0 || ser->irq >= nr_irqs)
 		ret = -EINVAL;
 	if (ser->baud_base < 9600)
 		ret = -EINVAL;
-	if (port->mapbase != (unsigned long)ser->iomem_base)
+	if (port->mapbase != (unsigned long) ser->iomem_base)
 		ret = -EINVAL;
 	return ret;
-}
-
-static int pl011_rs485_config(struct uart_port *port, struct ktermios *termios,
-			      struct serial_rs485 *rs485)
-{
-	struct uart_amba_port *uap =
-		container_of(port, struct uart_amba_port, port);
-
-	if (port->rs485.flags & SER_RS485_ENABLED)
-		pl011_rs485_tx_stop(uap);
-
-	/* Make sure auto RTS is disabled */
-	if (rs485->flags & SER_RS485_ENABLED) {
-		u32 cr = pl011_read(uap, REG_CR);
-
-		cr &= ~UART011_CR_RTSEN;
-		pl011_write(cr, uap, REG_CR);
-		port->status &= ~UPSTAT_AUTORTS;
-	}
-
-	return 0;
 }
 
 static const struct uart_ops amba_pl011_pops = {
@@ -2359,7 +2192,7 @@ static struct uart_amba_port *amba_ports[UART_NR];
 
 #ifdef CONFIG_SERIAL_AMBA_PL011_CONSOLE
 
-static void pl011_console_putchar(struct uart_port *port, unsigned char ch)
+static void pl011_console_putchar(struct uart_port *port, int ch)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
@@ -2367,40 +2200,88 @@ static void pl011_console_putchar(struct uart_port *port, unsigned char ch)
 	while (pl011_read(uap, REG_FR) & UART01x_FR_TXFF)
 		cpu_relax();
 	pl011_write(ch, uap, REG_DR);
-	uap->console_line_ended = (ch == '\n');
+}
+
+static void
+pl011_console_write(struct console *co, const char *s, unsigned int count)
+{
+	struct uart_amba_port *uap = amba_ports[co->index];
+	unsigned int old_cr = 0, new_cr;
+	unsigned long flags;
+	int locked = 1;
+
+	clk_enable(uap->clk);
+
+	local_irq_save(flags);
+	if (uap->port.sysrq)
+		locked = 0;
+	else if (oops_in_progress)
+		locked = spin_trylock(&uap->port.lock);
+	else
+		spin_lock(&uap->port.lock);
+
+	/*
+	 *	First save the CR then disable the interrupts
+	 */
+	if (!uap->vendor->always_enabled) {
+		old_cr = pl011_read(uap, REG_CR);
+		new_cr = old_cr & ~UART011_CR_CTSEN;
+		new_cr |= UART01x_CR_UARTEN | UART011_CR_TXE;
+		pl011_write(new_cr, uap, REG_CR);
+	}
+
+	uart_console_write(&uap->port, s, count, pl011_console_putchar);
+
+	/*
+	 *	Finally, wait for transmitter to become empty and restore the
+	 *	TCR. Allow feature register bits to be inverted to work around
+	 *	errata.
+	 */
+	while ((pl011_read(uap, REG_FR) ^ uap->vendor->inv_fr)
+						& uap->vendor->fr_busy)
+		cpu_relax();
+	if (!uap->vendor->always_enabled)
+		pl011_write(old_cr, uap, REG_CR);
+
+	if (locked)
+		spin_unlock(&uap->port.lock);
+	local_irq_restore(flags);
+
+	clk_disable(uap->clk);
 }
 
 static void pl011_console_get_options(struct uart_amba_port *uap, int *baud,
 				      int *parity, int *bits)
 {
-	unsigned int lcr_h, ibrd, fbrd;
+	if (pl011_read(uap, REG_CR) & UART01x_CR_UARTEN) {
+		unsigned int lcr_h, ibrd, fbrd;
 
-	if (!(pl011_read(uap, REG_CR) & UART01x_CR_UARTEN))
-		return;
+		lcr_h = pl011_read(uap, REG_LCRH_TX);
 
-	lcr_h = pl011_read(uap, REG_LCRH_TX);
+		*parity = 'n';
+		if (lcr_h & UART01x_LCRH_PEN) {
+			if (lcr_h & UART01x_LCRH_EPS)
+				*parity = 'e';
+			else
+				*parity = 'o';
+		}
 
-	*parity = 'n';
-	if (lcr_h & UART01x_LCRH_PEN) {
-		if (lcr_h & UART01x_LCRH_EPS)
-			*parity = 'e';
+		if ((lcr_h & 0x60) == UART01x_LCRH_WLEN_7)
+			*bits = 7;
 		else
-			*parity = 'o';
+			*bits = 8;
+
+		ibrd = pl011_read(uap, REG_IBRD);
+		fbrd = pl011_read(uap, REG_FBRD);
+
+		*baud = uap->port.uartclk * 4 / (64 * ibrd + fbrd);
+
+		if (uap->vendor->oversampling) {
+			if (pl011_read(uap, REG_CR)
+				  & ST_UART011_CR_OVSFACT)
+				*baud *= 2;
+		}
 	}
-
-	if ((lcr_h & 0x60) == UART01x_LCRH_WLEN_7)
-		*bits = 7;
-	else
-		*bits = 8;
-
-	ibrd = pl011_read(uap, REG_IBRD);
-	fbrd = pl011_read(uap, REG_FBRD);
-
-	*baud = uap->port.uartclk * 4 / (64 * ibrd + fbrd);
-
-	if (uap->vendor->oversampling &&
-	    (pl011_read(uap, REG_CR) & ST_UART011_CR_OVSFACT))
-		*baud *= 2;
 }
 
 static int pl011_console_setup(struct console *co, char *options)
@@ -2429,8 +2310,6 @@ static int pl011_console_setup(struct console *co, char *options)
 	ret = clk_prepare(uap->clk);
 	if (ret)
 		return ret;
-
-	uap->console_line_ended = true;
 
 	if (dev_get_platdata(uap->port.dev)) {
 		struct amba_pl011_data *plat;
@@ -2476,7 +2355,7 @@ static int pl011_console_setup(struct console *co, char *options)
 static int pl011_console_match(struct console *co, char *name, int idx,
 			       char *options)
 {
-	enum uart_iotype iotype;
+	unsigned char iotype;
 	resource_size_t addr;
 	int i;
 
@@ -2508,119 +2387,28 @@ static int pl011_console_match(struct console *co, char *name, int idx,
 			continue;
 
 		co->index = i;
-		uart_port_set_cons(port, co);
+		port->cons = co;
 		return pl011_console_setup(co, options);
 	}
 
 	return -ENODEV;
 }
 
-static void
-pl011_console_write_atomic(struct console *co, struct nbcon_write_context *wctxt)
-{
-	struct uart_amba_port *uap = amba_ports[co->index];
-	unsigned int old_cr = 0;
-
-	if (!nbcon_enter_unsafe(wctxt))
-		return;
-
-	clk_enable(uap->clk);
-
-	if (!uap->vendor->always_enabled) {
-		old_cr = pl011_read(uap, REG_CR);
-		pl011_write((old_cr & ~UART011_CR_CTSEN) | (UART01x_CR_UARTEN | UART011_CR_TXE),
-				uap, REG_CR);
-	}
-
-	if (!uap->console_line_ended)
-		uart_console_write(&uap->port, "\n", 1, pl011_console_putchar);
-	uart_console_write(&uap->port, wctxt->outbuf, wctxt->len, pl011_console_putchar);
-
-	while ((pl011_read(uap, REG_FR) ^ uap->vendor->inv_fr) & uap->vendor->fr_busy)
-		cpu_relax();
-
-	if (!uap->vendor->always_enabled)
-		pl011_write(old_cr, uap, REG_CR);
-
-	clk_disable(uap->clk);
-
-	nbcon_exit_unsafe(wctxt);
-}
-
-static void
-pl011_console_write_thread(struct console *co, struct nbcon_write_context *wctxt)
-{
-	struct uart_amba_port *uap = amba_ports[co->index];
-	unsigned int old_cr = 0;
-
-	if (!nbcon_enter_unsafe(wctxt))
-		return;
-
-	clk_enable(uap->clk);
-
-	if (!uap->vendor->always_enabled) {
-		old_cr = pl011_read(uap, REG_CR);
-		pl011_write((old_cr & ~UART011_CR_CTSEN) | (UART01x_CR_UARTEN | UART011_CR_TXE),
-				uap, REG_CR);
-	}
-
-	if (nbcon_exit_unsafe(wctxt)) {
-		int i;
-		unsigned int len = READ_ONCE(wctxt->len);
-
-		for (i = 0; i < len; i++) {
-			if (!nbcon_enter_unsafe(wctxt))
-				break;
-			uart_console_write(&uap->port, wctxt->outbuf + i, 1, pl011_console_putchar);
-			if (!nbcon_exit_unsafe(wctxt))
-				break;
-		}
-	}
-
-	while (!nbcon_enter_unsafe(wctxt))
-		nbcon_reacquire_nobuf(wctxt);
-
-	while ((pl011_read(uap, REG_FR) ^ uap->vendor->inv_fr) & uap->vendor->fr_busy)
-		cpu_relax();
-
-	if (!uap->vendor->always_enabled)
-		pl011_write(old_cr, uap, REG_CR);
-
-	clk_disable(uap->clk);
-
-	nbcon_exit_unsafe(wctxt);
-}
-
-static void
-pl011_console_device_lock(struct console *co, unsigned long *flags)
-{
-	__uart_port_lock_irqsave(&amba_ports[co->index]->port, flags);
-}
-
-static void
-pl011_console_device_unlock(struct console *co, unsigned long flags)
-{
-	__uart_port_unlock_irqrestore(&amba_ports[co->index]->port, flags);
-}
-
 static struct uart_driver amba_reg;
 static struct console amba_console = {
 	.name		= "ttyAMA",
+	.write		= pl011_console_write,
 	.device		= uart_console_device,
 	.setup		= pl011_console_setup,
 	.match		= pl011_console_match,
-	.write_atomic	= pl011_console_write_atomic,
-	.write_thread	= pl011_console_write_thread,
-	.device_lock	= pl011_console_device_lock,
-	.device_unlock	= pl011_console_device_unlock,
-	.flags		= CON_PRINTBUFFER | CON_ANYTIME | CON_NBCON,
+	.flags		= CON_PRINTBUFFER | CON_ANYTIME,
 	.index		= -1,
 	.data		= &amba_reg,
 };
 
 #define AMBA_CONSOLE	(&amba_console)
 
-static void qdf2400_e44_putc(struct uart_port *port, unsigned char c)
+static void qdf2400_e44_putc(struct uart_port *port, int c)
 {
 	while (readl(port->membase + UART01x_FR) & UART01x_FR_TXFF)
 		cpu_relax();
@@ -2629,14 +2417,14 @@ static void qdf2400_e44_putc(struct uart_port *port, unsigned char c)
 		cpu_relax();
 }
 
-static void qdf2400_e44_early_write(struct console *con, const char *s, unsigned int n)
+static void qdf2400_e44_early_write(struct console *con, const char *s, unsigned n)
 {
 	struct earlycon_device *dev = con->data;
 
 	uart_console_write(&dev->port, s, n, qdf2400_e44_putc);
 }
 
-static void pl011_putc(struct uart_port *port, unsigned char c)
+static void pl011_putc(struct uart_port *port, int c)
 {
 	while (readl(port->membase + UART01x_FR) & UART01x_FR_TXFF)
 		cpu_relax();
@@ -2648,7 +2436,7 @@ static void pl011_putc(struct uart_port *port, unsigned char c)
 		cpu_relax();
 }
 
-static void pl011_early_write(struct console *con, const char *s, unsigned int n)
+static void pl011_early_write(struct console *con, const char *s, unsigned n)
 {
 	struct earlycon_device *dev = con->data;
 
@@ -2709,9 +2497,7 @@ static int __init pl011_early_console_setup(struct earlycon_device *device,
 
 	return 0;
 }
-
 OF_EARLYCON_DECLARE(pl011, "arm,pl011", pl011_early_console_setup);
-
 OF_EARLYCON_DECLARE(pl011, "arm,sbsa-uart", pl011_early_console_setup);
 
 /*
@@ -2734,7 +2520,6 @@ qdf2400_e44_early_console_setup(struct earlycon_device *device,
 	device->con->write = qdf2400_e44_early_write;
 	return 0;
 }
-
 EARLYCON_DECLARE(qdf2400_e44, qdf2400_e44_early_console_setup);
 
 #else
@@ -2754,8 +2539,8 @@ static struct uart_driver amba_reg = {
 static int pl011_probe_dt_alias(int index, struct device *dev)
 {
 	struct device_node *np;
-	static bool seen_dev_with_alias;
-	static bool seen_dev_without_alias;
+	static bool seen_dev_with_alias = false;
+	static bool seen_dev_without_alias = false;
 	int ret = index;
 
 	if (!IS_ENABLED(CONFIG_OF))
@@ -2771,7 +2556,7 @@ static int pl011_probe_dt_alias(int index, struct device *dev)
 		ret = index;
 	} else {
 		seen_dev_with_alias = true;
-		if (ret >= ARRAY_SIZE(amba_ports) || amba_ports[ret]) {
+		if (ret >= ARRAY_SIZE(amba_ports) || amba_ports[ret] != NULL) {
 			dev_warn(dev, "requested serial port %d  not available.\n", ret);
 			ret = index;
 		}
@@ -2805,7 +2590,7 @@ static int pl011_find_free_port(void)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(amba_ports); i++)
-		if (!amba_ports[i])
+		if (amba_ports[i] == NULL)
 			return i;
 
 	return -EBUSY;
@@ -2815,7 +2600,6 @@ static int pl011_setup_port(struct device *dev, struct uart_amba_port *uap,
 			    struct resource *mmiobase, int index)
 {
 	void __iomem *base;
-	int ret;
 
 	base = devm_ioremap_resource(dev, mmiobase);
 	if (IS_ERR(base))
@@ -2823,6 +2607,7 @@ static int pl011_setup_port(struct device *dev, struct uart_amba_port *uap,
 
 	index = pl011_probe_dt_alias(index, dev);
 
+	uap->old_cr = 0;
 	uap->port.dev = dev;
 	uap->port.mapbase = mmiobase->start;
 	uap->port.membase = base;
@@ -2830,10 +2615,6 @@ static int pl011_setup_port(struct device *dev, struct uart_amba_port *uap,
 	uap->port.has_sysrq = IS_ENABLED(CONFIG_SERIAL_AMBA_PL011_CONSOLE);
 	uap->port.flags = UPF_BOOT_AUTOCONF;
 	uap->port.line = index;
-
-	ret = uart_get_rs485_mode(&uap->port);
-	if (ret)
-		return ret;
 
 	amba_ports[index] = uap;
 
@@ -2867,19 +2648,11 @@ static int pl011_register_port(struct uart_amba_port *uap)
 	return ret;
 }
 
-static const struct serial_rs485 pl011_rs485_supported = {
-	.flags = SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND | SER_RS485_RTS_AFTER_SEND |
-		 SER_RS485_RX_DURING_TX,
-	.delay_rts_before_send = 1,
-	.delay_rts_after_send = 1,
-};
-
 static int pl011_probe(struct amba_device *dev, const struct amba_id *id)
 {
 	struct uart_amba_port *uap;
 	struct vendor_data *vendor = id->data;
 	int portnr, ret;
-	u32 val;
 
 	portnr = pl011_find_free_port();
 	if (portnr < 0)
@@ -2900,28 +2673,8 @@ static int pl011_probe(struct amba_device *dev, const struct amba_id *id)
 	uap->port.iotype = vendor->access_32b ? UPIO_MEM32 : UPIO_MEM;
 	uap->port.irq = dev->irq[0];
 	uap->port.ops = &amba_pl011_pops;
-	uap->port.rs485_config = pl011_rs485_config;
-	uap->port.rs485_supported = pl011_rs485_supported;
-	snprintf(uap->type, sizeof(uap->type), "PL011 rev%u", amba_rev(dev));
 
-	if (device_property_read_u32(&dev->dev, "reg-io-width", &val) == 0) {
-		switch (val) {
-		case 1:
-			uap->port.iotype = UPIO_MEM;
-			break;
-		case 4:
-			uap->port.iotype = UPIO_MEM32;
-			break;
-		default:
-			dev_warn(&dev->dev, "unsupported reg-io-width (%d)\n",
-				 val);
-			return -EINVAL;
-		}
-	}
-	hrtimer_setup(&uap->trigger_start_tx, pl011_trigger_start_tx, CLOCK_MONOTONIC,
-		      HRTIMER_MODE_REL);
-	hrtimer_setup(&uap->trigger_stop_tx, pl011_trigger_stop_tx, CLOCK_MONOTONIC,
-		      HRTIMER_MODE_REL);
+	snprintf(uap->type, sizeof(uap->type), "PL011 rev%u", amba_rev(dev));
 
 	ret = pl011_setup_port(&dev->dev, uap, &dev->res, portnr);
 	if (ret)
@@ -2964,22 +2717,6 @@ static int pl011_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(pl011_dev_pm_ops, pl011_suspend, pl011_resume);
 
-#ifdef CONFIG_ACPI_SPCR_TABLE
-static void qpdf2400_erratum44_workaround(struct device *dev,
-					  struct uart_amba_port *uap)
-{
-	if (!qdf2400_e44_present)
-		return;
-
-	dev_info(dev, "working around QDF2400 SoC erratum 44\n");
-	uap->vendor = &vendor_qdt_qdf2400_e44;
-}
-#else
-static void qpdf2400_erratum44_workaround(struct device *dev,
-					  struct uart_amba_port *uap)
-{ /* empty */ }
-#endif
-
 static int sbsa_uart_probe(struct platform_device *pdev)
 {
 	struct uart_amba_port *uap;
@@ -3015,8 +2752,13 @@ static int sbsa_uart_probe(struct platform_device *pdev)
 		return ret;
 	uap->port.irq	= ret;
 
-	uap->vendor = &vendor_sbsa;
-	qpdf2400_erratum44_workaround(&pdev->dev, uap);
+#ifdef CONFIG_ACPI_SPCR_TABLE
+	if (qdf2400_e44_present) {
+		dev_info(&pdev->dev, "working around QDF2400 SoC erratum 44\n");
+		uap->vendor = &vendor_qdt_qdf2400_e44;
+	} else
+#endif
+		uap->vendor = &vendor_sbsa;
 
 	uap->reg_offset	= uap->vendor->reg_offset;
 	uap->fifosize	= 32;
@@ -3037,12 +2779,13 @@ static int sbsa_uart_probe(struct platform_device *pdev)
 	return pl011_register_port(uap);
 }
 
-static void sbsa_uart_remove(struct platform_device *pdev)
+static int sbsa_uart_remove(struct platform_device *pdev)
 {
 	struct uart_amba_port *uap = platform_get_drvdata(pdev);
 
 	uart_remove_one_port(&amba_reg, &uap->port);
 	pl011_unregister_port(uap);
+	return 0;
 }
 
 static const struct of_device_id sbsa_uart_of_match[] = {
@@ -3064,8 +2807,8 @@ static struct platform_driver arm_sbsa_uart_platform_driver = {
 	.driver	= {
 		.name	= "sbsa-uart",
 		.pm	= &pl011_dev_pm_ops,
-		.of_match_table = sbsa_uart_of_match,
-		.acpi_match_table = sbsa_uart_acpi_match,
+		.of_match_table = of_match_ptr(sbsa_uart_of_match),
+		.acpi_match_table = ACPI_PTR(sbsa_uart_acpi_match),
 		.suppress_bind_attrs = IS_BUILTIN(CONFIG_SERIAL_AMBA_PL011),
 	},
 };
@@ -3080,6 +2823,11 @@ static const struct amba_id pl011_ids[] = {
 		.id	= 0x00380802,
 		.mask	= 0x00ffffff,
 		.data	= &vendor_st,
+	},
+	{
+		.id	= AMBA_LINUX_ID(0x00, 0x1, 0xffe),
+		.mask	= 0x00ffffff,
+		.data	= &vendor_zte,
 	},
 	{ 0, 0 },
 };
@@ -3099,7 +2847,7 @@ static struct amba_driver pl011_driver = {
 
 static int __init pl011_init(void)
 {
-	pr_info("Serial: AMBA PL011 UART driver\n");
+	printk(KERN_INFO "Serial: AMBA PL011 UART driver\n");
 
 	if (platform_driver_register(&arm_sbsa_uart_platform_driver))
 		pr_warn("could not register SBSA UART platform driver\n");

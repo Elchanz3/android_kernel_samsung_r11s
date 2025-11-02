@@ -20,9 +20,26 @@
 
 enum {
 	P_BI_TCXO,
+	P_CORE_BI_PLL_TEST_SE,
+	P_VIDEO_PLL0_OUT_EVEN,
 	P_VIDEO_PLL0_OUT_MAIN,
-	/* P_VIDEO_PLL0_OUT_EVEN, */
-	/* P_VIDEO_PLL0_OUT_ODD, */
+	P_VIDEO_PLL0_OUT_ODD,
+};
+
+static const struct parent_map video_cc_parent_map_0[] = {
+	{ P_BI_TCXO, 0 },
+	{ P_VIDEO_PLL0_OUT_MAIN, 1 },
+	{ P_VIDEO_PLL0_OUT_EVEN, 2 },
+	{ P_VIDEO_PLL0_OUT_ODD, 3 },
+	{ P_CORE_BI_PLL_TEST_SE, 4 },
+};
+
+static const char * const video_cc_parent_names_0[] = {
+	"bi_tcxo",
+	"video_pll0",
+	"video_pll0_out_even",
+	"video_pll0_out_odd",
+	"core_bi_pll_test_se",
 };
 
 static const struct alpha_pll_config video_pll0_config = {
@@ -36,27 +53,11 @@ static struct clk_alpha_pll video_pll0 = {
 	.clkr = {
 		.hw.init = &(struct clk_init_data){
 			.name = "video_pll0",
-			.parent_data = &(const struct clk_parent_data){
-				.fw_name = "bi_tcxo", .name = "bi_tcxo",
-			},
+			.parent_names = (const char *[]){ "bi_tcxo" },
 			.num_parents = 1,
 			.ops = &clk_alpha_pll_fabia_ops,
 		},
 	},
-};
-
-static const struct parent_map video_cc_parent_map_0[] = {
-	{ P_BI_TCXO, 0 },
-	{ P_VIDEO_PLL0_OUT_MAIN, 1 },
-	/* { P_VIDEO_PLL0_OUT_EVEN, 2 }, */
-	/* { P_VIDEO_PLL0_OUT_ODD, 3 }, */
-};
-
-static const struct clk_parent_data video_cc_parent_data_0[] = {
-	{ .fw_name = "bi_tcxo", .name = "bi_tcxo" },
-	{ .hw = &video_pll0.clkr.hw },
-	/* { .name = "video_pll0_out_even" }, */
-	/* { .name = "video_pll0_out_odd" }, */
 };
 
 static const struct freq_tbl ftbl_video_cc_venus_clk_src[] = {
@@ -77,8 +78,8 @@ static struct clk_rcg2 video_cc_venus_clk_src = {
 	.freq_tbl = ftbl_video_cc_venus_clk_src,
 	.clkr.hw.init = &(struct clk_init_data){
 		.name = "video_cc_venus_clk_src",
-		.parent_data = video_cc_parent_data_0,
-		.num_parents = ARRAY_SIZE(video_cc_parent_data_0),
+		.parent_names = video_cc_parent_names_0,
+		.num_parents = 5,
 		.flags = CLK_SET_RATE_PARENT,
 		.ops = &clk_rcg2_shared_ops,
 	},
@@ -157,8 +158,8 @@ static struct clk_branch video_cc_vcodec0_core_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_vcodec0_core_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_venus_clk_src.clkr.hw,
+			.parent_names = (const char *[]){
+				"video_cc_venus_clk_src",
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -188,8 +189,8 @@ static struct clk_branch video_cc_vcodec1_core_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_vcodec1_core_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_venus_clk_src.clkr.hw,
+			.parent_names = (const char *[]){
+				"video_cc_venus_clk_src",
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -232,8 +233,8 @@ static struct clk_branch video_cc_venus_ctl_core_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_venus_ctl_core_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_venus_clk_src.clkr.hw,
+			.parent_names = (const char *[]){
+				"video_cc_venus_clk_src",
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -260,7 +261,7 @@ static struct gdsc vcodec0_gdsc = {
 	},
 	.cxcs = (unsigned int []){ 0x890, 0x930 },
 	.cxc_count = 2,
-	.flags = HW_CTRL_TRIGGER | POLL_CFG_GDSCR,
+	.flags = HW_CTRL | POLL_CFG_GDSCR,
 	.pwrsts = PWRSTS_OFF_ON,
 };
 
@@ -271,7 +272,7 @@ static struct gdsc vcodec1_gdsc = {
 	},
 	.cxcs = (unsigned int []){ 0x8d0, 0x950 },
 	.cxc_count = 2,
-	.flags = HW_CTRL_TRIGGER | POLL_CFG_GDSCR,
+	.flags = HW_CTRL | POLL_CFG_GDSCR,
 	.pwrsts = PWRSTS_OFF_ON,
 };
 
@@ -329,7 +330,7 @@ static int video_cc_sdm845_probe(struct platform_device *pdev)
 
 	clk_fabia_pll_configure(&video_pll0, regmap, &video_pll0_config);
 
-	return qcom_cc_really_probe(&pdev->dev, &video_cc_sdm845_desc, regmap);
+	return qcom_cc_really_probe(pdev, &video_cc_sdm845_desc, regmap);
 }
 
 static struct platform_driver video_cc_sdm845_driver = {
@@ -337,10 +338,20 @@ static struct platform_driver video_cc_sdm845_driver = {
 	.driver		= {
 		.name	= "sdm845-videocc",
 		.of_match_table = video_cc_sdm845_match_table,
+		.sync_state = clk_sync_state,
 	},
 };
 
-module_platform_driver(video_cc_sdm845_driver);
+static int __init video_cc_sdm845_init(void)
+{
+	return platform_driver_register(&video_cc_sdm845_driver);
+}
+subsys_initcall(video_cc_sdm845_init);
+
+static void __exit video_cc_sdm845_exit(void)
+{
+	platform_driver_unregister(&video_cc_sdm845_driver);
+}
+module_exit(video_cc_sdm845_exit);
 
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("QTI SDM845 VIDEOCC Driver");

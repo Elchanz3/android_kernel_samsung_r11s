@@ -32,7 +32,7 @@ void __iomem *__pci_ioport_map(struct pci_dev *dev,
 		sprintf(name, "%04x:%02x", pci_domain_nr(bus), bus->number);
 		printk(KERN_WARNING "io_map_base of root PCI bus %s unset.  "
 		       "Trying to continue but you better\nfix this issue or "
-		       "report it to linux-mips@vger.kernel.org or your "
+		       "report it to linux-mips@linux-mips.org or your "
 		       "vendor.\n", name);
 #ifdef CONFIG_PCI_DOMAINS
 		panic("To avoid data corruption io_map_base MUST be set with "
@@ -42,15 +42,5 @@ void __iomem *__pci_ioport_map(struct pci_dev *dev,
 
 	return (void __iomem *) (ctrl->io_map_base + port);
 }
-
-void pci_iounmap(struct pci_dev *dev, void __iomem *addr)
-{
-	struct pci_controller *ctrl = dev->bus->sysdata;
-	void __iomem *base = (void __iomem *)ctrl->io_map_base;
-
-	if (addr < base || addr > (base + resource_size(ctrl->io_resource)))
-		iounmap(addr);
-}
-EXPORT_SYMBOL(pci_iounmap);
 
 #endif /* CONFIG_PCI_DRIVERS_LEGACY */

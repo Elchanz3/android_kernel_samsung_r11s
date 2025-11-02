@@ -13,7 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int test_expand_events(struct evlist *evlist)
+static int test_expand_events(struct evlist *evlist,
+			      struct rblist *metric_events)
 {
 	int i, ret = TEST_FAIL;
 	int nr_events;
@@ -25,7 +26,7 @@ static int test_expand_events(struct evlist *evlist)
 	char **ev_name;
 	struct evsel *evsel;
 
-	TEST_ASSERT_VAL("evlist is empty", !evlist__empty(evlist));
+	TEST_ASSERT_VAL("evlist is empty", !perf_evlist__empty(evlist));
 
 	nr_events = evlist->core.nr_entries;
 	ev_name = calloc(nr_events, sizeof(*ev_name));
@@ -46,7 +47,7 @@ static int test_expand_events(struct evlist *evlist)
 	was_group_event = evsel__is_group_event(evlist__first(evlist));
 	nr_members = evlist__first(evlist)->core.nr_members;
 
-	ret = evlist__expand_cgroup(evlist, cgrp_str, false);
+	ret = evlist__expand_cgroup(evlist, cgrp_str, metric_events, false);
 	if (ret < 0) {
 		pr_debug("failed to expand events for cgroups\n");
 		goto out;
@@ -60,7 +61,7 @@ static int test_expand_events(struct evlist *evlist)
 
 	i = 0;
 	evlist__for_each_entry(evlist, evsel) {
-		if (!evsel__name_is(evsel, ev_name[i % nr_events])) {
+		if (strcmp(evsel->name, ev_name[i % nr_events])) {
 			pr_debug("event name doesn't match:\n");
 			pr_debug("  evsel[%d]: %s\n  expected: %s\n",
 				 i, evsel->name, ev_name[i % nr_events]);
@@ -99,11 +100,14 @@ out:	for (i = 0; i < nr_events; i++)
 static int expand_default_events(void)
 {
 	int ret;
-	struct evlist *evlist = evlist__new_default();
+	struct evlist *evlist;
+	struct rblist metric_events;
 
+	evlist = perf_evlist__new_default();
 	TEST_ASSERT_VAL("failed to get evlist", evlist);
 
-	ret = test_expand_events(evlist);
+	rblist__init(&metric_events);
+	ret = test_expand_events(evlist, &metric_events);
 	evlist__delete(evlist);
 	return ret;
 }
@@ -112,6 +116,7 @@ static int expand_group_events(void)
 {
 	int ret;
 	struct evlist *evlist;
+	struct rblist metric_events;
 	struct parse_events_error err;
 	const char event_str[] = "{cycles,instructions}";
 
@@ -120,17 +125,17 @@ static int expand_group_events(void)
 	evlist = evlist__new();
 	TEST_ASSERT_VAL("failed to get evlist", evlist);
 
-	parse_events_error__init(&err);
 	ret = parse_events(evlist, event_str, &err);
 	if (ret < 0) {
-		pr_debug("failed to parse event '%s', err %d\n", event_str, ret);
-		parse_events_error__print(&err, event_str);
+		pr_debug("failed to parse event '%s', err %d, str '%s'\n",
+			 event_str, ret, err.str);
+		parse_events_print_error(&err, event_str);
 		goto out;
 	}
 
-	ret = test_expand_events(evlist);
+	rblist__init(&metric_events);
+	ret = test_expand_events(evlist, &metric_events);
 out:
-	parse_events_error__exit(&err);
 	evlist__delete(evlist);
 	return ret;
 }
@@ -139,6 +144,7 @@ static int expand_libpfm_events(void)
 {
 	int ret;
 	struct evlist *evlist;
+	struct rblist metric_events;
 	const char event_str[] = "CYCLES";
 	struct option opt = {
 		.value = &evlist,
@@ -155,12 +161,13 @@ static int expand_libpfm_events(void)
 			 event_str, ret);
 		goto out;
 	}
-	if (evlist__empty(evlist)) {
+	if (perf_evlist__empty(evlist)) {
 		pr_debug("libpfm was not enabled\n");
 		goto out;
 	}
 
-	ret = test_expand_events(evlist);
+	rblist__init(&metric_events);
+	ret = test_expand_events(evlist, &metric_events);
 out:
 	evlist__delete(evlist);
 	return ret;
@@ -170,28 +177,51 @@ static int expand_metric_events(void)
 {
 	int ret;
 	struct evlist *evlist;
+	struct rblist metric_events;
 	const char metric_str[] = "CPI";
-	const struct pmu_metrics_table *pme_test;
+
+	struct pmu_event pme_test[] = {
+		{
+			.metric_expr	= "instructions / cycles",
+			.metric_name	= "IPC",
+		},
+		{
+			.metric_expr	= "1 / IPC",
+			.metric_name	= "CPI",
+		},
+		{
+			.metric_expr	= NULL,
+			.metric_name	= NULL,
+		},
+	};
+	struct pmu_events_map ev_map = {
+		.cpuid		= "test",
+		.version	= "1",
+		.type		= "core",
+		.table		= pme_test,
+	};
 
 	evlist = evlist__new();
 	TEST_ASSERT_VAL("failed to get evlist", evlist);
 
-	pme_test = find_core_metrics_table("testarch", "testcpu");
-	ret = metricgroup__parse_groups_test(evlist, pme_test, metric_str);
+	rblist__init(&metric_events);
+	ret = metricgroup__parse_groups_test(evlist, &ev_map, metric_str,
+					     false, false, &metric_events);
 	if (ret < 0) {
 		pr_debug("failed to parse '%s' metric\n", metric_str);
 		goto out;
 	}
 
-	ret = test_expand_events(evlist);
+	ret = test_expand_events(evlist, &metric_events);
 
 out:
+	metricgroup__rblist_exit(&metric_events);
 	evlist__delete(evlist);
 	return ret;
 }
 
-static int test__expand_cgroup_events(struct test_suite *test __maybe_unused,
-				      int subtest __maybe_unused)
+int test__expand_cgroup_events(struct test *test __maybe_unused,
+			       int subtest __maybe_unused)
 {
 	int ret;
 
@@ -209,5 +239,3 @@ static int test__expand_cgroup_events(struct test_suite *test __maybe_unused,
 
 	return ret;
 }
-
-DEFINE_SUITE("Event expansion for cgroups", expand_cgroup_events);

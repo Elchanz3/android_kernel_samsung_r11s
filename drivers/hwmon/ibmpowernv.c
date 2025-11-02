@@ -234,13 +234,13 @@ static int get_sensor_index_attr(const char *name, u32 *index, char *attr)
 	if (copy_len >= sizeof(buf))
 		return -EINVAL;
 
-	memcpy(buf, hash_pos + 1, copy_len);
+	strncpy(buf, hash_pos + 1, copy_len);
 
 	err = kstrtou32(buf, 10, index);
 	if (err)
 		return err;
 
-	strscpy(attr, dash_pos + 1, MAX_ATTR_LEN);
+	strncpy(attr, dash_pos + 1, MAX_ATTR_LEN);
 
 	return 0;
 }
@@ -456,9 +456,9 @@ static int populate_attr_groups(struct platform_device *pdev)
 		 */
 		if (!of_property_read_string(np, "label", &label))
 			sensor_groups[type].attr_count++;
-		if (of_property_present(np, "sensor-data-min"))
+		if (of_find_property(np, "sensor-data-min", NULL))
 			sensor_groups[type].attr_count++;
-		if (of_property_present(np, "sensor-data-max"))
+		if (of_find_property(np, "sensor-data-max", NULL))
 			sensor_groups[type].attr_count++;
 	}
 

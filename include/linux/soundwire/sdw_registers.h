@@ -4,9 +4,6 @@
 #ifndef __SDW_REGISTERS_H
 #define __SDW_REGISTERS_H
 
-#include <linux/bitfield.h>
-#include <linux/bits.h>
-
 /*
  * SDW registers as defined by MIPI 1.2 Spec
  */
@@ -16,7 +13,7 @@
 
 #define SDW_REG_NO_PAGE				0x00008000
 #define SDW_REG_OPTIONAL_PAGE			0x00010000
-#define SDW_REG_MAX				0x48000000
+#define SDW_REG_MAX				0x80000000
 
 #define SDW_DPN_SIZE				0x100
 #define SDW_BANK1_OFFSET			0x10
@@ -44,12 +41,6 @@
 #define SDW_DP0_INT_IMPDEF1			BIT(5)
 #define SDW_DP0_INT_IMPDEF2			BIT(6)
 #define SDW_DP0_INT_IMPDEF3			BIT(7)
-#define SDW_DP0_INTERRUPTS			(SDW_DP0_INT_TEST_FAIL | \
-						 SDW_DP0_INT_PORT_READY | \
-						 SDW_DP0_INT_BRA_FAILURE | \
-						 SDW_DP0_INT_IMPDEF1 | \
-						 SDW_DP0_INT_IMPDEF2 | \
-						 SDW_DP0_INT_IMPDEF3)
 
 #define SDW_DP0_PORTCTRL_DATAMODE		GENMASK(3, 2)
 #define SDW_DP0_PORTCTRL_NXTINVBANK		BIT(4)
@@ -250,11 +241,6 @@
 #define SDW_DPN_INT_IMPDEF1			BIT(5)
 #define SDW_DPN_INT_IMPDEF2			BIT(6)
 #define SDW_DPN_INT_IMPDEF3			BIT(7)
-#define SDW_DPN_INTERRUPTS			(SDW_DPN_INT_TEST_FAIL | \
-						 SDW_DPN_INT_PORT_READY | \
-						 SDW_DPN_INT_IMPDEF1 | \
-						 SDW_DPN_INT_IMPDEF2 | \
-						 SDW_DPN_INT_IMPDEF3)
 
 #define SDW_DPN_PORTCTRL_FLOWMODE		GENMASK(1, 0)
 #define SDW_DPN_PORTCTRL_DATAMODE		GENMASK(3, 2)
@@ -311,48 +297,5 @@
 #define SDW_CASC_PORT_START_INTSTAT3		11
 #define SDW_CASC_PORT_MASK_INTSTAT3		1
 #define SDW_CASC_PORT_REG_OFFSET_INTSTAT3	2
-
-/*
- * v1.2 device - SDCA address mapping
- *
- * Spec definition
- *	Bits		Contents
- *	31		0 (required by addressing range)
- *	30:26		0b10000 (Control Prefix)
- *	25		0 (Reserved)
- *	24:22		Function Number [2:0]
- *	21		Entity[6]
- *	20:19		Control Selector[5:4]
- *	18		0 (Reserved)
- *	17:15		Control Number[5:3]
- *	14		Next
- *	13		MBQ
- *	12:7		Entity[5:0]
- *	6:3		Control Selector[3:0]
- *	2:0		Control Number[2:0]
- */
-
-#define SDW_SDCA_CTL(fun, ent, ctl, ch)		(BIT(30) |				\
-						 (((fun) & GENMASK(2, 0)) << 22) |	\
-						 (((ent) & BIT(6)) << 15) |		\
-						 (((ent) & GENMASK(5, 0)) << 7) |	\
-						 (((ctl) & GENMASK(5, 4)) << 15) |	\
-						 (((ctl) & GENMASK(3, 0)) << 3) |	\
-						 (((ch) & GENMASK(5, 3)) << 12) |	\
-						 ((ch) & GENMASK(2, 0)))
-
-#define SDW_SDCA_CTL_FUNC(reg) FIELD_GET(GENMASK(24, 22), (reg))
-#define SDW_SDCA_CTL_ENT(reg) ((FIELD_GET(BIT(21), (reg)) << 6) | \
-				FIELD_GET(GENMASK(12, 7), (reg)))
-#define SDW_SDCA_CTL_CSEL(reg) ((FIELD_GET(GENMASK(20, 19), (reg)) << 4) | \
-				 FIELD_GET(GENMASK(6, 3), (reg)))
-#define SDW_SDCA_CTL_CNUM(reg) ((FIELD_GET(GENMASK(17, 15), (reg)) << 3) | \
-				 FIELD_GET(GENMASK(2, 0), (reg)))
-
-#define SDW_SDCA_MBQ_CTL(reg)			((reg) | BIT(13))
-#define SDW_SDCA_NEXT_CTL(reg)			((reg) | BIT(14))
-
-/* Check the reserved and fixed bits in address */
-#define SDW_SDCA_VALID_CTL(reg) (((reg) & (GENMASK(31, 25) | BIT(18) | BIT(13))) == BIT(30))
 
 #endif /* __SDW_REGISTERS_H */

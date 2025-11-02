@@ -215,9 +215,18 @@ static void arm_ccn_pmu_config_set(u64 *config, u32 node_xp, u32 type, u32 port)
 	*config |= (node_xp << 0) | (type << 8) | (port << 24);
 }
 
+static ssize_t arm_ccn_pmu_format_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct dev_ext_attribute *ea = container_of(attr,
+			struct dev_ext_attribute, attr);
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", (char *)ea->var);
+}
+
 #define CCN_FORMAT_ATTR(_name, _config) \
 	struct dev_ext_attribute arm_ccn_pmu_format_attr_##_name = \
-			{ __ATTR(_name, S_IRUGO, device_show_string, \
+			{ __ATTR(_name, S_IRUGO, arm_ccn_pmu_format_show, \
 			NULL), _config }
 
 static CCN_FORMAT_ATTR(node, "config:0-7");
@@ -317,38 +326,43 @@ static ssize_t arm_ccn_pmu_event_show(struct device *dev,
 	struct arm_ccn *ccn = pmu_to_arm_ccn(dev_get_drvdata(dev));
 	struct arm_ccn_pmu_event *event = container_of(attr,
 			struct arm_ccn_pmu_event, attr);
-	int res;
+	ssize_t res;
 
-	res = sysfs_emit(buf, "type=0x%x", event->type);
+	res = scnprintf(buf, PAGE_SIZE, "type=0x%x", event->type);
 	if (event->event)
-		res += sysfs_emit_at(buf, res, ",event=0x%x", event->event);
+		res += scnprintf(buf + res, PAGE_SIZE - res, ",event=0x%x",
+				event->event);
 	if (event->def)
-		res += sysfs_emit_at(buf, res, ",%s", event->def);
+		res += scnprintf(buf + res, PAGE_SIZE - res, ",%s",
+				event->def);
 	if (event->mask)
-		res += sysfs_emit_at(buf, res, ",mask=0x%x", event->mask);
+		res += scnprintf(buf + res, PAGE_SIZE - res, ",mask=0x%x",
+				event->mask);
 
 	/* Arguments required by an event */
 	switch (event->type) {
 	case CCN_TYPE_CYCLES:
 		break;
 	case CCN_TYPE_XP:
-		res += sysfs_emit_at(buf, res, ",xp=?,vc=?");
+		res += scnprintf(buf + res, PAGE_SIZE - res,
+				",xp=?,vc=?");
 		if (event->event == CCN_EVENT_WATCHPOINT)
-			res += sysfs_emit_at(buf, res,
+			res += scnprintf(buf + res, PAGE_SIZE - res,
 					",port=?,dir=?,cmp_l=?,cmp_h=?,mask=?");
 		else
-			res += sysfs_emit_at(buf, res, ",bus=?");
+			res += scnprintf(buf + res, PAGE_SIZE - res,
+					",bus=?");
 
 		break;
 	case CCN_TYPE_MN:
-		res += sysfs_emit_at(buf, res, ",node=%d", ccn->mn_id);
+		res += scnprintf(buf + res, PAGE_SIZE - res, ",node=%d", ccn->mn_id);
 		break;
 	default:
-		res += sysfs_emit_at(buf, res, ",node=?");
+		res += scnprintf(buf + res, PAGE_SIZE - res, ",node=?");
 		break;
 	}
 
-	res += sysfs_emit_at(buf, res, "\n");
+	res += scnprintf(buf + res, PAGE_SIZE - res, "\n");
 
 	return res;
 }
@@ -462,7 +476,7 @@ static ssize_t arm_ccn_pmu_cmp_mask_show(struct device *dev,
 	struct arm_ccn *ccn = pmu_to_arm_ccn(dev_get_drvdata(dev));
 	u64 *mask = arm_ccn_pmu_get_cmp_mask(ccn, attr->attr.name);
 
-	return mask ? sysfs_emit(buf, "0x%016llx\n", *mask) : -EINVAL;
+	return mask ? snprintf(buf, PAGE_SIZE, "0x%016llx\n", *mask) : -EINVAL;
 }
 
 static ssize_t arm_ccn_pmu_cmp_mask_store(struct device *dev,
@@ -565,7 +579,7 @@ module_param_named(pmu_poll_period_us, arm_ccn_pmu_poll_period_us, uint,
 
 static ktime_t arm_ccn_pmu_timer_period(void)
 {
-	return us_to_ktime((u64)arm_ccn_pmu_poll_period_us);
+	return ns_to_ktime((u64)arm_ccn_pmu_poll_period_us * 1000);
 }
 
 
@@ -1202,7 +1216,7 @@ static int arm_ccn_pmu_offline_cpu(unsigned int cpu, struct hlist_node *node)
 	perf_pmu_migrate_context(&dt->pmu, cpu, target);
 	dt->cpu = target;
 	if (ccn->irq)
-		WARN_ON(irq_set_affinity(ccn->irq, cpumask_of(dt->cpu)));
+		WARN_ON(irq_set_affinity_hint(ccn->irq, cpumask_of(dt->cpu)));
 	return 0;
 }
 
@@ -1241,7 +1255,7 @@ static int arm_ccn_pmu_init(struct arm_ccn *ccn)
 	ccn->dt.cmp_mask[CCN_IDX_MASK_OPCODE].h = ~(0x1f << 9);
 
 	/* Get a convenient /sys/event_source/devices/ name */
-	ccn->dt.id = ida_alloc(&arm_ccn_pmu_ida, GFP_KERNEL);
+	ccn->dt.id = ida_simple_get(&arm_ccn_pmu_ida, 0, 0, GFP_KERNEL);
 	if (ccn->dt.id == 0) {
 		name = "ccn";
 	} else {
@@ -1256,7 +1270,6 @@ static int arm_ccn_pmu_init(struct arm_ccn *ccn)
 	/* Perf driver registration */
 	ccn->dt.pmu = (struct pmu) {
 		.module = THIS_MODULE,
-		.parent = ccn->dev,
 		.attr_groups = arm_ccn_pmu_attr_groups,
 		.task_ctx_nr = perf_invalid_context,
 		.event_init = arm_ccn_pmu_event_init,
@@ -1273,8 +1286,9 @@ static int arm_ccn_pmu_init(struct arm_ccn *ccn)
 	/* No overflow interrupt? Have to use a timer instead. */
 	if (!ccn->irq) {
 		dev_info(ccn->dev, "No access to interrupts, using timer.\n");
-		hrtimer_setup(&ccn->dt.hrtimer, arm_ccn_pmu_timer_handler, CLOCK_MONOTONIC,
-			      HRTIMER_MODE_REL);
+		hrtimer_init(&ccn->dt.hrtimer, CLOCK_MONOTONIC,
+				HRTIMER_MODE_REL);
+		ccn->dt.hrtimer.function = arm_ccn_pmu_timer_handler;
 	}
 
 	/* Pick one CPU which we will use to collect data from CCN... */
@@ -1282,7 +1296,7 @@ static int arm_ccn_pmu_init(struct arm_ccn *ccn)
 
 	/* Also make sure that the overflow interrupt is handled by this CPU */
 	if (ccn->irq) {
-		err = irq_set_affinity(ccn->irq, cpumask_of(ccn->dt.cpu));
+		err = irq_set_affinity_hint(ccn->irq, cpumask_of(ccn->dt.cpu));
 		if (err) {
 			dev_err(ccn->dev, "Failed to set interrupt affinity!\n");
 			goto error_set_affinity;
@@ -1303,7 +1317,7 @@ error_pmu_register:
 					    &ccn->dt.node);
 error_set_affinity:
 error_choose_name:
-	ida_free(&arm_ccn_pmu_ida, ccn->dt.id);
+	ida_simple_remove(&arm_ccn_pmu_ida, ccn->dt.id);
 	for (i = 0; i < ccn->num_xps; i++)
 		writel(0, ccn->xp[i].base + CCN_XP_DT_CONTROL);
 	writel(0, ccn->dt.base + CCN_DT_PMCR);
@@ -1316,11 +1330,13 @@ static void arm_ccn_pmu_cleanup(struct arm_ccn *ccn)
 
 	cpuhp_state_remove_instance_nocalls(CPUHP_AP_PERF_ARM_CCN_ONLINE,
 					    &ccn->dt.node);
+	if (ccn->irq)
+		irq_set_affinity_hint(ccn->irq, NULL);
 	for (i = 0; i < ccn->num_xps; i++)
 		writel(0, ccn->xp[i].base + CCN_XP_DT_CONTROL);
 	writel(0, ccn->dt.base + CCN_DT_PMCR);
 	perf_pmu_unregister(&ccn->dt.pmu);
-	ida_free(&arm_ccn_pmu_ida, ccn->dt.id);
+	ida_simple_remove(&arm_ccn_pmu_ida, ccn->dt.id);
 }
 
 static int arm_ccn_for_each_valid_region(struct arm_ccn *ccn,
@@ -1451,7 +1467,8 @@ static irqreturn_t arm_ccn_irq_handler(int irq, void *dev_id)
 static int arm_ccn_probe(struct platform_device *pdev)
 {
 	struct arm_ccn *ccn;
-	int irq;
+	struct resource *res;
+	unsigned int irq;
 	int err;
 
 	ccn = devm_kzalloc(&pdev->dev, sizeof(*ccn), GFP_KERNEL);
@@ -1464,9 +1481,10 @@ static int arm_ccn_probe(struct platform_device *pdev)
 	if (IS_ERR(ccn->base))
 		return PTR_ERR(ccn->base);
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
+	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!res)
+		return -EINVAL;
+	irq = res->start;
 
 	/* Check if we can use the interrupt */
 	writel(CCN_MN_ERRINT_STATUS__PMU_EVENTS__DISABLE,
@@ -1506,11 +1524,13 @@ static int arm_ccn_probe(struct platform_device *pdev)
 	return arm_ccn_pmu_init(ccn);
 }
 
-static void arm_ccn_remove(struct platform_device *pdev)
+static int arm_ccn_remove(struct platform_device *pdev)
 {
 	struct arm_ccn *ccn = platform_get_drvdata(pdev);
 
 	arm_ccn_pmu_cleanup(ccn);
+
+	return 0;
 }
 
 static const struct of_device_id arm_ccn_match[] = {
@@ -1560,5 +1580,4 @@ module_init(arm_ccn_init);
 module_exit(arm_ccn_exit);
 
 MODULE_AUTHOR("Pawel Moll <pawel.moll@arm.com>");
-MODULE_DESCRIPTION("ARM CCN (Cache Coherent Network) Performance Monitor Driver");
 MODULE_LICENSE("GPL v2");

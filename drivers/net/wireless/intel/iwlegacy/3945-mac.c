@@ -571,18 +571,20 @@ il3945_tx_skb(struct il_priv *il,
 
 	/* Physical address of this Tx command's header (not MAC header!),
 	 * within command buffer array. */
-	txcmd_phys = dma_map_single(&il->pci_dev->dev, &out_cmd->hdr, firstlen,
-				    DMA_TO_DEVICE);
-	if (unlikely(dma_mapping_error(&il->pci_dev->dev, txcmd_phys)))
+	txcmd_phys =
+	    pci_map_single(il->pci_dev, &out_cmd->hdr, firstlen,
+			   PCI_DMA_TODEVICE);
+	if (unlikely(pci_dma_mapping_error(il->pci_dev, txcmd_phys)))
 		goto drop_unlock;
 
 	/* Set up TFD's 2nd entry to point directly to remainder of skb,
 	 * if any (802.11 null frames have no payload). */
 	secondlen = skb->len - hdr_len;
 	if (secondlen > 0) {
-		phys_addr = dma_map_single(&il->pci_dev->dev, skb->data + hdr_len,
-					   secondlen, DMA_TO_DEVICE);
-		if (unlikely(dma_mapping_error(&il->pci_dev->dev, phys_addr)))
+		phys_addr =
+		    pci_map_single(il->pci_dev, skb->data + hdr_len, secondlen,
+				   PCI_DMA_TODEVICE);
+		if (unlikely(pci_dma_mapping_error(il->pci_dev, phys_addr)))
 			goto drop_unlock;
 	}
 
@@ -749,7 +751,9 @@ il3945_hdl_alive(struct il_priv *il, struct il_rx_buf *rxb)
 static void
 il3945_hdl_add_sta(struct il_priv *il, struct il_rx_buf *rxb)
 {
+#ifdef CONFIG_IWLEGACY_DEBUG
 	struct il_rx_pkt *pkt = rxb_addr(rxb);
+#endif
 
 	D_RX("Received C_ADD_STA: 0x%02X\n", pkt->u.status);
 }
@@ -1013,11 +1017,11 @@ il3945_rx_allocate(struct il_priv *il, gfp_t priority)
 
 		/* Get physical address of RB/SKB */
 		page_dma =
-		    dma_map_page(&il->pci_dev->dev, page, 0,
+		    pci_map_page(il->pci_dev, page, 0,
 				 PAGE_SIZE << il->hw_params.rx_page_order,
-				 DMA_FROM_DEVICE);
+				 PCI_DMA_FROMDEVICE);
 
-		if (unlikely(dma_mapping_error(&il->pci_dev->dev, page_dma))) {
+		if (unlikely(pci_dma_mapping_error(il->pci_dev, page_dma))) {
 			__free_pages(page, il->hw_params.rx_page_order);
 			break;
 		}
@@ -1026,9 +1030,9 @@ il3945_rx_allocate(struct il_priv *il, gfp_t priority)
 
 		if (list_empty(&rxq->rx_used)) {
 			spin_unlock_irqrestore(&rxq->lock, flags);
-			dma_unmap_page(&il->pci_dev->dev, page_dma,
+			pci_unmap_page(il->pci_dev, page_dma,
 				       PAGE_SIZE << il->hw_params.rx_page_order,
-				       DMA_FROM_DEVICE);
+				       PCI_DMA_FROMDEVICE);
 			__free_pages(page, il->hw_params.rx_page_order);
 			return;
 		}
@@ -1060,10 +1064,9 @@ il3945_rx_queue_reset(struct il_priv *il, struct il_rx_queue *rxq)
 		/* In the reset function, these buffers may have been allocated
 		 * to an SKB, so we need to unmap and free potential storage */
 		if (rxq->pool[i].page != NULL) {
-			dma_unmap_page(&il->pci_dev->dev,
-				       rxq->pool[i].page_dma,
+			pci_unmap_page(il->pci_dev, rxq->pool[i].page_dma,
 				       PAGE_SIZE << il->hw_params.rx_page_order,
-				       DMA_FROM_DEVICE);
+				       PCI_DMA_FROMDEVICE);
 			__il_free_pages(il, rxq->pool[i].page);
 			rxq->pool[i].page = NULL;
 		}
@@ -1110,10 +1113,9 @@ il3945_rx_queue_free(struct il_priv *il, struct il_rx_queue *rxq)
 	int i;
 	for (i = 0; i < RX_QUEUE_SIZE + RX_FREE_BUFFERS; i++) {
 		if (rxq->pool[i].page != NULL) {
-			dma_unmap_page(&il->pci_dev->dev,
-				       rxq->pool[i].page_dma,
+			pci_unmap_page(il->pci_dev, rxq->pool[i].page_dma,
 				       PAGE_SIZE << il->hw_params.rx_page_order,
-				       DMA_FROM_DEVICE);
+				       PCI_DMA_FROMDEVICE);
 			__il_free_pages(il, rxq->pool[i].page);
 			rxq->pool[i].page = NULL;
 		}
@@ -1125,6 +1127,44 @@ il3945_rx_queue_free(struct il_priv *il, struct il_rx_queue *rxq)
 			  rxq->rb_stts, rxq->rb_stts_dma);
 	rxq->bd = NULL;
 	rxq->rb_stts = NULL;
+}
+
+/* Convert linear signal-to-noise ratio into dB */
+static u8 ratio2dB[100] = {
+/*	 0   1   2   3   4   5   6   7   8   9 */
+	0, 0, 6, 10, 12, 14, 16, 17, 18, 19,	/* 00 - 09 */
+	20, 21, 22, 22, 23, 23, 24, 25, 26, 26,	/* 10 - 19 */
+	26, 26, 26, 27, 27, 28, 28, 28, 29, 29,	/* 20 - 29 */
+	29, 30, 30, 30, 31, 31, 31, 31, 32, 32,	/* 30 - 39 */
+	32, 32, 32, 33, 33, 33, 33, 33, 34, 34,	/* 40 - 49 */
+	34, 34, 34, 34, 35, 35, 35, 35, 35, 35,	/* 50 - 59 */
+	36, 36, 36, 36, 36, 36, 36, 37, 37, 37,	/* 60 - 69 */
+	37, 37, 37, 37, 37, 38, 38, 38, 38, 38,	/* 70 - 79 */
+	38, 38, 38, 38, 38, 39, 39, 39, 39, 39,	/* 80 - 89 */
+	39, 39, 39, 39, 39, 40, 40, 40, 40, 40	/* 90 - 99 */
+};
+
+/* Calculates a relative dB value from a ratio of linear
+ *   (i.e. not dB) signal levels.
+ * Conversion assumes that levels are voltages (20*log), not powers (10*log). */
+int
+il3945_calc_db_from_ratio(int sig_ratio)
+{
+	/* 1000:1 or higher just report as 60 dB */
+	if (sig_ratio >= 1000)
+		return 60;
+
+	/* 100:1 or higher, divide by 10 and use table,
+	 *   add 20 dB to make up for divide by 10 */
+	if (sig_ratio >= 100)
+		return 20 + (int)ratio2dB[sig_ratio / 10];
+
+	/* We shouldn't see this */
+	if (sig_ratio < 1)
+		return 0;
+
+	/* Use table for ratios 1:1 - 99:1 */
+	return (int)ratio2dB[sig_ratio];
 }
 
 /*
@@ -1164,6 +1204,8 @@ il3945_rx_handle(struct il_priv *il)
 		D_RX("r = %d, i = %d\n", r, i);
 
 	while (i != r) {
+		int len;
+
 		rxb = rxq->queue[i];
 
 		/* If an RXB doesn't have a Rx queue slot associated with it,
@@ -1173,10 +1215,14 @@ il3945_rx_handle(struct il_priv *il)
 
 		rxq->queue[i] = NULL;
 
-		dma_unmap_page(&il->pci_dev->dev, rxb->page_dma,
+		pci_unmap_page(il->pci_dev, rxb->page_dma,
 			       PAGE_SIZE << il->hw_params.rx_page_order,
-			       DMA_FROM_DEVICE);
+			       PCI_DMA_FROMDEVICE);
 		pkt = rxb_addr(rxb);
+
+		len = le32_to_cpu(pkt->len_n_flags) & IL_RX_FRAME_SIZE_MSK;
+		len += sizeof(u32);	/* account for status word */
+
 		reclaim = il_need_reclaim(il, pkt);
 
 		/* Based on type of command response or notification,
@@ -1216,11 +1262,11 @@ il3945_rx_handle(struct il_priv *il)
 		spin_lock_irqsave(&rxq->lock, flags);
 		if (rxb->page != NULL) {
 			rxb->page_dma =
-			    dma_map_page(&il->pci_dev->dev, rxb->page, 0,
-					 PAGE_SIZE << il->hw_params.rx_page_order,
-					 DMA_FROM_DEVICE);
-			if (unlikely(dma_mapping_error(&il->pci_dev->dev,
-						       rxb->page_dma))) {
+			    pci_map_page(il->pci_dev, rxb->page, 0,
+					 PAGE_SIZE << il->hw_params.
+					 rx_page_order, PCI_DMA_FROMDEVICE);
+			if (unlikely(pci_dma_mapping_error(il->pci_dev,
+							   rxb->page_dma))) {
 				__il_free_pages(il, rxb->page);
 				rxb->page = NULL;
 				list_add_tail(&rxb->list, &rxq->rx_used);
@@ -2188,7 +2234,7 @@ __il3945_down(struct il_priv *il)
 
 	/* Stop TX queues watchdog. We need to have S_EXIT_PENDING bit set
 	 * to prevent rearm timer */
-	timer_delete_sync(&il->watchdog);
+	del_timer_sync(&il->watchdog);
 
 	/* Station information will now be cleared in device */
 	il_clear_ucode_stations(il);
@@ -2657,7 +2703,7 @@ il3945_post_associate(struct il_priv *il)
 	if (!il->vif || !il->is_open)
 		return;
 
-	D_ASSOC("Associated as %d to: %pM\n", il->vif->cfg.aid,
+	D_ASSOC("Associated as %d to: %pM\n", il->vif->bss_conf.aid,
 		il->active.bssid_addr);
 
 	if (test_bit(S_EXIT_PENDING, &il->status))
@@ -2674,9 +2720,9 @@ il3945_post_associate(struct il_priv *il)
 
 	il->staging.filter_flags |= RXON_FILTER_ASSOC_MSK;
 
-	il->staging.assoc_id = cpu_to_le16(il->vif->cfg.aid);
+	il->staging.assoc_id = cpu_to_le16(il->vif->bss_conf.aid);
 
-	D_ASSOC("assoc id %d beacon interval %d\n", il->vif->cfg.aid,
+	D_ASSOC("assoc id %d beacon interval %d\n", il->vif->bss_conf.aid,
 		il->vif->bss_conf.beacon_int);
 
 	if (il->vif->bss_conf.use_short_preamble)
@@ -2775,7 +2821,7 @@ out_release_irq:
 }
 
 static void
-il3945_mac_stop(struct ieee80211_hw *hw, bool suspend)
+il3945_mac_stop(struct ieee80211_hw *hw)
 {
 	struct il_priv *il = hw->priv;
 
@@ -3210,7 +3256,7 @@ il3945_store_measurement(struct device *d, struct device_attribute *attr,
 
 	if (count) {
 		char *p = buffer;
-		strscpy(buffer, buf, sizeof(buffer));
+		strlcpy(buffer, buf, sizeof(buffer));
 		channel = simple_strtoul(p, NULL, 0);
 		if (channel)
 			params.channel = channel;
@@ -3394,12 +3440,7 @@ static const struct attribute_group il3945_attribute_group = {
 };
 
 static struct ieee80211_ops il3945_mac_ops __ro_after_init = {
-	.add_chanctx = ieee80211_emulate_add_chanctx,
-	.remove_chanctx = ieee80211_emulate_remove_chanctx,
-	.change_chanctx = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = il3945_mac_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = il3945_mac_start,
 	.stop = il3945_mac_stop,
 	.add_interface = il_mac_add_interface,
@@ -3581,7 +3622,9 @@ il3945_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_master(pdev);
 
-	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	if (!err)
+		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (err) {
 		IL_WARN("No suitable DMA available.\n");
 		goto out_pci_disable_device;

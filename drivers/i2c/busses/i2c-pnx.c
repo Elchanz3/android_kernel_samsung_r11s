@@ -95,7 +95,7 @@ enum {
 
 static inline int wait_timeout(struct i2c_pnx_algo_data *data)
 {
-	long timeout = jiffies_to_msecs(data->timeout);
+	long timeout = data->timeout;
 	while (timeout > 0 &&
 			(ioread32(I2C_REG_STS(data)) & mstatus_active)) {
 		mdelay(1);
@@ -106,7 +106,7 @@ static inline int wait_timeout(struct i2c_pnx_algo_data *data)
 
 static inline int wait_reset(struct i2c_pnx_algo_data *data)
 {
-	long timeout = jiffies_to_msecs(data->timeout);
+	long timeout = data->timeout;
 	while (timeout > 0 &&
 			(ioread32(I2C_REG_CTL(data)) & mcntrl_reset)) {
 		mdelay(1);
@@ -118,7 +118,7 @@ static inline int wait_reset(struct i2c_pnx_algo_data *data)
 /**
  * i2c_pnx_start - start a device
  * @slave_addr:		slave address
- * @alg_data:		pointer to local driver data structure
+ * @adap:		pointer to adapter structure
  *
  * Generate a START signal in the desired mode.
  */
@@ -174,7 +174,7 @@ static int i2c_pnx_start(unsigned char slave_addr,
 
 /**
  * i2c_pnx_stop - stop a device
- * @alg_data:		pointer to local driver data structure
+ * @adap:		pointer to I2C adapter structure
  *
  * Generate a STOP signal to terminate the master transaction.
  */
@@ -203,7 +203,7 @@ static void i2c_pnx_stop(struct i2c_pnx_algo_data *alg_data)
 
 /**
  * i2c_pnx_master_xmit - transmit data to slave
- * @alg_data:		pointer to local driver data structure
+ * @adap:		pointer to I2C adapter structure
  *
  * Sends one byte of data to the slave
  */
@@ -269,7 +269,7 @@ static int i2c_pnx_master_xmit(struct i2c_pnx_algo_data *alg_data)
 
 /**
  * i2c_pnx_master_rcv - receive data from slave
- * @alg_data:		pointer to local driver data structure
+ * @adap:		pointer to I2C adapter structure
  *
  * Reads one byte data from the slave
  */
@@ -580,10 +580,11 @@ static u32 i2c_pnx_func(struct i2c_adapter *adapter)
 }
 
 static const struct i2c_algorithm pnx_algorithm = {
-	.xfer = i2c_pnx_xfer,
+	.master_xfer = i2c_pnx_xfer,
 	.functionality = i2c_pnx_func,
 };
 
+#ifdef CONFIG_PM_SLEEP
 static int i2c_pnx_controller_suspend(struct device *dev)
 {
 	struct i2c_pnx_algo_data *alg_data = dev_get_drvdata(dev);
@@ -600,9 +601,12 @@ static int i2c_pnx_controller_resume(struct device *dev)
 	return clk_prepare_enable(alg_data->clk);
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(i2c_pnx_pm,
-				i2c_pnx_controller_suspend,
-				i2c_pnx_controller_resume);
+static SIMPLE_DEV_PM_OPS(i2c_pnx_pm,
+			 i2c_pnx_controller_suspend, i2c_pnx_controller_resume);
+#define PNX_I2C_PM	(&i2c_pnx_pm)
+#else
+#define PNX_I2C_PM	NULL
+#endif
 
 static int i2c_pnx_probe(struct platform_device *pdev)
 {
@@ -651,7 +655,8 @@ static int i2c_pnx_probe(struct platform_device *pdev)
 		 "%s", pdev->name);
 
 	/* Register I/O resource */
-	alg_data->ioaddr = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	alg_data->ioaddr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(alg_data->ioaddr))
 		return PTR_ERR(alg_data->ioaddr);
 
@@ -710,18 +715,20 @@ out_clock:
 	return ret;
 }
 
-static void i2c_pnx_remove(struct platform_device *pdev)
+static int i2c_pnx_remove(struct platform_device *pdev)
 {
 	struct i2c_pnx_algo_data *alg_data = platform_get_drvdata(pdev);
 
 	i2c_del_adapter(&alg_data->adapter);
 	clk_disable_unprepare(alg_data->clk);
+
+	return 0;
 }
 
 #ifdef CONFIG_OF
 static const struct of_device_id i2c_pnx_of_match[] = {
 	{ .compatible = "nxp,pnx-i2c" },
-	{ }
+	{ },
 };
 MODULE_DEVICE_TABLE(of, i2c_pnx_of_match);
 #endif
@@ -730,7 +737,7 @@ static struct platform_driver i2c_pnx_driver = {
 	.driver = {
 		.name = "pnx-i2c",
 		.of_match_table = of_match_ptr(i2c_pnx_of_match),
-		.pm = pm_sleep_ptr(&i2c_pnx_pm),
+		.pm = PNX_I2C_PM,
 	},
 	.probe = i2c_pnx_probe,
 	.remove = i2c_pnx_remove,

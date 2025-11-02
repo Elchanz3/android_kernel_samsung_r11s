@@ -33,7 +33,7 @@
 #include <asm/setup.h>
 #include <asm/sections.h>
 
-#include "../kernel/proto.h"
+extern void die_if_kernel(char *,struct pt_regs *,long);
 
 static struct pcb_struct original_pcb;
 
@@ -42,7 +42,7 @@ pgd_alloc(struct mm_struct *mm)
 {
 	pgd_t *ret, *init;
 
-	ret = __pgd_alloc(mm, 0);
+	ret = (pgd_t *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	init = pgd_offset(&init_mm, 0UL);
 	if (ret) {
 #ifdef CONFIG_ALPHA_LARGE_VMALLOC
@@ -59,6 +59,33 @@ pgd_alloc(struct mm_struct *mm)
 	return ret;
 }
 
+
+/*
+ * BAD_PAGE is the page that is used for page faults when linux
+ * is out-of-memory. Older versions of linux just did a
+ * do_exit(), but using this instead means there is less risk
+ * for a process dying in kernel mode, possibly leaving an inode
+ * unused etc..
+ *
+ * BAD_PAGETABLE is the accompanying page-table: it is initialized
+ * to point to BAD_PAGE entries.
+ *
+ * ZERO_PAGE is a special page that is used for zero-initialized
+ * data and COW.
+ */
+pmd_t *
+__bad_pagetable(void)
+{
+	memset((void *) EMPTY_PGT, 0, PAGE_SIZE);
+	return (pmd_t *) EMPTY_PGT;
+}
+
+pte_t
+__bad_page(void)
+{
+	memset((void *) EMPTY_PGE, 0, PAGE_SIZE);
+	return pte_mkdirty(mk_pte(virt_to_page(EMPTY_PGE), PAGE_SHARED));
+}
 
 static inline unsigned long
 load_PCB(struct pcb_struct *pcb)
@@ -208,6 +235,8 @@ callback_init(void * kernel_end)
 	return kernel_end;
 }
 
+
+#ifndef CONFIG_DISCONTIGMEM
 /*
  * paging_init() sets up the memory map.
  */
@@ -226,8 +255,9 @@ void __init paging_init(void)
 	free_area_init(max_zone_pfn);
 
 	/* Initialize the kernel's ZERO_PGE. */
-	memset(absolute_pointer(ZERO_PGE), 0, PAGE_SIZE);
+	memset((void *)ZERO_PGE, 0, PAGE_SIZE);
 }
+#endif /* CONFIG_DISCONTIGMEM */
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM)
 void
@@ -246,24 +276,11 @@ srm_paging_stop (void)
 }
 #endif
 
-static const pgprot_t protection_map[16] = {
-	[VM_NONE]					= _PAGE_P(_PAGE_FOE | _PAGE_FOW |
-								  _PAGE_FOR),
-	[VM_READ]					= _PAGE_P(_PAGE_FOE | _PAGE_FOW),
-	[VM_WRITE]					= _PAGE_P(_PAGE_FOE),
-	[VM_WRITE | VM_READ]				= _PAGE_P(_PAGE_FOE),
-	[VM_EXEC]					= _PAGE_P(_PAGE_FOW | _PAGE_FOR),
-	[VM_EXEC | VM_READ]				= _PAGE_P(_PAGE_FOW),
-	[VM_EXEC | VM_WRITE]				= _PAGE_P(0),
-	[VM_EXEC | VM_WRITE | VM_READ]			= _PAGE_P(0),
-	[VM_SHARED]					= _PAGE_S(_PAGE_FOE | _PAGE_FOW |
-								  _PAGE_FOR),
-	[VM_SHARED | VM_READ]				= _PAGE_S(_PAGE_FOE | _PAGE_FOW),
-	[VM_SHARED | VM_WRITE]				= _PAGE_S(_PAGE_FOE),
-	[VM_SHARED | VM_WRITE | VM_READ]		= _PAGE_S(_PAGE_FOE),
-	[VM_SHARED | VM_EXEC]				= _PAGE_S(_PAGE_FOW | _PAGE_FOR),
-	[VM_SHARED | VM_EXEC | VM_READ]			= _PAGE_S(_PAGE_FOW),
-	[VM_SHARED | VM_EXEC | VM_WRITE]		= _PAGE_S(0),
-	[VM_SHARED | VM_EXEC | VM_WRITE | VM_READ]	= _PAGE_S(0)
-};
-DECLARE_VM_GET_PAGE_PROT
+void __init
+mem_init(void)
+{
+	set_max_mapnr(max_low_pfn);
+	high_memory = (void *) __va(max_low_pfn * PAGE_SIZE);
+	memblock_free_all();
+	mem_init_print_info(NULL);
+}

@@ -19,10 +19,6 @@ description: |
   second port, therefore the ports must be marked accordingly (with either
   dual-lvds-odd-pixels or dual-lvds-even-pixels).
 
-allOf:
-  - $ref: /schemas/display/lvds-dual-ports.yaml#
-  - $ref: panel-common.yaml#
-
 properties:
   compatible:
     items:
@@ -41,20 +37,33 @@ properties:
   panel-timing: true
 
   ports:
-    $ref: /schemas/graph.yaml#/properties/ports
-
+    type: object
     properties:
       port@0:
+        type: object
+        description: The sink for odd pixels.
+        properties:
+          reg:
+            const: 0
+
+          dual-lvds-odd-pixels: true
+
         required:
+          - reg
           - dual-lvds-odd-pixels
 
       port@1:
-        required:
-          - dual-lvds-even-pixels
+        type: object
+        description: The sink for even pixels.
+        properties:
+          reg:
+            const: 1
 
-    required:
-      - port@0
-      - port@1
+          dual-lvds-even-pixels: true
+
+        required:
+          - reg
+          - dual-lvds-even-pixels
 
 additionalProperties: false
 
@@ -64,6 +73,7 @@ required:
   - height-mm
   - data-mapping
   - panel-timing
+  - ports
 
 examples:
   - |+

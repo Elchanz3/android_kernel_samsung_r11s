@@ -68,7 +68,7 @@ static ssize_t als_lux_input_data_show(struct device *dev,
 	if (val < 0)
 		return val;
 	lux = ((((1 << (2 * (val & 3))))*1000) * ret_val) / 65536;
-	return sprintf(buf, "%lu\n", lux);
+	return sprintf(buf, "%ld\n", lux);
 }
 
 static ssize_t als_sensing_range_store(struct device *dev,
@@ -151,7 +151,8 @@ static int als_set_default_config(struct i2c_client *client)
 	return 0;
 }
 
-static int  isl29020_probe(struct i2c_client *client)
+static int  isl29020_probe(struct i2c_client *client,
+					const struct i2c_device_id *id)
 {
 	int res;
 
@@ -170,14 +171,15 @@ static int  isl29020_probe(struct i2c_client *client)
 	return res;
 }
 
-static void isl29020_remove(struct i2c_client *client)
+static int isl29020_remove(struct i2c_client *client)
 {
 	pm_runtime_disable(&client->dev);
 	sysfs_remove_group(&client->dev.kobj, &m_als_gr);
+	return 0;
 }
 
 static const struct i2c_device_id isl29020_id[] = {
-	{ "isl29020" },
+	{ "isl29020", 0 },
 	{ }
 };
 

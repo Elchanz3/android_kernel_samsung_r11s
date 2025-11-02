@@ -10,7 +10,6 @@
 
 #include <linux/ctype.h>
 #include <linux/firmware.h>
-#include <linux/string_choices.h>
 #include "otx_cpt_common.h"
 #include "otx_cptpf_ucode.h"
 #include "otx_cptpf.h"
@@ -98,7 +97,7 @@ static int dev_supports_eng_type(struct otx_cpt_eng_grps *eng_grps,
 static void set_ucode_filename(struct otx_cpt_ucode *ucode,
 			       const char *filename)
 {
-	strscpy(ucode->filename, filename, OTX_CPT_UCODE_NAME_LENGTH);
+	strlcpy(ucode->filename, filename, OTX_CPT_UCODE_NAME_LENGTH);
 }
 
 static char *get_eng_type_str(int eng_type)
@@ -139,7 +138,7 @@ static int get_ucode_type(struct otx_cpt_ucode_hdr *ucode_hdr, int *ucode_type)
 	u32 i, val = 0;
 	u8 nn;
 
-	strscpy(tmp_ver_str, ucode_hdr->ver_str, OTX_CPT_UCODE_VER_STR_SZ);
+	strlcpy(tmp_ver_str, ucode_hdr->ver_str, OTX_CPT_UCODE_VER_STR_SZ);
 	for (i = 0; i < strlen(tmp_ver_str); i++)
 		tmp_ver_str[i] = tolower(tmp_ver_str[i]);
 
@@ -346,7 +345,8 @@ static void release_tar_archive(struct tar_arch_info_t *tar_arch)
 		kfree(curr);
 	}
 
-	release_firmware(tar_arch->fw);
+	if (tar_arch->fw)
+		release_firmware(tar_arch->fw);
 	kfree(tar_arch);
 }
 
@@ -506,6 +506,17 @@ int otx_cpt_uc_supports_eng_type(struct otx_cpt_ucode *ucode, int eng_type)
 }
 EXPORT_SYMBOL_GPL(otx_cpt_uc_supports_eng_type);
 
+int otx_cpt_eng_grp_has_eng_type(struct otx_cpt_eng_grp_info *eng_grp,
+				 int eng_type)
+{
+	struct otx_cpt_engs_rsvd *engs;
+
+	engs = find_engines_by_type(eng_grp, eng_type);
+
+	return (engs != NULL ? 1 : 0);
+}
+EXPORT_SYMBOL_GPL(otx_cpt_eng_grp_has_eng_type);
+
 static void print_ucode_info(struct otx_cpt_eng_grp_info *eng_grp,
 			     char *buf, int size)
 {
@@ -604,8 +615,8 @@ static void print_dbg_info(struct device *dev,
 
 	for (i = 0; i < OTX_CPT_MAX_ENGINE_GROUPS; i++) {
 		grp = &eng_grps->grp[i];
-		pr_debug("engine_group%d, state %s\n", i,
-			 str_enabled_disabled(grp->is_enabled));
+		pr_debug("engine_group%d, state %s\n", i, grp->is_enabled ?
+			 "enabled" : "disabled");
 		if (grp->is_enabled) {
 			mirrored_grp = &eng_grps->grp[grp->mirror.idx];
 			pr_debug("Ucode0 filename %s, version %s\n",
@@ -1331,7 +1342,7 @@ static ssize_t ucode_load_store(struct device *dev,
 
 	eng_grps = container_of(attr, struct otx_cpt_eng_grps, ucode_load_attr);
 	err_msg = "Invalid engine group format";
-	strscpy(tmp_buf, buf, OTX_CPT_UCODE_NAME_LENGTH);
+	strlcpy(tmp_buf, buf, OTX_CPT_UCODE_NAME_LENGTH);
 	start = tmp_buf;
 
 	has_se = has_ie = has_ae = false;

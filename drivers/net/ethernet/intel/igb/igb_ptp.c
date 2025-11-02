@@ -67,13 +67,11 @@
 #define INCVALUE_82576_MASK		GENMASK(E1000_TIMINCA_16NS_SHIFT - 1, 0)
 #define INCVALUE_82576			(16u << IGB_82576_TSYNC_SHIFT)
 #define IGB_NBITS_82580			40
-#define IGB_82580_BASE_PERIOD		0x800000000
 
 static void igb_ptp_tx_hwtstamp(struct igb_adapter *adapter);
-static void igb_ptp_sdp_init(struct igb_adapter *adapter);
 
 /* SYSTIM read access for the 82576 */
-static u64 igb_ptp_read_82576(struct cyclecounter *cc)
+static u64 igb_ptp_read_82576(const struct cyclecounter *cc)
 {
 	struct igb_adapter *igb = container_of(cc, struct igb_adapter, cc);
 	struct e1000_hw *hw = &igb->hw;
@@ -90,7 +88,7 @@ static u64 igb_ptp_read_82576(struct cyclecounter *cc)
 }
 
 /* SYSTIM read access for the 82580 */
-static u64 igb_ptp_read_82580(struct cyclecounter *cc)
+static u64 igb_ptp_read_82580(const struct cyclecounter *cc)
 {
 	struct igb_adapter *igb = container_of(cc, struct igb_adapter, cc);
 	struct e1000_hw *hw = &igb->hw;
@@ -166,21 +164,23 @@ static void igb_ptp_systim_to_hwtstamp(struct igb_adapter *adapter,
 	unsigned long flags;
 	u64 ns;
 
-	memset(hwtstamps, 0, sizeof(*hwtstamps));
-
 	switch (adapter->hw.mac.type) {
 	case e1000_82576:
 	case e1000_82580:
 	case e1000_i354:
 	case e1000_i350:
 		spin_lock_irqsave(&adapter->tmreg_lock, flags);
+
 		ns = timecounter_cyc2time(&adapter->tc, systim);
+
 		spin_unlock_irqrestore(&adapter->tmreg_lock, flags);
 
+		memset(hwtstamps, 0, sizeof(*hwtstamps));
 		hwtstamps->hwtstamp = ns_to_ktime(ns);
 		break;
 	case e1000_i210:
 	case e1000_i211:
+		memset(hwtstamps, 0, sizeof(*hwtstamps));
 		/* Upper 32 bits contain s, lower 32 bits contain ns. */
 		hwtstamps->hwtstamp = ktime_set(systim >> 32,
 						systim & 0xFFFFFFFF);
@@ -191,14 +191,29 @@ static void igb_ptp_systim_to_hwtstamp(struct igb_adapter *adapter,
 }
 
 /* PTP clock operations */
-static int igb_ptp_adjfine_82576(struct ptp_clock_info *ptp, long scaled_ppm)
+static int igb_ptp_adjfreq_82576(struct ptp_clock_info *ptp, s32 ppb)
 {
 	struct igb_adapter *igb = container_of(ptp, struct igb_adapter,
 					       ptp_caps);
 	struct e1000_hw *hw = &igb->hw;
-	u64 incvalue;
+	int neg_adj = 0;
+	u64 rate;
+	u32 incvalue;
 
-	incvalue = adjust_by_scaled_ppm(INCVALUE_82576, scaled_ppm);
+	if (ppb < 0) {
+		neg_adj = 1;
+		ppb = -ppb;
+	}
+	rate = ppb;
+	rate <<= 14;
+	rate = div_u64(rate, 1953125);
+
+	incvalue = 16 << IGB_82576_TSYNC_SHIFT;
+
+	if (neg_adj)
+		incvalue -= rate;
+	else
+		incvalue += rate;
 
 	wr32(E1000_TIMINCA, INCPERIOD_82576 | (incvalue & INCVALUE_82576_MASK));
 
@@ -210,11 +225,17 @@ static int igb_ptp_adjfine_82580(struct ptp_clock_info *ptp, long scaled_ppm)
 	struct igb_adapter *igb = container_of(ptp, struct igb_adapter,
 					       ptp_caps);
 	struct e1000_hw *hw = &igb->hw;
-	bool neg_adj;
+	int neg_adj = 0;
 	u64 rate;
 	u32 inca;
 
-	neg_adj = diff_by_scaled_ppm(IGB_82580_BASE_PERIOD, scaled_ppm, &rate);
+	if (scaled_ppm < 0) {
+		neg_adj = 1;
+		scaled_ppm = -scaled_ppm;
+	}
+	rate = scaled_ppm;
+	rate <<= 13;
+	rate = div_u64(rate, 15625);
 
 	inca = rate & INCVALUE_MASK;
 	if (neg_adj)
@@ -486,157 +507,6 @@ static void igb_pin_perout(struct igb_adapter *igb, int chan, int pin, int freq)
 	wr32(E1000_CTRL_EXT, ctrl_ext);
 }
 
-static int igb_ptp_feature_enable_82580(struct ptp_clock_info *ptp,
-					struct ptp_clock_request *rq, int on)
-{
-	struct igb_adapter *igb =
-		container_of(ptp, struct igb_adapter, ptp_caps);
-	u32 tsauxc, tsim, tsauxc_mask, tsim_mask, trgttiml, trgttimh, systiml,
-		systimh, level_mask, level, rem;
-	struct e1000_hw *hw = &igb->hw;
-	struct timespec64 ts, start;
-	unsigned long flags;
-	u64 systim, now;
-	int pin = -1;
-	s64 ns;
-
-	switch (rq->type) {
-	case PTP_CLK_REQ_EXTTS:
-		/* Both the rising and falling edge are timestamped */
-		if (rq->extts.flags & PTP_STRICT_FLAGS &&
-		    (rq->extts.flags & PTP_ENABLE_FEATURE) &&
-		    (rq->extts.flags & PTP_EXTTS_EDGES) != PTP_EXTTS_EDGES)
-			return -EOPNOTSUPP;
-
-		if (on) {
-			pin = ptp_find_pin(igb->ptp_clock, PTP_PF_EXTTS,
-					   rq->extts.index);
-			if (pin < 0)
-				return -EBUSY;
-		}
-		if (rq->extts.index == 1) {
-			tsauxc_mask = TSAUXC_EN_TS1;
-			tsim_mask = TSINTR_AUTT1;
-		} else {
-			tsauxc_mask = TSAUXC_EN_TS0;
-			tsim_mask = TSINTR_AUTT0;
-		}
-		spin_lock_irqsave(&igb->tmreg_lock, flags);
-		tsauxc = rd32(E1000_TSAUXC);
-		tsim = rd32(E1000_TSIM);
-		if (on) {
-			igb_pin_extts(igb, rq->extts.index, pin);
-			tsauxc |= tsauxc_mask;
-			tsim |= tsim_mask;
-		} else {
-			tsauxc &= ~tsauxc_mask;
-			tsim &= ~tsim_mask;
-		}
-		wr32(E1000_TSAUXC, tsauxc);
-		wr32(E1000_TSIM, tsim);
-		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
-		return 0;
-
-	case PTP_CLK_REQ_PEROUT:
-		/* Reject requests with unsupported flags */
-		if (rq->perout.flags)
-			return -EOPNOTSUPP;
-
-		if (on) {
-			pin = ptp_find_pin(igb->ptp_clock, PTP_PF_PEROUT,
-					   rq->perout.index);
-			if (pin < 0)
-				return -EBUSY;
-		}
-		ts.tv_sec = rq->perout.period.sec;
-		ts.tv_nsec = rq->perout.period.nsec;
-		ns = timespec64_to_ns(&ts);
-		ns = ns >> 1;
-		if (on && ns < 8LL)
-			return -EINVAL;
-		ts = ns_to_timespec64(ns);
-		if (rq->perout.index == 1) {
-			tsauxc_mask = TSAUXC_EN_TT1;
-			tsim_mask = TSINTR_TT1;
-			trgttiml = E1000_TRGTTIML1;
-			trgttimh = E1000_TRGTTIMH1;
-		} else {
-			tsauxc_mask = TSAUXC_EN_TT0;
-			tsim_mask = TSINTR_TT0;
-			trgttiml = E1000_TRGTTIML0;
-			trgttimh = E1000_TRGTTIMH0;
-		}
-		spin_lock_irqsave(&igb->tmreg_lock, flags);
-		tsauxc = rd32(E1000_TSAUXC);
-		tsim = rd32(E1000_TSIM);
-		if (rq->perout.index == 1) {
-			tsauxc &= ~(TSAUXC_EN_TT1 | TSAUXC_EN_CLK1 | TSAUXC_ST1);
-			tsim &= ~TSINTR_TT1;
-		} else {
-			tsauxc &= ~(TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_ST0);
-			tsim &= ~TSINTR_TT0;
-		}
-		if (on) {
-			int i = rq->perout.index;
-
-			/* read systim registers in sequence */
-			rd32(E1000_SYSTIMR);
-			systiml = rd32(E1000_SYSTIML);
-			systimh = rd32(E1000_SYSTIMH);
-			systim = (((u64)(systimh & 0xFF)) << 32) | ((u64)systiml);
-			now = timecounter_cyc2time(&igb->tc, systim);
-
-			if (pin < 2) {
-				level_mask = (i == 1) ? 0x80000 : 0x40000;
-				level = (rd32(E1000_CTRL) & level_mask) ? 1 : 0;
-			} else {
-				level_mask = (i == 1) ? 0x80 : 0x40;
-				level = (rd32(E1000_CTRL_EXT) & level_mask) ? 1 : 0;
-			}
-
-			div_u64_rem(now, ns, &rem);
-			systim = systim + (ns - rem);
-
-			/* synchronize pin level with rising/falling edges */
-			div_u64_rem(now, ns << 1, &rem);
-			if (rem < ns) {
-				/* first half of period */
-				if (level == 0) {
-					/* output is already low, skip this period */
-					systim += ns;
-				}
-			} else {
-				/* second half of period */
-				if (level == 1) {
-					/* output is already high, skip this period */
-					systim += ns;
-				}
-			}
-
-			start = ns_to_timespec64(systim + (ns - rem));
-			igb_pin_perout(igb, i, pin, 0);
-			igb->perout[i].start.tv_sec = start.tv_sec;
-			igb->perout[i].start.tv_nsec = start.tv_nsec;
-			igb->perout[i].period.tv_sec = ts.tv_sec;
-			igb->perout[i].period.tv_nsec = ts.tv_nsec;
-
-			wr32(trgttiml, (u32)systim);
-			wr32(trgttimh, ((u32)(systim >> 32)) & 0xFF);
-			tsauxc |= tsauxc_mask;
-			tsim |= tsim_mask;
-		}
-		wr32(E1000_TSAUXC, tsauxc);
-		wr32(E1000_TSIM, tsim);
-		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
-		return 0;
-
-	case PTP_CLK_REQ_PPS:
-		return -EOPNOTSUPP;
-	}
-
-	return -EOPNOTSUPP;
-}
-
 static int igb_ptp_feature_enable_i210(struct ptp_clock_info *ptp,
 				       struct ptp_clock_request *rq, int on)
 {
@@ -651,6 +521,13 @@ static int igb_ptp_feature_enable_i210(struct ptp_clock_info *ptp,
 
 	switch (rq->type) {
 	case PTP_CLK_REQ_EXTTS:
+		/* Reject requests with unsupported flags */
+		if (rq->extts.flags & ~(PTP_ENABLE_FEATURE |
+					PTP_RISING_EDGE |
+					PTP_FALLING_EDGE |
+					PTP_STRICT_FLAGS))
+			return -EOPNOTSUPP;
+
 		/* Reject requests failing to enable both edges. */
 		if ((rq->extts.flags & PTP_STRICT_FLAGS) &&
 		    (rq->extts.flags & PTP_ENABLE_FEATURE) &&
@@ -949,7 +826,7 @@ static void igb_ptp_tx_hwtstamp(struct igb_adapter *adapter)
 
 	igb_ptp_systim_to_hwtstamp(adapter, &shhwtstamps, regval);
 	/* adjust timestamp for the TX latency based on link speed */
-	if (hw->mac.type == e1000_i210 || hw->mac.type == e1000_i211) {
+	if (adapter->hw.mac.type == e1000_i210) {
 		switch (adapter->link_speed) {
 		case SPEED_10:
 			adjust = IGB_I210_TX_LATENCY_10;
@@ -979,29 +856,30 @@ static void igb_ptp_tx_hwtstamp(struct igb_adapter *adapter)
 	dev_kfree_skb_any(skb);
 }
 
+#define IGB_RET_PTP_DISABLED 1
+#define IGB_RET_PTP_INVALID 2
+
 /**
  * igb_ptp_rx_pktstamp - retrieve Rx per packet timestamp
  * @q_vector: Pointer to interrupt specific structure
  * @va: Pointer to address containing Rx buffer
- * @timestamp: Pointer where timestamp will be stored
+ * @skb: Buffer containing timestamp and packet
  *
  * This function is meant to retrieve a timestamp from the first buffer of an
  * incoming frame.  The value is stored in little endian format starting on
  * byte 8
  *
- * Returns: The timestamp header length or 0 if not available
+ * Returns: 0 if success, nonzero if failure
  **/
 int igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector, void *va,
-			ktime_t *timestamp)
+			struct sk_buff *skb)
 {
 	struct igb_adapter *adapter = q_vector->adapter;
-	struct e1000_hw *hw = &adapter->hw;
-	struct skb_shared_hwtstamps ts;
 	__le64 *regval = (__le64 *)va;
 	int adjust = 0;
 
 	if (!(adapter->ptp_flags & IGB_PTP_ENABLED))
-		return 0;
+		return IGB_RET_PTP_DISABLED;
 
 	/* The timestamp is recorded in little endian format.
 	 * DWORD: 0        1        2        3
@@ -1010,12 +888,13 @@ int igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector, void *va,
 
 	/* check reserved dwords are zero, be/le doesn't matter for zero */
 	if (regval[0])
-		return 0;
+		return IGB_RET_PTP_INVALID;
 
-	igb_ptp_systim_to_hwtstamp(adapter, &ts, le64_to_cpu(regval[1]));
+	igb_ptp_systim_to_hwtstamp(adapter, skb_hwtstamps(skb),
+				   le64_to_cpu(regval[1]));
 
 	/* adjust timestamp for the RX latency based on link speed */
-	if (hw->mac.type == e1000_i210 || hw->mac.type == e1000_i211) {
+	if (adapter->hw.mac.type == e1000_i210) {
 		switch (adapter->link_speed) {
 		case SPEED_10:
 			adjust = IGB_I210_RX_LATENCY_10;
@@ -1028,10 +907,10 @@ int igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector, void *va,
 			break;
 		}
 	}
+	skb_hwtstamps(skb)->hwtstamp =
+		ktime_sub_ns(skb_hwtstamps(skb)->hwtstamp, adjust);
 
-	*timestamp = ktime_sub_ns(ts.hwtstamp, adjust);
-
-	return IGB_TS_HDR_LEN;
+	return 0;
 }
 
 /**
@@ -1094,22 +973,21 @@ void igb_ptp_rx_rgtstamp(struct igb_q_vector *q_vector, struct sk_buff *skb)
 }
 
 /**
- * igb_ptp_hwtstamp_get - get hardware time stamping config
+ * igb_ptp_get_ts_config - get hardware time stamping config
  * @netdev: netdev struct
- * @config: timestamping configuration structure
+ * @ifr: interface struct
  *
  * Get the hwtstamp_config settings to return to the user. Rather than attempt
  * to deconstruct the settings from the registers, just return a shadow copy
  * of the last known settings.
  **/
-int igb_ptp_hwtstamp_get(struct net_device *netdev,
-			 struct kernel_hwtstamp_config *config)
+int igb_ptp_get_ts_config(struct net_device *netdev, struct ifreq *ifr)
 {
 	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct hwtstamp_config *config = &adapter->tstamp_config;
 
-	*config = adapter->tstamp_config;
-
-	return 0;
+	return copy_to_user(ifr->ifr_data, config, sizeof(*config)) ?
+		-EFAULT : 0;
 }
 
 /**
@@ -1130,7 +1008,7 @@ int igb_ptp_hwtstamp_get(struct net_device *netdev,
  * level 2 or 4".
  */
 static int igb_ptp_set_timestamp_mode(struct igb_adapter *adapter,
-				      struct kernel_hwtstamp_config *config)
+				      struct hwtstamp_config *config)
 {
 	struct e1000_hw *hw = &adapter->hw;
 	u32 tsync_tx_ctl = E1000_TSYNCTXCTL_ENABLED;
@@ -1140,10 +1018,13 @@ static int igb_ptp_set_timestamp_mode(struct igb_adapter *adapter,
 	bool is_l2 = false;
 	u32 regval;
 
+	/* reserved for future extensions */
+	if (config->flags)
+		return -EINVAL;
+
 	switch (config->tx_type) {
 	case HWTSTAMP_TX_OFF:
 		tsync_tx_ctl = 0;
-		break;
 	case HWTSTAMP_TX_ON:
 		break;
 	default:
@@ -1252,12 +1133,12 @@ static int igb_ptp_set_timestamp_mode(struct igb_adapter *adapter,
 			| E1000_FTQF_MASK); /* mask all inputs */
 		ftqf &= ~E1000_FTQF_MASK_PROTO_BP; /* enable protocol check */
 
-		wr32(E1000_IMIR(3), (__force unsigned int)htons(PTP_EV_PORT));
+		wr32(E1000_IMIR(3), htons(PTP_EV_PORT));
 		wr32(E1000_IMIREXT(3),
 		     (E1000_IMIREXT_SIZE_BP | E1000_IMIREXT_CTRL_BP));
 		if (hw->mac.type == e1000_82576) {
 			/* enable source port check */
-			wr32(E1000_SPQF(3), (__force unsigned int)htons(PTP_EV_PORT));
+			wr32(E1000_SPQF(3), htons(PTP_EV_PORT));
 			ftqf &= ~E1000_FTQF_MASK_SOURCE_PORT_BP;
 		}
 		wr32(E1000_FTQF(3), ftqf);
@@ -1276,26 +1157,30 @@ static int igb_ptp_set_timestamp_mode(struct igb_adapter *adapter,
 }
 
 /**
- * igb_ptp_hwtstamp_set - set hardware time stamping config
+ * igb_ptp_set_ts_config - set hardware time stamping config
  * @netdev: netdev struct
- * @config: timestamping configuration structure
- * @extack: netlink extended ack structure for error reporting
+ * @ifr: interface struct
+ *
  **/
-int igb_ptp_hwtstamp_set(struct net_device *netdev,
-			 struct kernel_hwtstamp_config *config,
-			 struct netlink_ext_ack *extack)
+int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr)
 {
 	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct hwtstamp_config config;
 	int err;
 
-	err = igb_ptp_set_timestamp_mode(adapter, config);
+	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
+		return -EFAULT;
+
+	err = igb_ptp_set_timestamp_mode(adapter, &config);
 	if (err)
 		return err;
 
 	/* save these settings for future reference */
-	adapter->tstamp_config = *config;
+	memcpy(&adapter->tstamp_config, &config,
+	       sizeof(adapter->tstamp_config));
 
-	return 0;
+	return copy_to_user(ifr->ifr_data, &config, sizeof(config)) ?
+		-EFAULT : 0;
 }
 
 /**
@@ -1309,6 +1194,7 @@ void igb_ptp_init(struct igb_adapter *adapter)
 {
 	struct e1000_hw *hw = &adapter->hw;
 	struct net_device *netdev = adapter->netdev;
+	int i;
 
 	switch (hw->mac.type) {
 	case e1000_82576:
@@ -1317,7 +1203,7 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		adapter->ptp_caps.max_adj = 999999881;
 		adapter->ptp_caps.n_ext_ts = 0;
 		adapter->ptp_caps.pps = 0;
-		adapter->ptp_caps.adjfine = igb_ptp_adjfine_82576;
+		adapter->ptp_caps.adjfreq = igb_ptp_adjfreq_82576;
 		adapter->ptp_caps.adjtime = igb_ptp_adjtime_82576;
 		adapter->ptp_caps.gettimex64 = igb_ptp_gettimex_82576;
 		adapter->ptp_caps.settime64 = igb_ptp_settime_82576;
@@ -1331,24 +1217,16 @@ void igb_ptp_init(struct igb_adapter *adapter)
 	case e1000_82580:
 	case e1000_i354:
 	case e1000_i350:
-		igb_ptp_sdp_init(adapter);
 		snprintf(adapter->ptp_caps.name, 16, "%pm", netdev->dev_addr);
 		adapter->ptp_caps.owner = THIS_MODULE;
 		adapter->ptp_caps.max_adj = 62499999;
-		adapter->ptp_caps.n_ext_ts = IGB_N_EXTTS;
-		adapter->ptp_caps.n_per_out = IGB_N_PEROUT;
-		adapter->ptp_caps.n_pins = IGB_N_SDP;
+		adapter->ptp_caps.n_ext_ts = 0;
 		adapter->ptp_caps.pps = 0;
-		adapter->ptp_caps.supported_extts_flags = PTP_RISING_EDGE |
-							  PTP_FALLING_EDGE |
-							  PTP_STRICT_FLAGS;
-		adapter->ptp_caps.pin_config = adapter->sdp_config;
 		adapter->ptp_caps.adjfine = igb_ptp_adjfine_82580;
 		adapter->ptp_caps.adjtime = igb_ptp_adjtime_82576;
 		adapter->ptp_caps.gettimex64 = igb_ptp_gettimex_82580;
 		adapter->ptp_caps.settime64 = igb_ptp_settime_82576;
-		adapter->ptp_caps.enable = igb_ptp_feature_enable_82580;
-		adapter->ptp_caps.verify = igb_ptp_verify_pin;
+		adapter->ptp_caps.enable = igb_ptp_feature_enable;
 		adapter->cc.read = igb_ptp_read_82580;
 		adapter->cc.mask = CYCLECOUNTER_MASK(IGB_NBITS_82580);
 		adapter->cc.mult = 1;
@@ -1357,16 +1235,19 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		break;
 	case e1000_i210:
 	case e1000_i211:
-		igb_ptp_sdp_init(adapter);
+		for (i = 0; i < IGB_N_SDP; i++) {
+			struct ptp_pin_desc *ppd = &adapter->sdp_config[i];
+
+			snprintf(ppd->name, sizeof(ppd->name), "SDP%d", i);
+			ppd->index = i;
+			ppd->func = PTP_PF_NONE;
+		}
 		snprintf(adapter->ptp_caps.name, 16, "%pm", netdev->dev_addr);
 		adapter->ptp_caps.owner = THIS_MODULE;
 		adapter->ptp_caps.max_adj = 62499999;
 		adapter->ptp_caps.n_ext_ts = IGB_N_EXTTS;
 		adapter->ptp_caps.n_per_out = IGB_N_PEROUT;
 		adapter->ptp_caps.n_pins = IGB_N_SDP;
-		adapter->ptp_caps.supported_extts_flags = PTP_RISING_EDGE |
-							  PTP_FALLING_EDGE |
-							  PTP_STRICT_FLAGS;
 		adapter->ptp_caps.pps = 1;
 		adapter->ptp_caps.pin_config = adapter->sdp_config;
 		adapter->ptp_caps.adjfine = igb_ptp_adjfine_82580;
@@ -1402,23 +1283,6 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		adapter->tstamp_config.tx_type = HWTSTAMP_TX_OFF;
 
 		igb_ptp_reset(adapter);
-	}
-}
-
-/**
- * igb_ptp_sdp_init - utility function which inits the SDP config structs
- * @adapter: Board private structure.
- **/
-void igb_ptp_sdp_init(struct igb_adapter *adapter)
-{
-	int i;
-
-	for (i = 0; i < IGB_N_SDP; i++) {
-		struct ptp_pin_desc *ppd = &adapter->sdp_config[i];
-
-		snprintf(ppd->name, sizeof(ppd->name), "SDP%d", i);
-		ppd->index = i;
-		ppd->func = PTP_PF_NONE;
 	}
 }
 

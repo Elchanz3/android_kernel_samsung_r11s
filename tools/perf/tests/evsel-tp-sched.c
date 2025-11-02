@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/err.h>
-#include <event-parse.h>
+#include <traceevent/event-parse.h>
 #include "evsel.h"
 #include "tests.h"
 #include "debug.h"
 
-static int evsel__test_field(struct evsel *evsel, const char *name, int size, bool should_be_signed)
+static int perf_evsel__test_field(struct evsel *evsel, const char *name,
+				  int size, bool should_be_signed)
 {
 	struct tep_format_field *field = evsel__field(evsel, name);
 	int is_signed;
@@ -32,37 +33,36 @@ static int evsel__test_field(struct evsel *evsel, const char *name, int size, bo
 	return ret;
 }
 
-static int test__perf_evsel__tp_sched_test(struct test_suite *test __maybe_unused,
-					   int subtest __maybe_unused)
+int test__perf_evsel__tp_sched_test(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	struct evsel *evsel = evsel__newtp("sched", "sched_switch");
-	int ret = TEST_OK;
+	int ret = 0;
 
 	if (IS_ERR(evsel)) {
 		pr_debug("evsel__newtp failed with %ld\n", PTR_ERR(evsel));
-		return PTR_ERR(evsel) == -EACCES ? TEST_SKIP : TEST_FAIL;
+		return -1;
 	}
 
-	if (evsel__test_field(evsel, "prev_comm", 16, false))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "prev_comm", 16, false))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "prev_pid", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "prev_pid", 4, true))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "prev_prio", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "prev_prio", 4, true))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "prev_state", sizeof(long), true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "prev_state", sizeof(long), true))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "next_comm", 16, false))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "next_comm", 16, false))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "next_pid", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "next_pid", 4, true))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "next_prio", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "next_prio", 4, true))
+		ret = -1;
 
 	evsel__delete(evsel);
 
@@ -70,33 +70,21 @@ static int test__perf_evsel__tp_sched_test(struct test_suite *test __maybe_unuse
 
 	if (IS_ERR(evsel)) {
 		pr_debug("evsel__newtp failed with %ld\n", PTR_ERR(evsel));
-		return TEST_FAIL;
+		return -1;
 	}
 
-	if (evsel__test_field(evsel, "comm", 16, false))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "comm", 16, false))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "pid", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "pid", 4, true))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "prio", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "prio", 4, true))
+		ret = -1;
 
-	if (evsel__test_field(evsel, "target_cpu", 4, true))
-		ret = TEST_FAIL;
+	if (perf_evsel__test_field(evsel, "target_cpu", 4, true))
+		ret = -1;
 
 	evsel__delete(evsel);
 	return ret;
 }
-
-static struct test_case tests__perf_evsel__tp_sched_test[] = {
-	TEST_CASE_REASON("Parse sched tracepoints fields",
-			 perf_evsel__tp_sched_test,
-			 "permissions"),
-	{	.name = NULL, }
-};
-
-struct test_suite suite__perf_evsel__tp_sched_test = {
-	.desc = "Parse sched tracepoints fields",
-	.test_cases = tests__perf_evsel__tp_sched_test,
-};

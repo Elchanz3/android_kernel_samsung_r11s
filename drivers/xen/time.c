@@ -7,7 +7,6 @@
 #include <linux/math64.h>
 #include <linux/gfp.h>
 #include <linux/slab.h>
-#include <linux/static_call.h>
 
 #include <asm/paravirt.h>
 #include <asm/xen/hypervisor.h>
@@ -136,6 +135,14 @@ void xen_manage_runstate_time(int action)
 	}
 }
 
+/*
+ * Runstate accounting
+ */
+void xen_get_runstate_snapshot(struct vcpu_runstate_info *res)
+{
+	xen_get_runstate_snapshot_cpu(res, smp_processor_id());
+}
+
 /* return true when a vcpu could run but has no real cpu to run on */
 bool xen_vcpu_stolen(int vcpu)
 {
@@ -168,7 +175,7 @@ void __init xen_time_setup_guest(void)
 	xen_runstate_remote = !HYPERVISOR_vm_assist(VMASST_CMD_enable,
 					VMASST_TYPE_runstate_update_flag);
 
-	static_call_update(pv_steal_clock, xen_steal_clock);
+	pv_ops.time.steal_clock = xen_steal_clock;
 
 	static_key_slow_inc(&paravirt_steal_enabled);
 	if (xen_runstate_remote)

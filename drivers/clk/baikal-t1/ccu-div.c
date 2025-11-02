@@ -37,6 +37,7 @@
 #define CCU_DIV_CTL_GATE_REF_BUF	BIT(28)
 #define CCU_DIV_CTL_LOCK_NORMAL		BIT(31)
 
+#define CCU_DIV_RST_DELAY_US		1
 #define CCU_DIV_LOCK_CHECK_RETRIES	50
 
 #define CCU_DIV_CLKDIV_MIN		0
@@ -228,18 +229,15 @@ static inline unsigned long ccu_div_var_calc_divider(unsigned long rate,
 		       CCU_DIV_CLKDIV_MAX(mask));
 }
 
-static int ccu_div_var_determine_rate(struct clk_hw *hw,
-				      struct clk_rate_request *req)
+static long ccu_div_var_round_rate(struct clk_hw *hw, unsigned long rate,
+				   unsigned long *parent_rate)
 {
 	struct ccu_div *div = to_ccu_div(hw);
 	unsigned long divider;
 
-	divider = ccu_div_var_calc_divider(req->rate, req->best_parent_rate,
-					   div->mask);
+	divider = ccu_div_var_calc_divider(rate, *parent_rate, div->mask);
 
-	req->rate = ccu_div_calc_freq(req->best_parent_rate, divider);
-
-	return 0;
+	return ccu_div_calc_freq(*parent_rate, divider);
 }
 
 /*
@@ -311,19 +309,35 @@ static unsigned long ccu_div_fixed_recalc_rate(struct clk_hw *hw,
 	return ccu_div_calc_freq(parent_rate, div->divider);
 }
 
-static int ccu_div_fixed_determine_rate(struct clk_hw *hw,
-					struct clk_rate_request *req)
+static long ccu_div_fixed_round_rate(struct clk_hw *hw, unsigned long rate,
+				     unsigned long *parent_rate)
 {
 	struct ccu_div *div = to_ccu_div(hw);
 
-	req->rate = ccu_div_calc_freq(req->best_parent_rate, div->divider);
-
-	return 0;
+	return ccu_div_calc_freq(*parent_rate, div->divider);
 }
 
 static int ccu_div_fixed_set_rate(struct clk_hw *hw, unsigned long rate,
 				  unsigned long parent_rate)
 {
+	return 0;
+}
+
+int ccu_div_reset_domain(struct ccu_div *div)
+{
+	unsigned long flags;
+
+	if (!div || !(div->features & CCU_DIV_RESET_DOMAIN))
+		return -EINVAL;
+
+	spin_lock_irqsave(&div->lock, flags);
+	regmap_update_bits(div->sys_regs, div->reg_ctl,
+			   CCU_DIV_CTL_RST, CCU_DIV_CTL_RST);
+	spin_unlock_irqrestore(&div->lock, flags);
+
+	/* The next delay must be enough to cover all the resets. */
+	udelay(CCU_DIV_RST_DELAY_US);
+
 	return 0;
 }
 
@@ -539,14 +553,14 @@ static const struct clk_ops ccu_div_var_gate_to_set_ops = {
 	.disable = ccu_div_gate_disable,
 	.is_enabled = ccu_div_gate_is_enabled,
 	.recalc_rate = ccu_div_var_recalc_rate,
-	.determine_rate = ccu_div_var_determine_rate,
+	.round_rate = ccu_div_var_round_rate,
 	.set_rate = ccu_div_var_set_rate_fast,
 	.debug_init = ccu_div_var_debug_init
 };
 
 static const struct clk_ops ccu_div_var_nogate_ops = {
 	.recalc_rate = ccu_div_var_recalc_rate,
-	.determine_rate = ccu_div_var_determine_rate,
+	.round_rate = ccu_div_var_round_rate,
 	.set_rate = ccu_div_var_set_rate_slow,
 	.debug_init = ccu_div_var_debug_init
 };
@@ -556,7 +570,7 @@ static const struct clk_ops ccu_div_gate_ops = {
 	.disable = ccu_div_gate_disable,
 	.is_enabled = ccu_div_gate_is_enabled,
 	.recalc_rate = ccu_div_fixed_recalc_rate,
-	.determine_rate = ccu_div_fixed_determine_rate,
+	.round_rate = ccu_div_fixed_round_rate,
 	.set_rate = ccu_div_fixed_set_rate,
 	.debug_init = ccu_div_gate_debug_init
 };
@@ -570,7 +584,7 @@ static const struct clk_ops ccu_div_buf_ops = {
 
 static const struct clk_ops ccu_div_fixed_ops = {
 	.recalc_rate = ccu_div_fixed_recalc_rate,
-	.determine_rate = ccu_div_fixed_determine_rate,
+	.round_rate = ccu_div_fixed_round_rate,
 	.set_rate = ccu_div_fixed_set_rate,
 	.debug_init = ccu_div_fixed_debug_init
 };

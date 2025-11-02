@@ -506,7 +506,7 @@ error:
  * keyring, otherwise replace the link to the matching key with a link to the
  * new key.
  *
- * The key must grant the caller Link permission and the keyring must grant
+ * The key must grant the caller Link permission and the the keyring must grant
  * the caller Write permission.  Furthermore, if an additional link is created,
  * the keyring's quota will be extended.
  *
@@ -954,7 +954,6 @@ long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
 	long ret;
 	kuid_t uid;
 	kgid_t gid;
-	unsigned long flags;
 
 	uid = make_kuid(current_user_ns(), user);
 	gid = make_kgid(current_user_ns(), group);
@@ -1011,7 +1010,7 @@ long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
 			unsigned maxbytes = uid_eq(uid, GLOBAL_ROOT_UID) ?
 				key_quota_root_maxbytes : key_quota_maxbytes;
 
-			spin_lock_irqsave(&newowner->lock, flags);
+			spin_lock(&newowner->lock);
 			if (newowner->qnkeys + 1 > maxkeys ||
 			    newowner->qnbytes + key->quotalen > maxbytes ||
 			    newowner->qnbytes + key->quotalen <
@@ -1020,12 +1019,12 @@ long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
 
 			newowner->qnkeys++;
 			newowner->qnbytes += key->quotalen;
-			spin_unlock_irqrestore(&newowner->lock, flags);
+			spin_unlock(&newowner->lock);
 
-			spin_lock_irqsave(&key->user->lock, flags);
+			spin_lock(&key->user->lock);
 			key->user->qnkeys--;
 			key->user->qnbytes -= key->quotalen;
-			spin_unlock_irqrestore(&key->user->lock, flags);
+			spin_unlock(&key->user->lock);
 		}
 
 		atomic_dec(&key->user->nkeys);
@@ -1057,7 +1056,7 @@ error:
 	return ret;
 
 quota_overrun:
-	spin_unlock_irqrestore(&newowner->lock, flags);
+	spin_unlock(&newowner->lock);
 	zapowner = newowner;
 	ret = -EDQUOT;
 	goto error_put;
@@ -1253,11 +1252,12 @@ long keyctl_instantiate_key(key_serial_t id,
 			    key_serial_t ringid)
 {
 	if (_payload && plen) {
+		struct iovec iov;
 		struct iov_iter from;
 		int ret;
 
-		ret = import_ubuf(ITER_SOURCE, (void __user *)_payload, plen,
-				  &from);
+		ret = import_single_range(WRITE, (void __user *)_payload, plen,
+					  &iov, &from);
 		if (unlikely(ret))
 			return ret;
 
@@ -1288,7 +1288,7 @@ long keyctl_instantiate_key_iov(key_serial_t id,
 	if (!_payload_iov)
 		ioc = 0;
 
-	ret = import_iovec(ITER_SOURCE, _payload_iov, ioc,
+	ret = import_iovec(WRITE, _payload_iov, ioc,
 				    ARRAY_SIZE(iovstack), &iov, &from);
 	if (ret < 0)
 		return ret;
@@ -1694,7 +1694,7 @@ long keyctl_session_to_parent(void)
 		goto unlock;
 
 	/* cancel an already pending keyring replacement */
-	oldwork = task_work_cancel_func(parent, key_change_session_keyring);
+	oldwork = task_work_cancel(parent, key_change_session_keyring);
 
 	/* the replacement session keyring is applied just prior to userspace
 	 * restarting */

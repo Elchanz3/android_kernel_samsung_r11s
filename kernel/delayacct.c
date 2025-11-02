@@ -7,91 +7,29 @@
 #include <linux/sched.h>
 #include <linux/sched/task.h>
 #include <linux/sched/cputime.h>
-#include <linux/sched/clock.h>
 #include <linux/slab.h>
 #include <linux/taskstats.h>
+#include <linux/time.h>
 #include <linux/sysctl.h>
 #include <linux/delayacct.h>
 #include <linux/module.h>
 
-#define UPDATE_DELAY(type) \
-do { \
-	d->type##_delay_max = tsk->delays->type##_delay_max; \
-	d->type##_delay_min = tsk->delays->type##_delay_min; \
-	tmp = d->type##_delay_total + tsk->delays->type##_delay; \
-	d->type##_delay_total = (tmp < d->type##_delay_total) ? 0 : tmp; \
-	d->type##_count += tsk->delays->type##_count; \
-} while (0)
-
-DEFINE_STATIC_KEY_FALSE(delayacct_key);
-int delayacct_on __read_mostly;	/* Delay accounting turned on/off */
+int delayacct_on __read_mostly = 1;	/* Delay accounting turned on/off */
+EXPORT_SYMBOL_GPL(delayacct_on);
 struct kmem_cache *delayacct_cache;
 
-static void set_delayacct(bool enabled)
+static int __init delayacct_setup_disable(char *str)
 {
-	if (enabled) {
-		static_branch_enable(&delayacct_key);
-		delayacct_on = 1;
-	} else {
-		delayacct_on = 0;
-		static_branch_disable(&delayacct_key);
-	}
-}
-
-static int __init delayacct_setup_enable(char *str)
-{
-	delayacct_on = 1;
+	delayacct_on = 0;
 	return 1;
 }
-__setup("delayacct", delayacct_setup_enable);
+__setup("nodelayacct", delayacct_setup_disable);
 
 void delayacct_init(void)
 {
 	delayacct_cache = KMEM_CACHE(task_delay_info, SLAB_PANIC|SLAB_ACCOUNT);
 	delayacct_tsk_init(&init_task);
-	set_delayacct(delayacct_on);
 }
-
-#ifdef CONFIG_PROC_SYSCTL
-static int sysctl_delayacct(const struct ctl_table *table, int write, void *buffer,
-		     size_t *lenp, loff_t *ppos)
-{
-	int state = delayacct_on;
-	struct ctl_table t;
-	int err;
-
-	if (write && !capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	t = *table;
-	t.data = &state;
-	err = proc_dointvec_minmax(&t, write, buffer, lenp, ppos);
-	if (err < 0)
-		return err;
-	if (write)
-		set_delayacct(state);
-	return err;
-}
-
-static const struct ctl_table kern_delayacct_table[] = {
-	{
-		.procname       = "task_delayacct",
-		.data           = NULL,
-		.maxlen         = sizeof(unsigned int),
-		.mode           = 0644,
-		.proc_handler   = sysctl_delayacct,
-		.extra1         = SYSCTL_ZERO,
-		.extra2         = SYSCTL_ONE,
-	},
-};
-
-static __init int kernel_delayacct_sysctls_init(void)
-{
-	register_sysctl_init("kernel", kern_delayacct_table);
-	return 0;
-}
-late_initcall(kernel_delayacct_sysctls_init);
-#endif
 
 void __delayacct_tsk_init(struct task_struct *tsk)
 {
@@ -102,28 +40,25 @@ void __delayacct_tsk_init(struct task_struct *tsk)
 
 /*
  * Finish delay accounting for a statistic using its timestamps (@start),
- * accumulator (@total) and @count
+ * accumalator (@total) and @count
  */
-static void delayacct_end(raw_spinlock_t *lock, u64 *start, u64 *total, u32 *count, u64 *max, u64 *min)
+static void delayacct_end(raw_spinlock_t *lock, u64 *start, u64 *total,
+			  u32 *count)
 {
-	s64 ns = local_clock() - *start;
+	s64 ns = ktime_get_ns() - *start;
 	unsigned long flags;
 
 	if (ns > 0) {
 		raw_spin_lock_irqsave(lock, flags);
 		*total += ns;
 		(*count)++;
-		if (ns > *max)
-			*max = ns;
-		if (*min == 0 || ns < *min)
-			*min = ns;
 		raw_spin_unlock_irqrestore(lock, flags);
 	}
 }
 
 void __delayacct_blkio_start(void)
 {
-	current->delays->blkio_start = local_clock();
+	current->delays->blkio_start = ktime_get_ns();
 }
 
 /*
@@ -132,15 +67,22 @@ void __delayacct_blkio_start(void)
  */
 void __delayacct_blkio_end(struct task_struct *p)
 {
-	delayacct_end(&p->delays->lock,
-		      &p->delays->blkio_start,
-		      &p->delays->blkio_delay,
-		      &p->delays->blkio_count,
-		      &p->delays->blkio_delay_max,
-		      &p->delays->blkio_delay_min);
+	struct task_delay_info *delays = p->delays;
+	u64 *total;
+	u32 *count;
+
+	if (p->delays->flags & DELAYACCT_PF_SWAPIN) {
+		total = &delays->swapin_delay;
+		count = &delays->swapin_count;
+	} else {
+		total = &delays->blkio_delay;
+		count = &delays->blkio_count;
+	}
+
+	delayacct_end(&delays->lock, &delays->blkio_start, total, count);
 }
 
-int delayacct_add_tsk(struct taskstats *d, struct task_struct *tsk)
+int __delayacct_add_tsk(struct taskstats *d, struct task_struct *tsk)
 {
 	u64 utime, stime, stimescaled, utimescaled;
 	unsigned long long t2, t3;
@@ -168,27 +110,28 @@ int delayacct_add_tsk(struct taskstats *d, struct task_struct *tsk)
 
 	d->cpu_count += t1;
 
-	d->cpu_delay_max = tsk->sched_info.max_run_delay;
-	d->cpu_delay_min = tsk->sched_info.min_run_delay;
 	tmp = (s64)d->cpu_delay_total + t2;
 	d->cpu_delay_total = (tmp < (s64)d->cpu_delay_total) ? 0 : tmp;
-	tmp = (s64)d->cpu_run_virtual_total + t3;
 
+	tmp = (s64)d->cpu_run_virtual_total + t3;
 	d->cpu_run_virtual_total =
 		(tmp < (s64)d->cpu_run_virtual_total) ?	0 : tmp;
 
-	if (!tsk->delays)
-		return 0;
-
 	/* zero XXX_total, non-zero XXX_count implies XXX stat overflowed */
+
 	raw_spin_lock_irqsave(&tsk->delays->lock, flags);
-	UPDATE_DELAY(blkio);
-	UPDATE_DELAY(swapin);
-	UPDATE_DELAY(freepages);
-	UPDATE_DELAY(thrashing);
-	UPDATE_DELAY(compact);
-	UPDATE_DELAY(wpcopy);
-	UPDATE_DELAY(irq);
+	tmp = d->blkio_delay_total + tsk->delays->blkio_delay;
+	d->blkio_delay_total = (tmp < d->blkio_delay_total) ? 0 : tmp;
+	tmp = d->swapin_delay_total + tsk->delays->swapin_delay;
+	d->swapin_delay_total = (tmp < d->swapin_delay_total) ? 0 : tmp;
+	tmp = d->freepages_delay_total + tsk->delays->freepages_delay;
+	d->freepages_delay_total = (tmp < d->freepages_delay_total) ? 0 : tmp;
+	tmp = d->thrashing_delay_total + tsk->delays->thrashing_delay;
+	d->thrashing_delay_total = (tmp < d->thrashing_delay_total) ? 0 : tmp;
+	d->blkio_count += tsk->delays->blkio_count;
+	d->swapin_count += tsk->delays->swapin_count;
+	d->freepages_count += tsk->delays->freepages_count;
+	d->thrashing_count += tsk->delays->thrashing_count;
 	raw_spin_unlock_irqrestore(&tsk->delays->lock, flags);
 
 	return 0;
@@ -200,106 +143,48 @@ __u64 __delayacct_blkio_ticks(struct task_struct *tsk)
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&tsk->delays->lock, flags);
-	ret = nsec_to_clock_t(tsk->delays->blkio_delay);
+	ret = nsec_to_clock_t(tsk->delays->blkio_delay +
+				tsk->delays->swapin_delay);
 	raw_spin_unlock_irqrestore(&tsk->delays->lock, flags);
 	return ret;
 }
 
+#ifdef CONFIG_PAGE_BOOST
+__u64 __delayacct_blkio_nsecs(struct task_struct *tsk)
+{
+	__u64 ret;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&tsk->delays->lock, flags);
+	ret = tsk->delays->blkio_delay + tsk->delays->swapin_delay;
+	raw_spin_unlock_irqrestore(&tsk->delays->lock, flags);
+	return ret;
+}
+#endif
+
 void __delayacct_freepages_start(void)
 {
-	current->delays->freepages_start = local_clock();
+	current->delays->freepages_start = ktime_get_ns();
 }
 
 void __delayacct_freepages_end(void)
 {
-	delayacct_end(&current->delays->lock,
-		      &current->delays->freepages_start,
-		      &current->delays->freepages_delay,
-		      &current->delays->freepages_count,
-		      &current->delays->freepages_delay_max,
-		      &current->delays->freepages_delay_min);
+	delayacct_end(
+		&current->delays->lock,
+		&current->delays->freepages_start,
+		&current->delays->freepages_delay,
+		&current->delays->freepages_count);
 }
 
-void __delayacct_thrashing_start(bool *in_thrashing)
+void __delayacct_thrashing_start(void)
 {
-	*in_thrashing = !!current->in_thrashing;
-	if (*in_thrashing)
-		return;
-
-	current->in_thrashing = 1;
-	current->delays->thrashing_start = local_clock();
+	current->delays->thrashing_start = ktime_get_ns();
 }
 
-void __delayacct_thrashing_end(bool *in_thrashing)
+void __delayacct_thrashing_end(void)
 {
-	if (*in_thrashing)
-		return;
-
-	current->in_thrashing = 0;
 	delayacct_end(&current->delays->lock,
 		      &current->delays->thrashing_start,
 		      &current->delays->thrashing_delay,
-		      &current->delays->thrashing_count,
-		      &current->delays->thrashing_delay_max,
-		      &current->delays->thrashing_delay_min);
+		      &current->delays->thrashing_count);
 }
-
-void __delayacct_swapin_start(void)
-{
-	current->delays->swapin_start = local_clock();
-}
-
-void __delayacct_swapin_end(void)
-{
-	delayacct_end(&current->delays->lock,
-		      &current->delays->swapin_start,
-		      &current->delays->swapin_delay,
-		      &current->delays->swapin_count,
-		      &current->delays->swapin_delay_max,
-		      &current->delays->swapin_delay_min);
-}
-
-void __delayacct_compact_start(void)
-{
-	current->delays->compact_start = local_clock();
-}
-
-void __delayacct_compact_end(void)
-{
-	delayacct_end(&current->delays->lock,
-		      &current->delays->compact_start,
-		      &current->delays->compact_delay,
-		      &current->delays->compact_count,
-		      &current->delays->compact_delay_max,
-		      &current->delays->compact_delay_min);
-}
-
-void __delayacct_wpcopy_start(void)
-{
-	current->delays->wpcopy_start = local_clock();
-}
-
-void __delayacct_wpcopy_end(void)
-{
-	delayacct_end(&current->delays->lock,
-		      &current->delays->wpcopy_start,
-		      &current->delays->wpcopy_delay,
-		      &current->delays->wpcopy_count,
-		      &current->delays->wpcopy_delay_max,
-		      &current->delays->wpcopy_delay_min);
-}
-
-void __delayacct_irq(struct task_struct *task, u32 delta)
-{
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&task->delays->lock, flags);
-	task->delays->irq_delay += delta;
-	task->delays->irq_count++;
-	if (delta > task->delays->irq_delay_max)
-		task->delays->irq_delay_max = delta;
-	if (delta && (!task->delays->irq_delay_min || delta < task->delays->irq_delay_min))
-		task->delays->irq_delay_min = delta;
-	raw_spin_unlock_irqrestore(&task->delays->lock, flags);
-}
-

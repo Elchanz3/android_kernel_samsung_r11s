@@ -55,7 +55,6 @@ struct ice_fltr_desc {
 #define ICE_FXD_FLTR_QW0_COMP_REPORT_M	\
 				(0x3ULL << ICE_FXD_FLTR_QW0_COMP_REPORT_S)
 #define ICE_FXD_FLTR_QW0_COMP_REPORT_SW_FAIL	0x1ULL
-#define ICE_FXD_FLTR_QW0_COMP_REPORT_SW		0x2ULL
 
 #define ICE_FXD_FLTR_QW0_FD_SPACE_S	14
 #define ICE_FXD_FLTR_QW0_FD_SPACE_M	(0x3ULL << ICE_FXD_FLTR_QW0_FD_SPACE_S)
@@ -129,7 +128,6 @@ struct ice_fltr_desc {
 #define ICE_FXD_FLTR_QW1_FDID_PRI_S	25
 #define ICE_FXD_FLTR_QW1_FDID_PRI_M	(0x7ULL << ICE_FXD_FLTR_QW1_FDID_PRI_S)
 #define ICE_FXD_FLTR_QW1_FDID_PRI_ONE	0x1ULL
-#define ICE_FXD_FLTR_QW1_FDID_PRI_THREE	0x3ULL
 
 #define ICE_FXD_FLTR_QW1_FDID_MDID_S	28
 #define ICE_FXD_FLTR_QW1_FDID_MDID_M	(0xFULL << ICE_FXD_FLTR_QW1_FDID_MDID_S)
@@ -140,25 +138,64 @@ struct ice_fltr_desc {
 			(0xFFFFFFFFULL << ICE_FXD_FLTR_QW1_FDID_S)
 #define ICE_FXD_FLTR_QW1_FDID_ZERO	0x0ULL
 
-/* definition for FD filter programming status descriptor WB format */
-#define ICE_FXD_FLTR_WB_QW1_DD_S	0
-#define ICE_FXD_FLTR_WB_QW1_DD_M	(0x1ULL << ICE_FXD_FLTR_WB_QW1_DD_S)
-#define ICE_FXD_FLTR_WB_QW1_DD_YES	0x1ULL
+struct ice_rx_ptype_decoded {
+	u32 ptype:10;
+	u32 known:1;
+	u32 outer_ip:1;
+	u32 outer_ip_ver:2;
+	u32 outer_frag:1;
+	u32 tunnel_type:3;
+	u32 tunnel_end_prot:2;
+	u32 tunnel_end_frag:1;
+	u32 inner_prot:4;
+	u32 payload_layer:3;
+};
 
-#define ICE_FXD_FLTR_WB_QW1_PROG_ID_S	1
-#define ICE_FXD_FLTR_WB_QW1_PROG_ID_M	\
-				(0x3ULL << ICE_FXD_FLTR_WB_QW1_PROG_ID_S)
-#define ICE_FXD_FLTR_WB_QW1_PROG_ADD	0x0ULL
-#define ICE_FXD_FLTR_WB_QW1_PROG_DEL	0x1ULL
+enum ice_rx_ptype_outer_ip {
+	ICE_RX_PTYPE_OUTER_L2	= 0,
+	ICE_RX_PTYPE_OUTER_IP	= 1,
+};
 
-#define ICE_FXD_FLTR_WB_QW1_FAIL_S	4
-#define ICE_FXD_FLTR_WB_QW1_FAIL_M	(0x1ULL << ICE_FXD_FLTR_WB_QW1_FAIL_S)
-#define ICE_FXD_FLTR_WB_QW1_FAIL_YES	0x1ULL
+enum ice_rx_ptype_outer_ip_ver {
+	ICE_RX_PTYPE_OUTER_NONE	= 0,
+	ICE_RX_PTYPE_OUTER_IPV4	= 1,
+	ICE_RX_PTYPE_OUTER_IPV6	= 2,
+};
 
-#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_S	5
-#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_M	\
-				(0x1ULL << ICE_FXD_FLTR_WB_QW1_FAIL_PROF_S)
-#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_YES	0x1ULL
+enum ice_rx_ptype_outer_fragmented {
+	ICE_RX_PTYPE_NOT_FRAG	= 0,
+	ICE_RX_PTYPE_FRAG	= 1,
+};
+
+enum ice_rx_ptype_tunnel_type {
+	ICE_RX_PTYPE_TUNNEL_NONE		= 0,
+	ICE_RX_PTYPE_TUNNEL_IP_IP		= 1,
+	ICE_RX_PTYPE_TUNNEL_IP_GRENAT		= 2,
+	ICE_RX_PTYPE_TUNNEL_IP_GRENAT_MAC	= 3,
+	ICE_RX_PTYPE_TUNNEL_IP_GRENAT_MAC_VLAN	= 4,
+};
+
+enum ice_rx_ptype_tunnel_end_prot {
+	ICE_RX_PTYPE_TUNNEL_END_NONE	= 0,
+	ICE_RX_PTYPE_TUNNEL_END_IPV4	= 1,
+	ICE_RX_PTYPE_TUNNEL_END_IPV6	= 2,
+};
+
+enum ice_rx_ptype_inner_prot {
+	ICE_RX_PTYPE_INNER_PROT_NONE		= 0,
+	ICE_RX_PTYPE_INNER_PROT_UDP		= 1,
+	ICE_RX_PTYPE_INNER_PROT_TCP		= 2,
+	ICE_RX_PTYPE_INNER_PROT_SCTP		= 3,
+	ICE_RX_PTYPE_INNER_PROT_ICMP		= 4,
+	ICE_RX_PTYPE_INNER_PROT_TIMESYNC	= 5,
+};
+
+enum ice_rx_ptype_payload_layer {
+	ICE_RX_PTYPE_PAYLOAD_LAYER_NONE	= 0,
+	ICE_RX_PTYPE_PAYLOAD_LAYER_PAY2	= 1,
+	ICE_RX_PTYPE_PAYLOAD_LAYER_PAY3	= 2,
+	ICE_RX_PTYPE_PAYLOAD_LAYER_PAY4	= 3,
+};
 
 /* Rx Flex Descriptor
  * This descriptor is used instead of the legacy version descriptor when
@@ -229,7 +266,7 @@ struct ice_32b_rx_flex_desc_nic {
 	__le16 status_error1;
 	u8 flexi_flags2;
 	u8 ts_low;
-	__le16 raw_csum;
+	__le16 l2tag2_1st;
 	__le16 l2tag2_2nd;
 
 	/* Qword 3 */
@@ -237,46 +274,6 @@ struct ice_32b_rx_flex_desc_nic {
 	union {
 		struct {
 			__le16 vlan_id;
-			__le16 flow_id_ipv6;
-		} flex;
-		__le32 ts_high;
-	} flex_ts;
-};
-
-/* Rx Flex Descriptor NIC Profile
- * RxDID Profile ID 6
- * Flex-field 0: RSS hash lower 16-bits
- * Flex-field 1: RSS hash upper 16-bits
- * Flex-field 2: Flow ID lower 16-bits
- * Flex-field 3: Source VSI
- * Flex-field 4: reserved, VLAN ID taken from L2Tag
- */
-struct ice_32b_rx_flex_desc_nic_2 {
-	/* Qword 0 */
-	u8 rxdid;
-	u8 mir_id_umb_cast;
-	__le16 ptype_flexi_flags0;
-	__le16 pkt_len;
-	__le16 hdr_len_sph_flex_flags1;
-
-	/* Qword 1 */
-	__le16 status_error0;
-	__le16 l2tag1;
-	__le32 rss_hash;
-
-	/* Qword 2 */
-	__le16 status_error1;
-	u8 flexi_flags2;
-	u8 ts_low;
-	__le16 l2tag2_1st;
-	__le16 l2tag2_2nd;
-
-	/* Qword 3 */
-	__le16 flow_id;
-	__le16 src_vsi;
-	union {
-		struct {
-			__le16 rsvd;
 			__le16 flow_id_ipv6;
 		} flex;
 		__le32 ts_high;
@@ -366,26 +363,32 @@ enum ice_rx_flex_desc_status_error_0_bits {
 enum ice_rx_flex_desc_status_error_1_bits {
 	/* Note: These are predefined bit offsets */
 	ICE_RX_FLEX_DESC_STATUS1_NAT_S = 4,
-	 /* [10:5] reserved */
-	ICE_RX_FLEX_DESC_STATUS1_L2TAG2P_S = 11,
 	ICE_RX_FLEX_DESC_STATUS1_LAST /* this entry must be last!!! */
 };
 
+#define ICE_RXQ_CTX_SIZE_DWORDS		8
+#define ICE_RXQ_CTX_SZ			(ICE_RXQ_CTX_SIZE_DWORDS * sizeof(u32))
 #define ICE_TX_CMPLTNQ_CTX_SIZE_DWORDS	22
 #define ICE_TX_DRBELL_Q_CTX_SIZE_DWORDS	5
 #define GLTCLAN_CQ_CNTX(i, CQ)		(GLTCLAN_CQ_CNTX0(CQ) + ((i) * 0x0800))
 
-/* RLAN Rx queue context data */
+/* RLAN Rx queue context data
+ *
+ * The sizes of the variables may be larger than needed due to crossing byte
+ * boundaries. If we do not have the width of the variable set to the correct
+ * size then we could end up shifting bits off the top of the variable when the
+ * variable is at the top of a byte and crosses over into the next byte.
+ */
 struct ice_rlan_ctx {
 	u16 head;
-	u8 cpuid;
+	u16 cpuid; /* bigger than needed, see above for reason */
 #define ICE_RLAN_BASE_S 7
 	u64 base;
 	u16 qlen;
 #define ICE_RLAN_CTX_DBUF_S 7
-	u8 dbuf;
+	u16 dbuf; /* bigger than needed, see above for reason */
 #define ICE_RLAN_CTX_HBUF_S 6
-	u8 hbuf;
+	u16 hbuf; /* bigger than needed, see above for reason */
 	u8 dtype;
 	u8 dsize;
 	u8 crcstrip;
@@ -393,14 +396,28 @@ struct ice_rlan_ctx {
 	u8 hsplit_0;
 	u8 hsplit_1;
 	u8 showiv;
-	u16 rxmax;
+	u32 rxmax; /* bigger than needed, see above for reason */
 	u8 tphrdesc_ena;
 	u8 tphwdesc_ena;
 	u8 tphdata_ena;
 	u8 tphhead_ena;
-	u8 lrxqthresh;
+	u16 lrxqthresh; /* bigger than needed, see above for reason */
 	u8 prefena;	/* NOTE: normally must be set to 1 at init */
 };
+
+struct ice_ctx_ele {
+	u16 offset;
+	u16 size_of;
+	u16 width;
+	u16 lsb;
+};
+
+#define ICE_CTX_STORE(_struct, _ele, _width, _lsb) {	\
+	.offset = offsetof(struct _struct, _ele),	\
+	.size_of = sizeof_field(struct _struct, _ele),	\
+	.width = _width,				\
+	.lsb = _lsb,					\
+}
 
 /* for hsplit_0 field of Rx RLAN context */
 enum ice_rlan_ctx_rx_hsplit_0 {
@@ -478,14 +495,9 @@ enum ice_tx_desc_len_fields {
 struct ice_tx_ctx_desc {
 	__le32 tunneling_params;
 	__le16 l2tag2;
-	__le16 gcs;
+	__le16 rsvd;
 	__le64 qw1;
 };
-
-#define ICE_TX_GCS_DESC_START_M		GENMASK(7, 0)
-#define ICE_TX_GCS_DESC_OFFSET_M	GENMASK(11, 8)
-#define ICE_TX_GCS_DESC_TYPE_M		GENMASK(14, 12)
-#define ICE_TX_GCS_DESC_CSUM_PSH	1
 
 #define ICE_TXD_CTX_QW1_CMD_S	4
 #define ICE_TXD_CTX_QW1_CMD_M	(0x7FUL << ICE_TXD_CTX_QW1_CMD_S)
@@ -496,9 +508,6 @@ struct ice_tx_ctx_desc {
 
 #define ICE_TXD_CTX_QW1_MSS_S	50
 #define ICE_TXD_CTX_MIN_MSS	64
-
-#define ICE_TXD_CTX_QW1_VSI_S	50
-#define ICE_TXD_CTX_QW1_VSI_M	(0x3FFULL << ICE_TXD_CTX_QW1_VSI_S)
 
 enum ice_tx_ctx_desc_cmd_bits {
 	ICE_TX_CTX_DESC_TSO		= 0x01,
@@ -534,12 +543,18 @@ enum ice_tx_ctx_desc_eipt_offload {
 #define ICE_LAN_TXQ_MAX_QGRPS	127
 #define ICE_LAN_TXQ_MAX_QDIS	1023
 
-/* Tx queue context data */
+/* Tx queue context data
+ *
+ * The sizes of the variables may be larger than needed due to crossing byte
+ * boundaries. If we do not have the width of the variable set to the correct
+ * size then we could end up shifting bits off the top of the variable when the
+ * variable is at the top of a byte and crosses over into the next byte.
+ */
 struct ice_tlan_ctx {
 #define ICE_TLAN_CTX_BASE_S	7
 	u64 base;		/* base is defined in 128-byte units */
 	u8 port_num;
-	u8 cgd_num;
+	u16 cgd_num;		/* bigger than needed, see above for reason */
 	u8 pf_num;
 	u16 vmvf_num;
 	u8 vmvf_type;
@@ -550,7 +565,7 @@ struct ice_tlan_ctx {
 	u8 tsyn_ena;
 	u8 internal_usage_flag;
 	u8 alt_vlan;
-	u8 cpuid;
+	u16 cpuid;		/* bigger than needed, see above for reason */
 	u8 wb_mode;
 	u8 tphrd_desc;
 	u8 tphrd;
@@ -559,7 +574,7 @@ struct ice_tlan_ctx {
 	u16 qnum_in_func;
 	u8 itr_notification_mode;
 	u8 adjust_prof_id;
-	u16 qlen;
+	u32 qlen;		/* bigger than needed, see above for reason */
 	u8 quanta_prof_idx;
 	u8 tso_ena;
 	u16 tso_qnum;
@@ -567,47 +582,365 @@ struct ice_tlan_ctx {
 	u8 drop_ena;
 	u8 cache_prof_idx;
 	u8 pkt_shaper_prof_idx;
+	u8 int_q_state;	/* width not needed - internal - DO NOT WRITE!!! */
 };
 
-#define ICE_TXTIME_TX_DESC_IDX_M	GENMASK(12, 0)
-#define ICE_TXTIME_STAMP_M		GENMASK(31, 13)
+/* macro to make the table lines short */
+#define ICE_PTT(PTYPE, OUTER_IP, OUTER_IP_VER, OUTER_FRAG, T, TE, TEF, I, PL)\
+	{	PTYPE, \
+		1, \
+		ICE_RX_PTYPE_OUTER_##OUTER_IP, \
+		ICE_RX_PTYPE_OUTER_##OUTER_IP_VER, \
+		ICE_RX_PTYPE_##OUTER_FRAG, \
+		ICE_RX_PTYPE_TUNNEL_##T, \
+		ICE_RX_PTYPE_TUNNEL_END_##TE, \
+		ICE_RX_PTYPE_##TEF, \
+		ICE_RX_PTYPE_INNER_PROT_##I, \
+		ICE_RX_PTYPE_PAYLOAD_LAYER_##PL }
 
-/* Tx time stamp descriptor */
-struct ice_ts_desc {
-	__le32 tx_desc_idx_tstamp;
+#define ICE_PTT_UNUSED_ENTRY(PTYPE) { PTYPE, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+/* shorter macros makes the table fit but are terse */
+#define ICE_RX_PTYPE_NOF		ICE_RX_PTYPE_NOT_FRAG
+#define ICE_RX_PTYPE_FRG		ICE_RX_PTYPE_FRAG
+
+/* Lookup table mapping the HW PTYPE to the bit field for decoding */
+static const struct ice_rx_ptype_decoded ice_ptype_lkup[] = {
+	/* L2 Packet types */
+	ICE_PTT_UNUSED_ENTRY(0),
+	ICE_PTT(1, L2, NONE, NOF, NONE, NONE, NOF, NONE, PAY2),
+	ICE_PTT_UNUSED_ENTRY(2),
+	ICE_PTT_UNUSED_ENTRY(3),
+	ICE_PTT_UNUSED_ENTRY(4),
+	ICE_PTT_UNUSED_ENTRY(5),
+	ICE_PTT(6, L2, NONE, NOF, NONE, NONE, NOF, NONE, NONE),
+	ICE_PTT(7, L2, NONE, NOF, NONE, NONE, NOF, NONE, NONE),
+	ICE_PTT_UNUSED_ENTRY(8),
+	ICE_PTT_UNUSED_ENTRY(9),
+	ICE_PTT(10, L2, NONE, NOF, NONE, NONE, NOF, NONE, NONE),
+	ICE_PTT(11, L2, NONE, NOF, NONE, NONE, NOF, NONE, NONE),
+	ICE_PTT_UNUSED_ENTRY(12),
+	ICE_PTT_UNUSED_ENTRY(13),
+	ICE_PTT_UNUSED_ENTRY(14),
+	ICE_PTT_UNUSED_ENTRY(15),
+	ICE_PTT_UNUSED_ENTRY(16),
+	ICE_PTT_UNUSED_ENTRY(17),
+	ICE_PTT_UNUSED_ENTRY(18),
+	ICE_PTT_UNUSED_ENTRY(19),
+	ICE_PTT_UNUSED_ENTRY(20),
+	ICE_PTT_UNUSED_ENTRY(21),
+
+	/* Non Tunneled IPv4 */
+	ICE_PTT(22, IP, IPV4, FRG, NONE, NONE, NOF, NONE, PAY3),
+	ICE_PTT(23, IP, IPV4, NOF, NONE, NONE, NOF, NONE, PAY3),
+	ICE_PTT(24, IP, IPV4, NOF, NONE, NONE, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(25),
+	ICE_PTT(26, IP, IPV4, NOF, NONE, NONE, NOF, TCP,  PAY4),
+	ICE_PTT(27, IP, IPV4, NOF, NONE, NONE, NOF, SCTP, PAY4),
+	ICE_PTT(28, IP, IPV4, NOF, NONE, NONE, NOF, ICMP, PAY4),
+
+	/* IPv4 --> IPv4 */
+	ICE_PTT(29, IP, IPV4, NOF, IP_IP, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(30, IP, IPV4, NOF, IP_IP, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(31, IP, IPV4, NOF, IP_IP, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(32),
+	ICE_PTT(33, IP, IPV4, NOF, IP_IP, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(34, IP, IPV4, NOF, IP_IP, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(35, IP, IPV4, NOF, IP_IP, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv4 --> IPv6 */
+	ICE_PTT(36, IP, IPV4, NOF, IP_IP, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(37, IP, IPV4, NOF, IP_IP, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(38, IP, IPV4, NOF, IP_IP, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(39),
+	ICE_PTT(40, IP, IPV4, NOF, IP_IP, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(41, IP, IPV4, NOF, IP_IP, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(42, IP, IPV4, NOF, IP_IP, IPV6, NOF, ICMP, PAY4),
+
+	/* IPv4 --> GRE/NAT */
+	ICE_PTT(43, IP, IPV4, NOF, IP_GRENAT, NONE, NOF, NONE, PAY3),
+
+	/* IPv4 --> GRE/NAT --> IPv4 */
+	ICE_PTT(44, IP, IPV4, NOF, IP_GRENAT, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(45, IP, IPV4, NOF, IP_GRENAT, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(46, IP, IPV4, NOF, IP_GRENAT, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(47),
+	ICE_PTT(48, IP, IPV4, NOF, IP_GRENAT, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(49, IP, IPV4, NOF, IP_GRENAT, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(50, IP, IPV4, NOF, IP_GRENAT, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv4 --> GRE/NAT --> IPv6 */
+	ICE_PTT(51, IP, IPV4, NOF, IP_GRENAT, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(52, IP, IPV4, NOF, IP_GRENAT, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(53, IP, IPV4, NOF, IP_GRENAT, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(54),
+	ICE_PTT(55, IP, IPV4, NOF, IP_GRENAT, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(56, IP, IPV4, NOF, IP_GRENAT, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(57, IP, IPV4, NOF, IP_GRENAT, IPV6, NOF, ICMP, PAY4),
+
+	/* IPv4 --> GRE/NAT --> MAC */
+	ICE_PTT(58, IP, IPV4, NOF, IP_GRENAT_MAC, NONE, NOF, NONE, PAY3),
+
+	/* IPv4 --> GRE/NAT --> MAC --> IPv4 */
+	ICE_PTT(59, IP, IPV4, NOF, IP_GRENAT_MAC, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(60, IP, IPV4, NOF, IP_GRENAT_MAC, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(61, IP, IPV4, NOF, IP_GRENAT_MAC, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(62),
+	ICE_PTT(63, IP, IPV4, NOF, IP_GRENAT_MAC, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(64, IP, IPV4, NOF, IP_GRENAT_MAC, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(65, IP, IPV4, NOF, IP_GRENAT_MAC, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv4 --> GRE/NAT -> MAC --> IPv6 */
+	ICE_PTT(66, IP, IPV4, NOF, IP_GRENAT_MAC, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(67, IP, IPV4, NOF, IP_GRENAT_MAC, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(68, IP, IPV4, NOF, IP_GRENAT_MAC, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(69),
+	ICE_PTT(70, IP, IPV4, NOF, IP_GRENAT_MAC, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(71, IP, IPV4, NOF, IP_GRENAT_MAC, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(72, IP, IPV4, NOF, IP_GRENAT_MAC, IPV6, NOF, ICMP, PAY4),
+
+	/* IPv4 --> GRE/NAT --> MAC/VLAN */
+	ICE_PTT(73, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, NONE, NOF, NONE, PAY3),
+
+	/* IPv4 ---> GRE/NAT -> MAC/VLAN --> IPv4 */
+	ICE_PTT(74, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(75, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(76, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(77),
+	ICE_PTT(78, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(79, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(80, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv4 -> GRE/NAT -> MAC/VLAN --> IPv6 */
+	ICE_PTT(81, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(82, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(83, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(84),
+	ICE_PTT(85, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(86, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(87, IP, IPV4, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, ICMP, PAY4),
+
+	/* Non Tunneled IPv6 */
+	ICE_PTT(88, IP, IPV6, FRG, NONE, NONE, NOF, NONE, PAY3),
+	ICE_PTT(89, IP, IPV6, NOF, NONE, NONE, NOF, NONE, PAY3),
+	ICE_PTT(90, IP, IPV6, NOF, NONE, NONE, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(91),
+	ICE_PTT(92, IP, IPV6, NOF, NONE, NONE, NOF, TCP,  PAY4),
+	ICE_PTT(93, IP, IPV6, NOF, NONE, NONE, NOF, SCTP, PAY4),
+	ICE_PTT(94, IP, IPV6, NOF, NONE, NONE, NOF, ICMP, PAY4),
+
+	/* IPv6 --> IPv4 */
+	ICE_PTT(95, IP, IPV6, NOF, IP_IP, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(96, IP, IPV6, NOF, IP_IP, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(97, IP, IPV6, NOF, IP_IP, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(98),
+	ICE_PTT(99, IP, IPV6, NOF, IP_IP, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(100, IP, IPV6, NOF, IP_IP, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(101, IP, IPV6, NOF, IP_IP, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv6 --> IPv6 */
+	ICE_PTT(102, IP, IPV6, NOF, IP_IP, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(103, IP, IPV6, NOF, IP_IP, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(104, IP, IPV6, NOF, IP_IP, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(105),
+	ICE_PTT(106, IP, IPV6, NOF, IP_IP, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(107, IP, IPV6, NOF, IP_IP, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(108, IP, IPV6, NOF, IP_IP, IPV6, NOF, ICMP, PAY4),
+
+	/* IPv6 --> GRE/NAT */
+	ICE_PTT(109, IP, IPV6, NOF, IP_GRENAT, NONE, NOF, NONE, PAY3),
+
+	/* IPv6 --> GRE/NAT -> IPv4 */
+	ICE_PTT(110, IP, IPV6, NOF, IP_GRENAT, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(111, IP, IPV6, NOF, IP_GRENAT, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(112, IP, IPV6, NOF, IP_GRENAT, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(113),
+	ICE_PTT(114, IP, IPV6, NOF, IP_GRENAT, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(115, IP, IPV6, NOF, IP_GRENAT, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(116, IP, IPV6, NOF, IP_GRENAT, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv6 --> GRE/NAT -> IPv6 */
+	ICE_PTT(117, IP, IPV6, NOF, IP_GRENAT, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(118, IP, IPV6, NOF, IP_GRENAT, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(119, IP, IPV6, NOF, IP_GRENAT, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(120),
+	ICE_PTT(121, IP, IPV6, NOF, IP_GRENAT, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(122, IP, IPV6, NOF, IP_GRENAT, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(123, IP, IPV6, NOF, IP_GRENAT, IPV6, NOF, ICMP, PAY4),
+
+	/* IPv6 --> GRE/NAT -> MAC */
+	ICE_PTT(124, IP, IPV6, NOF, IP_GRENAT_MAC, NONE, NOF, NONE, PAY3),
+
+	/* IPv6 --> GRE/NAT -> MAC -> IPv4 */
+	ICE_PTT(125, IP, IPV6, NOF, IP_GRENAT_MAC, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(126, IP, IPV6, NOF, IP_GRENAT_MAC, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(127, IP, IPV6, NOF, IP_GRENAT_MAC, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(128),
+	ICE_PTT(129, IP, IPV6, NOF, IP_GRENAT_MAC, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(130, IP, IPV6, NOF, IP_GRENAT_MAC, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(131, IP, IPV6, NOF, IP_GRENAT_MAC, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv6 --> GRE/NAT -> MAC -> IPv6 */
+	ICE_PTT(132, IP, IPV6, NOF, IP_GRENAT_MAC, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(133, IP, IPV6, NOF, IP_GRENAT_MAC, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(134, IP, IPV6, NOF, IP_GRENAT_MAC, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(135),
+	ICE_PTT(136, IP, IPV6, NOF, IP_GRENAT_MAC, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(137, IP, IPV6, NOF, IP_GRENAT_MAC, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(138, IP, IPV6, NOF, IP_GRENAT_MAC, IPV6, NOF, ICMP, PAY4),
+
+	/* IPv6 --> GRE/NAT -> MAC/VLAN */
+	ICE_PTT(139, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, NONE, NOF, NONE, PAY3),
+
+	/* IPv6 --> GRE/NAT -> MAC/VLAN --> IPv4 */
+	ICE_PTT(140, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV4, FRG, NONE, PAY3),
+	ICE_PTT(141, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, NONE, PAY3),
+	ICE_PTT(142, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(143),
+	ICE_PTT(144, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, TCP,  PAY4),
+	ICE_PTT(145, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, SCTP, PAY4),
+	ICE_PTT(146, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV4, NOF, ICMP, PAY4),
+
+	/* IPv6 --> GRE/NAT -> MAC/VLAN --> IPv6 */
+	ICE_PTT(147, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV6, FRG, NONE, PAY3),
+	ICE_PTT(148, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, NONE, PAY3),
+	ICE_PTT(149, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, UDP,  PAY4),
+	ICE_PTT_UNUSED_ENTRY(150),
+	ICE_PTT(151, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, TCP,  PAY4),
+	ICE_PTT(152, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, SCTP, PAY4),
+	ICE_PTT(153, IP, IPV6, NOF, IP_GRENAT_MAC_VLAN, IPV6, NOF, ICMP, PAY4),
+
+	/* unused entries */
+	ICE_PTT_UNUSED_ENTRY(154),
+	ICE_PTT_UNUSED_ENTRY(155),
+	ICE_PTT_UNUSED_ENTRY(156),
+	ICE_PTT_UNUSED_ENTRY(157),
+	ICE_PTT_UNUSED_ENTRY(158),
+	ICE_PTT_UNUSED_ENTRY(159),
+
+	ICE_PTT_UNUSED_ENTRY(160),
+	ICE_PTT_UNUSED_ENTRY(161),
+	ICE_PTT_UNUSED_ENTRY(162),
+	ICE_PTT_UNUSED_ENTRY(163),
+	ICE_PTT_UNUSED_ENTRY(164),
+	ICE_PTT_UNUSED_ENTRY(165),
+	ICE_PTT_UNUSED_ENTRY(166),
+	ICE_PTT_UNUSED_ENTRY(167),
+	ICE_PTT_UNUSED_ENTRY(168),
+	ICE_PTT_UNUSED_ENTRY(169),
+
+	ICE_PTT_UNUSED_ENTRY(170),
+	ICE_PTT_UNUSED_ENTRY(171),
+	ICE_PTT_UNUSED_ENTRY(172),
+	ICE_PTT_UNUSED_ENTRY(173),
+	ICE_PTT_UNUSED_ENTRY(174),
+	ICE_PTT_UNUSED_ENTRY(175),
+	ICE_PTT_UNUSED_ENTRY(176),
+	ICE_PTT_UNUSED_ENTRY(177),
+	ICE_PTT_UNUSED_ENTRY(178),
+	ICE_PTT_UNUSED_ENTRY(179),
+
+	ICE_PTT_UNUSED_ENTRY(180),
+	ICE_PTT_UNUSED_ENTRY(181),
+	ICE_PTT_UNUSED_ENTRY(182),
+	ICE_PTT_UNUSED_ENTRY(183),
+	ICE_PTT_UNUSED_ENTRY(184),
+	ICE_PTT_UNUSED_ENTRY(185),
+	ICE_PTT_UNUSED_ENTRY(186),
+	ICE_PTT_UNUSED_ENTRY(187),
+	ICE_PTT_UNUSED_ENTRY(188),
+	ICE_PTT_UNUSED_ENTRY(189),
+
+	ICE_PTT_UNUSED_ENTRY(190),
+	ICE_PTT_UNUSED_ENTRY(191),
+	ICE_PTT_UNUSED_ENTRY(192),
+	ICE_PTT_UNUSED_ENTRY(193),
+	ICE_PTT_UNUSED_ENTRY(194),
+	ICE_PTT_UNUSED_ENTRY(195),
+	ICE_PTT_UNUSED_ENTRY(196),
+	ICE_PTT_UNUSED_ENTRY(197),
+	ICE_PTT_UNUSED_ENTRY(198),
+	ICE_PTT_UNUSED_ENTRY(199),
+
+	ICE_PTT_UNUSED_ENTRY(200),
+	ICE_PTT_UNUSED_ENTRY(201),
+	ICE_PTT_UNUSED_ENTRY(202),
+	ICE_PTT_UNUSED_ENTRY(203),
+	ICE_PTT_UNUSED_ENTRY(204),
+	ICE_PTT_UNUSED_ENTRY(205),
+	ICE_PTT_UNUSED_ENTRY(206),
+	ICE_PTT_UNUSED_ENTRY(207),
+	ICE_PTT_UNUSED_ENTRY(208),
+	ICE_PTT_UNUSED_ENTRY(209),
+
+	ICE_PTT_UNUSED_ENTRY(210),
+	ICE_PTT_UNUSED_ENTRY(211),
+	ICE_PTT_UNUSED_ENTRY(212),
+	ICE_PTT_UNUSED_ENTRY(213),
+	ICE_PTT_UNUSED_ENTRY(214),
+	ICE_PTT_UNUSED_ENTRY(215),
+	ICE_PTT_UNUSED_ENTRY(216),
+	ICE_PTT_UNUSED_ENTRY(217),
+	ICE_PTT_UNUSED_ENTRY(218),
+	ICE_PTT_UNUSED_ENTRY(219),
+
+	ICE_PTT_UNUSED_ENTRY(220),
+	ICE_PTT_UNUSED_ENTRY(221),
+	ICE_PTT_UNUSED_ENTRY(222),
+	ICE_PTT_UNUSED_ENTRY(223),
+	ICE_PTT_UNUSED_ENTRY(224),
+	ICE_PTT_UNUSED_ENTRY(225),
+	ICE_PTT_UNUSED_ENTRY(226),
+	ICE_PTT_UNUSED_ENTRY(227),
+	ICE_PTT_UNUSED_ENTRY(228),
+	ICE_PTT_UNUSED_ENTRY(229),
+
+	ICE_PTT_UNUSED_ENTRY(230),
+	ICE_PTT_UNUSED_ENTRY(231),
+	ICE_PTT_UNUSED_ENTRY(232),
+	ICE_PTT_UNUSED_ENTRY(233),
+	ICE_PTT_UNUSED_ENTRY(234),
+	ICE_PTT_UNUSED_ENTRY(235),
+	ICE_PTT_UNUSED_ENTRY(236),
+	ICE_PTT_UNUSED_ENTRY(237),
+	ICE_PTT_UNUSED_ENTRY(238),
+	ICE_PTT_UNUSED_ENTRY(239),
+
+	ICE_PTT_UNUSED_ENTRY(240),
+	ICE_PTT_UNUSED_ENTRY(241),
+	ICE_PTT_UNUSED_ENTRY(242),
+	ICE_PTT_UNUSED_ENTRY(243),
+	ICE_PTT_UNUSED_ENTRY(244),
+	ICE_PTT_UNUSED_ENTRY(245),
+	ICE_PTT_UNUSED_ENTRY(246),
+	ICE_PTT_UNUSED_ENTRY(247),
+	ICE_PTT_UNUSED_ENTRY(248),
+	ICE_PTT_UNUSED_ENTRY(249),
+
+	ICE_PTT_UNUSED_ENTRY(250),
+	ICE_PTT_UNUSED_ENTRY(251),
+	ICE_PTT_UNUSED_ENTRY(252),
+	ICE_PTT_UNUSED_ENTRY(253),
+	ICE_PTT_UNUSED_ENTRY(254),
+	ICE_PTT_UNUSED_ENTRY(255),
 };
 
-#define ICE_TS_DESC(R, i) (&(((struct ice_ts_desc *)((R)->desc))[i]))
+static inline struct ice_rx_ptype_decoded ice_decode_rx_desc_ptype(u16 ptype)
+{
+	return ice_ptype_lkup[ptype];
+}
 
-#define ICE_TXTIME_MAX_QUEUE		2047
-#define ICE_SET_TXTIME_MAX_Q_AMOUNT	127
-#define ICE_TXTIME_FETCH_TS_DESC_DFLT	8
-#define ICE_TXTIME_FETCH_PROFILE_CNT	16
-
-/* Tx Time queue context data */
-struct ice_txtime_ctx {
-#define ICE_TXTIME_CTX_BASE_S		7
-	u64 base;			/* base is defined in 128-byte units */
-	u8 pf_num;
-	u16 vmvf_num;
-	u8 vmvf_type;
-	u16 src_vsi;
-	u8 cpuid;
-	u8 tphrd_desc;
-	u16 qlen;
-	u8 timer_num;
-	u8 txtime_ena_q;
-	u8 drbell_mode_32;
-#define ICE_TXTIME_CTX_DRBELL_MODE_32	1
-	u8 ts_res;
-#define ICE_TXTIME_CTX_RESOLUTION_128NS 7
-	u8 ts_round_type;
-	u8 ts_pacing_slot;
-#define ICE_TXTIME_CTX_FETCH_PROF_ID_0 0
-	u8 merging_ena;
-	u8 ts_fetch_prof_id;
-	u8 ts_fetch_cache_line_aln_thld;
-	u8 tx_pipe_delay_mode;
-};
+#define ICE_LINK_SPEED_UNKNOWN		0
+#define ICE_LINK_SPEED_10MBPS		10
+#define ICE_LINK_SPEED_100MBPS		100
+#define ICE_LINK_SPEED_1000MBPS		1000
+#define ICE_LINK_SPEED_2500MBPS		2500
+#define ICE_LINK_SPEED_5000MBPS		5000
+#define ICE_LINK_SPEED_10000MBPS	10000
+#define ICE_LINK_SPEED_20000MBPS	20000
+#define ICE_LINK_SPEED_25000MBPS	25000
+#define ICE_LINK_SPEED_40000MBPS	40000
+#define ICE_LINK_SPEED_50000MBPS	50000
+#define ICE_LINK_SPEED_100000MBPS	100000
 
 #endif /* _ICE_LAN_TX_RX_H_ */

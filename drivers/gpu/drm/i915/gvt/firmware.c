@@ -30,7 +30,6 @@
 
 #include <linux/firmware.h>
 #include <linux/crc32.h>
-#include <linux/vmalloc.h>
 
 #include "i915_drv.h"
 #include "gvt.h"
@@ -46,25 +45,45 @@ struct gvt_firmware_header {
 	u64 cfg_space_offset;	/* offset in the file */
 	u64 mmio_size;
 	u64 mmio_offset;	/* offset in the file */
-	unsigned char data[];
+	unsigned char data[1];
 };
 
 #define dev_to_drm_minor(d) dev_get_drvdata((d))
 
-static BIN_ATTR_SIMPLE_ADMIN_RO(gvt_firmware);
+static ssize_t
+gvt_firmware_read(struct file *filp, struct kobject *kobj,
+	     struct bin_attribute *attr, char *buf,
+	     loff_t offset, size_t count)
+{
+	memcpy(buf, attr->private + offset, count);
+	return count;
+}
+
+static struct bin_attribute firmware_attr = {
+	.attr = {.name = "gvt_firmware", .mode = (S_IRUSR)},
+	.read = gvt_firmware_read,
+	.write = NULL,
+	.mmap = NULL,
+};
+
+static int mmio_snapshot_handler(struct intel_gvt *gvt, u32 offset, void *data)
+{
+	*(u32 *)(data + offset) = intel_uncore_read_notrace(gvt->gt->uncore,
+							    _MMIO(offset));
+	return 0;
+}
 
 static int expose_firmware_sysfs(struct intel_gvt *gvt)
 {
 	struct intel_gvt_device_info *info = &gvt->device_info;
-	struct drm_i915_private *i915 = gvt->gt->i915;
-	struct pci_dev *pdev = to_pci_dev(i915->drm.dev);
+	struct pci_dev *pdev = gvt->gt->i915->drm.pdev;
 	struct gvt_firmware_header *h;
 	void *firmware;
 	void *p;
 	unsigned long size, crc32_start;
-	int ret;
+	int i, ret;
 
-	size = offsetof(struct gvt_firmware_header, data) + info->mmio_size + info->cfg_space_size;
+	size = sizeof(*h) + info->mmio_size + info->cfg_space_size;
 	firmware = vzalloc(size);
 	if (!firmware)
 		return -ENOMEM;
@@ -80,24 +99,25 @@ static int expose_firmware_sysfs(struct intel_gvt *gvt)
 
 	p = firmware + h->cfg_space_offset;
 
-	memcpy(gvt->firmware.cfg_space, i915->vgpu.initial_cfg_space,
-	       info->cfg_space_size);
-	memcpy(p, gvt->firmware.cfg_space, info->cfg_space_size);
+	for (i = 0; i < h->cfg_space_size; i += 4)
+		pci_read_config_dword(pdev, i, p + i);
+
+	memcpy(gvt->firmware.cfg_space, p, info->cfg_space_size);
 
 	p = firmware + h->mmio_offset;
 
-	memcpy(gvt->firmware.mmio, i915->vgpu.initial_mmio,
-	       info->mmio_size);
+	/* Take a snapshot of hw mmio registers. */
+	intel_gvt_for_each_tracked_mmio(gvt, mmio_snapshot_handler, p);
 
-	memcpy(p, gvt->firmware.mmio, info->mmio_size);
+	memcpy(gvt->firmware.mmio, p, info->mmio_size);
 
-	crc32_start = offsetof(struct gvt_firmware_header, version);
+	crc32_start = offsetof(struct gvt_firmware_header, crc32) + 4;
 	h->crc32 = crc32_le(0, firmware + crc32_start, size - crc32_start);
 
-	bin_attr_gvt_firmware.size = size;
-	bin_attr_gvt_firmware.private = firmware;
+	firmware_attr.size = size;
+	firmware_attr.private = firmware;
 
-	ret = device_create_bin_file(&pdev->dev, &bin_attr_gvt_firmware);
+	ret = device_create_bin_file(&pdev->dev, &firmware_attr);
 	if (ret) {
 		vfree(firmware);
 		return ret;
@@ -107,10 +127,10 @@ static int expose_firmware_sysfs(struct intel_gvt *gvt)
 
 static void clean_firmware_sysfs(struct intel_gvt *gvt)
 {
-	struct pci_dev *pdev = to_pci_dev(gvt->gt->i915->drm.dev);
+	struct pci_dev *pdev = gvt->gt->i915->drm.pdev;
 
-	device_remove_bin_file(&pdev->dev, &bin_attr_gvt_firmware);
-	vfree(bin_attr_gvt_firmware.private);
+	device_remove_bin_file(&pdev->dev, &firmware_attr);
+	vfree(firmware_attr.private);
 }
 
 /**
@@ -131,7 +151,7 @@ static int verify_firmware(struct intel_gvt *gvt,
 			   const struct firmware *fw)
 {
 	struct intel_gvt_device_info *info = &gvt->device_info;
-	struct pci_dev *pdev = to_pci_dev(gvt->gt->i915->drm.dev);
+	struct pci_dev *pdev = gvt->gt->i915->drm.pdev;
 	struct gvt_firmware_header *h;
 	unsigned long id, crc32_start;
 	const void *mem;
@@ -158,7 +178,7 @@ static int verify_firmware(struct intel_gvt *gvt,
 	mem = (fw->data + h->cfg_space_offset);
 
 	id = *(u16 *)(mem + PCI_VENDOR_ID);
-	VERIFY("vendor id", id, pdev->vendor);
+	VERIFY("vender id", id, pdev->vendor);
 
 	id = *(u16 *)(mem + PCI_DEVICE_ID);
 	VERIFY("device id", id, pdev->device);
@@ -185,7 +205,7 @@ invalid_firmware:
 int intel_gvt_load_firmware(struct intel_gvt *gvt)
 {
 	struct intel_gvt_device_info *info = &gvt->device_info;
-	struct pci_dev *pdev = to_pci_dev(gvt->gt->i915->drm.dev);
+	struct pci_dev *pdev = gvt->gt->i915->drm.pdev;
 	struct intel_gvt_firmware *firmware = &gvt->firmware;
 	struct gvt_firmware_header *h;
 	const struct firmware *fw;
@@ -220,7 +240,7 @@ int intel_gvt_load_firmware(struct intel_gvt *gvt)
 
 	gvt_dbg_core("request hw state firmware %s...\n", path);
 
-	ret = request_firmware(&fw, path, gvt->gt->i915->drm.dev);
+	ret = request_firmware(&fw, path, &gvt->gt->i915->drm.pdev->dev);
 	kfree(path);
 
 	if (ret)

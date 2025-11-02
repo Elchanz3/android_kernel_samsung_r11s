@@ -149,7 +149,7 @@ static struct net_device *ieee802154_nl_get_dev(struct genl_info *info)
 	if (info->attrs[IEEE802154_ATTR_DEV_NAME]) {
 		char name[IFNAMSIZ + 1];
 
-		nla_strscpy(name, info->attrs[IEEE802154_ATTR_DEV_NAME],
+		nla_strlcpy(name, info->attrs[IEEE802154_ATTR_DEV_NAME],
 			    sizeof(name));
 		dev = dev_get_by_name(&init_net, name);
 	} else if (info->attrs[IEEE802154_ATTR_DEV_INDEX]) {
@@ -202,7 +202,10 @@ int ieee802154_associate_req(struct sk_buff *skb, struct genl_info *info)
 	addr.pan_id = nla_get_shortaddr(
 			info->attrs[IEEE802154_ATTR_COORD_PAN_ID]);
 
-	page = nla_get_u8_default(info->attrs[IEEE802154_ATTR_PAGE], 0);
+	if (info->attrs[IEEE802154_ATTR_PAGE])
+		page = nla_get_u8(info->attrs[IEEE802154_ATTR_PAGE]);
+	else
+		page = 0;
 
 	ret = ieee802154_mlme_ops(dev)->assoc_req(dev, &addr,
 			nla_get_u8(info->attrs[IEEE802154_ATTR_CHANNEL]),
@@ -335,7 +338,10 @@ int ieee802154_start_req(struct sk_buff *skb, struct genl_info *info)
 	blx = nla_get_u8(info->attrs[IEEE802154_ATTR_BAT_EXT]);
 	coord_realign = nla_get_u8(info->attrs[IEEE802154_ATTR_COORD_REALIGN]);
 
-	page = nla_get_u8_default(info->attrs[IEEE802154_ATTR_PAGE], 0);
+	if (info->attrs[IEEE802154_ATTR_PAGE])
+		page = nla_get_u8(info->attrs[IEEE802154_ATTR_PAGE]);
+	else
+		page = 0;
 
 	if (addr.short_addr == cpu_to_le16(IEEE802154_ADDR_BROADCAST)) {
 		ieee802154_nl_start_confirm(dev, IEEE802154_NO_SHORT_ADDRESS);
@@ -382,7 +388,10 @@ int ieee802154_scan_req(struct sk_buff *skb, struct genl_info *info)
 	channels = nla_get_u32(info->attrs[IEEE802154_ATTR_CHANNELS]);
 	duration = nla_get_u8(info->attrs[IEEE802154_ATTR_DURATION]);
 
-	page = nla_get_u8_default(info->attrs[IEEE802154_ATTR_PAGE], 0);
+	if (info->attrs[IEEE802154_ATTR_PAGE])
+		page = nla_get_u8(info->attrs[IEEE802154_ATTR_PAGE]);
+	else
+		page = 0;
 
 	ret = ieee802154_mlme_ops(dev)->scan_req(dev, type, channels,
 						 page, duration);
@@ -1177,7 +1186,7 @@ static int llsec_iter_devkeys(struct llsec_dump_data *data)
 {
 	struct ieee802154_llsec_device *dpos;
 	struct ieee802154_llsec_device_key *kpos;
-	int idx = 0, idx2;
+	int rc = 0, idx = 0, idx2;
 
 	list_for_each_entry(dpos, &data->table->devices, list) {
 		if (idx++ < data->s_idx)
@@ -1193,7 +1202,7 @@ static int llsec_iter_devkeys(struct llsec_dump_data *data)
 						      data->nlmsg_seq,
 						      dpos->hwaddr, kpos,
 						      data->dev)) {
-				return -EMSGSIZE;
+				return rc = -EMSGSIZE;
 			}
 
 			data->s_idx2++;
@@ -1202,7 +1211,7 @@ static int llsec_iter_devkeys(struct llsec_dump_data *data)
 		data->s_idx++;
 	}
 
-	return 0;
+	return rc;
 }
 
 int ieee802154_llsec_dump_devkeys(struct sk_buff *skb,

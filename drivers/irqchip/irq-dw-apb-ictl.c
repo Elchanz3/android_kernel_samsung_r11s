@@ -42,7 +42,7 @@ static void __irq_entry dw_apb_ictl_handle_irq(struct pt_regs *regs)
 		while (stat) {
 			u32 hwirq = ffs(stat) - 1;
 
-			generic_handle_domain_irq(d, hwirq);
+			handle_domain_irq(d, hwirq, regs);
 			stat &= ~BIT(hwirq);
 		}
 	}
@@ -62,8 +62,9 @@ static void dw_apb_ictl_handle_irq_cascaded(struct irq_desc *desc)
 
 		while (stat) {
 			u32 hwirq = ffs(stat) - 1;
-			generic_handle_domain_irq(d, gc->irq_base + hwirq);
+			u32 virq = irq_find_mapping(d, gc->irq_base + hwirq);
 
+			generic_handle_irq(virq);
 			stat &= ~BIT(hwirq);
 		}
 	}
@@ -101,9 +102,10 @@ static void dw_apb_ictl_resume(struct irq_data *d)
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(d);
 	struct irq_chip_type *ct = irq_data_get_chip_type(d);
 
-	guard(raw_spinlock)(&gc->lock);
+	irq_gc_lock(gc);
 	writel_relaxed(~0, gc->reg_base + ct->regs.enable);
 	writel_relaxed(*ct->mask_cache, gc->reg_base + ct->regs.mask);
+	irq_gc_unlock(gc);
 }
 #else
 #define dw_apb_ictl_resume	NULL
@@ -172,7 +174,7 @@ static int __init dw_apb_ictl_init(struct device_node *np,
 	else
 		nrirqs = fls(readl_relaxed(iobase + APB_INT_ENABLE_L));
 
-	domain = irq_domain_create_linear(of_fwnode_handle(np), nrirqs, domain_ops, NULL);
+	domain = irq_domain_add_linear(np, nrirqs, domain_ops, NULL);
 	if (!domain) {
 		pr_err("%pOF: unable to add irq domain\n", np);
 		ret = -ENOMEM;

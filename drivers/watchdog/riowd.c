@@ -14,7 +14,7 @@
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
 #include <linux/of.h>
-#include <linux/platform_device.h>
+#include <linux/of_device.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
@@ -46,6 +46,7 @@
 
 MODULE_AUTHOR("David S. Miller <davem@davemloft.net>");
 MODULE_DESCRIPTION("Hardware watchdog driver for Sun RIO");
+MODULE_SUPPORTED_DEVICE("watchdog");
 MODULE_LICENSE("GPL");
 
 #define DRIVER_NAME	"riowd"
@@ -160,6 +161,7 @@ static ssize_t riowd_write(struct file *file, const char __user *buf,
 
 static const struct file_operations riowd_fops = {
 	.owner =		THIS_MODULE,
+	.llseek =		no_llseek,
 	.unlocked_ioctl =	riowd_ioctl,
 	.compat_ioctl	=	compat_ptr_ioctl,
 	.open =			riowd_open,
@@ -216,12 +218,14 @@ out:
 	return err;
 }
 
-static void riowd_remove(struct platform_device *op)
+static int riowd_remove(struct platform_device *op)
 {
 	struct riowd *p = platform_get_drvdata(op);
 
 	misc_deregister(&riowd_miscdev);
 	of_iounmap(&op->resource[0], p->regs, 2);
+
+	return 0;
 }
 
 static const struct of_device_id riowd_match[] = {

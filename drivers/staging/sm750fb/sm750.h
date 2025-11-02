@@ -50,32 +50,28 @@ struct init_status {
 
 struct lynx_accel {
 	/* base virtual address of DPR registers */
-	unsigned char __iomem *dpr_base;
+	volatile unsigned char __iomem *dprBase;
 	/* base virtual address of de data port */
-	unsigned char __iomem *dp_port_base;
+	volatile unsigned char __iomem *dpPortBase;
 
 	/* function pointers */
-	void (*de_init)(struct lynx_accel *accel);
+	void (*de_init)(struct lynx_accel *);
 
 	int (*de_wait)(void);/* see if hardware ready to work */
 
-	int (*de_fillrect)(struct lynx_accel *accel,
-			   u32 base, u32 pitch, u32 bpp,
-			   u32 x, u32 y, u32 width, u32 height,
-			   u32 color, u32 rop);
+	int (*de_fillrect)(struct lynx_accel *,
+			   u32, u32, u32, u32,
+			   u32, u32, u32, u32, u32);
 
-	int (*de_copyarea)(struct lynx_accel *accel,
-			   u32 s_base, u32 s_pitch,
-			   u32 sx, u32 sy,
-			   u32 d_base, u32 d_pitch,
-			   u32 bpp, u32 dx, u32 dy,
-			   u32 width, u32 height,
-			   u32 rop2);
+	int (*de_copyarea)(struct lynx_accel *,
+			   u32, u32, u32, u32,
+			   u32, u32, u32, u32,
+			   u32, u32, u32, u32);
 
-	int (*de_imageblit)(struct lynx_accel *accel, const char *p_srcbuf,
-			    u32 src_delta, u32 start_bit, u32 d_base, u32 d_pitch,
-			    u32 byte_per_pixel, u32 dx, u32 dy, u32 width,
-			    u32 height, u32 f_color, u32 b_color, u32 rop2);
+	int (*de_imageblit)(struct lynx_accel *, const char *,
+			    u32, u32, u32, u32,
+			    u32, u32, u32, u32,
+			    u32, u32, u32, u32);
 
 };
 
@@ -113,7 +109,7 @@ struct sm750_dev {
 	 * 2: secondary crtc hw cursor enabled
 	 * 3: both ctrc hw cursor enabled
 	 */
-	int hw_cursor;
+	int hwCursor;
 };
 
 struct lynx_cursor {
@@ -122,20 +118,20 @@ struct lynx_cursor {
 	int h;
 	int size;
 	/* hardware limitation */
-	int max_w;
-	int max_h;
+	int maxW;
+	int maxH;
 	/* base virtual address and offset  of cursor image */
 	char __iomem *vstart;
 	int offset;
 	/* mmio addr of hw cursor */
-	char __iomem *mmio;
+	volatile char __iomem *mmio;
 };
 
 struct lynxfb_crtc {
-	unsigned char __iomem *v_cursor; /* virtual address of cursor */
-	unsigned char __iomem *v_screen; /* virtual address of on_screen */
-	int o_cursor; /* cursor address offset in vidmem */
-	int o_screen; /* onscreen address offset in vidmem */
+	unsigned char __iomem *vCursor; /* virtual address of cursor */
+	unsigned char __iomem *vScreen; /* virtual address of on_screen */
+	int oCursor; /* cursor address offset in vidmem */
+	int oScreen; /* onscreen address offset in vidmem */
 	int channel;/* which channel this crtc stands for*/
 	resource_size_t vidmem_size;/* this view's video memory max size */
 
@@ -169,6 +165,8 @@ struct lynxfb_output {
 	 * output->channel ==> &crtc->channel
 	 */
 	void *priv;
+
+	int (*proc_setBLANK)(struct lynxfb_output *output, int blank);
 };
 
 struct lynxfb_par {
@@ -191,26 +189,26 @@ static inline unsigned long ps_to_hz(unsigned int psvalue)
 
 int hw_sm750_map(struct sm750_dev *sm750_dev, struct pci_dev *pdev);
 int hw_sm750_inithw(struct sm750_dev *sm750_dev, struct pci_dev *pdev);
-void hw_sm750_init_accel(struct sm750_dev *sm750_dev);
-int hw_sm750_de_wait(void);
-int hw_sm750le_de_wait(void);
+void hw_sm750_initAccel(struct sm750_dev *sm750_dev);
+int hw_sm750_deWait(void);
+int hw_sm750le_deWait(void);
 
-int hw_sm750_output_set_mode(struct lynxfb_output *output,
-			     struct fb_var_screeninfo *var,
-			     struct fb_fix_screeninfo *fix);
+int hw_sm750_output_setMode(struct lynxfb_output *output,
+			    struct fb_var_screeninfo *var,
+			    struct fb_fix_screeninfo *fix);
 
-int hw_sm750_crtc_check_mode(struct lynxfb_crtc *crtc,
-			     struct fb_var_screeninfo *var);
+int hw_sm750_crtc_checkMode(struct lynxfb_crtc *crtc,
+			    struct fb_var_screeninfo *var);
 
-int hw_sm750_crtc_set_mode(struct lynxfb_crtc *crtc,
-			   struct fb_var_screeninfo *var,
-			   struct fb_fix_screeninfo *fix);
+int hw_sm750_crtc_setMode(struct lynxfb_crtc *crtc,
+			  struct fb_var_screeninfo *var,
+			  struct fb_fix_screeninfo *fix);
 
-int hw_sm750_set_col_reg(struct lynxfb_crtc *crtc, ushort index,
-			 ushort red, ushort green, ushort blue);
+int hw_sm750_setColReg(struct lynxfb_crtc *crtc, ushort index,
+		       ushort red, ushort green, ushort blue);
 
-int hw_sm750_set_blank(struct lynxfb_output *output, int blank);
-int hw_sm750le_set_blank(struct lynxfb_output *output, int blank);
+int hw_sm750_setBLANK(struct lynxfb_output *output, int blank);
+int hw_sm750le_setBLANK(struct lynxfb_output *output, int blank);
 int hw_sm750_pan_display(struct lynxfb_crtc *crtc,
 			 const struct fb_var_screeninfo *var,
 			 const struct fb_info *info);

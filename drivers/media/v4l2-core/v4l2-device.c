@@ -2,7 +2,7 @@
 /*
     V4L2 device support.
 
-    Copyright (C) 2008  Hans Verkuil <hverkuil@kernel.org>
+    Copyright (C) 2008  Hans Verkuil <hverkuil@xs4all.nl>
 
  */
 
@@ -108,8 +108,8 @@ void v4l2_device_unregister(struct v4l2_device *v4l2_dev)
 }
 EXPORT_SYMBOL_GPL(v4l2_device_unregister);
 
-int __v4l2_device_register_subdev(struct v4l2_device *v4l2_dev,
-				  struct v4l2_subdev *sd, struct module *module)
+int v4l2_device_register_subdev(struct v4l2_device *v4l2_dev,
+				struct v4l2_subdev *sd)
 {
 	int err;
 
@@ -125,9 +125,9 @@ int __v4l2_device_register_subdev(struct v4l2_device *v4l2_dev,
 	 * try_module_get() such sub-device owners.
 	 */
 	sd->owner_v4l2_dev = v4l2_dev->dev && v4l2_dev->dev->driver &&
-		module == v4l2_dev->dev->driver->owner;
+		sd->owner == v4l2_dev->dev->driver->owner;
 
-	if (!sd->owner_v4l2_dev && !try_module_get(module))
+	if (!sd->owner_v4l2_dev && !try_module_get(sd->owner))
 		return -ENODEV;
 
 	sd->v4l2_dev = v4l2_dev;
@@ -152,8 +152,6 @@ int __v4l2_device_register_subdev(struct v4l2_device *v4l2_dev,
 			goto error_unregister;
 	}
 
-	sd->owner = module;
-
 	spin_lock(&v4l2_dev->lock);
 	list_add_tail(&sd->list, &v4l2_dev->subdevs);
 	spin_unlock(&v4l2_dev->lock);
@@ -170,7 +168,7 @@ error_module:
 	sd->v4l2_dev = NULL;
 	return err;
 }
-EXPORT_SYMBOL_GPL(__v4l2_device_register_subdev);
+EXPORT_SYMBOL_GPL(v4l2_device_register_subdev);
 
 static void v4l2_subdev_release(struct v4l2_subdev *sd)
 {
@@ -220,14 +218,13 @@ int __v4l2_device_register_subdev_nodes(struct v4l2_device *v4l2_dev,
 		vdev->ctrl_handler = sd->ctrl_handler;
 		if (read_only)
 			set_bit(V4L2_FL_SUBDEV_RO_DEVNODE, &vdev->flags);
-		sd->devnode = vdev;
 		err = __video_register_device(vdev, VFL_TYPE_SUBDEV, -1, 1,
 					      sd->owner);
 		if (err < 0) {
-			sd->devnode = NULL;
 			kfree(vdev);
 			goto clean_up;
 		}
+		sd->devnode = vdev;
 #if defined(CONFIG_MEDIA_CONTROLLER)
 		sd->entity.info.dev.major = VIDEO_MAJOR;
 		sd->entity.info.dev.minor = vdev->minor;

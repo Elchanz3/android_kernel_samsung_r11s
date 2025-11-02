@@ -15,9 +15,9 @@
 
 const struct ata_port_operations sata_pmp_port_ops = {
 	.inherits		= &sata_port_ops,
-	.pmp_reset.prereset	= ata_std_prereset,
-	.pmp_reset.hardreset	= sata_std_hardreset,
-	.pmp_reset.postreset	= ata_std_postreset,
+	.pmp_prereset		= ata_std_prereset,
+	.pmp_hardreset		= sata_std_hardreset,
+	.pmp_postreset		= ata_std_postreset,
 	.error_handler		= sata_pmp_error_handler,
 };
 
@@ -62,7 +62,7 @@ static unsigned int sata_pmp_read(struct ata_link *link, int reg, u32 *r_val)
  *	sata_pmp_write - write PMP register
  *	@link: link to write PMP register for
  *	@reg: register to write
- *	@val: value to write
+ *	@r_val: value to write
  *
  *	Write PMP register.
  *
@@ -648,8 +648,11 @@ static int sata_pmp_same_pmp(struct ata_device *dev, const u32 *new_gscr)
 static int sata_pmp_revalidate(struct ata_device *dev, unsigned int new_class)
 {
 	struct ata_link *link = dev->link;
-	u32 *gscr = (void *)dev->sector_buf;
+	struct ata_port *ap = link->ap;
+	u32 *gscr = (void *)ap->sector_buf;
 	int rc;
+
+	DPRINTK("ENTER\n");
 
 	ata_eh_about_to_do(link, NULL, ATA_EH_REVALIDATE);
 
@@ -683,10 +686,12 @@ static int sata_pmp_revalidate(struct ata_device *dev, unsigned int new_class)
 
 	ata_eh_done(link, NULL, ATA_EH_REVALIDATE);
 
+	DPRINTK("EXIT, rc=0\n");
 	return 0;
 
  fail:
 	ata_dev_err(dev, "PMP revalidation failed (errno=%d)\n", rc);
+	DPRINTK("EXIT, rc=%d\n", rc);
 	return rc;
 }
 
@@ -727,7 +732,10 @@ static int sata_pmp_revalidate_quick(struct ata_device *dev)
 /**
  *	sata_pmp_eh_recover_pmp - recover PMP
  *	@ap: ATA port PMP is attached to
- *	@reset_ops: The set of reset operations to use
+ *	@prereset: prereset method (can be NULL)
+ *	@softreset: softreset method
+ *	@hardreset: hardreset method
+ *	@postreset: postreset method (can be NULL)
  *
  *	Recover PMP attached to @ap.  Recovery procedure is somewhat
  *	similar to that of ata_eh_recover() except that reset should
@@ -741,7 +749,8 @@ static int sata_pmp_revalidate_quick(struct ata_device *dev)
  *	0 on success, -errno on failure.
  */
 static int sata_pmp_eh_recover_pmp(struct ata_port *ap,
-				   struct ata_reset_operations *reset_ops)
+		ata_prereset_fn_t prereset, ata_reset_fn_t softreset,
+		ata_reset_fn_t hardreset, ata_postreset_fn_t postreset)
 {
 	struct ata_link *link = &ap->link;
 	struct ata_eh_context *ehc = &link->eh_context;
@@ -749,6 +758,8 @@ static int sata_pmp_eh_recover_pmp(struct ata_port *ap,
 	int tries = ATA_EH_PMP_TRIES;
 	int detach = 0, rc = 0;
 	int reval_failed = 0;
+
+	DPRINTK("ENTER\n");
 
 	if (dev->flags & ATA_DFLAG_DETACH) {
 		detach = 1;
@@ -763,7 +774,8 @@ static int sata_pmp_eh_recover_pmp(struct ata_port *ap,
 		struct ata_link *tlink;
 
 		/* reset */
-		rc = ata_eh_reset(link, 0, reset_ops);
+		rc = ata_eh_reset(link, 0, prereset, softreset, hardreset,
+				  postreset);
 		if (rc) {
 			ata_link_err(link, "failed to reset PMP, giving up\n");
 			goto fail;
@@ -816,6 +828,7 @@ static int sata_pmp_eh_recover_pmp(struct ata_port *ap,
 	/* okay, PMP resurrected */
 	ehc->i.flags = 0;
 
+	DPRINTK("EXIT, rc=0\n");
 	return 0;
 
  fail:
@@ -825,6 +838,7 @@ static int sata_pmp_eh_recover_pmp(struct ata_port *ap,
 	else
 		ata_dev_disable(dev);
 
+	DPRINTK("EXIT, rc=%d\n", rc);
 	return rc;
 }
 
@@ -927,7 +941,8 @@ static int sata_pmp_eh_recover(struct ata_port *ap)
  retry:
 	/* PMP attached? */
 	if (!sata_pmp_attached(ap)) {
-		rc = ata_eh_recover(ap, &ops->reset, NULL);
+		rc = ata_eh_recover(ap, ops->prereset, ops->softreset,
+				    ops->hardreset, ops->postreset, NULL);
 		if (rc) {
 			ata_for_each_dev(dev, &ap->link, ALL)
 				ata_dev_disable(dev);
@@ -945,7 +960,8 @@ static int sata_pmp_eh_recover(struct ata_port *ap)
 	}
 
 	/* recover pmp */
-	rc = sata_pmp_eh_recover_pmp(ap, &ops->reset);
+	rc = sata_pmp_eh_recover_pmp(ap, ops->prereset, ops->softreset,
+				     ops->hardreset, ops->postreset);
 	if (rc)
 		goto pmp_fail;
 
@@ -971,7 +987,8 @@ static int sata_pmp_eh_recover(struct ata_port *ap)
 		goto pmp_fail;
 
 	/* recover links */
-	rc = ata_eh_recover(ap, &ops->pmp_reset, &link);
+	rc = ata_eh_recover(ap, ops->pmp_prereset, ops->pmp_softreset,
+			    ops->pmp_hardreset, ops->pmp_postreset, &link);
 	if (rc)
 		goto link_fail;
 

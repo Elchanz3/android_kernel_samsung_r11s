@@ -20,7 +20,8 @@ static const struct i2c_device_id ad193x_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, ad193x_id);
 
-static int ad193x_i2c_probe(struct i2c_client *client)
+static int ad193x_i2c_probe(struct i2c_client *client,
+			    const struct i2c_device_id *id)
 {
 	struct regmap_config config;
 
@@ -30,14 +31,14 @@ static int ad193x_i2c_probe(struct i2c_client *client)
 
 	return ad193x_probe(&client->dev,
 			    devm_regmap_init_i2c(client, &config),
-			    (uintptr_t)i2c_get_match_data(client));
+			    (enum ad193x_type)id->driver_data);
 }
 
 static struct i2c_driver ad193x_i2c_driver = {
 	.driver = {
 		.name = "ad193x",
 	},
-	.probe = ad193x_i2c_probe,
+	.probe    = ad193x_i2c_probe,
 	.id_table = ad193x_id,
 };
 module_i2c_driver(ad193x_i2c_driver);

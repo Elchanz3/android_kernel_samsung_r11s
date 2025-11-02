@@ -44,7 +44,7 @@ altro, utili riferimenti:
 - "C:  A Reference Manual" di Harbison and Steele [Prentice Hall]
 
 Il kernel è stato scritto usando GNU C e la toolchain GNU.
-Sebbene si attenga allo standard ISO C11, esso utilizza una serie di
+Sebbene si attenga allo standard ISO C89, esso utilizza una serie di
 estensioni che non sono previste in questo standard. Il kernel è un
 ambiente C indipendente, che non ha alcuna dipendenza dalle librerie
 C standard, così alcune parti del C standard non sono supportate.
@@ -85,8 +85,8 @@ relativi file di documentatione che spiegano come usarele.
 Quando un cambiamento del kernel genera anche un cambiamento nell'interfaccia
 con lo spazio utente, è raccomandabile che inviate una notifica o una
 correzione alle pagine *man* spiegando tale modifica agli amministratori di
-queste pagine all'indirizzo alx@kernel.org, aggiungendo in CC la
-lista linux-api@vger.kernel.org.
+queste pagine all'indirizzo mtk.manpages@gmail.com, aggiungendo
+in CC la lista linux-api@vger.kernel.org.
 
 Di seguito una lista di file che sono presenti nei sorgente del kernel e che
 è richiesto che voi leggiate:
@@ -109,7 +109,8 @@ Di seguito una lista di file che sono presenti nei sorgente del kernel e che
     accetteranno patch solo se queste osserveranno tali regole, e molte
     persone revisioneranno il codice solo se scritto nello stile appropriato.
 
-  :ref:`Documentation/translations/it_IT/process/submitting-patches.rst <it_submittingpatches>`
+  :ref:`Documentation/translations/it_IT/process/submitting-patches.rst <it_submittingpatches>` e
+  :ref:`Documentation/translations/it_IT/process/submitting-drivers.rst <it_submittingdrivers>`
 
     Questo file descrive dettagliatamente come creare ed inviare una patch
     con successo, includendo (ma non solo questo):
@@ -144,7 +145,7 @@ Di seguito una lista di file che sono presenti nei sorgente del kernel e che
     dello sviluppo di Linux ed è molto importante per le persone che arrivano
     da esperienze con altri Sistemi Operativi.
 
-  :ref:`Documentation/translations/it_IT/process/security-bugs.rst <it_securitybugs>`
+  :ref:`Documentation/translations/it_IT/admin-guide/security-bugs.rst <it_securitybugs>`
     Se ritenete di aver trovato un problema di sicurezza nel kernel Linux,
     seguite i passaggi scritti in questo documento per notificarlo agli
     sviluppatori del kernel, ed aiutare la risoluzione del problema.
@@ -344,7 +345,7 @@ principale 4.x, sarà necessario un test d'integrazione.
 A tale scopo, esiste un repositorio speciale di test nel quale virtualmente
 tutti i rami dei sottosistemi vengono inclusi su base quotidiana:
 
-	https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git
+	https://git.kernel.org/?p=linux/kernel/git/next/linux-next.git
 
 In questo modo, i kernel -next offrono uno sguardo riassuntivo su quello che
 ci si aspetterà essere nel kernel principale nel successivo periodo
@@ -356,10 +357,17 @@ benvenuti.
 Riportare Bug
 -------------
 
-Il file 'Documentation/admin-guide/reporting-issues.rst' nella
-cartella principale del kernel spiega come segnalare un baco nel
-kernel, e fornisce dettagli su quali informazioni sono necessarie agli
-sviluppatori del kernel per poter studiare il problema.
+https://bugzilla.kernel.org è dove gli sviluppatori del kernel Linux tracciano
+i bachi del kernel. Gli utenti sono incoraggiati nel riportare tutti i bachi
+che trovano utilizzando questo strumento.
+Per maggiori dettagli su come usare il bugzilla del kernel, guardare:
+
+	https://bugzilla.kernel.org/page.cgi?id=faq.html
+
+Il file admin-guide/reporting-bugs.rst nella cartella principale del kernel
+fornisce un buon modello sul come segnalare un baco nel kernel, e spiega quali
+informazioni sono necessarie agli sviluppatori per poter aiutare il
+rintracciamento del problema.
 
 Gestire i rapporti sui bug
 --------------------------
@@ -372,14 +380,8 @@ al corrente della vostra presenza. Riparare bachi è una delle migliori vie per
 acquisire meriti tra gli altri sviluppatori, perchè non a molte persone piace
 perdere tempo a sistemare i bachi di altri.
 
-Per lavorare sui bachi già segnalati, per prima cosa cercate il
-sottosistema che vi interessa. Poi, verificate nel file MAINTAINERS
-dove vengono collezionati solitamente i bachi per quel sottosistema;
-spesso sarà una lista di discussione, raramente un bugtracker. Cercate
-bachi nell'archivio e aiutate dove credete di poterlo fare. Potete
-anche consultare https://bugzilla.kernel.org; però, solo una manciata di
-sottosistemi lo usano attivamente, ciò nonostante i bachi che
-coinvolgono l'intero kernel sono sempre riportati lì.
+Per lavorare sui rapporti di bachi già riportati, andate su
+https://bugzilla.kernel.org.
 
 Liste di discussione
 --------------------
@@ -389,12 +391,12 @@ sviluppatori del kernel partecipano alla lista di discussione Linux Kernel.
 I dettagli su come iscriversi e disiscriversi dalla lista possono essere
 trovati al sito:
 
-	https://subspace.kernel.org/subscribing.html
+	http://vger.kernel.org/vger-lists.html#linux-kernel
 
 Ci sono diversi archivi della lista di discussione. Usate un qualsiasi motore
 di ricerca per trovarli. Per esempio:
 
-	https://lore.kernel.org/linux-kernel/
+	http://dir.gmane.org/gmane.linux.kernel
 
 É caldamente consigliata una ricerca in questi archivi sul tema che volete
 sollevare, prima di pubblicarlo sulla lista. Molte cose sono già state
@@ -407,13 +409,13 @@ discussione e il loro uso.
 Molte di queste liste sono gestite su kernel.org. Per informazioni consultate
 la seguente pagina:
 
-	https://subspace.kernel.org
+	http://vger.kernel.org/vger-lists.html
 
 Per favore ricordatevi della buona educazione quando utilizzate queste liste.
 Sebbene sia un pò dozzinale, il seguente URL contiene alcune semplici linee
 guida per interagire con la lista (o con qualsiasi altra lista):
 
-	https://subspace.kernel.org/etiquette.html
+	http://www.albion.com/netiquette/
 
 Se diverse persone rispondo alla vostra mail, la lista dei riceventi (copia
 conoscenza) potrebbe diventare abbastanza lunga. Non cancellate nessuno dalla

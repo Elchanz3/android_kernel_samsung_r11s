@@ -26,6 +26,7 @@
 
 MODULE_AUTHOR("Talel Shenhar");
 MODULE_DESCRIPTION("Amazon's Annapurna Labs Interrupt Controller Driver");
+MODULE_LICENSE("GPL v2");
 
 enum al_fic_state {
 	AL_FIC_UNCONFIGURED = 0,
@@ -65,13 +66,15 @@ static int al_fic_irq_set_type(struct irq_data *data, unsigned int flow_type)
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(data);
 	struct al_fic *fic = gc->private;
 	enum al_fic_state new_state;
+	int ret = 0;
 
-	guard(raw_spinlock)(&gc->lock);
+	irq_gc_lock(gc);
 
 	if (((flow_type & IRQ_TYPE_SENSE_MASK) != IRQ_TYPE_LEVEL_HIGH) &&
 	    ((flow_type & IRQ_TYPE_SENSE_MASK) != IRQ_TYPE_EDGE_RISING)) {
 		pr_debug("fic doesn't support flow type %d\n", flow_type);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err;
 	}
 
 	new_state = (flow_type & IRQ_TYPE_LEVEL_HIGH) ?
@@ -89,10 +92,16 @@ static int al_fic_irq_set_type(struct irq_data *data, unsigned int flow_type)
 	if (fic->state == AL_FIC_UNCONFIGURED) {
 		al_fic_set_trigger(fic, gc, new_state);
 	} else if (fic->state != new_state) {
-		pr_debug("fic %s state already configured to %d\n", fic->name, fic->state);
-		return -EINVAL;
+		pr_debug("fic %s state already configured to %d\n",
+			 fic->name, fic->state);
+		ret = -EINVAL;
+		goto err;
 	}
-	return 0;
+
+err:
+	irq_gc_unlock(gc);
+
+	return ret;
 }
 
 static void al_fic_irq_handler(struct irq_desc *desc)
@@ -102,6 +111,7 @@ static void al_fic_irq_handler(struct irq_desc *desc)
 	struct irq_chip *irqchip = irq_desc_get_chip(desc);
 	struct irq_chip_generic *gc = irq_get_domain_generic_chip(domain, 0);
 	unsigned long pending;
+	unsigned int irq;
 	u32 hwirq;
 
 	chained_irq_enter(irqchip, desc);
@@ -109,8 +119,10 @@ static void al_fic_irq_handler(struct irq_desc *desc)
 	pending = readl_relaxed(fic->base + AL_FIC_CAUSE);
 	pending &= ~gc->mask_cache;
 
-	for_each_set_bit(hwirq, &pending, NR_FIC_IRQS)
-		generic_handle_domain_irq(domain, hwirq);
+	for_each_set_bit(hwirq, &pending, NR_FIC_IRQS) {
+		irq = irq_find_mapping(domain, hwirq);
+		generic_handle_irq(irq);
+	}
 
 	chained_irq_exit(irqchip, desc);
 }
@@ -131,7 +143,7 @@ static int al_fic_register(struct device_node *node,
 	struct irq_chip_generic *gc;
 	int ret;
 
-	fic->domain = irq_domain_create_linear(of_fwnode_handle(node),
+	fic->domain = irq_domain_add_linear(node,
 					    NR_FIC_IRQS,
 					    &irq_generic_chip_ops,
 					    fic);

@@ -21,8 +21,8 @@
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/mfd/syscon.h>
-#include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -522,15 +522,6 @@ static const struct hdmiphy_config hdmiphy_5420_configs[] = {
 			0x54, 0x4B, 0x25, 0x03, 0x00, 0x80, 0x01, 0x80,
 		},
 	},
-	{
-		.pixel_clock = 154000000,
-		.conf = {
-			0x01, 0xD1, 0x20, 0x01, 0x40, 0x30, 0x08, 0xCC,
-			0x8C, 0xE8, 0xC1, 0xD8, 0x45, 0xA0, 0xAC, 0x80,
-			0x08, 0x80, 0x09, 0x84, 0x05, 0x02, 0x24, 0x86,
-			0x54, 0x3F, 0x25, 0x03, 0x00, 0x00, 0x01, 0x80,
-		},
-	},
 };
 
 static const struct hdmiphy_config hdmiphy_5433_configs[] = {
@@ -883,32 +874,27 @@ static const struct drm_connector_funcs hdmi_connector_funcs = {
 static int hdmi_get_modes(struct drm_connector *connector)
 {
 	struct hdmi_context *hdata = connector_to_hdmi(connector);
-	const struct drm_display_info *info = &connector->display_info;
-	const struct drm_edid *drm_edid;
+	struct edid *edid;
 	int ret;
 
 	if (!hdata->ddc_adpt)
 		goto no_edid;
 
-	drm_edid = drm_edid_read_ddc(connector, hdata->ddc_adpt);
-
-	ret = drm_edid_connector_update(connector, drm_edid);
-	if (ret)
-		return 0;
-
-	cec_notifier_set_phys_addr(hdata->notifier, info->source_physical_address);
-
-	if (!drm_edid)
+	edid = drm_get_edid(connector, hdata->ddc_adpt);
+	if (!edid)
 		goto no_edid;
 
-	hdata->dvi_mode = !info->is_hdmi;
+	hdata->dvi_mode = !drm_detect_hdmi_monitor(edid);
 	DRM_DEV_DEBUG_KMS(hdata->dev, "%s : width[%d] x height[%d]\n",
 			  (hdata->dvi_mode ? "dvi monitor" : "hdmi monitor"),
-			  info->width_mm / 10, info->height_mm / 10);
+			  edid->width_cm, edid->height_cm);
 
-	ret = drm_edid_connector_add_modes(connector);
+	drm_connector_update_edid_property(connector, edid);
+	cec_notifier_set_phys_addr_from_edid(hdata->notifier, edid);
 
-	drm_edid_free(drm_edid);
+	ret = drm_add_edid_modes(connector, edid);
+
+	kfree(edid);
 
 	return ret;
 
@@ -930,8 +916,8 @@ static int hdmi_find_phy_conf(struct hdmi_context *hdata, u32 pixel_clock)
 	return -EINVAL;
 }
 
-static enum drm_mode_status hdmi_mode_valid(struct drm_connector *connector,
-					    const struct drm_display_mode *mode)
+static int hdmi_mode_valid(struct drm_connector *connector,
+			struct drm_display_mode *mode)
 {
 	struct hdmi_context *hdata = connector_to_hdmi(connector);
 	int ret;
@@ -978,8 +964,11 @@ static int hdmi_create_connector(struct drm_encoder *encoder)
 	drm_connector_helper_add(connector, &hdmi_connector_helper_funcs);
 	drm_connector_attach_encoder(connector, encoder);
 
-	if (hdata->bridge)
+	if (hdata->bridge) {
 		ret = drm_bridge_attach(encoder, hdata->bridge, NULL, 0);
+		if (ret)
+			DRM_DEV_ERROR(hdata->dev, "Failed to attach bridge\n");
+	}
 
 	cec_fill_conn_info_from_drm(&conn_info, connector);
 
@@ -1488,16 +1477,10 @@ static void hdmi_set_refclk(struct hdmi_context *hdata, bool on)
 /* Should be called with hdata->mutex mutex held. */
 static void hdmiphy_enable(struct hdmi_context *hdata)
 {
-	int ret;
-
 	if (hdata->powered)
 		return;
 
-	ret = pm_runtime_resume_and_get(hdata->dev);
-	if (ret < 0) {
-		dev_err(hdata->dev, "failed to enable HDMIPHY device.\n");
-		return;
-	}
+	pm_runtime_get_sync(hdata->dev);
 
 	if (regulator_bulk_enable(ARRAY_SIZE(supply), hdata->regul_bulk))
 		DRM_DEV_DEBUG_KMS(hdata->dev,
@@ -1602,12 +1585,12 @@ static int hdmi_audio_hw_params(struct device *dev, void *data,
 	struct hdmi_context *hdata = dev_get_drvdata(dev);
 
 	if (daifmt->fmt != HDMI_I2S || daifmt->bit_clk_inv ||
-	    daifmt->frame_clk_inv || daifmt->bit_clk_provider ||
-	    daifmt->frame_clk_provider) {
+	    daifmt->frame_clk_inv || daifmt->bit_clk_master ||
+	    daifmt->frame_clk_master) {
 		dev_err(dev, "%s: Bad flags %d %d %d %d\n", __func__,
 			daifmt->bit_clk_inv, daifmt->frame_clk_inv,
-			daifmt->bit_clk_provider,
-			daifmt->frame_clk_provider);
+			daifmt->bit_clk_master,
+			daifmt->frame_clk_master);
 		return -EINVAL;
 	}
 
@@ -1648,9 +1631,7 @@ static int hdmi_audio_get_eld(struct device *dev, void *data, uint8_t *buf,
 	struct hdmi_context *hdata = dev_get_drvdata(dev);
 	struct drm_connector *connector = &hdata->connector;
 
-	mutex_lock(&connector->eld_mutex);
 	memcpy(buf, connector->eld, min(sizeof(connector->eld), len));
-	mutex_unlock(&connector->eld_mutex);
 
 	return 0;
 }
@@ -1660,6 +1641,7 @@ static const struct hdmi_codec_ops audio_codec_ops = {
 	.audio_shutdown = hdmi_audio_shutdown,
 	.mute_stream = hdmi_audio_mute,
 	.get_eld = hdmi_audio_get_eld,
+	.no_capture_mute = 1,
 };
 
 static int hdmi_register_audio_device(struct hdmi_context *hdata)
@@ -1668,7 +1650,6 @@ static int hdmi_register_audio_device(struct hdmi_context *hdata)
 		.ops = &audio_codec_ops,
 		.max_i2s_channels = 6,
 		.i2s = 1,
-		.no_capture_mute = 1,
 	};
 
 	hdata->audio.pdev = platform_device_register_data(
@@ -1929,9 +1910,10 @@ static int hdmi_get_ddc_adapter(struct hdmi_context *hdata)
 static int hdmi_get_phy_io(struct hdmi_context *hdata)
 {
 	const char *compatible_str = "samsung,exynos4212-hdmiphy";
-	struct device_node *np __free(device_node) =
-		of_find_compatible_node(NULL, NULL, compatible_str);
+	struct device_node *np;
+	int ret = 0;
 
+	np = of_find_compatible_node(NULL, NULL, compatible_str);
 	if (!np) {
 		np = of_parse_phandle(hdata->dev->of_node, "phy", 0);
 		if (!np) {
@@ -1946,17 +1928,21 @@ static int hdmi_get_phy_io(struct hdmi_context *hdata)
 		if (!hdata->regs_hdmiphy) {
 			DRM_DEV_ERROR(hdata->dev,
 				      "failed to ioremap hdmi phy\n");
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto out;
 		}
 	} else {
 		hdata->hdmiphy_port = of_find_i2c_device_by_node(np);
 		if (!hdata->hdmiphy_port) {
 			DRM_INFO("Failed to get hdmi phy i2c client\n");
-			return -EPROBE_DEFER;
+			ret = -EPROBE_DEFER;
+			goto out;
 		}
 	}
 
-	return 0;
+out:
+	of_node_put(np);
+	return ret;
 }
 
 static int hdmi_probe(struct platform_device *pdev)
@@ -1964,6 +1950,7 @@ static int hdmi_probe(struct platform_device *pdev)
 	struct hdmi_audio_infoframe *audio_infoframe;
 	struct device *dev = &pdev->dev;
 	struct hdmi_context *hdata;
+	struct resource *res;
 	int ret;
 
 	hdata = devm_kzalloc(dev, sizeof(struct hdmi_context), GFP_KERNEL);
@@ -1985,7 +1972,8 @@ static int hdmi_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	hdata->regs = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	hdata->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(hdata->regs)) {
 		ret = PTR_ERR(hdata->regs);
 		return ret;
@@ -2074,7 +2062,7 @@ err_ddc:
 	return ret;
 }
 
-static void hdmi_remove(struct platform_device *pdev)
+static int hdmi_remove(struct platform_device *pdev)
 {
 	struct hdmi_context *hdata = platform_get_drvdata(pdev);
 
@@ -2097,6 +2085,8 @@ static void hdmi_remove(struct platform_device *pdev)
 	put_device(&hdata->ddc_adpt->dev);
 
 	mutex_destroy(&hdata->mutex);
+
+	return 0;
 }
 
 static int __maybe_unused exynos_hdmi_suspend(struct device *dev)
@@ -2131,6 +2121,7 @@ struct platform_driver hdmi_driver = {
 	.remove		= hdmi_remove,
 	.driver		= {
 		.name	= "exynos-hdmi",
+		.owner	= THIS_MODULE,
 		.pm	= &exynos_hdmi_pm_ops,
 		.of_match_table = hdmi_match_types,
 	},

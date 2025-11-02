@@ -28,7 +28,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <limits.h>
-#include <tools/dis-asm-compat.h>
 
 #define CMD_ACTION_SIZE_BUFFER		10
 #define CMD_ACTION_READ_ALL		3
@@ -45,8 +44,6 @@ static void get_exec_path(char *tpath, size_t size)
 	assert(path);
 
 	len = readlink(path, tpath, size);
-	if (len < 0)
-		len = 0;
 	tpath[len] = 0;
 
 	free(path);
@@ -67,9 +64,7 @@ static void get_asm_insns(uint8_t *image, size_t len, int opcodes)
 	assert(bfdf);
 	assert(bfd_check_format(bfdf, bfd_object));
 
-	init_disassemble_info_compat(&info, stdout,
-				     (fprintf_ftype) fprintf,
-				     fprintf_styled);
+	init_disassemble_info(&info, stdout, (fprintf_ftype) fprintf);
 	info.arch = bfd_get_arch(bfdf);
 	info.mach = bfd_get_mach(bfdf);
 	info.buffer = image;
@@ -212,7 +207,7 @@ static uint8_t *get_last_jit_image(char *haystack, size_t hlen,
 		return NULL;
 	}
 	if (proglen > 1000000) {
-		printf("proglen of %u too big, stopping\n", proglen);
+		printf("proglen of %d too big, stopping\n", proglen);
 		return NULL;
 	}
 

@@ -17,7 +17,7 @@
 
 #ifdef __KERNEL__
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 #include <asm/types.h>
 #include <asm/processor.h>
 #endif
@@ -25,7 +25,7 @@
 
 /* THREAD_SIZE is the size of the task_struct/kernel_stack combo.
  * normally, the stack is found by doing something like p + THREAD_SIZE
- * in or1k, a page is 8192 bytes, which seems like a sane size
+ * in or32, a page is 8192 bytes, which seems like a sane size
  */
 
 #define THREAD_SIZE_ORDER 0
@@ -38,7 +38,9 @@
  * - if the contents of this structure are changed, the assembly constants
  *   must also be changed
  */
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
+
+typedef unsigned long mm_segment_t;
 
 struct thread_info {
 	struct task_struct	*task;		/* main task structure */
@@ -46,6 +48,10 @@ struct thread_info {
 	__u32			cpu;		/* current CPU */
 	__s32			preempt_count; /* 0 => preemptable, <0 => BUG */
 
+	mm_segment_t		addr_limit; /* thread address space:
+					       0-0x7FFFFFFF for user-thead
+					       0-0xFFFFFFFF for kernel-thread
+					     */
 	__u8			supervisor_stack[0];
 
 	/* saved context data */
@@ -58,13 +64,14 @@ struct thread_info {
  *
  * preempt_count needs to be 1 initially, until the scheduler is functional.
  */
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 #define INIT_THREAD_INFO(tsk)				\
 {							\
 	.task		= &tsk,				\
 	.flags		= 0,				\
 	.cpu		= 0,				\
 	.preempt_count	= INIT_PREEMPT_COUNT,		\
+	.addr_limit	= KERNEL_DS,			\
 	.ksp            = 0,                            \
 }
 
@@ -75,7 +82,7 @@ register struct thread_info *current_thread_info_reg asm("r10");
 #define get_thread_info(ti) get_task_struct((ti)->task)
 #define put_thread_info(ti) put_task_struct((ti)->task)
 
-#endif /* !__ASSEMBLER__ */
+#endif /* !__ASSEMBLY__ */
 
 /*
  * thread information flags

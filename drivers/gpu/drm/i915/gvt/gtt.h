@@ -34,18 +34,9 @@
 #ifndef _GVT_GTT_H_
 #define _GVT_GTT_H_
 
-#include <linux/kernel.h>
-#include <linux/kref.h>
-#include <linux/mutex.h>
-#include <linux/radix-tree.h>
-
-#include "gt/intel_gtt.h"
-
-struct intel_gvt;
-struct intel_vgpu;
-struct intel_vgpu_mm;
-
 #define I915_GTT_PAGE_SHIFT         12
+
+struct intel_vgpu_mm;
 
 #define INTEL_GVT_INVALID_ADDR (~0UL)
 
@@ -91,8 +82,10 @@ struct intel_gvt_gtt_gma_ops {
 };
 
 struct intel_gvt_gtt {
-	const struct intel_gvt_gtt_pte_ops *pte_ops;
-	const struct intel_gvt_gtt_gma_ops *gma_ops;
+	struct intel_gvt_gtt_pte_ops *pte_ops;
+	struct intel_gvt_gtt_gma_ops *gma_ops;
+	int (*mm_alloc_page_table)(struct intel_vgpu_mm *mm);
+	void (*mm_free_page_table)(struct intel_vgpu_mm *mm);
 	struct list_head oos_page_use_list_head;
 	struct list_head oos_page_free_list_head;
 	struct mutex ppgtt_mm_lock;
@@ -208,6 +201,7 @@ struct intel_vgpu_scratch_pt {
 
 struct intel_vgpu_gtt {
 	struct intel_vgpu_mm *ggtt_mm;
+	unsigned long active_ppgtt_mm_bitmap;
 	struct list_head ppgtt_mm_list_head;
 	struct radix_tree_root spt_tree;
 	struct list_head oos_page_list_head;

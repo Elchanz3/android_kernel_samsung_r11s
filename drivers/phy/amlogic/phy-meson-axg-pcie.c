@@ -4,7 +4,6 @@
  *
  * Copyright (C) 2020 Remi Pommarel <repk@triplefau.lt>
  */
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/regmap.h>
@@ -130,13 +129,24 @@ static int phy_axg_pcie_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct phy_axg_pcie_priv *priv;
 	struct device_node *np = dev->of_node;
+	struct resource *res;
 	void __iomem *base;
+	int ret;
 
 	priv = devm_kmalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	base = devm_platform_ioremap_resource(pdev, 0);
+	priv->phy = devm_phy_create(dev, np, &phy_axg_pcie_ops);
+	if (IS_ERR(priv->phy)) {
+		ret = PTR_ERR(priv->phy);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "failed to create PHY\n");
+		return ret;
+	}
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
@@ -145,18 +155,13 @@ static int phy_axg_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->regmap))
 		return PTR_ERR(priv->regmap);
 
-	priv->reset = devm_reset_control_array_get_exclusive(dev);
+	priv->reset = devm_reset_control_array_get(dev, false, false);
 	if (IS_ERR(priv->reset))
 		return PTR_ERR(priv->reset);
 
 	priv->analog = devm_phy_get(dev, "analog");
 	if (IS_ERR(priv->analog))
 		return PTR_ERR(priv->analog);
-
-	priv->phy = devm_phy_create(dev, np, &phy_axg_pcie_ops);
-	if (IS_ERR(priv->phy))
-		return dev_err_probe(dev, PTR_ERR(priv->phy),
-				     "failed to create PHY\n");
 
 	phy_set_drvdata(priv->phy, priv);
 	dev_set_drvdata(dev, priv);

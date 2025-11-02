@@ -13,13 +13,13 @@
 
 #include <linux/kernel.h>
 #include <linux/delay.h>
+#include <linux/export.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/string.h>
 #include <linux/of.h>
-#include <linux/of_graph.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 
@@ -55,7 +55,7 @@ static struct dpi_data *dpi_get_data_from_dssdev(struct omap_dss_device *dssdev)
 /* only used in non-DT mode */
 static struct dpi_data *dpi_get_data_from_pdev(struct platform_device *pdev)
 {
-	return platform_get_drvdata(pdev);
+	return dev_get_drvdata(&pdev->dev);
 }
 
 static struct dss_pll *dpi_get_pll(enum omap_channel channel)
@@ -784,7 +784,7 @@ static int dpi_bind(struct device *dev, struct device *master, void *data)
 
 	dpi->pdev = pdev;
 
-	platform_set_drvdata(pdev, dpi);
+	dev_set_drvdata(&pdev->dev, dpi);
 
 	mutex_init(&dpi->lock);
 
@@ -810,15 +810,16 @@ static int dpi_probe(struct platform_device *pdev)
 	return component_add(&pdev->dev, &dpi_component_ops);
 }
 
-static void dpi_remove(struct platform_device *pdev)
+static int dpi_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &dpi_component_ops);
+	return 0;
 }
 
 static struct platform_driver omap_dpi_driver = {
 	.probe		= dpi_probe,
 	.remove		= dpi_remove,
-	.driver		= {
+	.driver         = {
 		.name   = "omapdss_dpi",
 		.suppress_bind_attrs = true,
 	},
@@ -845,7 +846,7 @@ int dpi_init_port(struct platform_device *pdev, struct device_node *port)
 	if (!dpi)
 		return -ENOMEM;
 
-	ep = of_graph_get_next_port_endpoint(port, NULL);
+	ep = omapdss_of_get_next_endpoint(port, NULL);
 	if (!ep)
 		return 0;
 

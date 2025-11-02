@@ -22,6 +22,7 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/slab.h>
+#include <linux/of_platform.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -885,10 +886,10 @@ static void dwc2_gadget_config_nonisoc_xfer_ddma(struct dwc2_hsotg_ep *hs_ep,
 	}
 
 	/* DMA sg buffer */
-	for_each_sg(ureq->sg, sg, ureq->num_mapped_sgs, i) {
+	for_each_sg(ureq->sg, sg, ureq->num_sgs, i) {
 		dwc2_gadget_fill_nonisoc_xfer_ddma_one(hs_ep, &desc,
 			sg_dma_address(sg) + sg->offset, sg_dma_len(sg),
-			(i == (ureq->num_mapped_sgs - 1)));
+			sg_is_last(sg));
 		desc_count += hs_ep->desc_count;
 	}
 
@@ -1528,8 +1529,8 @@ static int dwc2_hsotg_ep_queue_lock(struct usb_ep *ep, struct usb_request *req,
 {
 	struct dwc2_hsotg_ep *hs_ep = our_ep(ep);
 	struct dwc2_hsotg *hs = hs_ep->parent;
-	unsigned long flags;
-	int ret;
+	unsigned long flags = 0;
+	int ret = 0;
 
 	spin_lock_irqsave(&hs->lock, flags);
 	ret = dwc2_hsotg_ep_queue(ep, req, gfp_flags);
@@ -1833,8 +1834,7 @@ static int dwc2_hsotg_process_req_feature(struct dwc2_hsotg *hsotg,
 		case USB_ENDPOINT_HALT:
 			halted = ep->halted;
 
-			if (!ep->wedged)
-				dwc2_hsotg_ep_sethalt(&ep->ep, set, true);
+			dwc2_hsotg_ep_sethalt(&ep->ep, set, true);
 
 			ret = dwc2_hsotg_send_reply(hsotg, ep0, NULL, 0);
 			if (ret) {
@@ -3375,7 +3375,7 @@ static void dwc2_hsotg_irq_fifoempty(struct dwc2_hsotg *hsotg, bool periodic)
 
 static int dwc2_hsotg_ep_disable(struct usb_ep *ep);
 /**
- * dwc2_hsotg_core_init_disconnected - issue softreset to the core
+ * dwc2_hsotg_core_init - issue softreset to the core
  * @hsotg: The device state
  * @is_usb_reset: Usb resetting flag
  *
@@ -3424,11 +3424,8 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 
 	dwc2_hsotg_init_fifo(hsotg);
 
-	if (!is_usb_reset) {
+	if (!is_usb_reset)
 		dwc2_set_bit(hsotg, DCTL, DCTL_SFTDISCON);
-		if (hsotg->params.eusb2_disc)
-			dwc2_set_bit(hsotg, GOTGCTL, GOTGCTL_EUSB2_DISC_SUPP);
-	}
 
 	dcfg |= DCFG_EPMISCNT(1);
 
@@ -3731,16 +3728,10 @@ irq_retry:
 		dwc2_writel(hsotg, GINTSTS_RESETDET, GINTSTS);
 
 		/* This event must be used only if controller is suspended */
-		if (hsotg->in_ppd && hsotg->lx_state == DWC2_L2)
-			dwc2_exit_partial_power_down(hsotg, 0, true);
-
-		/* Exit gadget mode clock gating. */
-		if (hsotg->params.power_down ==
-		    DWC2_POWER_DOWN_PARAM_NONE && hsotg->bus_suspended &&
-		    !hsotg->params.no_clock_gating)
-			dwc2_gadget_exit_clock_gating(hsotg, 0);
-
-		hsotg->lx_state = DWC2_L0;
+		if (hsotg->lx_state == DWC2_L2) {
+			dwc2_exit_partial_power_down(hsotg, true);
+			hsotg->lx_state = DWC2_L0;
+		}
 	}
 
 	if (gintsts & (GINTSTS_USBRST | GINTSTS_RESETDET)) {
@@ -4049,7 +4040,7 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
 		return -EINVAL;
 	}
 
-	ep_type = usb_endpoint_type(desc);
+	ep_type = desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
 	mps = usb_endpoint_maxp(desc);
 	mc = usb_endpoint_maxp_mult(desc);
 
@@ -4111,7 +4102,6 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
 	hs_ep->isochronous = 0;
 	hs_ep->periodic = 0;
 	hs_ep->halted = 0;
-	hs_ep->wedged = 0;
 	hs_ep->interval = desc->bInterval;
 
 	switch (ep_type) {
@@ -4354,27 +4344,6 @@ static int dwc2_hsotg_ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 }
 
 /**
- * dwc2_gadget_ep_set_wedge - set wedge on a given endpoint
- * @ep: The endpoint to be wedged.
- *
- */
-static int dwc2_gadget_ep_set_wedge(struct usb_ep *ep)
-{
-	struct dwc2_hsotg_ep *hs_ep = our_ep(ep);
-	struct dwc2_hsotg *hs = hs_ep->parent;
-
-	unsigned long	flags;
-	int		ret;
-
-	spin_lock_irqsave(&hs->lock, flags);
-	hs_ep->wedged = 1;
-	ret = dwc2_hsotg_ep_sethalt(ep, 1, false);
-	spin_unlock_irqrestore(&hs->lock, flags);
-
-	return ret;
-}
-
-/**
  * dwc2_hsotg_ep_sethalt - set halt on a given endpoint
  * @ep: The endpoint to set halt.
  * @value: Set or unset the halt.
@@ -4425,7 +4394,6 @@ static int dwc2_hsotg_ep_sethalt(struct usb_ep *ep, int value, bool now)
 				epctl |= DXEPCTL_EPDIS;
 		} else {
 			epctl &= ~DXEPCTL_STALL;
-			hs_ep->wedged = 0;
 			xfertype = epctl & DXEPCTL_EPTYPE_MASK;
 			if (xfertype == DXEPCTL_EPTYPE_BULK ||
 			    xfertype == DXEPCTL_EPTYPE_INTERRUPT)
@@ -4445,7 +4413,6 @@ static int dwc2_hsotg_ep_sethalt(struct usb_ep *ep, int value, bool now)
 			// STALL bit will be set in GOUTNAKEFF interrupt handler
 		} else {
 			epctl &= ~DXEPCTL_STALL;
-			hs_ep->wedged = 0;
 			xfertype = epctl & DXEPCTL_EPTYPE_MASK;
 			if (xfertype == DXEPCTL_EPTYPE_BULK ||
 			    xfertype == DXEPCTL_EPTYPE_INTERRUPT)
@@ -4467,8 +4434,8 @@ static int dwc2_hsotg_ep_sethalt_lock(struct usb_ep *ep, int value)
 {
 	struct dwc2_hsotg_ep *hs_ep = our_ep(ep);
 	struct dwc2_hsotg *hs = hs_ep->parent;
-	unsigned long flags;
-	int ret;
+	unsigned long flags = 0;
+	int ret = 0;
 
 	spin_lock_irqsave(&hs->lock, flags);
 	ret = dwc2_hsotg_ep_sethalt(ep, value, false);
@@ -4485,7 +4452,6 @@ static const struct usb_ep_ops dwc2_hsotg_ep_ops = {
 	.queue		= dwc2_hsotg_ep_queue_lock,
 	.dequeue	= dwc2_hsotg_ep_dequeue,
 	.set_halt	= dwc2_hsotg_ep_sethalt_lock,
-	.set_wedge	= dwc2_gadget_ep_set_wedge,
 	/* note, don't believe we have any call for the fifo routines */
 };
 
@@ -4598,17 +4564,11 @@ err:
 static int dwc2_hsotg_udc_stop(struct usb_gadget *gadget)
 {
 	struct dwc2_hsotg *hsotg = to_hsotg(gadget);
-	unsigned long flags;
+	unsigned long flags = 0;
 	int ep;
 
 	if (!hsotg)
 		return -ENODEV;
-
-	/* Exit clock gating when driver is stopped. */
-	if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
-	    hsotg->bus_suspended && !hsotg->params.no_clock_gating) {
-		dwc2_gadget_exit_clock_gating(hsotg, 0);
-	}
 
 	/* all endpoints should be shutdown */
 	for (ep = 1; ep < hsotg->num_of_eps; ep++) {
@@ -4621,7 +4581,6 @@ static int dwc2_hsotg_udc_stop(struct usb_gadget *gadget)
 	spin_lock_irqsave(&hsotg->lock, flags);
 
 	hsotg->driver = NULL;
-	hsotg->gadget.dev.of_node = NULL;
 	hsotg->gadget.speed = USB_SPEED_UNKNOWN;
 	hsotg->enabled = 0;
 
@@ -4677,7 +4636,7 @@ static int dwc2_hsotg_set_selfpowered(struct usb_gadget *gadget,
 static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
 {
 	struct dwc2_hsotg *hsotg = to_hsotg(gadget);
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	dev_dbg(hsotg->dev, "%s: is_on: %d op_state: %d\n", __func__, is_on,
 		hsotg->op_state);
@@ -4716,15 +4675,11 @@ static int dwc2_hsotg_vbus_session(struct usb_gadget *gadget, int is_active)
 	spin_lock_irqsave(&hsotg->lock, flags);
 
 	/*
-	 * If controller is in partial power down state, it must exit from
-	 * that state before being initialized / de-initialized
+	 * If controller is hibernated, it must exit from power_down
+	 * before being initialized / de-initialized
 	 */
-	if (hsotg->lx_state == DWC2_L2 && hsotg->in_ppd)
-		/*
-		 * No need to check the return value as
-		 * registers are not being restored.
-		 */
-		dwc2_exit_partial_power_down(hsotg, 0, false);
+	if (hsotg->lx_state == DWC2_L2)
+		dwc2_exit_partial_power_down(hsotg, false);
 
 	if (is_active) {
 		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
@@ -4760,35 +4715,12 @@ static int dwc2_hsotg_vbus_draw(struct usb_gadget *gadget, unsigned int mA)
 	return usb_phy_set_power(hsotg->uphy, mA);
 }
 
-static void dwc2_gadget_set_speed(struct usb_gadget *g, enum usb_device_speed speed)
-{
-	struct dwc2_hsotg *hsotg = to_hsotg(g);
-	unsigned long		flags;
-
-	spin_lock_irqsave(&hsotg->lock, flags);
-	switch (speed) {
-	case USB_SPEED_HIGH:
-		hsotg->params.speed = DWC2_SPEED_PARAM_HIGH;
-		break;
-	case USB_SPEED_FULL:
-		hsotg->params.speed = DWC2_SPEED_PARAM_FULL;
-		break;
-	case USB_SPEED_LOW:
-		hsotg->params.speed = DWC2_SPEED_PARAM_LOW;
-		break;
-	default:
-		dev_err(hsotg->dev, "invalid speed (%d)\n", speed);
-	}
-	spin_unlock_irqrestore(&hsotg->lock, flags);
-}
-
 static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
 	.get_frame	= dwc2_hsotg_gadget_getframe,
 	.set_selfpowered	= dwc2_hsotg_set_selfpowered,
 	.udc_start		= dwc2_hsotg_udc_start,
 	.udc_stop		= dwc2_hsotg_udc_stop,
 	.pullup                 = dwc2_hsotg_pullup,
-	.udc_set_speed		= dwc2_gadget_set_speed,
 	.vbus_session		= dwc2_hsotg_vbus_session,
 	.vbus_draw		= dwc2_hsotg_vbus_draw,
 };
@@ -4993,21 +4925,9 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg)
 		hsotg->params.g_np_tx_fifo_size);
 	dev_dbg(dev, "RXFIFO size: %d\n", hsotg->params.g_rx_fifo_size);
 
-	switch (hsotg->params.speed) {
-	case DWC2_SPEED_PARAM_LOW:
-		hsotg->gadget.max_speed = USB_SPEED_LOW;
-		break;
-	case DWC2_SPEED_PARAM_FULL:
-		hsotg->gadget.max_speed = USB_SPEED_FULL;
-		break;
-	default:
-		hsotg->gadget.max_speed = USB_SPEED_HIGH;
-		break;
-	}
-
+	hsotg->gadget.max_speed = USB_SPEED_HIGH;
 	hsotg->gadget.ops = &dwc2_hsotg_gadget_ops;
 	hsotg->gadget.name = dev_name(dev);
-	hsotg->gadget.otg_caps = &hsotg->params.otg_caps;
 	hsotg->remote_wakeup_allowed = 0;
 
 	if (hsotg->params.lpm)
@@ -5210,11 +5130,11 @@ int dwc2_backup_device_registers(struct dwc2_hsotg *hsotg)
  * if controller power were disabled.
  *
  * @hsotg: Programming view of the DWC_otg controller
- * @flags: Defines which registers should be restored.
+ * @remote_wakeup: Indicates whether resume is initiated by Device or Host.
  *
  * Return: 0 if successful, negative error code otherwise
  */
-int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg, unsigned int flags)
+int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg, int remote_wakeup)
 {
 	struct dwc2_dregs_backup *dr;
 	int i;
@@ -5230,10 +5150,7 @@ int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg, unsigned int flags)
 	}
 	dr->valid = false;
 
-	if (flags & DWC2_RESTORE_DCFG)
-		dwc2_writel(hsotg, dr->dcfg, DCFG);
-
-	if (flags & DWC2_RESTORE_DCTL)
+	if (!remote_wakeup)
 		dwc2_writel(hsotg, dr->dctl, DCTL);
 
 	dwc2_writel(hsotg, dr->daintmsk, DAINTMSK);
@@ -5250,7 +5167,7 @@ int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg, unsigned int flags)
 		 * as result BNA interrupt asserted on hibernation exit
 		 * by restoring from saved area.
 		 */
-		if (using_desc_dma(hsotg) &&
+		if (hsotg->params.g_dma_desc &&
 		    (dr->diepctl[i] & DXEPCTL_EPENA))
 			dr->diepdma[i] = hsotg->eps_in[i]->desc_list_dma;
 		dwc2_writel(hsotg, dr->dtxfsiz[i], DPTXFSIZN(i));
@@ -5262,7 +5179,7 @@ int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg, unsigned int flags)
 		 * as result BNA interrupt asserted on hibernation exit
 		 * by restoring from saved area.
 		 */
-		if (using_desc_dma(hsotg) &&
+		if (hsotg->params.g_dma_desc &&
 		    (dr->doepctl[i] & DXEPCTL_EPENA))
 			dr->doepdma[i] = hsotg->eps_out[i]->desc_list_dma;
 		dwc2_writel(hsotg, dr->doepdma[i], DOEPDMA(i));
@@ -5319,49 +5236,6 @@ void dwc2_gadget_program_ref_clk(struct dwc2_hsotg *hsotg)
 	dev_dbg(hsotg->dev, "GREFCLK=0x%08x\n", dwc2_readl(hsotg, GREFCLK));
 }
 
-int dwc2_gadget_backup_critical_registers(struct dwc2_hsotg *hsotg)
-{
-	int ret;
-
-	/* Backup all registers */
-	ret = dwc2_backup_global_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to backup global registers\n",
-			__func__);
-		return ret;
-	}
-
-	ret = dwc2_backup_device_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to backup device registers\n",
-			__func__);
-		return ret;
-	}
-
-	return 0;
-}
-
-int dwc2_gadget_restore_critical_registers(struct dwc2_hsotg *hsotg,
-					   unsigned int flags)
-{
-	int ret;
-
-	ret = dwc2_restore_global_registers(hsotg);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to restore registers\n",
-			__func__);
-		return ret;
-	}
-	ret = dwc2_restore_device_registers(hsotg, flags);
-	if (ret) {
-		dev_err(hsotg->dev, "%s: failed to restore device registers\n",
-			__func__);
-		return ret;
-	}
-
-	return 0;
-}
-
 /**
  * dwc2_gadget_enter_hibernation() - Put controller in Hibernation.
  *
@@ -5372,51 +5246,28 @@ int dwc2_gadget_restore_critical_registers(struct dwc2_hsotg *hsotg,
 int dwc2_gadget_enter_hibernation(struct dwc2_hsotg *hsotg)
 {
 	u32 gpwrdn;
-	u32 gusbcfg;
-	u32 pcgcctl;
 	int ret = 0;
 
 	/* Change to L2(suspend) state */
 	hsotg->lx_state = DWC2_L2;
 	dev_dbg(hsotg->dev, "Start of hibernation completed\n");
-	ret = dwc2_gadget_backup_critical_registers(hsotg);
-	if (ret)
+	ret = dwc2_backup_global_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to backup global registers\n",
+			__func__);
 		return ret;
+	}
+	ret = dwc2_backup_device_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to backup device registers\n",
+			__func__);
+		return ret;
+	}
 
 	gpwrdn = GPWRDN_PWRDNRSTN;
+	gpwrdn |= GPWRDN_PMUACTV;
+	dwc2_writel(hsotg, gpwrdn, GPWRDN);
 	udelay(10);
-	gusbcfg = dwc2_readl(hsotg, GUSBCFG);
-	if (gusbcfg & GUSBCFG_ULPI_UTMI_SEL) {
-		/* ULPI interface */
-		gpwrdn |= GPWRDN_ULPI_LATCH_EN_DURING_HIB_ENTRY;
-		dwc2_writel(hsotg, gpwrdn, GPWRDN);
-		udelay(10);
-
-		/* Suspend the Phy Clock */
-		pcgcctl = dwc2_readl(hsotg, PCGCTL);
-		pcgcctl |= PCGCTL_STOPPCLK;
-		dwc2_writel(hsotg, pcgcctl, PCGCTL);
-		udelay(10);
-
-		gpwrdn = dwc2_readl(hsotg, GPWRDN);
-		gpwrdn |= GPWRDN_PMUACTV;
-		dwc2_writel(hsotg, gpwrdn, GPWRDN);
-		udelay(10);
-	} else {
-		/* UTMI+ Interface */
-		dwc2_writel(hsotg, gpwrdn, GPWRDN);
-		udelay(10);
-
-		gpwrdn = dwc2_readl(hsotg, GPWRDN);
-		gpwrdn |= GPWRDN_PMUACTV;
-		dwc2_writel(hsotg, gpwrdn, GPWRDN);
-		udelay(10);
-
-		pcgcctl = dwc2_readl(hsotg, PCGCTL);
-		pcgcctl |= PCGCTL_STOPPCLK;
-		dwc2_writel(hsotg, pcgcctl, PCGCTL);
-		udelay(10);
-	}
 
 	/* Set flag to indicate that we are in hibernation */
 	hsotg->hibernated = 1;
@@ -5472,7 +5323,6 @@ int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 	u32 gpwrdn;
 	u32 dctl;
 	int ret = 0;
-	unsigned int flags = 0;
 	struct dwc2_gregs_backup *gr;
 	struct dwc2_dregs_backup *dr;
 
@@ -5511,15 +5361,6 @@ int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 	dwc2_writel(hsotg, dr->dcfg, DCFG);
 	dwc2_writel(hsotg, dr->dctl, DCTL);
 
-	/* On USB Reset, reset device address to zero */
-	if (reset)
-		dwc2_clear_bit(hsotg, DCFG, DCFG_DEVADDR_MASK);
-
-	/* Reset ULPI latch */
-	gpwrdn = dwc2_readl(hsotg, GPWRDN);
-	gpwrdn &= ~GPWRDN_ULPI_LATCH_EN_DURING_HIB_ENTRY;
-	dwc2_writel(hsotg, gpwrdn, GPWRDN);
-
 	/* De-assert Wakeup Logic */
 	gpwrdn = dwc2_readl(hsotg, GPWRDN);
 	gpwrdn &= ~GPWRDN_PMUACTV;
@@ -5535,7 +5376,6 @@ int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 		dctl = dwc2_readl(hsotg, DCTL);
 		dctl |= DCTL_PWRONPRGDONE;
 		dwc2_writel(hsotg, dctl, DCTL);
-		flags |= DWC2_RESTORE_DCTL;
 	}
 	/* Wait for interrupts which must be cleared */
 	mdelay(2);
@@ -5543,9 +5383,20 @@ int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
 
 	/* Restore global registers */
-	ret = dwc2_gadget_restore_critical_registers(hsotg, flags);
-	if (ret)
+	ret = dwc2_restore_global_registers(hsotg);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to restore registers\n",
+			__func__);
 		return ret;
+	}
+
+	/* Restore device registers */
+	ret = dwc2_restore_device_registers(hsotg, rem_wakeup);
+	if (ret) {
+		dev_err(hsotg->dev, "%s: failed to restore device registers\n",
+			__func__);
+		return ret;
+	}
 
 	if (rem_wakeup) {
 		mdelay(10);
@@ -5559,179 +5410,4 @@ int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 	dev_dbg(hsotg->dev, "Hibernation recovery completes here\n");
 
 	return ret;
-}
-
-/**
- * dwc2_gadget_enter_partial_power_down() - Put controller in partial
- * power down.
- *
- * @hsotg: Programming view of the DWC_otg controller
- *
- * Return: non-zero if failed to enter device partial power down.
- *
- * This function is for entering device mode partial power down.
- */
-int dwc2_gadget_enter_partial_power_down(struct dwc2_hsotg *hsotg)
-{
-	u32 pcgcctl;
-	int ret = 0;
-
-	dev_dbg(hsotg->dev, "Entering device partial power down started.\n");
-
-	/* Backup all registers */
-	ret = dwc2_gadget_backup_critical_registers(hsotg);
-	if (ret)
-		return ret;
-
-	/*
-	 * Clear any pending interrupts since dwc2 will not be able to
-	 * clear them after entering partial_power_down.
-	 */
-	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
-
-	/* Put the controller in low power state */
-	pcgcctl = dwc2_readl(hsotg, PCGCTL);
-
-	pcgcctl |= PCGCTL_PWRCLMP;
-	dwc2_writel(hsotg, pcgcctl, PCGCTL);
-	udelay(5);
-
-	pcgcctl |= PCGCTL_RSTPDWNMODULE;
-	dwc2_writel(hsotg, pcgcctl, PCGCTL);
-	udelay(5);
-
-	pcgcctl |= PCGCTL_STOPPCLK;
-	dwc2_writel(hsotg, pcgcctl, PCGCTL);
-
-	/* Set in_ppd flag to 1 as here core enters suspend. */
-	hsotg->in_ppd = 1;
-	hsotg->lx_state = DWC2_L2;
-
-	dev_dbg(hsotg->dev, "Entering device partial power down completed.\n");
-
-	return ret;
-}
-
-/*
- * dwc2_gadget_exit_partial_power_down() - Exit controller from device partial
- * power down.
- *
- * @hsotg: Programming view of the DWC_otg controller
- * @restore: indicates whether need to restore the registers or not.
- *
- * Return: non-zero if failed to exit device partial power down.
- *
- * This function is for exiting from device mode partial power down.
- */
-int dwc2_gadget_exit_partial_power_down(struct dwc2_hsotg *hsotg,
-					bool restore)
-{
-	u32 pcgcctl;
-	u32 dctl;
-	int ret = 0;
-
-	dev_dbg(hsotg->dev, "Exiting device partial Power Down started.\n");
-
-	pcgcctl = dwc2_readl(hsotg, PCGCTL);
-	pcgcctl &= ~PCGCTL_STOPPCLK;
-	dwc2_writel(hsotg, pcgcctl, PCGCTL);
-
-	pcgcctl = dwc2_readl(hsotg, PCGCTL);
-	pcgcctl &= ~PCGCTL_PWRCLMP;
-	dwc2_writel(hsotg, pcgcctl, PCGCTL);
-
-	pcgcctl = dwc2_readl(hsotg, PCGCTL);
-	pcgcctl &= ~PCGCTL_RSTPDWNMODULE;
-	dwc2_writel(hsotg, pcgcctl, PCGCTL);
-
-	udelay(100);
-	if (restore) {
-		ret = dwc2_gadget_restore_critical_registers(hsotg, DWC2_RESTORE_DCTL |
-							     DWC2_RESTORE_DCFG);
-		if (ret)
-			return ret;
-	}
-
-	/* Set the Power-On Programming done bit */
-	dctl = dwc2_readl(hsotg, DCTL);
-	dctl |= DCTL_PWRONPRGDONE;
-	dwc2_writel(hsotg, dctl, DCTL);
-
-	/* Set in_ppd flag to 0 as here core exits from suspend. */
-	hsotg->in_ppd = 0;
-	hsotg->lx_state = DWC2_L0;
-
-	dev_dbg(hsotg->dev, "Exiting device partial Power Down completed.\n");
-	return ret;
-}
-
-/**
- * dwc2_gadget_enter_clock_gating() - Put controller in clock gating.
- *
- * @hsotg: Programming view of the DWC_otg controller
- *
- * Return: non-zero if failed to enter device partial power down.
- *
- * This function is for entering device mode clock gating.
- */
-void dwc2_gadget_enter_clock_gating(struct dwc2_hsotg *hsotg)
-{
-	u32 pcgctl;
-
-	dev_dbg(hsotg->dev, "Entering device clock gating.\n");
-
-	/* Set the Phy Clock bit as suspend is received. */
-	pcgctl = dwc2_readl(hsotg, PCGCTL);
-	pcgctl |= PCGCTL_STOPPCLK;
-	dwc2_writel(hsotg, pcgctl, PCGCTL);
-	udelay(5);
-
-	/* Set the Gate hclk as suspend is received. */
-	pcgctl = dwc2_readl(hsotg, PCGCTL);
-	pcgctl |= PCGCTL_GATEHCLK;
-	dwc2_writel(hsotg, pcgctl, PCGCTL);
-	udelay(5);
-
-	hsotg->lx_state = DWC2_L2;
-	hsotg->bus_suspended = true;
-}
-
-/*
- * dwc2_gadget_exit_clock_gating() - Exit controller from device clock gating.
- *
- * @hsotg: Programming view of the DWC_otg controller
- * @rem_wakeup: indicates whether remote wake up is enabled.
- *
- * This function is for exiting from device mode clock gating.
- */
-void dwc2_gadget_exit_clock_gating(struct dwc2_hsotg *hsotg, int rem_wakeup)
-{
-	u32 pcgctl;
-	u32 dctl;
-
-	dev_dbg(hsotg->dev, "Exiting device clock gating.\n");
-
-	/* Clear the Gate hclk. */
-	pcgctl = dwc2_readl(hsotg, PCGCTL);
-	pcgctl &= ~PCGCTL_GATEHCLK;
-	dwc2_writel(hsotg, pcgctl, PCGCTL);
-	udelay(5);
-
-	/* Phy Clock bit. */
-	pcgctl = dwc2_readl(hsotg, PCGCTL);
-	pcgctl &= ~PCGCTL_STOPPCLK;
-	dwc2_writel(hsotg, pcgctl, PCGCTL);
-	udelay(5);
-
-	if (rem_wakeup) {
-		/* Set Remote Wakeup Signaling */
-		dctl = dwc2_readl(hsotg, DCTL);
-		dctl |= DCTL_RMTWKUPSIG;
-		dwc2_writel(hsotg, dctl, DCTL);
-	}
-
-	/* Change to L0 state */
-	call_gadget(hsotg, resume);
-	hsotg->lx_state = DWC2_L0;
-	hsotg->bus_suspended = false;
 }

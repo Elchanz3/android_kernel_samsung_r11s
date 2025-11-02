@@ -7,7 +7,6 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/err.h>
-#include <linux/kstrtox.h>
 #include <linux/slab.h>
 #include <linux/powercap.h>
 
@@ -171,8 +170,9 @@ static ssize_t show_constraint_name(struct device *dev,
 	if (pconst && pconst->ops && pconst->ops->get_name) {
 		name = pconst->ops->get_name(power_zone, id);
 		if (name) {
-			sprintf(buf, "%.*s\n", POWERCAP_CONSTRAINT_NAME_LEN - 1,
-				name);
+			snprintf(buf, POWERCAP_CONSTRAINT_NAME_LEN,
+								"%s\n", name);
+			buf[POWERCAP_CONSTRAINT_NAME_LEN] = '\0';
 			len = strlen(buf);
 		}
 	}
@@ -447,7 +447,7 @@ static ssize_t enabled_store(struct device *dev,
 {
 	bool mode;
 
-	if (kstrtobool(buf, &mode))
+	if (strtobool(buf, &mode))
 		return -EINVAL;
 	if (dev->parent) {
 		struct powercap_zone *power_zone = to_powercap_zone(dev);
@@ -627,7 +627,8 @@ struct powercap_control_type *powercap_register_control_type(
 	dev_set_name(&control_type->dev, "%s", name);
 	result = device_register(&control_type->dev);
 	if (result) {
-		put_device(&control_type->dev);
+		if (control_type->allocated)
+			kfree(control_type);
 		return ERR_PTR(result);
 	}
 	idr_init(&control_type->idr);
@@ -678,3 +679,4 @@ fs_initcall(powercap_init);
 
 MODULE_DESCRIPTION("PowerCap sysfs Driver");
 MODULE_AUTHOR("Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>");
+MODULE_LICENSE("GPL v2");

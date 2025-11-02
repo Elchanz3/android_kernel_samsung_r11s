@@ -323,7 +323,7 @@ static void usdhi6_blk_bounce(struct usdhi6_host *host,
 
 	host->head_pg.page	= host->pg.page;
 	host->head_pg.mapped	= host->pg.mapped;
-	host->pg.page		= host->pg.page + 1;
+	host->pg.page		= nth_page(host->pg.page, 1);
 	host->pg.mapped		= kmap(host->pg.page);
 
 	host->blk_page = host->bounce_buf;
@@ -503,7 +503,7 @@ static void usdhi6_sg_advance(struct usdhi6_host *host)
 	/* We cannot get here after crossing a page border */
 
 	/* Next page in the same SG */
-	host->pg.page = sg_page(host->sg) + host->page_idx;
+	host->pg.page = nth_page(sg_page(host->sg), host->page_idx);
 	host->pg.mapped = kmap(host->pg.page);
 	host->blk_page = host->pg.mapped;
 
@@ -631,9 +631,9 @@ static void usdhi6_dma_kill(struct usdhi6_host *host)
 		__func__, data->sg_len, data->blocks, data->blksz);
 	/* Abort DMA */
 	if (data->flags & MMC_DATA_READ)
-		dmaengine_terminate_sync(host->chan_rx);
+		dmaengine_terminate_all(host->chan_rx);
 	else
-		dmaengine_terminate_sync(host->chan_tx);
+		dmaengine_terminate_all(host->chan_tx);
 }
 
 static void usdhi6_dma_check_error(struct usdhi6_host *host)
@@ -1186,15 +1186,6 @@ static int usdhi6_sig_volt_switch(struct mmc_host *mmc, struct mmc_ios *ios)
 	return ret;
 }
 
-static int usdhi6_card_busy(struct mmc_host *mmc)
-{
-	struct usdhi6_host *host = mmc_priv(mmc);
-	u32 tmp = usdhi6_read(host, USDHI6_SD_INFO2);
-
-	/* Card is busy if it is pulling dat[0] low */
-	return !(tmp & USDHI6_SD_INFO2_SDDAT0);
-}
-
 static const struct mmc_host_ops usdhi6_ops = {
 	.request	= usdhi6_request,
 	.set_ios	= usdhi6_set_ios,
@@ -1202,7 +1193,6 @@ static const struct mmc_host_ops usdhi6_ops = {
 	.get_ro		= usdhi6_get_ro,
 	.enable_sdio_irq = usdhi6_enable_sdio_irq,
 	.start_signal_voltage_switch = usdhi6_sig_volt_switch,
-	.card_busy = usdhi6_card_busy,
 };
 
 /*			State machine handlers				*/
@@ -1762,17 +1752,17 @@ static int usdhi6_probe(struct platform_device *pdev)
 	if (irq_sdio < 0)
 		return irq_sdio;
 
-	mmc = devm_mmc_alloc_host(dev, sizeof(*host));
+	mmc = mmc_alloc_host(sizeof(struct usdhi6_host), dev);
 	if (!mmc)
 		return -ENOMEM;
 
 	ret = mmc_regulator_get_supply(mmc);
 	if (ret)
-		return ret;
+		goto e_free_mmc;
 
 	ret = mmc_of_parse(mmc);
 	if (ret < 0)
-		return ret;
+		goto e_free_mmc;
 
 	host		= mmc_priv(mmc);
 	host->mmc	= mmc;
@@ -1785,24 +1775,31 @@ static int usdhi6_probe(struct platform_device *pdev)
 	mmc->max_busy_timeout = USDHI6_REQ_TIMEOUT_MS;
 
 	host->pinctrl = devm_pinctrl_get(&pdev->dev);
-	if (IS_ERR(host->pinctrl))
-		return PTR_ERR(host->pinctrl);
+	if (IS_ERR(host->pinctrl)) {
+		ret = PTR_ERR(host->pinctrl);
+		goto e_free_mmc;
+	}
 
 	host->pins_uhs = pinctrl_lookup_state(host->pinctrl, "state_uhs");
 
-	host->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
-	if (IS_ERR(host->base))
-		return PTR_ERR(host->base);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	host->base = devm_ioremap_resource(dev, res);
+	if (IS_ERR(host->base)) {
+		ret = PTR_ERR(host->base);
+		goto e_free_mmc;
+	}
 
 	host->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(host->clk))
-		return PTR_ERR(host->clk);
+	if (IS_ERR(host->clk)) {
+		ret = PTR_ERR(host->clk);
+		goto e_free_mmc;
+	}
 
 	host->imclk = clk_get_rate(host->clk);
 
 	ret = clk_prepare_enable(host->clk);
 	if (ret < 0)
-		return ret;
+		goto e_free_mmc;
 
 	version = usdhi6_read(host, USDHI6_VERSION);
 	if ((version & 0xfff) != 0xa0d) {
@@ -1872,10 +1869,13 @@ e_release_dma:
 	usdhi6_dma_release(host);
 e_clk_off:
 	clk_disable_unprepare(host->clk);
+e_free_mmc:
+	mmc_free_host(mmc);
+
 	return ret;
 }
 
-static void usdhi6_remove(struct platform_device *pdev)
+static int usdhi6_remove(struct platform_device *pdev)
 {
 	struct usdhi6_host *host = platform_get_drvdata(pdev);
 
@@ -1885,6 +1885,9 @@ static void usdhi6_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&host->timeout_work);
 	usdhi6_dma_release(host);
 	clk_disable_unprepare(host->clk);
+	mmc_free_host(host->mmc);
+
+	return 0;
 }
 
 static struct platform_driver usdhi6_driver = {

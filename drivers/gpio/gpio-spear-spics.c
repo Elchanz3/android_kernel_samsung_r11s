@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SPEAr platform SPI chipselect abstraction over gpiolib
  *
  * Copyright (C) 2012 ST Microelectronics
  * Shiraz Hashim <shiraz.linux.kernel@gmail.com>
+ *
+ * This file is licensed under the terms of the GNU General Public
+ * License version 2. This program is licensed "as is" without any
+ * warranty of any kind, whether express or implied.
  */
 
 #include <linux/err.h>
@@ -51,8 +54,13 @@ struct spear_spics {
 	struct gpio_chip	chip;
 };
 
-static int spics_set_value(struct gpio_chip *chip, unsigned int offset,
-			   int value)
+/* gpio framework specific routines */
+static int spics_get_value(struct gpio_chip *chip, unsigned offset)
+{
+	return -ENXIO;
+}
+
+static void spics_set_value(struct gpio_chip *chip, unsigned offset, int value)
 {
 	struct spear_spics *spics = gpiochip_get_data(chip);
 	u32 tmp;
@@ -69,14 +77,18 @@ static int spics_set_value(struct gpio_chip *chip, unsigned int offset,
 	tmp &= ~(0x1 << spics->cs_value_bit);
 	tmp |= value << spics->cs_value_bit;
 	writel_relaxed(tmp, spics->base + spics->perip_cfg);
+}
 
-	return 0;
+static int spics_direction_input(struct gpio_chip *chip, unsigned offset)
+{
+	return -ENXIO;
 }
 
 static int spics_direction_output(struct gpio_chip *chip, unsigned offset,
 		int value)
 {
-	return spics_set_value(chip, offset, value);
+	spics_set_value(chip, offset, value);
+	return 0;
 }
 
 static int spics_request(struct gpio_chip *chip, unsigned offset)
@@ -110,6 +122,7 @@ static int spics_gpio_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct spear_spics *spics;
+	int ret;
 
 	spics = devm_kzalloc(&pdev->dev, sizeof(*spics), GFP_KERNEL);
 	if (!spics)
@@ -135,18 +148,29 @@ static int spics_gpio_probe(struct platform_device *pdev)
 				&spics->cs_enable_shift))
 		goto err_dt_data;
 
+	platform_set_drvdata(pdev, spics);
+
 	spics->chip.ngpio = NUM_OF_GPIO;
 	spics->chip.base = -1;
 	spics->chip.request = spics_request;
 	spics->chip.free = spics_free;
+	spics->chip.direction_input = spics_direction_input;
 	spics->chip.direction_output = spics_direction_output;
+	spics->chip.get = spics_get_value;
 	spics->chip.set = spics_set_value;
 	spics->chip.label = dev_name(&pdev->dev);
 	spics->chip.parent = &pdev->dev;
 	spics->chip.owner = THIS_MODULE;
 	spics->last_off = -1;
 
-	return devm_gpiochip_add_data(&pdev->dev, &spics->chip, spics);
+	ret = devm_gpiochip_add_data(&pdev->dev, &spics->chip, spics);
+	if (ret) {
+		dev_err(&pdev->dev, "unable to add gpio chip\n");
+		return ret;
+	}
+
+	dev_info(&pdev->dev, "spear spics registered\n");
+	return 0;
 
 err_dt_data:
 	dev_err(&pdev->dev, "DT probe failed\n");

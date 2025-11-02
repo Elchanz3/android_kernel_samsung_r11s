@@ -111,7 +111,7 @@ static struct clk_aliastable {
 /* access locks to SYS_FREQCTRL0/1 and SYS_CLKSRC registers */
 static spinlock_t alchemy_clk_fg0_lock;
 static spinlock_t alchemy_clk_fg1_lock;
-static DEFINE_SPINLOCK(alchemy_clk_csrc_lock);
+static spinlock_t alchemy_clk_csrc_lock;
 
 /* CPU Core clock *****************************************************/
 
@@ -211,34 +211,30 @@ static int alchemy_clk_aux_setr(struct clk_hw *hw,
 	return 0;
 }
 
-static int alchemy_clk_aux_determine_rate(struct clk_hw *hw,
-					  struct clk_rate_request *req)
+static long alchemy_clk_aux_roundr(struct clk_hw *hw,
+					    unsigned long rate,
+					    unsigned long *parent_rate)
 {
 	struct alchemy_auxpll_clk *a = to_auxpll_clk(hw);
 	unsigned long mult;
 
-	if (!req->rate || !req->best_parent_rate) {
-		req->rate = 0;
-
+	if (!rate || !*parent_rate)
 		return 0;
-	}
 
-	mult = req->rate / req->best_parent_rate;
+	mult = rate / (*parent_rate);
 
 	if (mult && (mult < 7))
 		mult = 7;
 	if (mult > a->maxmult)
 		mult = a->maxmult;
 
-	req->rate = req->best_parent_rate * mult;
-
-	return 0;
+	return (*parent_rate) * mult;
 }
 
 static const struct clk_ops alchemy_clkops_aux = {
 	.recalc_rate	= alchemy_clk_aux_recalc,
 	.set_rate	= alchemy_clk_aux_setr,
-	.determine_rate = alchemy_clk_aux_determine_rate,
+	.round_rate	= alchemy_clk_aux_roundr,
 };
 
 static struct clk __init *alchemy_clk_setup_aux(const char *parent_name,
@@ -775,7 +771,7 @@ static int __init alchemy_clk_init_fgens(int ctype)
 	}
 	id.flags = CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE;
 
-	a = kcalloc(6, sizeof(*a), GFP_KERNEL);
+	a = kzalloc((sizeof(*a)) * 6, GFP_KERNEL);
 	if (!a)
 		return -ENOMEM;
 
@@ -1000,6 +996,7 @@ static int __init alchemy_clk_setup_imux(int ctype)
 	if (!a)
 		return -ENOMEM;
 
+	spin_lock_init(&alchemy_clk_csrc_lock);
 	ret = 0;
 
 	for (i = 0; i < 6; i++) {

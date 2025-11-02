@@ -30,14 +30,12 @@
 #include <linux/ratelimit.h>
 #include <linux/uaccess.h>
 #include <linux/kdebug.h>
-#include <linux/kfence.h>
-#include <linux/perf_event.h>
 
 #include <asm/assembly.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include <linux/atomic.h>
 #include <asm/smp.h>
 #include <asm/pdc.h>
@@ -47,12 +45,6 @@
 #include <asm/cacheflush.h>
 #include <linux/kgdb.h>
 #include <linux/kprobes.h>
-
-#include "unaligned.h"
-
-#if defined(CONFIG_LIGHTWEIGHT_SPINLOCK_CHECK)
-#include <asm/spinlock.h>
-#endif
 
 #include "../math-emu/math-emu.h"	/* for handle_fpe() */
 
@@ -151,7 +143,7 @@ void show_regs(struct pt_regs *regs)
 	printk("%s IIR: %08lx    ISR: " RFMT "  IOR: " RFMT "\n",
 	       level, regs->iir, regs->isr, regs->ior);
 	printk("%s CPU: %8d   CR30: " RFMT " CR31: " RFMT "\n",
-	       level, task_cpu(current), cr30, cr31);
+	       level, current_thread_info()->cpu, cr30, cr31);
 	printk("%s ORIG_R28: " RFMT "\n", level, regs->orig_r28);
 
 	if (user) {
@@ -246,6 +238,13 @@ void die_if_kernel(char *str, struct pt_regs *regs, long err)
 	/* unlock the pdc lock if necessary */
 	pdc_emergency_unlock();
 
+	/* maybe the kernel hasn't booted very far yet and hasn't been able 
+	 * to initialize the serial or STI console. In that case we should 
+	 * re-enable the pdc console, so that the user will be able to 
+	 * identify the problem. */
+	if (!console_drivers)
+		pdc_console_restart();
+	
 	if (err)
 		printk(KERN_CRIT "%s (pid %d): %s (code %ld)\n",
 			current->comm, task_pid_nr(current), str, err);
@@ -298,14 +297,11 @@ static void handle_break(struct pt_regs *regs)
 	}
 
 #ifdef CONFIG_KPROBES
-	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN && !user_mode(regs))) {
+	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN)) {
 		parisc_kprobe_break_handler(regs);
 		return;
 	}
-	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN2 && !user_mode(regs))) {
-		parisc_kprobe_ss_handler(regs);
-		return;
-	}
+
 #endif
 
 #ifdef CONFIG_KGDB
@@ -313,12 +309,6 @@ static void handle_break(struct pt_regs *regs)
 		iir == PARISC_KGDB_BREAK_INSN)) && !user_mode(regs)) {
 		kgdb_handle_exception(9, SIGTRAP, 0, regs);
 		return;
-	}
-#endif
-
-#ifdef CONFIG_LIGHTWEIGHT_SPINLOCK_CHECK
-        if ((iir == SPINLOCK_BREAK_INSN) && !user_mode(regs)) {
-		die_if_kernel("Spinlock was trashed", regs, 1);
 	}
 #endif
 
@@ -338,7 +328,10 @@ static void default_trap(int code, struct pt_regs *regs)
 	show_regs(regs);
 }
 
-static void transfer_pim_to_trap_frame(struct pt_regs *regs)
+void (*cpu_lpmc) (int code, struct pt_regs *regs) __read_mostly = default_trap;
+
+
+void transfer_pim_to_trap_frame(struct pt_regs *regs)
 {
     register int i;
     extern unsigned int hpmc_pim_data[];
@@ -432,6 +425,10 @@ void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long o
 	/* unlock the pdc lock if necessary */
 	pdc_emergency_unlock();
 
+	/* restart pdc console if necessary */
+	if (!console_drivers)
+		pdc_console_restart();
+
 	/* Not all paths will gutter the processor... */
 	switch(code){
 
@@ -468,7 +465,7 @@ void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long o
 	 * panic notifiers, and we should call panic
 	 * directly from the location that we wish. 
 	 * e.g. We should not call panic from
-	 * parisc_terminate, but rather the other way around.
+	 * parisc_terminate, but rather the oter way around.
 	 * This hack works, prints the panic message twice,
 	 * and it enables reboot timers!
 	 */
@@ -481,7 +478,9 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 	unsigned long fault_space = 0;
 	int si_code;
 
-	if (!irqs_disabled_flags(regs->gr[0]))
+	if (code == 1)
+	    pdc_console_restart();  /* switch back to pdc if HPMC */
+	else
 	    local_irq_enable();
 
 	/* Security check:
@@ -507,7 +506,7 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 	if (((unsigned long)regs->iaoq[0] & 3) &&
 	    ((unsigned long)regs->iasq[0] != (unsigned long)regs->sr[7])) { 
 		/* Kill the user process later */
-		regs->iaoq[0] = 0 | PRIV_USER;
+		regs->iaoq[0] = 0 | 3;
 		regs->iaoq[1] = regs->iaoq[0] + 4;
 		regs->iasq[0] = regs->iasq[1] = regs->sr[7];
 		regs->gr[0] &= ~PSW_B;
@@ -539,6 +538,11 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 		/* Recovery counter trap */
 		regs->gr[0] &= ~PSW_R;
 
+#ifdef CONFIG_KPROBES
+		if (parisc_kprobe_ss_handler(regs))
+			return;
+#endif
+
 #ifdef CONFIG_KGDB
 		if (kgdb_single_step) {
 			kgdb_handle_exception(0, SIGTRAP, 0, regs);
@@ -557,7 +561,7 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 		
 		flush_cache_all();
 		flush_tlb_all();
-		default_trap(code, regs);
+		cpu_lpmc(5, regs);
 		return;
 
 	case  PARISC_ITLB_TRAP:
@@ -634,7 +638,6 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 		/* Assist Exception Trap, i.e. floating point exception. */
 		die_if_kernel("Floating point exception", regs, 0); /* quiet */
 		__inc_irq_stat(irq_fpassist_count);
-		perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, 0);
 		handle_fpe(regs);
 		return;
 
@@ -788,10 +791,6 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 		/* Clean up and return if in exception table. */
 		if (fixup_exception(regs))
 			return;
-		/* Clean up and return if handled by kfence. */
-		if (kfence_handle_page_fault(fault_address,
-			parisc_acctyp(code, regs->iir) == VM_WRITE, regs))
-			return;
 		pdc_chassis_send_status(PDC_CHASSIS_DIRECT_PANIC);
 		parisc_terminate("Kernel Fault", regs, code, fault_address);
 	    }
@@ -801,14 +800,16 @@ void notrace handle_interruption(int code, struct pt_regs *regs)
 }
 
 
-static void __init initialize_ivt(const void *iva)
+void __init initialize_ivt(const void *iva)
 {
+	extern u32 os_hpmc_size;
 	extern const u32 os_hpmc[];
 
 	int i;
 	u32 check = 0;
 	u32 *ivap;
-	u32 instr;
+	u32 *hpmcp;
+	u32 length, instr;
 
 	if (strcmp((const char *)iva, "cows can fly"))
 		panic("IVT invalid");
@@ -839,12 +840,18 @@ static void __init initialize_ivt(const void *iva)
 
 	/* Setup IVA and compute checksum for HPMC handler */
 	ivap[6] = (u32)__pa(os_hpmc);
+	length = os_hpmc_size;
+	ivap[7] = length;
+
+	hpmcp = (u32 *)os_hpmc;
+
+	for (i=0; i<length/4; i++)
+	    check += *hpmcp++;
 
 	for (i=0; i<8; i++)
 	    check += ivap[i];
 
 	ivap[5] = -check;
-	pr_debug("initialize_ivt: IVA[6] = 0x%08x\n", ivap[6]);
 }
 	
 
@@ -860,4 +867,8 @@ void  __init early_trap_init(void)
 #endif
 
 	initialize_ivt(&fault_vector_20);
+}
+
+void __init trap_init(void)
+{
 }

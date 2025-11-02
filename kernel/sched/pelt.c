@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Per Entity Load Tracking (PELT)
+ * Per Entity Load Tracking
  *
  *  Copyright (C) 2007 Red Hat, Inc., Ingo Molnar <mingo@redhat.com>
  *
@@ -23,7 +23,69 @@
  *  Move PELT related code from fair.c into this pelt.c file
  *  Author: Vincent Guittot <vincent.guittot@linaro.org>
  */
+
+#include <linux/sched.h>
+#include "sched.h"
 #include "pelt.h"
+
+int pelt_load_avg_period = PELT32_LOAD_AVG_PERIOD;
+int pelt_load_avg_max = PELT32_LOAD_AVG_MAX;
+const u32 *pelt_runnable_avg_yN_inv = pelt32_runnable_avg_yN_inv;
+
+int get_pelt_halflife(void)
+{
+	return pelt_load_avg_period;
+}
+EXPORT_SYMBOL_GPL(get_pelt_halflife);
+
+static int __set_pelt_halflife(void *data)
+{
+	int rc = 0;
+	int num = *(int *)data;
+
+	switch (num) {
+	case PELT8_LOAD_AVG_PERIOD:
+		pelt_load_avg_period = PELT8_LOAD_AVG_PERIOD;
+		pelt_load_avg_max = PELT8_LOAD_AVG_MAX;
+		pelt_runnable_avg_yN_inv = pelt8_runnable_avg_yN_inv;
+		pr_info("PELT half life is set to %dms\n", num);
+		break;
+	case PELT32_LOAD_AVG_PERIOD:
+		pelt_load_avg_period = PELT32_LOAD_AVG_PERIOD;
+		pelt_load_avg_max = PELT32_LOAD_AVG_MAX;
+		pelt_runnable_avg_yN_inv = pelt32_runnable_avg_yN_inv;
+		pr_info("PELT half life is set to %dms\n", num);
+		break;
+	default:
+		rc = -EINVAL;
+		pr_err("Failed to set PELT half life to %dms, the current value is %dms\n",
+			num, pelt_load_avg_period);
+	}
+
+	return rc;
+}
+
+int set_pelt_halflife(int num)
+{
+	return stop_machine(__set_pelt_halflife, &num, NULL);
+}
+EXPORT_SYMBOL_GPL(set_pelt_halflife);
+
+static int __init set_pelt(char *str)
+{
+	int rc, num;
+
+	rc = kstrtoint(str, 0, &num);
+	if (rc) {
+		pr_err("%s: kstrtoint failed. rc=%d\n", __func__, rc);
+		return 0;
+	}
+
+	__set_pelt_halflife(&num);
+	return rc;
+}
+
+early_param("pelt", set_pelt);
 
 /*
  * Approximate:
@@ -51,7 +113,7 @@ static u64 decay_load(u64 val, u64 n)
 		local_n %= LOAD_AVG_PERIOD;
 	}
 
-	val = mul_u64_u32_shr(val, runnable_avg_yN_inv[local_n], 32);
+	val = mul_u64_u32_shr(val, pelt_runnable_avg_yN_inv[local_n], 32);
 	return val;
 }
 
@@ -130,7 +192,7 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 			 *	runnable = running = 0;
 			 *
 			 * clause from ___update_load_sum(); this results in
-			 * the below usage of @contrib to disappear entirely,
+			 * the below usage of @contrib to dissapear entirely,
 			 * so no point in calculating it.
 			 */
 			contrib = __accumulate_pelt_segments(periods,
@@ -209,8 +271,8 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 	 * se has been already dequeued but cfs_rq->curr still points to it.
 	 * This means that weight will be 0 but not running for a sched_entity
 	 * but also for a cfs_rq if the latter becomes idle. As an example,
-	 * this happens during sched_balance_newidle() which calls
-	 * sched_balance_update_blocked_averages().
+	 * this happens during idle_balance() which calls
+	 * update_blocked_averages().
 	 *
 	 * Also see the comment in accumulate_sum().
 	 */
@@ -276,7 +338,7 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load)
  *
  *   group: [ see update_cfs_group() ]
  *     se_weight()   = tg->weight * grq->load_avg / tg->load_avg
- *     se_runnable() = grq->h_nr_runnable
+ *     se_runnable() = grq->h_nr_running
  *
  *   runnable_sum = se_runnable() * runnable = grq->runnable_sum
  *   runnable_avg = runnable_sum
@@ -303,6 +365,7 @@ int __update_load_avg_blocked_se(u64 now, struct sched_entity *se)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(__update_load_avg_blocked_se);
 
 int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -322,7 +385,7 @@ int __update_load_avg_cfs_rq(u64 now, struct cfs_rq *cfs_rq)
 {
 	if (___update_load_sum(now, &cfs_rq->avg,
 				scale_load_down(cfs_rq->load.weight),
-				cfs_rq->h_nr_runnable,
+				cfs_rq->h_nr_running,
 				cfs_rq->curr != NULL)) {
 
 		___update_load_avg(&cfs_rq->avg, 1);
@@ -385,40 +448,40 @@ int update_dl_rq_load_avg(u64 now, struct rq *rq, int running)
 	return 0;
 }
 
-#ifdef CONFIG_SCHED_HW_PRESSURE
+#ifdef CONFIG_SCHED_THERMAL_PRESSURE
 /*
- * hardware:
+ * thermal:
  *
  *   load_sum = \Sum se->avg.load_sum but se->avg.load_sum is not tracked
  *
  *   util_avg and runnable_load_avg are not supported and meaningless.
  *
  * Unlike rt/dl utilization tracking that track time spent by a cpu
- * running a rt/dl task through util_avg, the average HW pressure is
- * tracked through load_avg. This is because HW pressure signal is
+ * running a rt/dl task through util_avg, the average thermal pressure is
+ * tracked through load_avg. This is because thermal pressure signal is
  * time weighted "delta" capacity unlike util_avg which is binary.
  * "delta capacity" =  actual capacity  -
- *			capped capacity a cpu due to a HW event.
+ *			capped capacity a cpu due to a thermal event.
  */
 
-int update_hw_load_avg(u64 now, struct rq *rq, u64 capacity)
+int update_thermal_load_avg(u64 now, struct rq *rq, u64 capacity)
 {
-	if (___update_load_sum(now, &rq->avg_hw,
+	if (___update_load_sum(now, &rq->avg_thermal,
 			       capacity,
 			       capacity,
 			       capacity)) {
-		___update_load_avg(&rq->avg_hw, 1);
-		trace_pelt_hw_tp(rq);
+		___update_load_avg(&rq->avg_thermal, 1);
+		trace_pelt_thermal_tp(rq);
 		return 1;
 	}
 
 	return 0;
 }
-#endif /* CONFIG_SCHED_HW_PRESSURE */
+#endif
 
 #ifdef CONFIG_HAVE_SCHED_AVG_IRQ
 /*
- * IRQ:
+ * irq:
  *
  *   util_sum = \Sum se->avg.util_sum but se->avg.util_sum is not tracked
  *   util_sum = cpu_scale * load_sum
@@ -433,7 +496,7 @@ int update_irq_load_avg(struct rq *rq, u64 running)
 	int ret = 0;
 
 	/*
-	 * We can't use clock_pelt because IRQ time is not accounted in
+	 * We can't use clock_pelt because irq time is not accounted in
 	 * clock_task. Instead we directly scale the running time to
 	 * reflect the real amount of computation
 	 */
@@ -467,24 +530,51 @@ int update_irq_load_avg(struct rq *rq, u64 running)
 
 	return ret;
 }
-#endif /* CONFIG_HAVE_SCHED_AVG_IRQ */
+#endif
 
-/*
- * Load avg and utiliztion metrics need to be updated periodically and before
- * consumption. This function updates the metrics for all subsystems except for
- * the fair class. @rq must be locked and have its clock updated.
- */
-bool update_other_load_avgs(struct rq *rq)
+#include <trace/hooks/sched.h>
+DEFINE_PER_CPU(u64, clock_task_mult);
+
+unsigned int sysctl_sched_pelt_multiplier = 1;
+__read_mostly unsigned int sched_pelt_lshift;
+
+int sched_pelt_multiplier(struct ctl_table *table, int write, void *buffer,
+			  size_t *lenp, loff_t *ppos)
 {
-	u64 now = rq_clock_pelt(rq);
-	const struct sched_class *curr_class = rq->donor->sched_class;
-	unsigned long hw_pressure = arch_scale_hw_pressure(cpu_of(rq));
+	static DEFINE_MUTEX(mutex);
+	unsigned int old;
+	int ret;
 
-	lockdep_assert_rq_held(rq);
+	mutex_lock(&mutex);
 
-	/* hw_pressure doesn't care about invariance */
-	return update_rt_rq_load_avg(now, rq, curr_class == &rt_sched_class) |
-		update_dl_rq_load_avg(now, rq, curr_class == &dl_sched_class) |
-		update_hw_load_avg(rq_clock_task(rq), rq, hw_pressure) |
-		update_irq_load_avg(rq, 0);
+	old = sysctl_sched_pelt_multiplier;
+	ret = proc_dointvec(table, write, buffer, lenp, ppos);
+	if (ret)
+		goto undo;
+	if (!write)
+		goto done;
+
+	trace_android_vh_sched_pelt_multiplier(old, sysctl_sched_pelt_multiplier, &ret);
+	if (ret)
+		goto undo;
+
+	switch (sysctl_sched_pelt_multiplier)  {
+	case 1:
+		fallthrough;
+	case 2:
+		fallthrough;
+	case 4:
+		WRITE_ONCE(sched_pelt_lshift,
+			   sysctl_sched_pelt_multiplier >> 1);
+		goto done;
+	default:
+		ret = -EINVAL;
+	}
+
+undo:
+	sysctl_sched_pelt_multiplier = old;
+done:
+	mutex_unlock(&mutex);
+
+	return ret;
 }

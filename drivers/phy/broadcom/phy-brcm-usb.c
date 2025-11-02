@@ -35,7 +35,7 @@ struct value_to_name_map {
 };
 
 struct match_chip_info {
-	void (*init_func)(struct brcm_usb_init_params *params);
+	void *init_func;
 	u8 required_regs[BRCM_REGS_MAX + 1];
 	u8 optional_reg;
 };
@@ -175,7 +175,7 @@ static const struct phy_ops brcm_usb_phy_ops = {
 };
 
 static struct phy *brcm_usb_phy_xlate(struct device *dev,
-				      const struct of_phandle_args *args)
+				      struct of_phandle_args *args)
 {
 	struct brcm_usb_phy_data *data = dev_get_drvdata(dev);
 
@@ -232,7 +232,7 @@ static ssize_t dr_mode_show(struct device *dev,
 	return sprintf(buf, "%s\n",
 		value_to_name(&brcm_dr_mode_to_name[0],
 			      ARRAY_SIZE(brcm_dr_mode_to_name),
-			      priv->ini.supported_port_modes));
+			      priv->ini.mode));
 }
 static DEVICE_ATTR_RO(dr_mode);
 
@@ -248,8 +248,7 @@ static ssize_t dual_select_store(struct device *dev,
 	res = name_to_value(&brcm_dual_mode_to_name[0],
 			    ARRAY_SIZE(brcm_dual_mode_to_name), buf, &value);
 	if (!res) {
-		priv->ini.port_mode = value;
-		brcm_usb_set_dual_select(&priv->ini);
+		brcm_usb_set_dual_select(&priv->ini, value);
 		res = len;
 	}
 	mutex_unlock(&sysfs_lock);
@@ -281,25 +280,6 @@ static struct attribute *brcm_usb_phy_attrs[] = {
 
 static const struct attribute_group brcm_usb_phy_group = {
 	.attrs = brcm_usb_phy_attrs,
-};
-
-static const struct match_chip_info chip_info_74110 = {
-	.init_func = &brcm_usb_dvr_init_74110,
-	.required_regs = {
-		BRCM_REGS_CTRL,
-		BRCM_REGS_XHCI_EC,
-		BRCM_REGS_XHCI_GBL,
-		-1,
-	},
-};
-
-static const struct match_chip_info chip_info_4908 = {
-	.init_func = &brcm_usb_dvr_init_4908,
-	.required_regs = {
-		BRCM_REGS_CTRL,
-		BRCM_REGS_XHCI_EC,
-		-1,
-	},
 };
 
 static const struct match_chip_info chip_info_7216 = {
@@ -335,14 +315,6 @@ static const struct match_chip_info chip_info_7445 = {
 };
 
 static const struct of_device_id brcm_usb_dt_ids[] = {
-	{
-		.compatible = "brcm,bcm74110-usb-phy",
-		.data = &chip_info_74110,
-	},
-	{
-		.compatible = "brcm,bcm4908-usb-phy",
-		.data = &chip_info_4908,
-	},
 	{
 		.compatible = "brcm,bcm7216-usb-phy",
 		.data = &chip_info_7216,
@@ -459,9 +431,9 @@ static int brcm_usb_phy_dvr_init(struct platform_device *pdev,
 		priv->suspend_clk = NULL;
 	}
 
-	priv->wake_irq = platform_get_irq_byname_optional(pdev, "wake");
+	priv->wake_irq = platform_get_irq_byname(pdev, "wake");
 	if (priv->wake_irq < 0)
-		priv->wake_irq = platform_get_irq_byname_optional(pdev, "wakeup");
+		priv->wake_irq = platform_get_irq_byname(pdev, "wakeup");
 	if (priv->wake_irq >= 0) {
 		err = devm_request_irq(dev, priv->wake_irq,
 				       brcm_usb_phy_wake_isr, 0,
@@ -485,6 +457,8 @@ static int brcm_usb_phy_probe(struct platform_device *pdev)
 	struct device_node *dn = pdev->dev.of_node;
 	int err;
 	const char *mode;
+	const struct of_device_id *match;
+	void (*dvr_init)(struct brcm_usb_init_params *params);
 	const struct match_chip_info *info;
 	struct regmap *rmap;
 	int x;
@@ -497,11 +471,10 @@ static int brcm_usb_phy_probe(struct platform_device *pdev)
 	priv->ini.family_id = brcmstb_get_family_id();
 	priv->ini.product_id = brcmstb_get_product_id();
 
-	info = of_device_get_match_data(&pdev->dev);
-	if (!info)
-		return -ENOENT;
-
-	info->init_func(&priv->ini);
+	match = of_match_node(brcm_usb_dt_ids, dev->of_node);
+	info = match->data;
+	dvr_init = info->init_func;
+	(*dvr_init)(&priv->ini);
 
 	dev_dbg(dev, "Best mapping table is for %s\n",
 		priv->ini.family_name);
@@ -509,16 +482,13 @@ static int brcm_usb_phy_probe(struct platform_device *pdev)
 	of_property_read_u32(dn, "brcm,ipp", &priv->ini.ipp);
 	of_property_read_u32(dn, "brcm,ioc", &priv->ini.ioc);
 
-	priv->ini.supported_port_modes = USB_CTLR_MODE_HOST;
+	priv->ini.mode = USB_CTLR_MODE_HOST;
 	err = of_property_read_string(dn, "dr_mode", &mode);
 	if (err == 0) {
 		name_to_value(&brcm_dr_mode_to_name[0],
 			      ARRAY_SIZE(brcm_dr_mode_to_name),
-			mode, &priv->ini.supported_port_modes);
+			mode, &priv->ini.mode);
 	}
-	/* Default port_mode to supported port_modes */
-	priv->ini.port_mode = priv->ini.supported_port_modes;
-
 	if (of_property_read_bool(dn, "brcm,has-xhci"))
 		priv->has_xhci = true;
 	if (of_property_read_bool(dn, "brcm,has-eohci"))
@@ -556,7 +526,7 @@ static int brcm_usb_phy_probe(struct platform_device *pdev)
 	 * Create sysfs entries for mode.
 	 * Remove "dual_select" attribute if not in dual mode
 	 */
-	if (priv->ini.supported_port_modes != USB_CTLR_MODE_DRD)
+	if (priv->ini.mode != USB_CTLR_MODE_DRD)
 		brcm_usb_phy_attrs[1] = NULL;
 	err = sysfs_create_group(&dev->kobj, &brcm_usb_phy_group);
 	if (err)
@@ -585,12 +555,14 @@ static int brcm_usb_phy_probe(struct platform_device *pdev)
 	return PTR_ERR_OR_ZERO(phy_provider);
 }
 
-static void brcm_usb_phy_remove(struct platform_device *pdev)
+static int brcm_usb_phy_remove(struct platform_device *pdev)
 {
 	struct brcm_usb_phy_data *priv = dev_get_drvdata(&pdev->dev);
 
 	sysfs_remove_group(&pdev->dev.kobj, &brcm_usb_phy_group);
 	unregister_pm_notifier(&priv->pm_notifier);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -613,7 +585,7 @@ static int brcm_usb_phy_suspend(struct device *dev)
 		 * and newer XHCI->2.0-clks/3.0-clks.
 		 */
 
-		if (!priv->ini.wake_enabled) {
+		if (!priv->ini.suspend_with_clocks) {
 			if (priv->phys[BRCM_USB_PHY_3_0].inited)
 				clk_disable_unprepare(priv->usb_30_clk);
 			if (priv->phys[BRCM_USB_PHY_2_0].inited ||
@@ -630,10 +602,8 @@ static int brcm_usb_phy_resume(struct device *dev)
 {
 	struct brcm_usb_phy_data *priv = dev_get_drvdata(dev);
 
-	if (!priv->ini.wake_enabled) {
-		clk_prepare_enable(priv->usb_20_clk);
-		clk_prepare_enable(priv->usb_30_clk);
-	}
+	clk_prepare_enable(priv->usb_20_clk);
+	clk_prepare_enable(priv->usb_30_clk);
 	brcm_usb_init_ipp(&priv->ini);
 
 	/*
@@ -691,6 +661,7 @@ static struct platform_driver brcm_usb_driver = {
 
 module_platform_driver(brcm_usb_driver);
 
+MODULE_ALIAS("platform:brcmstb-usb-phy");
 MODULE_AUTHOR("Al Cooper <acooper@broadcom.com>");
 MODULE_DESCRIPTION("BRCM USB PHY driver");
 MODULE_LICENSE("GPL v2");

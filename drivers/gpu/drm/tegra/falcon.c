@@ -30,14 +30,6 @@ int falcon_wait_idle(struct falcon *falcon)
 				  (value == 0), 10, 100000);
 }
 
-static int falcon_dma_wait_not_full(struct falcon *falcon)
-{
-	u32 value;
-
-	return readl_poll_timeout(falcon->regs + FALCON_DMATRFCMD, value,
-				  !(value & FALCON_DMATRFCMD_FULL), 10, 100000);
-}
-
 static int falcon_dma_wait_idle(struct falcon *falcon)
 {
 	u32 value;
@@ -52,28 +44,15 @@ static int falcon_copy_chunk(struct falcon *falcon,
 			     enum falcon_memory target)
 {
 	u32 cmd = FALCON_DMATRFCMD_SIZE_256B;
-	int err;
 
 	if (target == FALCON_MEMORY_IMEM)
 		cmd |= FALCON_DMATRFCMD_IMEM;
-
-	/*
-	 * Use second DMA context (i.e. the one for firmware). Strictly
-	 * speaking, at this point both DMA contexts point to the firmware
-	 * stream ID, but this register's value will be reused by the firmware
-	 * for later DMA transactions, so we need to use the correct value.
-	 */
-	cmd |= FALCON_DMATRFCMD_DMACTX(1);
-
-	err = falcon_dma_wait_not_full(falcon);
-	if (err < 0)
-		return err;
 
 	falcon_writel(falcon, offset, FALCON_DMATRFMOFFS);
 	falcon_writel(falcon, base, FALCON_DMATRFFBOFFS);
 	falcon_writel(falcon, cmd, FALCON_DMATRFCMD);
 
-	return 0;
+	return falcon_dma_wait_idle(falcon);
 }
 
 static void falcon_copy_firmware_image(struct falcon *falcon,
@@ -84,7 +63,7 @@ static void falcon_copy_firmware_image(struct falcon *falcon,
 
 	/* copy the whole thing taking into account endianness */
 	for (i = 0; i < firmware->size / sizeof(u32); i++)
-		virt[i] = le32_to_cpu(((__le32 *)firmware->data)[i]);
+		virt[i] = le32_to_cpu(((u32 *)firmware->data)[i]);
 }
 
 static int falcon_parse_firmware_image(struct falcon *falcon)
@@ -93,7 +72,7 @@ static int falcon_parse_firmware_image(struct falcon *falcon)
 	struct falcon_fw_os_header_v1 *os;
 
 	/* endian problems would show up right here */
-	if (bin->magic != PCI_VENDOR_ID_NVIDIA && bin->magic != 0x10fe) {
+	if (bin->magic != PCI_VENDOR_ID_NVIDIA) {
 		dev_err(falcon->dev, "incorrect firmware magic\n");
 		return -EINVAL;
 	}
@@ -199,15 +178,9 @@ int falcon_boot(struct falcon *falcon)
 				  falcon->firmware.data.offset + offset,
 				  offset, FALCON_MEMORY_DATA);
 
-	/* copy the code segment into Falcon internal memory */
-	for (offset = 0; offset < falcon->firmware.code.size; offset += 256)
-		falcon_copy_chunk(falcon, falcon->firmware.code.offset + offset,
-				  offset, FALCON_MEMORY_IMEM);
-
-	/* wait for DMA to complete */
-	err = falcon_dma_wait_idle(falcon);
-	if (err < 0)
-		return err;
+	/* copy the first code segment into Falcon internal memory */
+	falcon_copy_chunk(falcon, falcon->firmware.code.offset,
+			  0, FALCON_MEMORY_IMEM);
 
 	/* setup falcon interrupts */
 	falcon_writel(falcon, FALCON_IRQMSET_EXT(0xff) |

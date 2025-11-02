@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2015 HGST, a Western Digital Company.
  */
+#include <linux/module.h>
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <rdma/ib_verbs.h>
@@ -122,7 +123,7 @@ static int __ib_process_cq(struct ib_cq *cq, int budget, struct ib_wc *wcs,
 }
 
 /**
- * ib_process_cq_direct - process a CQ in caller context
+ * ib_process_direct_cq - process a CQ in caller context
  * @cq:		CQ to process
  * @budget:	number of CQEs to poll for
  *
@@ -196,7 +197,7 @@ static void ib_cq_completion_workqueue(struct ib_cq *cq, void *private)
 }
 
 /**
- * __ib_alloc_cq - allocate a completion queue
+ * __ib_alloc_cq        allocate a completion queue
  * @dev:		device to allocate the CQ for
  * @private:		driver private data, accessible from cq->cq_context
  * @nr_cqe:		number of CQEs to allocate
@@ -317,17 +318,12 @@ EXPORT_SYMBOL(__ib_alloc_cq_any);
  */
 void ib_free_cq(struct ib_cq *cq)
 {
-	int ret = 0;
+	int ret;
 
 	if (WARN_ON_ONCE(atomic_read(&cq->usecnt)))
 		return;
 	if (WARN_ON_ONCE(cq->cqe_used))
 		return;
-
-	if (cq->device->ops.pre_destroy_cq) {
-		ret = cq->device->ops.pre_destroy_cq(cq);
-		WARN_ONCE(ret, "Disable of kernel CQ shouldn't fail");
-	}
 
 	switch (cq->poll_ctx) {
 	case IB_POLL_DIRECT:
@@ -345,10 +341,7 @@ void ib_free_cq(struct ib_cq *cq)
 
 	rdma_dim_destroy(cq);
 	trace_cq_free(cq);
-	if (cq->device->ops.post_destroy_cq)
-		cq->device->ops.post_destroy_cq(cq);
-	else
-		ret = cq->device->ops.destroy_cq(cq, NULL);
+	ret = cq->device->ops.destroy_cq(cq, NULL);
 	WARN_ONCE(ret, "Destroy of kernel CQ shouldn't fail");
 	rdma_restrack_del(&cq->res);
 	kfree(cq->wc);
@@ -356,7 +349,16 @@ void ib_free_cq(struct ib_cq *cq)
 }
 EXPORT_SYMBOL(ib_free_cq);
 
-void ib_cq_pool_cleanup(struct ib_device *dev)
+void ib_cq_pool_init(struct ib_device *dev)
+{
+	unsigned int i;
+
+	spin_lock_init(&dev->cq_pools_lock);
+	for (i = 0; i < ARRAY_SIZE(dev->cq_pools); i++)
+		INIT_LIST_HEAD(&dev->cq_pools[i]);
+}
+
+void ib_cq_pool_destroy(struct ib_device *dev)
 {
 	struct ib_cq *cq, *n;
 	unsigned int i;
@@ -365,7 +367,6 @@ void ib_cq_pool_cleanup(struct ib_device *dev)
 		list_for_each_entry_safe(cq, n, &dev->cq_pools[i],
 					 pool_entry) {
 			WARN_ON(cq->cqe_used);
-			list_del(&cq->pool_entry);
 			cq->shared = false;
 			ib_free_cq(cq);
 		}

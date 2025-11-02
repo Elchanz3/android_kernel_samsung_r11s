@@ -2,8 +2,6 @@
 #ifndef __SUNGEM_PHY_H__
 #define __SUNGEM_PHY_H__
 
-#include <linux/types.h>
-
 struct mii_phy;
 
 /* Operations supported by any kind of PHY */
@@ -40,7 +38,7 @@ enum {
 /* An instance of a PHY, partially borrowed from mii_if_info */
 struct mii_phy
 {
-	const struct mii_phy_def *def;
+	struct mii_phy_def*	def;
 	u32			advertising;
 	int			mii_id;
 

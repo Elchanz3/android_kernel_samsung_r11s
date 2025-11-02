@@ -546,10 +546,7 @@ list_set_cancel_gc(struct ip_set *set)
 	struct list_set *map = set->data;
 
 	if (SET_WITH_TIMEOUT(set))
-		timer_shutdown_sync(&map->gc);
-
-	/* Flush list to drop references to other ipsets */
-	list_set_flush(set);
+		del_timer_sync(&map->gc);
 }
 
 static const struct ip_set_type_variant set_variant = {
@@ -571,7 +568,7 @@ static const struct ip_set_type_variant set_variant = {
 static void
 list_set_gc(struct timer_list *t)
 {
-	struct list_set *map = timer_container_of(map, t, gc);
+	struct list_set *map = from_timer(map, t, gc);
 	struct ip_set *set = map->set;
 
 	spin_lock_bh(&set->lock);
@@ -611,8 +608,6 @@ init_list_set(struct net *net, struct ip_set *set, u32 size)
 	return true;
 }
 
-static struct lock_class_key list_set_lockdep_key;
-
 static int
 list_set_create(struct net *net, struct ip_set *set, struct nlattr *tb[],
 		u32 flags)
@@ -629,7 +624,6 @@ list_set_create(struct net *net, struct ip_set *set, struct nlattr *tb[],
 	if (size < IP_SET_LIST_MIN_SIZE)
 		size = IP_SET_LIST_MIN_SIZE;
 
-	lockdep_set_class(&set->lock, &list_set_lockdep_key);
 	set->variant = &set_variant;
 	set->dsize = ip_set_elem_len(set, tb, sizeof(struct set_elem),
 				     __alignof__(struct set_elem));

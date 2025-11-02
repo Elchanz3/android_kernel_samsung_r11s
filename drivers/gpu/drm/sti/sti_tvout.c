@@ -153,7 +153,7 @@ static void tvout_write(struct sti_tvout *tvout, u32 val, int offset)
 }
 
 /**
- * tvout_vip_set_color_order - Set the clipping mode of a VIP
+ * Set the clipping mode of a VIP
  *
  * @tvout: tvout structure
  * @reg: register to set
@@ -177,7 +177,7 @@ static void tvout_vip_set_color_order(struct sti_tvout *tvout, int reg,
 }
 
 /**
- * tvout_vip_set_clip_mode - Set the clipping mode of a VIP
+ * Set the clipping mode of a VIP
  *
  * @tvout: tvout structure
  * @reg: register to set
@@ -193,7 +193,7 @@ static void tvout_vip_set_clip_mode(struct sti_tvout *tvout, int reg, u32 range)
 }
 
 /**
- * tvout_vip_set_rnd - Set the rounded value of a VIP
+ * Set the rounded value of a VIP
  *
  * @tvout: tvout structure
  * @reg: register to set
@@ -209,7 +209,7 @@ static void tvout_vip_set_rnd(struct sti_tvout *tvout, int reg, u32 rnd)
 }
 
 /**
- * tvout_vip_set_sel_input - Select the VIP input
+ * Select the VIP input
  *
  * @tvout: tvout structure
  * @reg: register to set
@@ -247,7 +247,7 @@ static void tvout_vip_set_sel_input(struct sti_tvout *tvout,
 }
 
 /**
- * tvout_vip_set_in_vid_fmt - Select the input video signed or unsigned
+ * Select the input video signed or unsigned
  *
  * @tvout: tvout structure
  * @reg: register to set
@@ -264,7 +264,7 @@ static void tvout_vip_set_in_vid_fmt(struct sti_tvout *tvout,
 }
 
 /**
- * tvout_preformatter_set_matrix - Set preformatter matrix
+ * Set preformatter matrix
  *
  * @tvout: tvout structure
  * @mode: display mode structure
@@ -289,7 +289,7 @@ static void tvout_preformatter_set_matrix(struct sti_tvout *tvout,
 }
 
 /**
- * tvout_dvo_start - Start VIP block for DVO output
+ * Start VIP block for DVO output
  *
  * @tvout: pointer on tvout structure
  * @main_path: true if main path has to be used in the vip configuration
@@ -343,7 +343,7 @@ static void tvout_dvo_start(struct sti_tvout *tvout, bool main_path)
 }
 
 /**
- * tvout_hdmi_start - Start VIP block for HDMI output
+ * Start VIP block for HDMI output
  *
  * @tvout: pointer on tvout structure
  * @main_path: true if main path has to be used in the vip configuration
@@ -392,7 +392,7 @@ static void tvout_hdmi_start(struct sti_tvout *tvout, bool main_path)
 }
 
 /**
- * tvout_hda_start - Start HDF VIP and HD DAC
+ * Start HDF VIP and HD DAC
  *
  * @tvout: pointer on tvout structure
  * @main_path: true if main path has to be used in the vip configuration
@@ -838,6 +838,7 @@ static int sti_tvout_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *node = dev->of_node;
 	struct sti_tvout *tvout;
+	struct resource *res;
 
 	DRM_INFO("%s\n", __func__);
 
@@ -849,9 +850,16 @@ static int sti_tvout_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	tvout->dev = dev;
-	tvout->regs = devm_platform_ioremap_resource_byname(pdev, "tvout-reg");
-	if (IS_ERR(tvout->regs))
-		return PTR_ERR(tvout->regs);
+
+	/* get memory resources */
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "tvout-reg");
+	if (!res) {
+		DRM_ERROR("Invalid glue resource\n");
+		return -ENOMEM;
+	}
+	tvout->regs = devm_ioremap(dev, res->start, resource_size(res));
+	if (!tvout->regs)
+		return -ENOMEM;
 
 	/* get reset resources */
 	tvout->reset = devm_reset_control_get(dev, "tvout");
@@ -864,9 +872,10 @@ static int sti_tvout_probe(struct platform_device *pdev)
 	return component_add(dev, &sti_tvout_ops);
 }
 
-static void sti_tvout_remove(struct platform_device *pdev)
+static int sti_tvout_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &sti_tvout_ops);
+	return 0;
 }
 
 static const struct of_device_id tvout_of_match[] = {
@@ -878,6 +887,7 @@ MODULE_DEVICE_TABLE(of, tvout_of_match);
 struct platform_driver sti_tvout_driver = {
 	.driver = {
 		.name = "sti-tvout",
+		.owner = THIS_MODULE,
 		.of_match_table = tvout_of_match,
 	},
 	.probe = sti_tvout_probe,

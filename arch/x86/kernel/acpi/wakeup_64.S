@@ -1,14 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 .text
 #include <linux/linkage.h>
-#include <linux/objtool.h>
 #include <asm/segment.h>
 #include <asm/pgtable_types.h>
 #include <asm/page_types.h>
 #include <asm/msr.h>
 #include <asm/asm-offsets.h>
 #include <asm/frame.h>
-#include <asm/nospec-branch.h>
 
 # Copyright 2003 Pavel Machek <pavel@suse.cz
 
@@ -17,8 +15,7 @@
 	 * Hooray, we are in Long 64-bit mode (but still running in low memory)
 	 */
 SYM_FUNC_START(wakeup_long64)
-	ANNOTATE_NOENDBR
-	movq	saved_magic(%rip), %rax
+	movq	saved_magic, %rax
 	movq	$0x123456789abcdef0, %rdx
 	cmpq	%rdx, %rax
 	je	2f
@@ -34,15 +31,14 @@ SYM_FUNC_START(wakeup_long64)
 	movw	%ax, %es
 	movw	%ax, %fs
 	movw	%ax, %gs
-	movq	saved_rsp(%rip), %rsp
+	movq	saved_rsp, %rsp
 
-	movq	saved_rbx(%rip), %rbx
-	movq	saved_rdi(%rip), %rdi
-	movq	saved_rsi(%rip), %rsi
-	movq	saved_rbp(%rip), %rbp
+	movq	saved_rbx, %rbx
+	movq	saved_rdi, %rdi
+	movq	saved_rsi, %rsi
+	movq	saved_rbp, %rbp
 
-	movq	saved_rip(%rip), %rax
-	ANNOTATE_RETPOLINE_SAFE
+	movq	saved_rip, %rax
 	jmp	*%rax
 SYM_FUNC_END(wakeup_long64)
 
@@ -73,11 +69,11 @@ SYM_FUNC_START(do_suspend_lowlevel)
 
 	movq	$.Lresume_point, saved_rip(%rip)
 
-	movq	%rsp, saved_rsp(%rip)
-	movq	%rbp, saved_rbp(%rip)
-	movq	%rbx, saved_rbx(%rip)
-	movq	%rdi, saved_rdi(%rip)
-	movq	%rsi, saved_rsi(%rip)
+	movq	%rsp, saved_rsp
+	movq	%rbp, saved_rbp
+	movq	%rbx, saved_rbx
+	movq	%rdi, saved_rdi
+	movq	%rsi, saved_rsi
 
 	addq	$8, %rsp
 	movl	$3, %edi
@@ -88,7 +84,6 @@ SYM_FUNC_START(do_suspend_lowlevel)
 
 	.align 4
 .Lresume_point:
-	ANNOTATE_NOENDBR
 	/* We don't restore %rax, it must be 0 anyway */
 	movq	$saved_context, %rax
 	movq	saved_context_cr4(%rax), %rbx
@@ -131,7 +126,6 @@ SYM_FUNC_START(do_suspend_lowlevel)
 	FRAME_END
 	jmp	restore_processor_state
 SYM_FUNC_END(do_suspend_lowlevel)
-STACK_FRAME_NON_STANDARD do_suspend_lowlevel
 
 .data
 saved_rbp:		.quad	0

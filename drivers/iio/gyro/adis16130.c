@@ -12,7 +12,7 @@
 
 #include <linux/iio/iio.h>
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #define ADIS16130_CON         0x0
 #define ADIS16130_CON_RD      (1 << 6)
@@ -41,7 +41,7 @@
 struct adis16130_state {
 	struct spi_device		*us;
 	struct mutex			buf_lock;
-	u8				buf[4] __aligned(IIO_DMA_MINALIGN);
+	u8				buf[4] ____cacheline_aligned;
 };
 
 static int adis16130_spi_read(struct iio_dev *indio_dev, u8 reg_addr, u32 *val)

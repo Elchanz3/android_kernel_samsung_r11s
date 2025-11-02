@@ -44,13 +44,12 @@ struct hotplug_slot_ops {
 	int (*get_attention_status)	(struct hotplug_slot *slot, u8 *value);
 	int (*get_latch_status)		(struct hotplug_slot *slot, u8 *value);
 	int (*get_adapter_status)	(struct hotplug_slot *slot, u8 *value);
-	int (*reset_slot)		(struct hotplug_slot *slot, bool probe);
+	int (*reset_slot)		(struct hotplug_slot *slot, int probe);
 };
 
 /**
  * struct hotplug_slot - used to register a physical slot with the hotplug pci core
  * @ops: pointer to the &struct hotplug_slot_ops to be used for this slot
- * @pci_slot: represents a physical slot
  * @owner: The module owner of this structure
  * @mod_name: The module name (KBUILD_MODNAME) of this structure
  */
@@ -58,6 +57,7 @@ struct hotplug_slot {
 	const struct hotplug_slot_ops	*ops;
 
 	/* Variables below this are for use only by the hotplug pci core. */
+	struct list_head		slot_list;
 	struct pci_slot			*pci_slot;
 	struct module			*owner;
 	const char			*mod_name;
@@ -104,7 +104,6 @@ static inline bool shpchp_is_native(struct pci_dev *bridge) { return true; }
 
 static inline bool hotplug_is_native(struct pci_dev *bridge)
 {
-	return (bridge->is_pciehp && pciehp_is_native(bridge)) ||
-	       shpchp_is_native(bridge);
+	return pciehp_is_native(bridge) || shpchp_is_native(bridge);
 }
 #endif

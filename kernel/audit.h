@@ -1,21 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* audit -- definition of audit_context structure and supporting types
+/* audit -- definition of audit_context structure and supporting types 
  *
  * Copyright 2003-2004 Red Hat, Inc.
  * Copyright 2005 Hewlett-Packard Development Company, L.P.
  * Copyright 2005 IBM Corporation
  */
 
-#ifndef _KERNEL_AUDIT_H_
-#define _KERNEL_AUDIT_H_
-
 #include <linux/fs.h>
 #include <linux/audit.h>
-#include <linux/security.h>
 #include <linux/skbuff.h>
 #include <uapi/linux/mqueue.h>
 #include <linux/tty.h>
-#include <uapi/linux/openat2.h> // struct open_how
 
 /* AUDIT_NAMES is the number of slots we reserve in the audit_context
  * for saving names from getname().  If we get more names we will allocate
@@ -26,16 +21,16 @@
    a per-task filter.  At syscall entry, the audit_state is augmented by
    the syscall filter. */
 enum audit_state {
-	AUDIT_STATE_DISABLED,	/* Do not create per-task audit_context.
+	AUDIT_DISABLED,		/* Do not create per-task audit_context.
 				 * No syscall-specific audit records can
 				 * be generated. */
-	AUDIT_STATE_BUILD,	/* Create the per-task audit_context,
+	AUDIT_BUILD_CONTEXT,	/* Create the per-task audit_context,
 				 * and fill it in at syscall
 				 * entry time.  This makes a full
 				 * syscall record available if some
 				 * other part of the kernel decides it
 				 * should be recorded. */
-	AUDIT_STATE_RECORD	/* Create the per-task audit_context,
+	AUDIT_RECORD_CONTEXT	/* Create the per-task audit_context,
 				 * always fill it in at syscall entry
 				 * time, and always write out the audit
 				 * record at syscall exit time.  */
@@ -82,7 +77,7 @@ struct audit_names {
 	kuid_t			uid;
 	kgid_t			gid;
 	dev_t			rdev;
-	struct lsm_prop		oprop;
+	u32			osid;
 	struct audit_cap_data	fcap;
 	unsigned int		fcap_ver;
 	unsigned char		type;		/* record type */
@@ -99,24 +94,14 @@ struct audit_proctitle {
 	char	*value;	/* the cmdline field */
 };
 
-/* A timestamp/serial pair to identify an event */
-struct audit_stamp {
-	struct timespec64	ctime;	/* time of syscall entry */
-	unsigned int		serial;	/* serial number for record */
-};
-
 /* The per-task audit context. */
 struct audit_context {
 	int		    dummy;	/* must be the first element */
-	enum {
-		AUDIT_CTX_UNUSED,	/* audit_context is currently unused */
-		AUDIT_CTX_SYSCALL,	/* in use by syscall */
-		AUDIT_CTX_URING,	/* in use by io_uring */
-	} context;
+	int		    in_syscall;	/* 1 if task is in a syscall */
 	enum audit_state    state, current_state;
-	struct audit_stamp  stamp;	/* event identifier */
+	unsigned int	    serial;     /* serial number for record */
 	int		    major;      /* syscall number */
-	int		    uring_op;   /* uring operation */
+	struct timespec64   ctime;      /* time of syscall entry */
 	unsigned long	    argv[4];    /* syscall arguments */
 	long		    return_code;/* syscall return code */
 	u64		    prio;
@@ -139,7 +124,7 @@ struct audit_context {
 	struct sockaddr_storage *sockaddr;
 	size_t sockaddr_len;
 				/* Save things to print about task_struct */
-	pid_t		    ppid;
+	pid_t		    pid, ppid;
 	kuid_t		    uid, euid, suid, fsuid;
 	kgid_t		    gid, egid, sgid, fsgid;
 	unsigned long	    personality;
@@ -149,7 +134,7 @@ struct audit_context {
 	kuid_t		    target_auid;
 	kuid_t		    target_uid;
 	unsigned int	    target_sessionid;
-	struct lsm_prop	    target_ref;
+	u32		    target_sid;
 	char		    target_comm[TASK_COMM_LEN];
 
 	struct audit_tree_refs *trees, *first_trees;
@@ -166,7 +151,7 @@ struct audit_context {
 			kuid_t			uid;
 			kgid_t			gid;
 			umode_t			mode;
-			struct lsm_prop		oprop;
+			u32			osid;
 			int			has_perm;
 			uid_t			perm_uid;
 			gid_t			perm_gid;
@@ -200,12 +185,11 @@ struct audit_context {
 			int			fd;
 			int			flags;
 		} mmap;
-		struct open_how openat2;
 		struct {
 			int			argc;
 		} execve;
 		struct {
-			const char		*name;
+			char			*name;
 		} module;
 		struct {
 			struct audit_ntp_data	ntp_data;
@@ -251,6 +235,8 @@ struct audit_netlink_list {
 
 int audit_send_list_thread(void *_dest);
 
+extern int selinux_audit_rule_update(void);
+
 extern struct mutex audit_filter_mutex;
 extern int audit_del_rule(struct audit_entry *entry);
 extern void audit_free_rule_rcu(struct rcu_head *head);
@@ -265,10 +251,10 @@ extern struct tty_struct *audit_get_tty(void);
 extern void audit_put_tty(struct tty_struct *tty);
 
 /* audit watch/mark/tree functions */
-extern unsigned int audit_serial(void);
 #ifdef CONFIG_AUDITSYSCALL
+extern unsigned int audit_serial(void);
 extern int auditsc_get_stamp(struct audit_context *ctx,
-			     struct audit_stamp *stamp);
+			      struct timespec64 *t, unsigned int *serial);
 
 extern void audit_put_watch(struct audit_watch *watch);
 extern void audit_get_watch(struct audit_watch *watch);
@@ -309,9 +295,9 @@ extern void audit_filter_inodes(struct task_struct *tsk,
 				struct audit_context *ctx);
 extern struct list_head *audit_killed_trees(void);
 #else /* CONFIG_AUDITSYSCALL */
-#define auditsc_get_stamp(c, s) 0
-#define audit_put_watch(w) do { } while (0)
-#define audit_get_watch(w) do { } while (0)
+#define auditsc_get_stamp(c, t, s) 0
+#define audit_put_watch(w) {}
+#define audit_get_watch(w) {}
 #define audit_to_watch(k, p, l, o) (-EINVAL)
 #define audit_add_watch(k, l) (-EINVAL)
 #define audit_remove_watch_rule(k) BUG()
@@ -320,8 +306,8 @@ extern struct list_head *audit_killed_trees(void);
 
 #define audit_alloc_mark(k, p, l) (ERR_PTR(-EINVAL))
 #define audit_mark_path(m) ""
-#define audit_remove_mark(m) do { } while (0)
-#define audit_remove_mark_rule(k) do { } while (0)
+#define audit_remove_mark(m)
+#define audit_remove_mark_rule(k)
 #define audit_mark_compare(m, i, d) 0
 #define audit_exe_compare(t, m) (-EINVAL)
 #define audit_dupe_exe(n, o) (-EINVAL)
@@ -329,8 +315,8 @@ extern struct list_head *audit_killed_trees(void);
 #define audit_remove_tree_rule(rule) BUG()
 #define audit_add_tree_rule(rule) -EINVAL
 #define audit_make_tree(rule, str, op) -EINVAL
-#define audit_trim_trees() do { } while (0)
-#define audit_put_tree(tree) do { } while (0)
+#define audit_trim_trees() (void)0
+#define audit_put_tree(tree) (void)0
 #define audit_tag_tree(old, new) -EINVAL
 #define audit_tree_path(rule) ""	/* never called */
 #define audit_kill_trees(context) BUG()
@@ -340,7 +326,7 @@ static inline int audit_signal_info_syscall(struct task_struct *t)
 	return 0;
 }
 
-#define audit_filter_inodes(t, c) do { } while (0)
+#define audit_filter_inodes(t, c) AUDIT_DISABLED
 #endif /* CONFIG_AUDITSYSCALL */
 
 extern char *audit_unpack_string(void **bufp, size_t *remain, size_t len);
@@ -349,5 +335,3 @@ extern int audit_filter(int msgtype, unsigned int listtype);
 
 extern void audit_ctl_lock(void);
 extern void audit_ctl_unlock(void);
-
-#endif

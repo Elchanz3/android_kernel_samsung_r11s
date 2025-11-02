@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2015-2018 Oracle.  All rights reserved.
  *
- * Support for reverse-direction RPCs on RPC/RDMA (server-side).
+ * Support for backward direction RPCs on RPC/RDMA (server-side).
  */
 
 #include <linux/sunrpc/svc_rdma.h>
@@ -59,7 +59,7 @@ out_unlock:
 	spin_unlock(&xprt->queue_lock);
 }
 
-/* Send a reverse-direction RPC Call.
+/* Send a backwards direction RPC call.
  *
  * Caller holds the connection's mutex and has already marshaled
  * the RPC/RDMA request.
@@ -74,14 +74,11 @@ out_unlock:
  */
 static int svc_rdma_bc_sendto(struct svcxprt_rdma *rdma,
 			      struct rpc_rqst *rqst,
-			      struct svc_rdma_send_ctxt *sctxt)
+			      struct svc_rdma_send_ctxt *ctxt)
 {
-	struct svc_rdma_pcl empty_pcl;
 	int ret;
 
-	pcl_init(&empty_pcl);
-	ret = svc_rdma_map_reply_msg(rdma, sctxt, &empty_pcl, &empty_pcl,
-				     &rqst->rq_snd_buf);
+	ret = svc_rdma_map_reply_msg(rdma, ctxt, NULL, &rqst->rq_snd_buf);
 	if (ret < 0)
 		return -EIO;
 
@@ -89,8 +86,8 @@ static int svc_rdma_bc_sendto(struct svcxprt_rdma *rdma,
 	 * the rq_buffer before all retransmits are complete.
 	 */
 	get_page(virt_to_page(rqst->rq_buffer));
-	sctxt->sc_send_wr.opcode = IB_WR_SEND;
-	return svc_rdma_post_send(rdma, sctxt);
+	ctxt->sc_send_wr.opcode = IB_WR_SEND;
+	return svc_rdma_send(rdma, ctxt);
 }
 
 /* Server-side transport endpoint wants a whole page for its send
@@ -110,12 +107,12 @@ xprt_rdma_bc_allocate(struct rpc_task *task)
 		return -EINVAL;
 	}
 
-	page = alloc_page(GFP_NOIO | __GFP_NOWARN);
+	page = alloc_page(RPCRDMA_DEF_GFP);
 	if (!page)
 		return -ENOMEM;
 	rqst->rq_buffer = page_address(page);
 
-	rqst->rq_rbuffer = kmalloc(rqst->rq_rcvsize, GFP_NOIO | __GFP_NOWARN);
+	rqst->rq_rbuffer = kmalloc(rqst->rq_rcvsize, RPCRDMA_DEF_GFP);
 	if (!rqst->rq_rbuffer) {
 		put_page(page);
 		return -ENOMEM;
@@ -189,7 +186,7 @@ static int xprt_rdma_bc_send_request(struct rpc_rqst *rqst)
 
 	ret = rpcrdma_bc_send_request(rdma, rqst);
 	if (ret == -ENOTCONN)
-		svc_xprt_close(sxprt);
+		svc_close_xprt(sxprt);
 	return ret;
 }
 

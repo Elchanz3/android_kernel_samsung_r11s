@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) B.A.T.M.A.N. contributors:
+/* Copyright (C) 2011-2020  B.A.T.M.A.N. contributors:
  *
  * Antonio Quartulli
  */
@@ -12,6 +12,7 @@
 #include <linux/compiler.h>
 #include <linux/netdevice.h>
 #include <linux/netlink.h>
+#include <linux/seq_file.h>
 #include <linux/skbuff.h>
 #include <linux/types.h>
 #include <uapi/linux/batadv_packet.h>
@@ -56,7 +57,7 @@ batadv_dat_init_orig_node_addr(struct batadv_orig_node *orig_node)
 
 /**
  * batadv_dat_init_own_addr() - assign a DAT address to the node itself
- * @bat_priv: the bat priv with all the mesh interface information
+ * @bat_priv: the bat priv with all the soft interface information
  * @primary_if: a pointer to the primary interface
  */
 static inline void
@@ -73,11 +74,12 @@ batadv_dat_init_own_addr(struct batadv_priv *bat_priv,
 
 int batadv_dat_init(struct batadv_priv *bat_priv);
 void batadv_dat_free(struct batadv_priv *bat_priv);
+int batadv_dat_cache_seq_print_text(struct seq_file *seq, void *offset);
 int batadv_dat_cache_dump(struct sk_buff *msg, struct netlink_callback *cb);
 
 /**
  * batadv_dat_inc_counter() - increment the correct DAT packet counter
- * @bat_priv: the bat priv with all the mesh interface information
+ * @bat_priv: the bat priv with all the soft interface information
  * @subtype: the 4addr subtype of the packet to be counted
  *
  * Updates the ethtool statistics for the received packet if it is a DAT subtype

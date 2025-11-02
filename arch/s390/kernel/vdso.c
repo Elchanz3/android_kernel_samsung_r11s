@@ -6,182 +6,245 @@
  *  Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 
-#include <linux/binfmts.h>
-#include <linux/compat.h>
-#include <linux/elf.h>
-#include <linux/errno.h>
 #include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/sched.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/smp.h>
-#include <linux/random.h>
-#include <linux/vdso_datastore.h>
+#include <linux/stddef.h>
+#include <linux/unistd.h>
+#include <linux/slab.h>
+#include <linux/user.h>
+#include <linux/elf.h>
+#include <linux/security.h>
+#include <linux/memblock.h>
+#include <linux/compat.h>
+#include <linux/binfmts.h>
 #include <vdso/datapage.h>
-#include <asm/vdso/vsyscall.h>
-#include <asm/alternative.h>
+#include <asm/asm-offsets.h>
+#include <asm/processor.h>
+#include <asm/mmu.h>
+#include <asm/mmu_context.h>
+#include <asm/sections.h>
 #include <asm/vdso.h>
+#include <asm/facility.h>
 
-extern char vdso64_start[], vdso64_end[];
-extern char vdso32_start[], vdso32_end[];
+extern char vdso64_start, vdso64_end;
+static void *vdso64_kbase = &vdso64_start;
+static unsigned int vdso64_pages;
+static struct page **vdso64_pagelist;
+
+/*
+ * Should the kernel map a VDSO page into processes and pass its
+ * address down to glibc upon exec()?
+ */
+unsigned int __read_mostly vdso_enabled = 1;
+
+static vm_fault_t vdso_fault(const struct vm_special_mapping *sm,
+		      struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	struct page **vdso_pagelist;
+	unsigned long vdso_pages;
+
+	vdso_pagelist = vdso64_pagelist;
+	vdso_pages = vdso64_pages;
+
+	if (vmf->pgoff >= vdso_pages)
+		return VM_FAULT_SIGBUS;
+
+	vmf->page = vdso_pagelist[vmf->pgoff];
+	get_page(vmf->page);
+	return 0;
+}
 
 static int vdso_mremap(const struct vm_special_mapping *sm,
 		       struct vm_area_struct *vma)
 {
+	unsigned long vdso_pages;
+
+	vdso_pages = vdso64_pages;
+
+	if ((vdso_pages << PAGE_SHIFT) != vma->vm_end - vma->vm_start)
+		return -EINVAL;
+
+	if (WARN_ON_ONCE(current->mm != vma->vm_mm))
+		return -EFAULT;
+
 	current->mm->context.vdso_base = vma->vm_start;
 	return 0;
 }
 
-static struct vm_special_mapping vdso64_mapping = {
+static const struct vm_special_mapping vdso_mapping = {
 	.name = "[vdso]",
+	.fault = vdso_fault,
 	.mremap = vdso_mremap,
 };
 
-static struct vm_special_mapping vdso32_mapping = {
-	.name = "[vdso]",
-	.mremap = vdso_mremap,
-};
-
-int vdso_getcpu_init(void)
+static int __init vdso_setup(char *str)
 {
-	set_tod_programmable_field(smp_processor_id());
-	return 0;
+	bool enabled;
+
+	if (!kstrtobool(str, &enabled))
+		vdso_enabled = enabled;
+	return 1;
 }
-early_initcall(vdso_getcpu_init); /* Must be called before SMP init */
+__setup("vdso=", vdso_setup);
 
-static int map_vdso(unsigned long addr, unsigned long vdso_mapping_len)
+/*
+ * The vdso data page
+ */
+static union {
+	struct vdso_data	data;
+	u8			page[PAGE_SIZE];
+} vdso_data_store __page_aligned_data;
+struct vdso_data *vdso_data = (struct vdso_data *)&vdso_data_store.data;
+/*
+ * Allocate/free per cpu vdso data.
+ */
+#define SEGMENT_ORDER	2
+
+int vdso_alloc_per_cpu(struct lowcore *lowcore)
 {
-	unsigned long vvar_start, vdso_text_start, vdso_text_len;
-	struct vm_special_mapping *vdso_mapping;
+	unsigned long segment_table, page_table, page_frame;
+	struct vdso_per_cpu_data *vd;
+
+	segment_table = __get_free_pages(GFP_KERNEL, SEGMENT_ORDER);
+	page_table = get_zeroed_page(GFP_KERNEL);
+	page_frame = get_zeroed_page(GFP_KERNEL);
+	if (!segment_table || !page_table || !page_frame)
+		goto out;
+	arch_set_page_dat(virt_to_page(segment_table), SEGMENT_ORDER);
+	arch_set_page_dat(virt_to_page(page_table), 0);
+
+	/* Initialize per-cpu vdso data page */
+	vd = (struct vdso_per_cpu_data *) page_frame;
+	vd->cpu_nr = lowcore->cpu_nr;
+	vd->node_id = cpu_to_node(vd->cpu_nr);
+
+	/* Set up page table for the vdso address space */
+	memset64((u64 *)segment_table, _SEGMENT_ENTRY_EMPTY, _CRST_ENTRIES);
+	memset64((u64 *)page_table, _PAGE_INVALID, PTRS_PER_PTE);
+
+	*(unsigned long *) segment_table = _SEGMENT_ENTRY + page_table;
+	*(unsigned long *) page_table = _PAGE_PROTECT + page_frame;
+
+	lowcore->vdso_asce = segment_table +
+		_ASCE_TABLE_LENGTH + _ASCE_USER_BITS + _ASCE_TYPE_SEGMENT;
+	lowcore->vdso_per_cpu_data = page_frame;
+
+	return 0;
+
+out:
+	free_page(page_frame);
+	free_page(page_table);
+	free_pages(segment_table, SEGMENT_ORDER);
+	return -ENOMEM;
+}
+
+void vdso_free_per_cpu(struct lowcore *lowcore)
+{
+	unsigned long segment_table, page_table, page_frame;
+
+	segment_table = lowcore->vdso_asce & PAGE_MASK;
+	page_table = *(unsigned long *) segment_table;
+	page_frame = *(unsigned long *) page_table;
+
+	free_page(page_frame);
+	free_page(page_table);
+	free_pages(segment_table, SEGMENT_ORDER);
+}
+
+/*
+ * This is called from binfmt_elf, we create the special vma for the
+ * vDSO and insert it into the mm struct tree
+ */
+int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+{
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
+	unsigned long vdso_pages;
+	unsigned long vdso_base;
 	int rc;
 
-	BUILD_BUG_ON(VDSO_NR_PAGES != __VDSO_PAGES);
+	if (!vdso_enabled)
+		return 0;
+
+	if (is_compat_task())
+		return 0;
+
+	vdso_pages = vdso64_pages;
+	/*
+	 * vDSO has a problem and was disabled, just don't "enable" it for
+	 * the process
+	 */
+	if (vdso_pages == 0)
+		return 0;
+
+	/*
+	 * pick a base address for the vDSO in process space. We try to put
+	 * it at vdso_base which is the "natural" base for it, but we might
+	 * fail and end up putting it elsewhere.
+	 */
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;
+	vdso_base = get_unmapped_area(NULL, 0, vdso_pages << PAGE_SHIFT, 0, 0);
+	if (IS_ERR_VALUE(vdso_base)) {
+		rc = vdso_base;
+		goto out_up;
+	}
 
-	if (is_compat_task()) {
-		vdso_text_len = vdso32_end - vdso32_start;
-		vdso_mapping = &vdso32_mapping;
-	} else {
-		vdso_text_len = vdso64_end - vdso64_start;
-		vdso_mapping = &vdso64_mapping;
-	}
-	vvar_start = get_unmapped_area(NULL, addr, vdso_mapping_len, 0, 0);
-	rc = vvar_start;
-	if (IS_ERR_VALUE(vvar_start))
-		goto out;
-	vma = vdso_install_vvar_mapping(mm, vvar_start);
-	rc = PTR_ERR(vma);
-	if (IS_ERR(vma))
-		goto out;
-	vdso_text_start = vvar_start + VDSO_NR_PAGES * PAGE_SIZE;
-	/* VM_MAYWRITE for COW so gdb can set breakpoints */
-	vma = _install_special_mapping(mm, vdso_text_start, vdso_text_len,
-				       VM_READ|VM_EXEC|VM_SEALED_SYSMAP|
+	/*
+	 * our vma flags don't have VM_WRITE so by default, the process
+	 * isn't allowed to write those pages.
+	 * gdb can break that with ptrace interface, and thus trigger COW
+	 * on those pages but it's then your responsibility to never do that
+	 * on the "data" page of the vDSO or you'll stop getting kernel
+	 * updates and your nice userland gettimeofday will be totally dead.
+	 * It's fine to use that for setting breakpoints in the vDSO code
+	 * pages though.
+	 */
+	vma = _install_special_mapping(mm, vdso_base, vdso_pages << PAGE_SHIFT,
+				       VM_READ|VM_EXEC|
 				       VM_MAYREAD|VM_MAYWRITE|VM_MAYEXEC,
-				       vdso_mapping);
+				       &vdso_mapping);
 	if (IS_ERR(vma)) {
-		do_munmap(mm, vvar_start, PAGE_SIZE, NULL);
 		rc = PTR_ERR(vma);
-	} else {
-		current->mm->context.vdso_base = vdso_text_start;
-		rc = 0;
+		goto out_up;
 	}
-out:
+
+	current->mm->context.vdso_base = vdso_base;
+	rc = 0;
+
+out_up:
 	mmap_write_unlock(mm);
 	return rc;
 }
 
-static unsigned long vdso_addr(unsigned long start, unsigned long len)
-{
-	unsigned long addr, end, offset;
-
-	/*
-	 * Round up the start address. It can start out unaligned as a result
-	 * of stack start randomization.
-	 */
-	start = PAGE_ALIGN(start);
-
-	/* Round the lowest possible end address up to a PMD boundary. */
-	end = (start + len + PMD_SIZE - 1) & PMD_MASK;
-	if (end >= VDSO_BASE)
-		end = VDSO_BASE;
-	end -= len;
-
-	if (end > start) {
-		offset = get_random_u32_below(((end - start) >> PAGE_SHIFT) + 1);
-		addr = start + (offset << PAGE_SHIFT);
-	} else {
-		addr = start;
-	}
-	return addr;
-}
-
-unsigned long vdso_text_size(void)
-{
-	unsigned long size;
-
-	if (is_compat_task())
-		size = vdso32_end - vdso32_start;
-	else
-		size = vdso64_end - vdso64_start;
-	return PAGE_ALIGN(size);
-}
-
-unsigned long vdso_size(void)
-{
-	return vdso_text_size() + VDSO_NR_PAGES * PAGE_SIZE;
-}
-
-int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
-{
-	unsigned long addr = VDSO_BASE;
-	unsigned long size = vdso_size();
-
-	if (current->flags & PF_RANDOMIZE)
-		addr = vdso_addr(current->mm->start_stack + PAGE_SIZE, size);
-	return map_vdso(addr, size);
-}
-
-static struct page ** __init vdso_setup_pages(void *start, void *end)
-{
-	int pages = (end - start) >> PAGE_SHIFT;
-	struct page **pagelist;
-	int i;
-
-	pagelist = kcalloc(pages + 1, sizeof(struct page *), GFP_KERNEL);
-	if (!pagelist)
-		panic("%s: Cannot allocate page list for VDSO", __func__);
-	for (i = 0; i < pages; i++)
-		pagelist[i] = virt_to_page(start + i * PAGE_SIZE);
-	return pagelist;
-}
-
-static void vdso_apply_alternatives(void)
-{
-	const struct elf64_shdr *alt, *shdr;
-	struct alt_instr *start, *end;
-	const struct elf64_hdr *hdr;
-
-	hdr = (struct elf64_hdr *)vdso64_start;
-	shdr = (void *)hdr + hdr->e_shoff;
-	alt = find_section(hdr, shdr, ".altinstructions");
-	if (!alt)
-		return;
-	start = (void *)hdr + alt->sh_offset;
-	end = (void *)hdr + alt->sh_offset + alt->sh_size;
-	apply_alternatives(start, end);
-}
-
 static int __init vdso_init(void)
 {
-	vdso_apply_alternatives();
-	vdso64_mapping.pages = vdso_setup_pages(vdso64_start, vdso64_end);
-	if (IS_ENABLED(CONFIG_COMPAT))
-		vdso32_mapping.pages = vdso_setup_pages(vdso32_start, vdso32_end);
+	int i;
+
+	/* Calculate the size of the 64 bit vDSO */
+	vdso64_pages = ((&vdso64_end - &vdso64_start
+			 + PAGE_SIZE - 1) >> PAGE_SHIFT) + 1;
+
+	/* Make sure pages are in the correct state */
+	vdso64_pagelist = kcalloc(vdso64_pages + 1, sizeof(struct page *),
+				  GFP_KERNEL);
+	BUG_ON(vdso64_pagelist == NULL);
+	for (i = 0; i < vdso64_pages - 1; i++) {
+		struct page *pg = virt_to_page(vdso64_kbase + i*PAGE_SIZE);
+		get_page(pg);
+		vdso64_pagelist[i] = pg;
+	}
+	vdso64_pagelist[vdso64_pages - 1] = virt_to_page(vdso_data);
+	vdso64_pagelist[vdso64_pages] = NULL;
+	if (vdso_alloc_per_cpu(&S390_lowcore))
+		BUG();
+
+	get_page(virt_to_page(vdso_data));
+
 	return 0;
 }
-arch_initcall(vdso_init);
+early_initcall(vdso_init);

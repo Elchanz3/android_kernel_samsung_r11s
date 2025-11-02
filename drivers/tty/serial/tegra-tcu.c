@@ -7,6 +7,7 @@
 #include <linux/mailbox_client.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/serial.h>
 #include <linux/serial_core.h>
@@ -91,17 +92,15 @@ static void tegra_tcu_write(struct tegra_tcu *tcu, const char *s,
 static void tegra_tcu_uart_start_tx(struct uart_port *port)
 {
 	struct tegra_tcu *tcu = port->private_data;
-	struct tty_port *tport = &port->state->port;
-	unsigned char *tail;
-	unsigned int count;
+	struct circ_buf *xmit = &port->state->xmit;
+	unsigned long count;
 
 	for (;;) {
-		count = kfifo_out_linear_ptr(&tport->xmit_fifo, &tail,
-				UART_XMIT_SIZE);
+		count = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
 		if (!count)
 			break;
 
-		tegra_tcu_write(tcu, tail, count);
+		tegra_tcu_write(tcu, &xmit->buf[xmit->tail], count);
 		uart_xmit_advance(port, count);
 	}
 
@@ -127,7 +126,7 @@ static void tegra_tcu_uart_shutdown(struct uart_port *port)
 
 static void tegra_tcu_uart_set_termios(struct uart_port *port,
 				       struct ktermios *new,
-				       const struct ktermios *old)
+				       struct ktermios *old)
 {
 }
 
@@ -196,6 +195,13 @@ static int tegra_tcu_probe(struct platform_device *pdev)
 		return err;
 	}
 
+	tcu->rx = mbox_request_channel_byname(&tcu->rx_client, "rx");
+	if (IS_ERR(tcu->rx)) {
+		err = PTR_ERR(tcu->rx);
+		dev_err(&pdev->dev, "failed to get rx mailbox: %d\n", err);
+		goto free_tx;
+	}
+
 #if IS_ENABLED(CONFIG_SERIAL_TEGRA_TCU_CONSOLE)
 	/* setup the console */
 	strcpy(tcu->console.name, "ttyTCU");
@@ -220,7 +226,7 @@ static int tegra_tcu_probe(struct platform_device *pdev)
 	if (err) {
 		dev_err(&pdev->dev, "failed to register UART driver: %d\n",
 			err);
-		goto free_tx;
+		goto free_rx;
 	}
 
 	/* setup the port */
@@ -240,17 +246,6 @@ static int tegra_tcu_probe(struct platform_device *pdev)
 		goto unregister_uart;
 	}
 
-	/*
-	 * Request RX channel after creating port to ensure tcu->port
-	 * is ready for any immediate incoming bytes.
-	 */
-	tcu->rx = mbox_request_channel_byname(&tcu->rx_client, "rx");
-	if (IS_ERR(tcu->rx)) {
-		err = PTR_ERR(tcu->rx);
-		dev_err(&pdev->dev, "failed to get rx mailbox: %d\n", err);
-		goto remove_uart_port;
-	}
-
 	platform_set_drvdata(pdev, tcu);
 #if IS_ENABLED(CONFIG_SERIAL_TEGRA_TCU_CONSOLE)
 	register_console(&tcu->console);
@@ -258,34 +253,35 @@ static int tegra_tcu_probe(struct platform_device *pdev)
 
 	return 0;
 
-remove_uart_port:
-	uart_remove_one_port(&tcu->driver, &tcu->port);
 unregister_uart:
 	uart_unregister_driver(&tcu->driver);
+free_rx:
+	mbox_free_channel(tcu->rx);
 free_tx:
 	mbox_free_channel(tcu->tx);
 
 	return err;
 }
 
-static void tegra_tcu_remove(struct platform_device *pdev)
+static int tegra_tcu_remove(struct platform_device *pdev)
 {
 	struct tegra_tcu *tcu = platform_get_drvdata(pdev);
 
 #if IS_ENABLED(CONFIG_SERIAL_TEGRA_TCU_CONSOLE)
 	unregister_console(&tcu->console);
 #endif
-	mbox_free_channel(tcu->rx);
 	uart_remove_one_port(&tcu->driver, &tcu->port);
 	uart_unregister_driver(&tcu->driver);
+	mbox_free_channel(tcu->rx);
 	mbox_free_channel(tcu->tx);
+
+	return 0;
 }
 
 static const struct of_device_id tegra_tcu_match[] = {
 	{ .compatible = "nvidia,tegra194-tcu" },
 	{ }
 };
-MODULE_DEVICE_TABLE(of, tegra_tcu_match);
 
 static struct platform_driver tegra_tcu_driver = {
 	.driver = {

@@ -315,7 +315,7 @@ exit:
 	case 0:
 		++cfv->stats.rx_napi_complete;
 
-		/* Really out of packets? (stolen from virtio_net)*/
+		/* Really out of patckets? (stolen from virtio_net)*/
 		napi_complete(napi);
 		if (unlikely(!vringh_notify_enable_kern(cfv->vr_rx)) &&
 		    napi_schedule_prep(napi)) {
@@ -463,7 +463,7 @@ static int cfv_netdev_close(struct net_device *netdev)
 	vringh_notify_disable_kern(cfv->vr_rx);
 	napi_disable(&cfv->napi);
 
-	/* Release any TX buffers on both used and available rings */
+	/* Release any TX buffers on both used and avilable rings */
 	cfv_release_used_buf(cfv->vq_tx);
 	spin_lock_irqsave(&cfv->tx_lock, flags);
 	while ((buf_info = virtqueue_detach_unused_buf(cfv->vq_tx)))
@@ -497,7 +497,7 @@ static struct buf_info *cfv_alloc_and_copy_to_shm(struct cfv_info *cfv,
 	if (unlikely(!buf_info))
 		goto err;
 
-	/* Make the IP header aligned in the buffer */
+	/* Make the IP header aligned in tbe buffer */
 	hdr_ofs = cfv->tx_hr + info->hdr_len;
 	pad_len = hdr_ofs & (IP_HDR_ALIGN - 1);
 	buf_info->size = cfv->tx_hr + skb->len + cfv->tx_tr + pad_len;
@@ -598,9 +598,9 @@ err:
 	return NETDEV_TX_OK;
 }
 
-static void cfv_tx_release_tasklet(struct tasklet_struct *t)
+static void cfv_tx_release_tasklet(unsigned long drv)
 {
-	struct cfv_info *cfv = from_tasklet(cfv, t, tx_release_tasklet);
+	struct cfv_info *cfv = (struct cfv_info *)drv;
 	cfv_release_used_buf(cfv->vq_tx);
 }
 
@@ -646,7 +646,9 @@ static inline void debugfs_init(struct cfv_info *cfv)
 /* Setup CAIF for the a virtio device */
 static int cfv_probe(struct virtio_device *vdev)
 {
+	vq_callback_t *vq_cbs = cfv_release_cb;
 	vrh_callback_t *vrh_cbs = cfv_recv;
+	const char *names =  "output";
 	const char *cfv_netdev_name = "cfvrt";
 	struct net_device *netdev;
 	struct cfv_info *cfv;
@@ -673,11 +675,9 @@ static int cfv_probe(struct virtio_device *vdev)
 		goto err;
 
 	/* Get the TX virtio ring. This is a "guest side vring". */
-	cfv->vq_tx = virtio_find_single_vq(vdev, cfv_release_cb, "output");
-	if (IS_ERR(cfv->vq_tx)) {
-		err = PTR_ERR(cfv->vq_tx);
+	err = virtio_find_vqs(vdev, 1, &cfv->vq_tx, &vq_cbs, &names, NULL);
+	if (err)
 		goto err;
-	}
 
 	/* Get the CAIF configuration from virtio config space, if available */
 	if (vdev->config->get) {
@@ -714,10 +714,11 @@ static int cfv_probe(struct virtio_device *vdev)
 	/* Initialize NAPI poll context data */
 	vringh_kiov_init(&cfv->ctx.riov, NULL, 0);
 	cfv->ctx.head = USHRT_MAX;
-	netif_napi_add_weight(netdev, &cfv->napi, cfv_rx_poll,
-			      CFV_DEFAULT_QUOTA);
+	netif_napi_add(netdev, &cfv->napi, cfv_rx_poll, CFV_DEFAULT_QUOTA);
 
-	tasklet_setup(&cfv->tx_release_tasklet, cfv_tx_release_tasklet);
+	tasklet_init(&cfv->tx_release_tasklet,
+		     cfv_tx_release_tasklet,
+		     (unsigned long)cfv);
 
 	/* Carrier is off until netdevice is opened */
 	netif_carrier_off(netdev);
@@ -745,7 +746,7 @@ err:
 
 	if (cfv->vr_rx)
 		vdev->vringh_config->del_vrhs(cfv->vdev);
-	if (cfv->vq_tx)
+	if (cfv->vdev)
 		vdev->config->del_vqs(cfv->vdev);
 	free_netdev(netdev);
 	return err;
@@ -763,7 +764,7 @@ static void cfv_remove(struct virtio_device *vdev)
 	debugfs_remove_recursive(cfv->debugfs);
 
 	vringh_kiov_cleanup(&cfv->ctx.riov);
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 	vdev->vringh_config->del_vrhs(cfv->vdev);
 	cfv->vr_rx = NULL;
 	vdev->config->del_vqs(cfv->vdev);
@@ -782,6 +783,7 @@ static struct virtio_driver caif_virtio_driver = {
 	.feature_table		= features,
 	.feature_table_size	= ARRAY_SIZE(features),
 	.driver.name		= KBUILD_MODNAME,
+	.driver.owner		= THIS_MODULE,
 	.id_table		= id_table,
 	.probe			= cfv_probe,
 	.remove			= cfv_remove,

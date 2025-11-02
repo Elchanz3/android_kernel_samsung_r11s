@@ -38,10 +38,6 @@ static void j1939_can_recv(struct sk_buff *iskb, void *data)
 	struct j1939_sk_buff_cb *skcb, *iskcb;
 	struct can_frame *cf;
 
-	/* make sure we only get Classical CAN frames */
-	if (!can_is_can_skb(iskb))
-		return;
-
 	/* create a copy of the skb
 	 * j1939 only delivers the real data bytes,
 	 * the header goes into sockaddr.
@@ -62,7 +58,7 @@ static void j1939_can_recv(struct sk_buff *iskb, void *data)
 	skb_pull(skb, J1939_CAN_HDR);
 
 	/* fix length, set to dlc, with 8 maximum */
-	skb_trim(skb, min_t(uint8_t, cf->len, 8));
+	skb_trim(skb, min_t(uint8_t, cf->can_dlc, 8));
 
 	/* set addr */
 	skcb = j1939_skb_to_cb(skb);
@@ -270,7 +266,7 @@ struct j1939_priv *j1939_netdev_start(struct net_device *ndev)
 		return ERR_PTR(-ENOMEM);
 
 	j1939_tp_init(priv);
-	rwlock_init(&priv->j1939_socks_lock);
+	spin_lock_init(&priv->j1939_socks_lock);
 	INIT_LIST_HEAD(&priv->j1939_socks);
 
 	mutex_lock(&j1939_netdev_lock);
@@ -348,7 +344,7 @@ int j1939_send_one(struct j1939_priv *priv, struct sk_buff *skb)
 		canid |= skcb->addr.da << 8;
 
 	cf->can_id = canid;
-	cf->len = dlc;
+	cf->can_dlc = dlc;
 
 	return can_send(skb, 1);
 
@@ -376,11 +372,6 @@ static int j1939_netdev_notify(struct notifier_block *nb,
 		j1939_cancel_active_session(priv, NULL);
 		j1939_sk_netdev_event_netdown(priv);
 		j1939_ecu_unmap_all(priv);
-		break;
-	case NETDEV_UNREGISTER:
-		j1939_cancel_active_session(priv, NULL);
-		j1939_sk_netdev_event_netdown(priv);
-		j1939_sk_netdev_event_unregister(priv);
 		break;
 	}
 

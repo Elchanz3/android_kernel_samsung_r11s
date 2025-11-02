@@ -52,6 +52,26 @@
  *						    | etc
  */
 
+void saa7164_buffer_display(struct saa7164_buffer *buf)
+{
+	struct saa7164_dev *dev = buf->port->dev;
+	int i;
+
+	dprintk(DBGLVL_BUF, "%s()   buffer @ 0x%p nr=%d\n",
+		__func__, buf, buf->idx);
+	dprintk(DBGLVL_BUF, "  pci_cpu @ 0x%p    dma @ 0x%08llx len = 0x%x\n",
+		buf->cpu, (long long)buf->dma, buf->pci_size);
+	dprintk(DBGLVL_BUF, "   pt_cpu @ 0x%p pt_dma @ 0x%08llx len = 0x%x\n",
+		buf->pt_cpu, (long long)buf->pt_dma, buf->pt_size);
+
+	/* Format the Page Table Entries to point into the data buffer */
+	for (i = 0 ; i < SAA7164_PT_ENTRIES; i++) {
+
+		dprintk(DBGLVL_BUF, "    pt[%02d] = 0x%p -> 0x%llx\n",
+			i, buf->pt_cpu, (u64)*(buf->pt_cpu));
+
+	}
+}
 /* Allocate a new buffer structure and associated PCI space in bytes.
  * len must be a multiple of sizeof(u64)
  */
@@ -83,13 +103,13 @@ struct saa7164_buffer *saa7164_buffer_alloc(struct saa7164_port *port,
 	buf->pt_size = (SAA7164_PT_ENTRIES * sizeof(u64)) + 0x1000;
 
 	/* Allocate contiguous memory */
-	buf->cpu = dma_alloc_coherent(&port->dev->pci->dev, buf->pci_size,
-				      &buf->dma, GFP_KERNEL);
+	buf->cpu = pci_alloc_consistent(port->dev->pci, buf->pci_size,
+		&buf->dma);
 	if (!buf->cpu)
 		goto fail1;
 
-	buf->pt_cpu = dma_alloc_coherent(&port->dev->pci->dev, buf->pt_size,
-					 &buf->pt_dma, GFP_KERNEL);
+	buf->pt_cpu = pci_alloc_consistent(port->dev->pci, buf->pt_size,
+		&buf->pt_dma);
 	if (!buf->pt_cpu)
 		goto fail2;
 
@@ -117,8 +137,7 @@ struct saa7164_buffer *saa7164_buffer_alloc(struct saa7164_port *port,
 	goto ret;
 
 fail2:
-	dma_free_coherent(&port->dev->pci->dev, buf->pci_size, buf->cpu,
-			  buf->dma);
+	pci_free_consistent(port->dev->pci, buf->pci_size, buf->cpu, buf->dma);
 fail1:
 	kfree(buf);
 
@@ -141,9 +160,8 @@ int saa7164_buffer_dealloc(struct saa7164_buffer *buf)
 	if (buf->flags != SAA7164_BUFFER_FREE)
 		log_warn(" freeing a non-free buffer\n");
 
-	dma_free_coherent(&dev->pci->dev, buf->pci_size, buf->cpu, buf->dma);
-	dma_free_coherent(&dev->pci->dev, buf->pt_size, buf->pt_cpu,
-			  buf->pt_dma);
+	pci_free_consistent(dev->pci, buf->pci_size, buf->cpu, buf->dma);
+	pci_free_consistent(dev->pci, buf->pt_size, buf->pt_cpu, buf->pt_dma);
 
 	kfree(buf);
 

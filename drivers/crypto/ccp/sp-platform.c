@@ -79,9 +79,17 @@ static int sp_get_irqs(struct sp_device *sp)
 	struct sp_platform *sp_platform = sp->dev_specific;
 	struct device *dev = sp->dev;
 	struct platform_device *pdev = to_platform_device(dev);
+	unsigned int i, count;
 	int ret;
 
-	sp_platform->irq_count = platform_irq_count(pdev);
+	for (i = 0, count = 0; i < pdev->num_resources; i++) {
+		struct resource *res = &pdev->resource[i];
+
+		if (resource_type(res) == IORESOURCE_IRQ)
+			count++;
+	}
+
+	sp_platform->irq_count = count;
 
 	ret = platform_get_irq(pdev, 0);
 	if (ret < 0) {
@@ -90,7 +98,7 @@ static int sp_get_irqs(struct sp_device *sp)
 	}
 
 	sp->psp_irq = ret;
-	if (sp_platform->irq_count == 1) {
+	if (count == 1) {
 		sp->ccp_irq = ret;
 	} else {
 		ret = platform_get_irq(pdev, 1);
@@ -174,7 +182,7 @@ e_err:
 	return ret;
 }
 
-static void sp_platform_remove(struct platform_device *pdev)
+static int sp_platform_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct sp_device *sp = dev_get_drvdata(dev);
@@ -182,6 +190,8 @@ static void sp_platform_remove(struct platform_device *pdev)
 	sp_destroy(sp);
 
 	dev_notice(dev, "disabled\n");
+
+	return 0;
 }
 
 #ifdef CONFIG_PM

@@ -67,7 +67,6 @@ static void esw_acl_egress_lgcy_groups_destroy(struct mlx5_vport *vport)
 int esw_acl_egress_lgcy_setup(struct mlx5_eswitch *esw,
 			      struct mlx5_vport *vport)
 {
-	bool vst_mode_steering = esw_vst_mode_is_steering(esw);
 	struct mlx5_flow_destination drop_ctr_dst = {};
 	struct mlx5_flow_destination *dst = NULL;
 	struct mlx5_fc *drop_counter = NULL;
@@ -78,7 +77,6 @@ int esw_acl_egress_lgcy_setup(struct mlx5_eswitch *esw,
 	 */
 	int table_size = 2;
 	int dest_num = 0;
-	int actions_flag;
 	int err = 0;
 
 	if (vport->egress.legacy.drop_counter) {
@@ -87,8 +85,8 @@ int esw_acl_egress_lgcy_setup(struct mlx5_eswitch *esw,
 		drop_counter = mlx5_fc_create(esw->dev, false);
 		if (IS_ERR(drop_counter)) {
 			esw_warn(esw->dev,
-				 "vport[%d] configure egress drop rule counter err(%pe)\n",
-				 vport->vport, drop_counter);
+				 "vport[%d] configure egress drop rule counter err(%ld)\n",
+				 vport->vport, PTR_ERR(drop_counter));
 			drop_counter = NULL;
 		}
 		vport->egress.legacy.drop_counter = drop_counter;
@@ -102,7 +100,7 @@ int esw_acl_egress_lgcy_setup(struct mlx5_eswitch *esw,
 	}
 
 	if (!vport->egress.acl) {
-		vport->egress.acl = esw_acl_table_create(esw, vport,
+		vport->egress.acl = esw_acl_table_create(esw, vport->vport,
 							 MLX5_FLOW_NAMESPACE_ESW_EGRESS,
 							 table_size);
 		if (IS_ERR(vport->egress.acl)) {
@@ -121,11 +119,8 @@ int esw_acl_egress_lgcy_setup(struct mlx5_eswitch *esw,
 		  vport->vport, vport->info.vlan, vport->info.qos);
 
 	/* Allowed vlan rule */
-	actions_flag = MLX5_FLOW_CONTEXT_ACTION_ALLOW;
-	if (vst_mode_steering)
-		actions_flag |= MLX5_FLOW_CONTEXT_ACTION_VLAN_POP;
 	err = esw_egress_acl_vlan_create(esw, vport, NULL, vport->info.vlan,
-					 actions_flag);
+					 MLX5_FLOW_CONTEXT_ACTION_ALLOW);
 	if (err)
 		goto out;
 
@@ -135,7 +130,7 @@ int esw_acl_egress_lgcy_setup(struct mlx5_eswitch *esw,
 	if (drop_counter) {
 		flow_act.action |= MLX5_FLOW_CONTEXT_ACTION_COUNT;
 		drop_ctr_dst.type = MLX5_FLOW_DESTINATION_TYPE_COUNTER;
-		drop_ctr_dst.counter = drop_counter;
+		drop_ctr_dst.counter_id = mlx5_fc_id(drop_counter);
 		dst = &drop_ctr_dst;
 		dest_num++;
 	}

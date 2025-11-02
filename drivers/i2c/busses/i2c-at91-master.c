@@ -23,10 +23,11 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
+#include <linux/platform_data/dma-atmel.h>
 #include <linux/pm_runtime.h>
-#include <linux/string_choices.h>
 
 #include "i2c-at91.h"
 
@@ -138,9 +139,9 @@ static void at91_twi_dma_cleanup(struct at91_twi_dev *dev)
 
 	if (dma->xfer_in_progress) {
 		if (dma->direction == DMA_FROM_DEVICE)
-			dmaengine_terminate_sync(dma->chan_rx);
+			dmaengine_terminate_all(dma->chan_rx);
 		else
-			dmaengine_terminate_sync(dma->chan_tx);
+			dmaengine_terminate_all(dma->chan_tx);
 		dma->xfer_in_progress = false;
 	}
 	if (dma->buf_mapped) {
@@ -524,7 +525,7 @@ static int at91_do_twi_transfer(struct at91_twi_dev *dev)
 	 */
 
 	dev_dbg(dev->dev, "transfer: %s %zu bytes.\n",
-		str_read_write(dev->msg->flags & I2C_M_RD), dev->buf_len);
+		(dev->msg->flags & I2C_M_RD) ? "read" : "write", dev->buf_len);
 
 	reinit_completion(&dev->cmd_complete);
 	dev->transfer_status = 0;
@@ -592,6 +593,7 @@ static int at91_do_twi_transfer(struct at91_twi_dev *dev)
 					      dev->adapter.timeout);
 	if (time_left == 0) {
 		dev->transfer_status |= at91_twi_read(dev, AT91_TWI_SR);
+		dev_err(dev->dev, "controller timed out\n");
 		at91_init_twi_bus(dev);
 		ret = -ETIMEDOUT;
 		goto error;
@@ -717,6 +719,7 @@ static int at91_twi_xfer(struct i2c_adapter *adap, struct i2c_msg *msg, int num)
 
 	ret = (ret < 0) ? ret : num;
 out:
+	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 
 	return ret;
@@ -738,8 +741,8 @@ static u32 at91_twi_func(struct i2c_adapter *adapter)
 }
 
 static const struct i2c_algorithm at91_twi_algorithm = {
-	.xfer = at91_twi_xfer,
-	.functionality = at91_twi_func,
+	.master_xfer	= at91_twi_xfer,
+	.functionality	= at91_twi_func,
 };
 
 static int at91_twi_configure_dma(struct at91_twi_dev *dev, u32 phy_addr)
@@ -830,11 +833,7 @@ static int at91_init_twi_recovery_gpio(struct platform_device *pdev,
 	struct i2c_bus_recovery_info *rinfo = &dev->rinfo;
 
 	rinfo->pinctrl = devm_pinctrl_get(&pdev->dev);
-	if (!rinfo->pinctrl) {
-		dev_info(dev->dev, "pinctrl unavailable, bus recovery not supported\n");
-		return 0;
-	}
-	if (IS_ERR(rinfo->pinctrl)) {
+	if (!rinfo->pinctrl || IS_ERR(rinfo->pinctrl)) {
 		dev_info(dev->dev, "can't get pinctrl, bus recovery not supported\n");
 		return PTR_ERR(rinfo->pinctrl);
 	}

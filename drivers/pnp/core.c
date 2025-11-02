@@ -31,6 +31,18 @@ DEFINE_MUTEX(pnp_lock);
 int pnp_platform_devices;
 EXPORT_SYMBOL(pnp_platform_devices);
 
+void *pnp_alloc(long size)
+{
+	void *result;
+
+	result = kzalloc(size, GFP_KERNEL);
+	if (!result) {
+		printk(KERN_ERR "pnp: Out of Memory\n");
+		return NULL;
+	}
+	return result;
+}
+
 static void pnp_remove_protocol(struct pnp_protocol *protocol)
 {
 	mutex_lock(&pnp_lock);
@@ -76,6 +88,16 @@ int pnp_register_protocol(struct pnp_protocol *protocol)
 		pnp_remove_protocol(protocol);
 
 	return ret;
+}
+
+/**
+ * pnp_unregister_protocol - removes a pnp protocol from the pnp layer
+ * @protocol: pointer to the corresponding pnp_protocol structure
+ */
+void pnp_unregister_protocol(struct pnp_protocol *protocol)
+{
+	pnp_remove_protocol(protocol);
+	device_unregister(&protocol->dev);
 }
 
 static void pnp_free_ids(struct pnp_dev *dev)
@@ -205,9 +227,16 @@ int pnp_add_device(struct pnp_dev *dev)
 	for (id = dev->id; id; id = id->next)
 		len += scnprintf(buf + len, sizeof(buf) - len, " %s", id->id);
 
-	dev_dbg(&dev->dev, "%s device, IDs%s (%s)\n", dev->protocol->name, buf,
-		dev->active ? "active" : "disabled");
+	dev_printk(KERN_DEBUG, &dev->dev, "%s device, IDs%s (%s)\n",
+		   dev->protocol->name, buf,
+		   dev->active ? "active" : "disabled");
 	return 0;
+}
+
+void __pnp_remove_device(struct pnp_dev *dev)
+{
+	pnp_delist_device(dev);
+	device_unregister(&dev->dev);
 }
 
 static int __init pnp_init(void)

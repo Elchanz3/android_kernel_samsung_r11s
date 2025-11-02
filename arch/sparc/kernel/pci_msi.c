@@ -5,8 +5,6 @@
  */
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/irq.h>
 
@@ -148,13 +146,13 @@ static int sparc64_setup_msi_irq(unsigned int *irq_p,
 	msiqid = pick_msiq(pbm);
 
 	err = ops->msi_setup(pbm, msiqid, msi,
-			     (entry->pci.msi_attrib.is_64 ? 1 : 0));
+			     (entry->msi_attrib.is_64 ? 1 : 0));
 	if (err)
 		goto out_msi_free;
 
 	pbm->msi_irq_table[msi - pbm->msi_first] = *irq_p;
 
-	if (entry->pci.msi_attrib.is_64) {
+	if (entry->msi_attrib.is_64) {
 		msg.address_hi = pbm->msi64_start >> 32;
 		msg.address_lo = pbm->msi64_start & 0xffffffff;
 	} else {
@@ -287,7 +285,10 @@ static int bringup_one_msi_queue(struct pci_pbm_info *pbm,
 
 	nid = pbm->numa_node;
 	if (nid != -1) {
-		irq_set_affinity(irq, cpumask_of_node(nid));
+		cpumask_t numa_mask;
+
+		cpumask_copy(&numa_mask, cpumask_of_node(nid));
+		irq_set_affinity(irq, &numa_mask);
 	}
 	err = request_irq(irq, sparc64_msiq_interrupt, 0,
 			  "MSIQ",

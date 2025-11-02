@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/compiler.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <scsi/scsi_transport.h>
@@ -100,7 +101,7 @@ struct Scsi_Host;
 
 struct sysfs_bin_attrs {
 	char *name;
-	const struct bin_attribute *attr;
+	struct bin_attribute *attr;
 };
 
 extern int qedf_alloc_grc_dump_buf(uint8_t **buf, uint32_t len);

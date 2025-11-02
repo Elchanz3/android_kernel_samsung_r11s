@@ -7,7 +7,6 @@
  *  This is the "shell" of the ARMv7 processor support.
  */
 #include <linux/arm-smccc.h>
-#include <linux/cfi_types.h>
 #include <linux/init.h>
 #include <linux/linkage.h>
 #include <linux/pgtable.h>
@@ -15,7 +14,7 @@
 #include <asm/asm-offsets.h>
 #include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
-#include <asm/page.h>
+#include <asm/memory.h>
 
 #include "proc-macros.S"
 
@@ -25,19 +24,17 @@
 #include "proc-v7-2level.S"
 #endif
 
-.arch armv7-a
-
-SYM_TYPED_FUNC_START(cpu_v7_proc_init)
+ENTRY(cpu_v7_proc_init)
 	ret	lr
-SYM_FUNC_END(cpu_v7_proc_init)
+ENDPROC(cpu_v7_proc_init)
 
-SYM_TYPED_FUNC_START(cpu_v7_proc_fin)
+ENTRY(cpu_v7_proc_fin)
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x0006			@ .............ca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
 	ret	lr
-SYM_FUNC_END(cpu_v7_proc_fin)
+ENDPROC(cpu_v7_proc_fin)
 
 /*
  *	cpu_v7_reset(loc, hyp)
@@ -54,7 +51,7 @@ SYM_FUNC_END(cpu_v7_proc_fin)
  */
 	.align	5
 	.pushsection	.idmap.text, "ax"
-SYM_TYPED_FUNC_START(cpu_v7_reset)
+ENTRY(cpu_v7_reset)
 	mrc	p15, 0, r2, c1, c0, 0		@ ctrl register
 	bic	r2, r2, #0x1			@ ...............m
  THUMB(	bic	r2, r2, #1 << 30 )		@ SCTLR.TE (Thumb exceptions)
@@ -65,7 +62,7 @@ SYM_TYPED_FUNC_START(cpu_v7_reset)
 	bne	__hyp_soft_restart
 #endif
 	bx	r0
-SYM_FUNC_END(cpu_v7_reset)
+ENDPROC(cpu_v7_reset)
 	.popsection
 
 /*
@@ -75,13 +72,13 @@ SYM_FUNC_END(cpu_v7_reset)
  *
  *	IRQs are already disabled.
  */
-SYM_TYPED_FUNC_START(cpu_v7_do_idle)
+ENTRY(cpu_v7_do_idle)
 	dsb					@ WFI may enter a low-power mode
 	wfi
 	ret	lr
-SYM_FUNC_END(cpu_v7_do_idle)
+ENDPROC(cpu_v7_do_idle)
 
-SYM_TYPED_FUNC_START(cpu_v7_dcache_clean_area)
+ENTRY(cpu_v7_dcache_clean_area)
 	ALT_SMP(W(nop))			@ MP extensions imply L1 PTW
 	ALT_UP_B(1f)
 	ret	lr
@@ -92,39 +89,38 @@ SYM_TYPED_FUNC_START(cpu_v7_dcache_clean_area)
 	bhi	2b
 	dsb	ishst
 	ret	lr
-SYM_FUNC_END(cpu_v7_dcache_clean_area)
+ENDPROC(cpu_v7_dcache_clean_area)
 
-#if defined(CONFIG_ARM_PSCI) && defined(CONFIG_HARDEN_BRANCH_PREDICTOR)
+#ifdef CONFIG_ARM_PSCI
 	.arch_extension sec
-SYM_TYPED_FUNC_START(cpu_v7_smc_switch_mm)
+ENTRY(cpu_v7_smc_switch_mm)
 	stmfd	sp!, {r0 - r3}
 	movw	r0, #:lower16:ARM_SMCCC_ARCH_WORKAROUND_1
 	movt	r0, #:upper16:ARM_SMCCC_ARCH_WORKAROUND_1
 	smc	#0
 	ldmfd	sp!, {r0 - r3}
 	b	cpu_v7_switch_mm
-SYM_FUNC_END(cpu_v7_smc_switch_mm)
+ENDPROC(cpu_v7_smc_switch_mm)
 	.arch_extension virt
-SYM_TYPED_FUNC_START(cpu_v7_hvc_switch_mm)
+ENTRY(cpu_v7_hvc_switch_mm)
 	stmfd	sp!, {r0 - r3}
 	movw	r0, #:lower16:ARM_SMCCC_ARCH_WORKAROUND_1
 	movt	r0, #:upper16:ARM_SMCCC_ARCH_WORKAROUND_1
 	hvc	#0
 	ldmfd	sp!, {r0 - r3}
 	b	cpu_v7_switch_mm
-SYM_FUNC_END(cpu_v7_hvc_switch_mm)
+ENDPROC(cpu_v7_hvc_switch_mm)
 #endif
-
-SYM_TYPED_FUNC_START(cpu_v7_iciallu_switch_mm)
+ENTRY(cpu_v7_iciallu_switch_mm)
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c5, 0		@ ICIALLU
 	b	cpu_v7_switch_mm
-SYM_FUNC_END(cpu_v7_iciallu_switch_mm)
-SYM_TYPED_FUNC_START(cpu_v7_bpiall_switch_mm)
+ENDPROC(cpu_v7_iciallu_switch_mm)
+ENTRY(cpu_v7_bpiall_switch_mm)
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c5, 6		@ flush BTAC/BTB
 	b	cpu_v7_switch_mm
-SYM_FUNC_END(cpu_v7_bpiall_switch_mm)
+ENDPROC(cpu_v7_bpiall_switch_mm)
 
 	string	cpu_v7_name, "ARMv7 Processor"
 	.align
@@ -133,7 +129,7 @@ SYM_FUNC_END(cpu_v7_bpiall_switch_mm)
 .globl	cpu_v7_suspend_size
 .equ	cpu_v7_suspend_size, 4 * 9
 #ifdef CONFIG_ARM_CPU_SUSPEND
-SYM_TYPED_FUNC_START(cpu_v7_do_suspend)
+ENTRY(cpu_v7_do_suspend)
 	stmfd	sp!, {r4 - r11, lr}
 	mrc	p15, 0, r4, c13, c0, 0	@ FCSE/PID
 	mrc	p15, 0, r5, c13, c0, 3	@ User r/o thread ID
@@ -152,9 +148,9 @@ SYM_TYPED_FUNC_START(cpu_v7_do_suspend)
 	mrc	p15, 0, r10, c1, c0, 2	@ Co-processor access control
 	stmia	r0, {r5 - r11}
 	ldmfd	sp!, {r4 - r11, pc}
-SYM_FUNC_END(cpu_v7_do_suspend)
+ENDPROC(cpu_v7_do_suspend)
 
-SYM_TYPED_FUNC_START(cpu_v7_do_resume)
+ENTRY(cpu_v7_do_resume)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c5, 0	@ invalidate I cache
 	mcr	p15, 0, ip, c13, c0, 1	@ set reserved context ID
@@ -188,22 +184,22 @@ SYM_TYPED_FUNC_START(cpu_v7_do_resume)
 	dsb
 	mov	r0, r8			@ control register
 	b	cpu_resume_mmu
-SYM_FUNC_END(cpu_v7_do_resume)
+ENDPROC(cpu_v7_do_resume)
 #endif
 
 .globl	cpu_ca9mp_suspend_size
 .equ	cpu_ca9mp_suspend_size, cpu_v7_suspend_size + 4 * 2
 #ifdef CONFIG_ARM_CPU_SUSPEND
-SYM_TYPED_FUNC_START(cpu_ca9mp_do_suspend)
+ENTRY(cpu_ca9mp_do_suspend)
 	stmfd	sp!, {r4 - r5}
 	mrc	p15, 0, r4, c15, c0, 1		@ Diagnostic register
 	mrc	p15, 0, r5, c15, c0, 0		@ Power register
 	stmia	r0!, {r4 - r5}
 	ldmfd	sp!, {r4 - r5}
 	b	cpu_v7_do_suspend
-SYM_FUNC_END(cpu_ca9mp_do_suspend)
+ENDPROC(cpu_ca9mp_do_suspend)
 
-SYM_TYPED_FUNC_START(cpu_ca9mp_do_resume)
+ENTRY(cpu_ca9mp_do_resume)
 	ldmia	r0!, {r4 - r5}
 	mrc	p15, 0, r10, c15, c0, 1		@ Read Diagnostic register
 	teq	r4, r10				@ Already restored?
@@ -212,7 +208,7 @@ SYM_TYPED_FUNC_START(cpu_ca9mp_do_resume)
 	teq	r5, r10				@ Already restored?
 	mcrne	p15, 0, r5, c15, c0, 0		@ No, so restore it
 	b	cpu_v7_do_resume
-SYM_FUNC_END(cpu_ca9mp_do_resume)
+ENDPROC(cpu_ca9mp_do_resume)
 #endif
 
 #ifdef CONFIG_CPU_PJ4B
@@ -222,18 +218,18 @@ SYM_FUNC_END(cpu_ca9mp_do_resume)
 	globl_equ	cpu_pj4b_proc_fin, 	cpu_v7_proc_fin
 	globl_equ	cpu_pj4b_reset,	   	cpu_v7_reset
 #ifdef CONFIG_PJ4B_ERRATA_4742
-SYM_TYPED_FUNC_START(cpu_pj4b_do_idle)
+ENTRY(cpu_pj4b_do_idle)
 	dsb					@ WFI may enter a low-power mode
 	wfi
 	dsb					@barrier
 	ret	lr
-SYM_FUNC_END(cpu_pj4b_do_idle)
+ENDPROC(cpu_pj4b_do_idle)
 #else
 	globl_equ	cpu_pj4b_do_idle,  	cpu_v7_do_idle
 #endif
 	globl_equ	cpu_pj4b_dcache_clean_area,	cpu_v7_dcache_clean_area
 #ifdef CONFIG_ARM_CPU_SUSPEND
-SYM_TYPED_FUNC_START(cpu_pj4b_do_suspend)
+ENTRY(cpu_pj4b_do_suspend)
 	stmfd	sp!, {r6 - r10}
 	mrc	p15, 1, r6, c15, c1, 0  @ save CP15 - extra features
 	mrc	p15, 1, r7, c15, c2, 0	@ save CP15 - Aux Func Modes Ctrl 0
@@ -243,9 +239,9 @@ SYM_TYPED_FUNC_START(cpu_pj4b_do_suspend)
 	stmia	r0!, {r6 - r10}
 	ldmfd	sp!, {r6 - r10}
 	b cpu_v7_do_suspend
-SYM_FUNC_END(cpu_pj4b_do_suspend)
+ENDPROC(cpu_pj4b_do_suspend)
 
-SYM_TYPED_FUNC_START(cpu_pj4b_do_resume)
+ENTRY(cpu_pj4b_do_resume)
 	ldmia	r0!, {r6 - r10}
 	mcr	p15, 1, r6, c15, c1, 0  @ restore CP15 - extra features
 	mcr	p15, 1, r7, c15, c2, 0	@ restore CP15 - Aux Func Modes Ctrl 0
@@ -253,26 +249,12 @@ SYM_TYPED_FUNC_START(cpu_pj4b_do_resume)
 	mcr	p15, 1, r9, c15, c1, 1  @ restore CP15 - Aux Debug Modes Ctrl 1
 	mcr	p15, 0, r10, c9, c14, 0  @ restore CP15 - PMC
 	b cpu_v7_do_resume
-SYM_FUNC_END(cpu_pj4b_do_resume)
+ENDPROC(cpu_pj4b_do_resume)
 #endif
 .globl	cpu_pj4b_suspend_size
 .equ	cpu_pj4b_suspend_size, cpu_v7_suspend_size + 4 * 5
 
 #endif
-
-	@
-	@ Invoke the v7_invalidate_l1() function, which adheres to the AAPCS
-	@ rules, and so it may corrupt registers that we need to preserve.
-	@
-	.macro	do_invalidate_l1
-	mov	r6, r1
-	mov	r7, r2
-	mov	r10, lr
-	bl	v7_invalidate_l1		@ corrupts {r0-r3, ip, lr}
-	mov	r1, r6
-	mov	r2, r7
-	mov	lr, r10
-	.endm
 
 /*
  *	__v7_setup
@@ -295,7 +277,6 @@ __v7_ca5mp_setup:
 __v7_ca9mp_setup:
 __v7_cr7mp_setup:
 __v7_cr8mp_setup:
-	do_invalidate_l1
 	mov	r10, #(1 << 0)			@ Cache/TLB ops broadcasting
 	b	1f
 __v7_ca7mp_setup:
@@ -303,9 +284,13 @@ __v7_ca12mp_setup:
 __v7_ca15mp_setup:
 __v7_b15mp_setup:
 __v7_ca17mp_setup:
-	do_invalidate_l1
 	mov	r10, #0
-1:
+1:	adr	r0, __v7_setup_stack_ptr
+	ldr	r12, [r0]
+	add	r12, r12, r0			@ the local stack
+	stmia	r12, {r1-r6, lr}		@ v7_invalidate_l1 touches r0-r6
+	bl      v7_invalidate_l1
+	ldmia	r12, {r1-r6, lr}
 #ifdef CONFIG_SMP
 	orr	r10, r10, #(1 << 6)		@ Enable SMP/nAMP mode
 	ALT_SMP(mrc	p15, 0, r0, c1, c0, 1)
@@ -486,7 +471,12 @@ __v7_pj4b_setup:
 #endif /* CONFIG_CPU_PJ4B */
 
 __v7_setup:
-	do_invalidate_l1
+	adr	r0, __v7_setup_stack_ptr
+	ldr	r12, [r0]
+	add	r12, r12, r0			@ the local stack
+	stmia	r12, {r1-r6, lr}		@ v7_invalidate_l1 touches r0-r6
+	bl      v7_invalidate_l1
+	ldmia	r12, {r1-r6, lr}
 
 __v7_setup_cont:
 	and	r0, r9, #0xff000000		@ ARM?
@@ -558,7 +548,16 @@ __errata_finish:
 	orr	r0, r0, r6			@ set them
  THUMB(	orr	r0, r0, #1 << 30	)	@ Thumb exceptions
 	ret	lr				@ return to head.S:__ret
+
+	.align	2
+__v7_setup_stack_ptr:
+	.word	PHYS_RELATIVE(__v7_setup_stack, .)
 ENDPROC(__v7_setup)
+
+	.bss
+	.align	2
+__v7_setup_stack:
+	.space	4 * 7				@ 7 registers
 
 	__INITDATA
 

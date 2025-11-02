@@ -36,13 +36,8 @@
 #include <linux/hugetlb.h>
 #include <linux/cpu.h>
 #include <linux/pgtable.h>
-#include <linux/debugfs.h>
-#include <linux/random.h>
-#include <linux/elf-randomize.h>
-#include <linux/of_fdt.h>
-#include <linux/kfence.h>
 
-#include <asm/interrupt.h>
+#include <asm/debugfs.h>
 #include <asm/processor.h>
 #include <asm/mmu.h>
 #include <asm/mmu_context.h>
@@ -50,15 +45,16 @@
 #include <asm/types.h>
 #include <linux/uaccess.h>
 #include <asm/machdep.h>
+#include <asm/prom.h>
 #include <asm/io.h>
 #include <asm/eeh.h>
 #include <asm/tlb.h>
 #include <asm/cacheflush.h>
 #include <asm/cputable.h>
 #include <asm/sections.h>
-#include <asm/spu.h>
+#include <asm/copro.h>
 #include <asm/udbg.h>
-#include <asm/text-patching.h>
+#include <asm/code-patching.h>
 #include <asm/fadump.h>
 #include <asm/firmware.h>
 #include <asm/tm.h>
@@ -67,7 +63,6 @@
 #include <asm/pte-walk.h>
 #include <asm/asm-prototypes.h>
 #include <asm/ultravisor.h>
-#include <asm/kfence.h>
 
 #include <mm/mmu_decl.h>
 
@@ -103,6 +98,8 @@
  */
 
 static unsigned long _SDR1;
+struct mmu_psize_def mmu_psize_defs[MMU_PAGE_COUNT];
+EXPORT_SYMBOL_GPL(mmu_psize_defs);
 
 u8 hpte_page_sizes[1 << LP_BITS];
 EXPORT_SYMBOL_GPL(hpte_page_sizes);
@@ -115,7 +112,9 @@ int mmu_linear_psize = MMU_PAGE_4K;
 EXPORT_SYMBOL_GPL(mmu_linear_psize);
 int mmu_virtual_psize = MMU_PAGE_4K;
 int mmu_vmalloc_psize = MMU_PAGE_4K;
-EXPORT_SYMBOL_GPL(mmu_vmalloc_psize);
+#ifdef CONFIG_SPARSEMEM_VMEMMAP
+int mmu_vmemmap_psize = MMU_PAGE_4K;
+#endif
 int mmu_io_psize = MMU_PAGE_4K;
 int mmu_kernel_ssize = MMU_SEGSIZE_256M;
 EXPORT_SYMBOL_GPL(mmu_kernel_ssize);
@@ -125,7 +124,12 @@ EXPORT_SYMBOL_GPL(mmu_slb_size);
 #ifdef CONFIG_PPC_64K_PAGES
 int mmu_ci_restrictions;
 #endif
-struct mmu_hash_ops mmu_hash_ops __ro_after_init;
+#ifdef CONFIG_DEBUG_PAGEALLOC
+static u8 *linear_map_hash_slots;
+static unsigned long linear_map_hash_count;
+static DEFINE_SPINLOCK(linear_map_hash_lock);
+#endif /* CONFIG_DEBUG_PAGEALLOC */
+struct mmu_hash_ops mmu_hash_ops;
 EXPORT_SYMBOL(mmu_hash_ops);
 
 /*
@@ -169,374 +173,6 @@ static struct mmu_psize_def mmu_psize_defaults_gp[] = {
 	},
 };
 
-static inline void tlbiel_hash_set_isa206(unsigned int set, unsigned int is)
-{
-	unsigned long rb;
-
-	rb = (set << PPC_BITLSHIFT(51)) | (is << PPC_BITLSHIFT(53));
-
-	asm volatile("tlbiel %0" : : "r" (rb));
-}
-
-/*
- * tlbiel instruction for hash, set invalidation
- * i.e., r=1 and is=01 or is=10 or is=11
- */
-static __always_inline void tlbiel_hash_set_isa300(unsigned int set, unsigned int is,
-					unsigned int pid,
-					unsigned int ric, unsigned int prs)
-{
-	unsigned long rb;
-	unsigned long rs;
-	unsigned int r = 0; /* hash format */
-
-	rb = (set << PPC_BITLSHIFT(51)) | (is << PPC_BITLSHIFT(53));
-	rs = ((unsigned long)pid << PPC_BITLSHIFT(31));
-
-	asm volatile(PPC_TLBIEL(%0, %1, %2, %3, %4)
-		     : : "r"(rb), "r"(rs), "i"(ric), "i"(prs), "i"(r)
-		     : "memory");
-}
-
-
-static void tlbiel_all_isa206(unsigned int num_sets, unsigned int is)
-{
-	unsigned int set;
-
-	asm volatile("ptesync": : :"memory");
-
-	for (set = 0; set < num_sets; set++)
-		tlbiel_hash_set_isa206(set, is);
-
-	ppc_after_tlbiel_barrier();
-}
-
-static void tlbiel_all_isa300(unsigned int num_sets, unsigned int is)
-{
-	unsigned int set;
-
-	asm volatile("ptesync": : :"memory");
-
-	/*
-	 * Flush the partition table cache if this is HV mode.
-	 */
-	if (early_cpu_has_feature(CPU_FTR_HVMODE))
-		tlbiel_hash_set_isa300(0, is, 0, 2, 0);
-
-	/*
-	 * Now invalidate the process table cache. UPRT=0 HPT modes (what
-	 * current hardware implements) do not use the process table, but
-	 * add the flushes anyway.
-	 *
-	 * From ISA v3.0B p. 1078:
-	 *     The following forms are invalid.
-	 *      * PRS=1, R=0, and RIC!=2 (The only process-scoped
-	 *        HPT caching is of the Process Table.)
-	 */
-	tlbiel_hash_set_isa300(0, is, 0, 2, 1);
-
-	/*
-	 * Then flush the sets of the TLB proper. Hash mode uses
-	 * partition scoped TLB translations, which may be flushed
-	 * in !HV mode.
-	 */
-	for (set = 0; set < num_sets; set++)
-		tlbiel_hash_set_isa300(set, is, 0, 0, 0);
-
-	ppc_after_tlbiel_barrier();
-
-	asm volatile(PPC_ISA_3_0_INVALIDATE_ERAT "; isync" : : :"memory");
-}
-
-void hash__tlbiel_all(unsigned int action)
-{
-	unsigned int is;
-
-	switch (action) {
-	case TLB_INVAL_SCOPE_GLOBAL:
-		is = 3;
-		break;
-	case TLB_INVAL_SCOPE_LPID:
-		is = 2;
-		break;
-	default:
-		BUG();
-	}
-
-	if (early_cpu_has_feature(CPU_FTR_ARCH_300))
-		tlbiel_all_isa300(POWER9_TLB_SETS_HASH, is);
-	else if (early_cpu_has_feature(CPU_FTR_ARCH_207S))
-		tlbiel_all_isa206(POWER8_TLB_SETS, is);
-	else if (early_cpu_has_feature(CPU_FTR_ARCH_206))
-		tlbiel_all_isa206(POWER7_TLB_SETS, is);
-	else
-		WARN(1, "%s called on pre-POWER7 CPU\n", __func__);
-}
-
-#if defined(CONFIG_DEBUG_PAGEALLOC) || defined(CONFIG_KFENCE)
-static void kernel_map_linear_page(unsigned long vaddr, unsigned long idx,
-				   u8 *slots, raw_spinlock_t *lock)
-{
-	unsigned long hash;
-	unsigned long vsid = get_kernel_vsid(vaddr, mmu_kernel_ssize);
-	unsigned long vpn = hpt_vpn(vaddr, vsid, mmu_kernel_ssize);
-	unsigned long mode = htab_convert_pte_flags(pgprot_val(PAGE_KERNEL), HPTE_USE_KERNEL_KEY);
-	long ret;
-
-	hash = hpt_hash(vpn, PAGE_SHIFT, mmu_kernel_ssize);
-
-	/* Don't create HPTE entries for bad address */
-	if (!vsid)
-		return;
-
-	if (slots[idx] & 0x80)
-		return;
-
-	ret = hpte_insert_repeating(hash, vpn, __pa(vaddr), mode,
-				    HPTE_V_BOLTED,
-				    mmu_linear_psize, mmu_kernel_ssize);
-
-	BUG_ON (ret < 0);
-	raw_spin_lock(lock);
-	BUG_ON(slots[idx] & 0x80);
-	slots[idx] = ret | 0x80;
-	raw_spin_unlock(lock);
-}
-
-static void kernel_unmap_linear_page(unsigned long vaddr, unsigned long idx,
-				     u8 *slots, raw_spinlock_t *lock)
-{
-	unsigned long hash, hslot, slot;
-	unsigned long vsid = get_kernel_vsid(vaddr, mmu_kernel_ssize);
-	unsigned long vpn = hpt_vpn(vaddr, vsid, mmu_kernel_ssize);
-
-	hash = hpt_hash(vpn, PAGE_SHIFT, mmu_kernel_ssize);
-	raw_spin_lock(lock);
-	if (!(slots[idx] & 0x80)) {
-		raw_spin_unlock(lock);
-		return;
-	}
-	hslot = slots[idx] & 0x7f;
-	slots[idx] = 0;
-	raw_spin_unlock(lock);
-	if (hslot & _PTEIDX_SECONDARY)
-		hash = ~hash;
-	slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
-	slot += hslot & _PTEIDX_GROUP_IX;
-	mmu_hash_ops.hpte_invalidate(slot, vpn, mmu_linear_psize,
-				     mmu_linear_psize,
-				     mmu_kernel_ssize, 0);
-}
-#endif
-
-static inline bool hash_supports_debug_pagealloc(void)
-{
-	unsigned long max_hash_count = ppc64_rma_size / 4;
-	unsigned long linear_map_count = memblock_end_of_DRAM() >> PAGE_SHIFT;
-
-	if (!debug_pagealloc_enabled() || linear_map_count > max_hash_count)
-		return false;
-	return true;
-}
-
-#ifdef CONFIG_DEBUG_PAGEALLOC
-static u8 *linear_map_hash_slots;
-static unsigned long linear_map_hash_count;
-static DEFINE_RAW_SPINLOCK(linear_map_hash_lock);
-static __init void hash_debug_pagealloc_alloc_slots(void)
-{
-	if (!hash_supports_debug_pagealloc())
-		return;
-
-	linear_map_hash_count = memblock_end_of_DRAM() >> PAGE_SHIFT;
-	linear_map_hash_slots = memblock_alloc_try_nid(
-			linear_map_hash_count, 1, MEMBLOCK_LOW_LIMIT,
-			ppc64_rma_size,	NUMA_NO_NODE);
-	if (!linear_map_hash_slots)
-		panic("%s: Failed to allocate %lu bytes max_addr=%pa\n",
-		      __func__, linear_map_hash_count, &ppc64_rma_size);
-}
-
-static inline void hash_debug_pagealloc_add_slot(phys_addr_t paddr,
-							int slot)
-{
-	if (!debug_pagealloc_enabled() || !linear_map_hash_count)
-		return;
-	if ((paddr >> PAGE_SHIFT) < linear_map_hash_count)
-		linear_map_hash_slots[paddr >> PAGE_SHIFT] = slot | 0x80;
-}
-
-static int hash_debug_pagealloc_map_pages(struct page *page, int numpages,
-					  int enable)
-{
-	unsigned long flags, vaddr, lmi;
-	int i;
-
-	if (!debug_pagealloc_enabled() || !linear_map_hash_count)
-		return 0;
-
-	local_irq_save(flags);
-	for (i = 0; i < numpages; i++, page++) {
-		vaddr = (unsigned long)page_address(page);
-		lmi = __pa(vaddr) >> PAGE_SHIFT;
-		if (lmi >= linear_map_hash_count)
-			continue;
-		if (enable)
-			kernel_map_linear_page(vaddr, lmi,
-				linear_map_hash_slots, &linear_map_hash_lock);
-		else
-			kernel_unmap_linear_page(vaddr, lmi,
-				linear_map_hash_slots, &linear_map_hash_lock);
-	}
-	local_irq_restore(flags);
-	return 0;
-}
-
-#else /* CONFIG_DEBUG_PAGEALLOC */
-static inline void hash_debug_pagealloc_alloc_slots(void) {}
-static inline void hash_debug_pagealloc_add_slot(phys_addr_t paddr, int slot) {}
-static int __maybe_unused
-hash_debug_pagealloc_map_pages(struct page *page, int numpages, int enable)
-{
-	return 0;
-}
-#endif /* CONFIG_DEBUG_PAGEALLOC */
-
-#ifdef CONFIG_KFENCE
-static u8 *linear_map_kf_hash_slots;
-static unsigned long linear_map_kf_hash_count;
-static DEFINE_RAW_SPINLOCK(linear_map_kf_hash_lock);
-
-static phys_addr_t kfence_pool;
-
-static __init void hash_kfence_alloc_pool(void)
-{
-	if (!kfence_early_init_enabled())
-		goto err;
-
-	/* allocate linear map for kfence within RMA region */
-	linear_map_kf_hash_count = KFENCE_POOL_SIZE >> PAGE_SHIFT;
-	linear_map_kf_hash_slots = memblock_alloc_try_nid(
-					linear_map_kf_hash_count, 1,
-					MEMBLOCK_LOW_LIMIT, ppc64_rma_size,
-					NUMA_NO_NODE);
-	if (!linear_map_kf_hash_slots) {
-		pr_err("%s: memblock for linear map (%lu) failed\n", __func__,
-				linear_map_kf_hash_count);
-		goto err;
-	}
-
-	/* allocate kfence pool early */
-	kfence_pool = memblock_phys_alloc_range(KFENCE_POOL_SIZE, PAGE_SIZE,
-				MEMBLOCK_LOW_LIMIT, MEMBLOCK_ALLOC_ANYWHERE);
-	if (!kfence_pool) {
-		pr_err("%s: memblock for kfence pool (%lu) failed\n", __func__,
-				KFENCE_POOL_SIZE);
-		memblock_free(linear_map_kf_hash_slots,
-				linear_map_kf_hash_count);
-		linear_map_kf_hash_count = 0;
-		goto err;
-	}
-	memblock_mark_nomap(kfence_pool, KFENCE_POOL_SIZE);
-
-	return;
-err:
-	pr_info("Disabling kfence\n");
-	disable_kfence();
-}
-
-static __init void hash_kfence_map_pool(void)
-{
-	unsigned long kfence_pool_start, kfence_pool_end;
-	unsigned long prot = pgprot_val(PAGE_KERNEL);
-
-	if (!kfence_pool)
-		return;
-
-	kfence_pool_start = (unsigned long) __va(kfence_pool);
-	kfence_pool_end = kfence_pool_start + KFENCE_POOL_SIZE;
-	__kfence_pool = (char *) kfence_pool_start;
-	BUG_ON(htab_bolt_mapping(kfence_pool_start, kfence_pool_end,
-				    kfence_pool, prot, mmu_linear_psize,
-				    mmu_kernel_ssize));
-	memblock_clear_nomap(kfence_pool, KFENCE_POOL_SIZE);
-}
-
-static inline void hash_kfence_add_slot(phys_addr_t paddr, int slot)
-{
-	unsigned long vaddr = (unsigned long) __va(paddr);
-	unsigned long lmi = (vaddr - (unsigned long)__kfence_pool)
-					>> PAGE_SHIFT;
-
-	if (!kfence_pool)
-		return;
-	BUG_ON(!is_kfence_address((void *)vaddr));
-	BUG_ON(lmi >= linear_map_kf_hash_count);
-	linear_map_kf_hash_slots[lmi] = slot | 0x80;
-}
-
-static int hash_kfence_map_pages(struct page *page, int numpages, int enable)
-{
-	unsigned long flags, vaddr, lmi;
-	int i;
-
-	WARN_ON_ONCE(!linear_map_kf_hash_count);
-	local_irq_save(flags);
-	for (i = 0; i < numpages; i++, page++) {
-		vaddr = (unsigned long)page_address(page);
-		lmi = (vaddr - (unsigned long)__kfence_pool) >> PAGE_SHIFT;
-
-		/* Ideally this should never happen */
-		if (lmi >= linear_map_kf_hash_count) {
-			WARN_ON_ONCE(1);
-			continue;
-		}
-
-		if (enable)
-			kernel_map_linear_page(vaddr, lmi,
-					       linear_map_kf_hash_slots,
-					       &linear_map_kf_hash_lock);
-		else
-			kernel_unmap_linear_page(vaddr, lmi,
-						 linear_map_kf_hash_slots,
-						 &linear_map_kf_hash_lock);
-	}
-	local_irq_restore(flags);
-	return 0;
-}
-#else
-static inline void hash_kfence_alloc_pool(void) {}
-static inline void hash_kfence_map_pool(void) {}
-static inline void hash_kfence_add_slot(phys_addr_t paddr, int slot) {}
-static int __maybe_unused
-hash_kfence_map_pages(struct page *page, int numpages, int enable)
-{
-	return 0;
-}
-#endif
-
-#if defined(CONFIG_DEBUG_PAGEALLOC) || defined(CONFIG_KFENCE)
-int hash__kernel_map_pages(struct page *page, int numpages, int enable)
-{
-	void *vaddr = page_address(page);
-
-	if (is_kfence_address(vaddr))
-		return hash_kfence_map_pages(page, numpages, enable);
-	else
-		return hash_debug_pagealloc_map_pages(page, numpages, enable);
-}
-
-static void hash_linear_map_add_slot(phys_addr_t paddr, int slot)
-{
-	if (is_kfence_address(__va(paddr)))
-		hash_kfence_add_slot(paddr, slot);
-	else
-		hash_debug_pagealloc_add_slot(paddr, slot);
-}
-#else
-static void hash_linear_map_add_slot(phys_addr_t paddr, int slot) {}
-#endif
-
 /*
  * 'R' and 'C' update notes:
  *  - Under pHyp or KVM, the updatepp path will not set C, thus it *will*
@@ -550,7 +186,7 @@ static void hash_linear_map_add_slot(phys_addr_t paddr, int slot) {}
  *    - We make sure R is always set and never lost
  *    - C is _PAGE_DIRTY, and *should* always be set for a writeable mapping
  */
-unsigned long htab_convert_pte_flags(unsigned long pteflags, unsigned long flags)
+unsigned long htab_convert_pte_flags(unsigned long pteflags)
 {
 	unsigned long rflags = 0;
 
@@ -574,16 +210,9 @@ unsigned long htab_convert_pte_flags(unsigned long pteflags, unsigned long flags
 			else
 				rflags |= 0x3;
 		}
-		VM_WARN_ONCE(!(pteflags & _PAGE_RWX), "no-access mapping request");
 	} else {
 		if (pteflags & _PAGE_RWX)
 			rflags |= 0x2;
-		/*
-		 * We should never hit this in normal fault handling because
-		 * a permission check (check_pte_access()) will bubble this
-		 * to higher level linux handler even for PAGE_NONE.
-		 */
-		VM_WARN_ONCE(!(pteflags & _PAGE_RWX), "no-access mapping request");
 		if (!((pteflags & _PAGE_WRITE) && (pteflags & _PAGE_DIRTY)))
 			rflags |= 0x1;
 	}
@@ -611,7 +240,7 @@ unsigned long htab_convert_pte_flags(unsigned long pteflags, unsigned long flags
 		 */
 		rflags |= HPTE_R_M;
 
-	rflags |= pte_to_hpte_pkey_bits(pteflags, flags);
+	rflags |= pte_to_hpte_pkey_bits(pteflags);
 	return rflags;
 }
 
@@ -626,7 +255,7 @@ int htab_bolt_mapping(unsigned long vstart, unsigned long vend,
 	shift = mmu_psize_defs[psize].shift;
 	step = 1 << shift;
 
-	prot = htab_convert_pte_flags(prot, HPTE_USE_KERNEL_KEY);
+	prot = htab_convert_pte_flags(prot);
 
 	DBG("htab_bolt_mapping(%lx..%lx -> %lx (%lx,%d,%d)\n",
 	    vstart, vend, pstart, prot, psize, ssize);
@@ -676,7 +305,7 @@ repeat:
 					       ssize);
 		if (ret == -1) {
 			/*
-			 * Try to keep bolted entries in primary.
+			 * Try to to keep bolted entries in primary.
 			 * Remove non bolted entries and try insert again
 			 */
 			ret = mmu_hash_ops.hpte_remove(hpteg);
@@ -695,8 +324,11 @@ repeat:
 			break;
 
 		cond_resched();
-		/* add slot info in debug_pagealloc / kfence linear map */
-		hash_linear_map_add_slot(paddr, ret);
+#ifdef CONFIG_DEBUG_PAGEALLOC
+		if (debug_pagealloc_enabled() &&
+			(paddr >> PAGE_SHIFT) < linear_map_hash_count)
+			linear_map_hash_slots[paddr >> PAGE_SHIFT] = ret | 0x80;
+#endif /* CONFIG_DEBUG_PAGEALLOC */
 	}
 	return ret < 0 ? ret : 0;
 }
@@ -741,7 +373,7 @@ int htab_remove_mapping(unsigned long vstart, unsigned long vend,
 	return ret;
 }
 
-static bool disable_1tb_segments __ro_after_init;
+static bool disable_1tb_segments = false;
 
 static int __init parse_disable_1tb_segments(char *p)
 {
@@ -749,40 +381,6 @@ static int __init parse_disable_1tb_segments(char *p)
 	return 0;
 }
 early_param("disable_1tb_segments", parse_disable_1tb_segments);
-
-bool stress_hpt_enabled __initdata;
-
-static int __init parse_stress_hpt(char *p)
-{
-	stress_hpt_enabled = true;
-	return 0;
-}
-early_param("stress_hpt", parse_stress_hpt);
-
-__ro_after_init DEFINE_STATIC_KEY_FALSE(stress_hpt_key);
-
-/*
- * per-CPU array allocated if we enable stress_hpt.
- */
-#define STRESS_MAX_GROUPS 16
-struct stress_hpt_struct {
-	unsigned long last_group[STRESS_MAX_GROUPS];
-};
-
-static inline int stress_nr_groups(void)
-{
-	/*
-	 * LPAR H_REMOVE flushes TLB, so need some number > 1 of entries
-	 * to allow practical forward progress. Bare metal returns 1, which
-	 * seems to help uncover more bugs.
-	 */
-	if (firmware_has_feature(FW_FEATURE_LPAR))
-		return STRESS_MAX_GROUPS;
-	else
-		return 1;
-}
-
-static struct stress_hpt_struct *stress_hpt_struct;
 
 static int __init htab_dt_scan_seg_sizes(unsigned long node,
 					 const char *uname, int depth,
@@ -963,7 +561,7 @@ static int __init htab_dt_scan_hugepage_blocks(unsigned long node,
 }
 #endif /* CONFIG_HUGETLB_PAGE */
 
-static void __init mmu_psize_set_default_penc(void)
+static void mmu_psize_set_default_penc(void)
 {
 	int bpsize, apsize;
 	for (bpsize = 0; bpsize < MMU_PAGE_COUNT; bpsize++)
@@ -973,7 +571,7 @@ static void __init mmu_psize_set_default_penc(void)
 
 #ifdef CONFIG_PPC_64K_PAGES
 
-static bool __init might_have_hea(void)
+static bool might_have_hea(void)
 {
 	/*
 	 * The HEA ethernet adapter requires awareness of the
@@ -1044,7 +642,7 @@ static void __init htab_scan_page_sizes(void)
  * low-order N bits as the encoding for the 2^(12+N) byte page size
  * (if it exists).
  */
-static void __init init_hpte_page_sizes(void)
+static void init_hpte_page_sizes(void)
 {
 	long int ap, bp;
 	long int shift, penc;
@@ -1077,7 +675,7 @@ static void __init htab_init_page_sizes(void)
 	bool aligned = true;
 	init_hpte_page_sizes();
 
-	if (!hash_supports_debug_pagealloc() && !kfence_early_init_enabled()) {
+	if (!debug_pagealloc_enabled()) {
 		/*
 		 * Pick a size for the linear mapping. Currently, we only
 		 * support 16M, 1M and 4K which is the default
@@ -1258,6 +856,7 @@ int hash__remove_section_mapping(unsigned long start, unsigned long end)
 {
 	int rc = htab_remove_mapping(start, end, mmu_linear_psize,
 				     mmu_kernel_ssize);
+	WARN_ON(rc < 0);
 
 	if (resize_hpt_for_hotplug(memblock_phys_mem_size()) == -ENOSPC)
 		pr_warn("Hash collision while resizing HPT\n");
@@ -1280,23 +879,6 @@ static void __init hash_init_partition_table(phys_addr_t hash_table,
 	pr_info("Partition table %p\n", partition_tb);
 }
 
-void hpt_clear_stress(void);
-static struct timer_list stress_hpt_timer;
-static void stress_hpt_timer_fn(struct timer_list *timer)
-{
-	int next_cpu;
-
-	hpt_clear_stress();
-	if (!firmware_has_feature(FW_FEATURE_LPAR))
-		tlbiel_all();
-
-	next_cpu = cpumask_next(raw_smp_processor_id(), cpu_online_mask);
-	if (next_cpu >= nr_cpu_ids)
-		next_cpu = cpumask_first(cpu_online_mask);
-	stress_hpt_timer.expires = jiffies + msecs_to_jiffies(10);
-	add_timer_on(&stress_hpt_timer, next_cpu);
-}
-
 static void __init htab_initialize(void)
 {
 	unsigned long table;
@@ -1315,21 +897,6 @@ static void __init htab_initialize(void)
 
 	if (stress_slb_enabled)
 		static_branch_enable(&stress_slb_key);
-
-	if (stress_hpt_enabled) {
-		unsigned long tmp;
-		static_branch_enable(&stress_hpt_key);
-		// Too early to use nr_cpu_ids, so use NR_CPUS
-		tmp = memblock_phys_alloc_range(sizeof(struct stress_hpt_struct) * NR_CPUS,
-						__alignof__(struct stress_hpt_struct),
-						0, MEMBLOCK_ALLOC_ANYWHERE);
-		memset((void *)tmp, 0xff, sizeof(struct stress_hpt_struct) * NR_CPUS);
-		stress_hpt_struct = __va(tmp);
-
-		timer_setup(&stress_hpt_timer, stress_hpt_timer_fn, 0);
-		stress_hpt_timer.expires = jiffies + msecs_to_jiffies(10);
-		add_timer(&stress_hpt_timer);
-	}
 
 	/*
 	 * Calculate the required size of the htab.  We want the number of
@@ -1358,6 +925,18 @@ static void __init htab_initialize(void)
 	} else {
 		unsigned long limit = MEMBLOCK_ALLOC_ANYWHERE;
 
+#ifdef CONFIG_PPC_CELL
+		/*
+		 * Cell may require the hash table down low when using the
+		 * Axon IOMMU in order to fit the dynamic region over it, see
+		 * comments in cell/iommu.c
+		 */
+		if (fdt_subnode_offset(initial_boot_params, 0, "axon") > 0) {
+			limit = 0x80000000;
+			pr_info("Hash table forced below 2G for Axon IOMMU\n");
+		}
+#endif /* CONFIG_PPC_CELL */
+
 		table = memblock_phys_alloc_range(htab_size_bytes,
 						  htab_size_bytes,
 						  0, limit);
@@ -1385,8 +964,18 @@ static void __init htab_initialize(void)
 
 	prot = pgprot_val(PAGE_KERNEL);
 
-	hash_debug_pagealloc_alloc_slots();
-	hash_kfence_alloc_pool();
+#ifdef CONFIG_DEBUG_PAGEALLOC
+	if (debug_pagealloc_enabled()) {
+		linear_map_hash_count = memblock_end_of_DRAM() >> PAGE_SHIFT;
+		linear_map_hash_slots = memblock_alloc_try_nid(
+				linear_map_hash_count, 1, MEMBLOCK_LOW_LIMIT,
+				ppc64_rma_size,	NUMA_NO_NODE);
+		if (!linear_map_hash_slots)
+			panic("%s: Failed to allocate %lu bytes max_addr=%pa\n",
+			      __func__, linear_map_hash_count, &ppc64_rma_size);
+	}
+#endif /* CONFIG_DEBUG_PAGEALLOC */
+
 	/* create bolted the linear mapping in the hash table */
 	for_each_mem_range(i, &base, &end) {
 		size = end - base;
@@ -1403,7 +992,6 @@ static void __init htab_initialize(void)
 		BUG_ON(htab_bolt_mapping(base, base + size, __pa(base),
 				prot, mmu_linear_psize, mmu_kernel_ssize));
 	}
-	hash_kfence_map_pool();
 	memblock_set_current_limit(MEMBLOCK_ALLOC_ANYWHERE);
 
 	/*
@@ -1477,6 +1065,10 @@ void __init hash__early_init_mmu(void)
 	__pmd_table_size = H_PMD_TABLE_SIZE;
 	__pud_table_size = H_PUD_TABLE_SIZE;
 	__pgd_table_size = H_PGD_TABLE_SIZE;
+	/*
+	 * 4k use hugepd format, so for hash set then to
+	 * zero
+	 */
 	__pmd_val_bits = HASH_PMD_VAL_BITS;
 	__pud_val_bits = HASH_PUD_VAL_BITS;
 	__pgd_val_bits = HASH_PGD_VAL_BITS;
@@ -1498,7 +1090,7 @@ void __init hash__early_init_mmu(void)
 		ps3_early_mm_init();
 	else if (firmware_has_feature(FW_FEATURE_LPAR))
 		hpte_init_pseries();
-	else if (IS_ENABLED(CONFIG_PPC_HASH_MMU_NATIVE))
+	else if (IS_ENABLED(CONFIG_PPC_NATIVE))
 		hpte_init_native();
 
 	if (!mmu_hash_ops.hpte_insert)
@@ -1554,25 +1146,25 @@ void hash__early_init_mmu_secondary(void)
  */
 unsigned int hash_page_do_lazy_icache(unsigned int pp, pte_t pte, int trap)
 {
-	struct folio *folio;
+	struct page *page;
 
 	if (!pfn_valid(pte_pfn(pte)))
 		return pp;
 
-	folio = page_folio(pte_page(pte));
+	page = pte_page(pte);
 
 	/* page is dirty */
-	if (!test_bit(PG_dcache_clean, &folio->flags.f) &&
-	    !folio_test_reserved(folio)) {
-		if (trap == INTERRUPT_INST_STORAGE) {
-			flush_dcache_icache_folio(folio);
-			set_bit(PG_dcache_clean, &folio->flags.f);
+	if (!test_bit(PG_arch_1, &page->flags) && !PageReserved(page)) {
+		if (trap == 0x400) {
+			flush_dcache_icache_page(page);
+			set_bit(PG_arch_1, &page->flags);
 		} else
 			pp |= HPTE_R_N;
 	}
 	return pp;
 }
 
+#ifdef CONFIG_PPC_MM_SLICES
 static unsigned int get_paca_psize(unsigned long addr)
 {
 	unsigned char *psizes;
@@ -1589,6 +1181,12 @@ static unsigned int get_paca_psize(unsigned long addr)
 	return (psizes[index >> 1] >> (mask_index * 4)) & 0xF;
 }
 
+#else
+unsigned int get_paca_psize(unsigned long addr)
+{
+	return get_paca()->mm_ctx_user_psize;
+}
+#endif
 
 /*
  * Demote a segment to using 4k pages.
@@ -1600,9 +1198,7 @@ void demote_segment_4k(struct mm_struct *mm, unsigned long addr)
 	if (get_slice_psize(mm, addr) == MMU_PAGE_4K)
 		return;
 	slice_set_range_psize(mm, addr, 1, MMU_PAGE_4K);
-#ifdef CONFIG_SPU_BASE
-	spu_flush_all_slbs(mm);
-#endif
+	copro_flush_all_slbs(mm);
 	if ((get_paca_psize(addr) != MMU_PAGE_4K) && (current->mm == mm)) {
 
 		copy_mm_to_paca(mm);
@@ -1647,7 +1243,7 @@ static int subpage_protection(struct mm_struct *mm, unsigned long ea)
 	spp >>= 30 - 2 * ((ea >> 12) & 0xf);
 
 	/*
-	 * 0 -> full permission
+	 * 0 -> full premission
 	 * 1 -> Read only
 	 * 2 -> no access.
 	 * We return the flag that need to be cleared.
@@ -1703,6 +1299,7 @@ int hash_page_mm(struct mm_struct *mm, unsigned long ea,
 		 unsigned long flags)
 {
 	bool is_thp;
+	enum ctx_state prev_state = exception_enter();
 	pgd_t *pgdir;
 	unsigned long vsid;
 	pte_t *ptep;
@@ -1731,14 +1328,12 @@ int hash_page_mm(struct mm_struct *mm, unsigned long ea,
 		vsid = get_kernel_vsid(ea, mmu_kernel_ssize);
 		psize = mmu_vmalloc_psize;
 		ssize = mmu_kernel_ssize;
-		flags |= HPTE_USE_KERNEL_KEY;
 		break;
 
 	case IO_REGION_ID:
 		vsid = get_kernel_vsid(ea, mmu_kernel_ssize);
 		psize = mmu_io_psize;
 		ssize = mmu_kernel_ssize;
-		flags |= HPTE_USE_KERNEL_KEY;
 		break;
 	default:
 		/*
@@ -1786,13 +1381,6 @@ int hash_page_mm(struct mm_struct *mm, unsigned long ea,
 		DBG_LOW(" no PTE !\n");
 		rc = 1;
 		goto bail;
-	}
-
-	if (IS_ENABLED(CONFIG_PPC_4K_PAGES) && !radix_enabled()) {
-		if (hugeshift == PMD_SHIFT && psize == MMU_PAGE_16M)
-			hugeshift = mmu_psize_defs[MMU_PAGE_16M].shift;
-		if (hugeshift == PUD_SHIFT && psize == MMU_PAGE_16G)
-			hugeshift = mmu_psize_defs[MMU_PAGE_16G].shift;
 	}
 
 	/*
@@ -1871,9 +1459,7 @@ int hash_page_mm(struct mm_struct *mm, unsigned long ea,
 			       "to 4kB pages because of "
 			       "non-cacheable mapping\n");
 			psize = mmu_vmalloc_psize = MMU_PAGE_4K;
-#ifdef CONFIG_SPU_BASE
-			spu_flush_all_slbs(mm);
-#endif
+			copro_flush_all_slbs(mm);
 		}
 	}
 
@@ -1913,6 +1499,7 @@ int hash_page_mm(struct mm_struct *mm, unsigned long ea,
 	DBG_LOW(" -> rc=%d\n", rc);
 
 bail:
+	exception_exit(prev_state);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(hash_page_mm);
@@ -1934,26 +1521,16 @@ int hash_page(unsigned long ea, unsigned long access, unsigned long trap,
 }
 EXPORT_SYMBOL_GPL(hash_page);
 
-DEFINE_INTERRUPT_HANDLER(do_hash_fault)
+int __hash_page(unsigned long trap, unsigned long ea, unsigned long dsisr,
+		unsigned long msr)
 {
-	unsigned long ea = regs->dar;
-	unsigned long dsisr = regs->dsisr;
 	unsigned long access = _PAGE_PRESENT | _PAGE_READ;
 	unsigned long flags = 0;
-	struct mm_struct *mm;
-	unsigned int region_id;
-	long err;
+	struct mm_struct *mm = current->mm;
+	unsigned int region_id = get_region_id(ea);
 
-	if (unlikely(dsisr & (DSISR_BAD_FAULT_64S | DSISR_KEYFAULT))) {
-		hash__do_page_fault(regs);
-		return;
-	}
-
-	region_id = get_region_id(ea);
 	if ((region_id == VMALLOC_REGION_ID) || (region_id == IO_REGION_ID))
 		mm = &init_mm;
-	else
-		mm = current->mm;
 
 	if (dsisr & DSISR_NOHPTE)
 		flags |= HPTE_NOHPTE_UPDATE;
@@ -1969,30 +1546,16 @@ DEFINE_INTERRUPT_HANDLER(do_hash_fault)
 	 * 2) user space access kernel space.
 	 */
 	access |= _PAGE_PRIVILEGED;
-	if (user_mode(regs) || (region_id == USER_REGION_ID))
+	if ((msr & MSR_PR) || (region_id == USER_REGION_ID))
 		access &= ~_PAGE_PRIVILEGED;
 
-	if (TRAP(regs) == INTERRUPT_INST_STORAGE)
+	if (trap == 0x400)
 		access |= _PAGE_EXEC;
 
-	err = hash_page_mm(mm, ea, access, TRAP(regs), flags);
-	if (unlikely(err < 0)) {
-		// failed to insert a hash PTE due to an hypervisor error
-		if (user_mode(regs)) {
-			if (IS_ENABLED(CONFIG_PPC_SUBPAGE_PROT) && err == -2)
-				_exception(SIGSEGV, regs, SEGV_ACCERR, ea);
-			else
-				_exception(SIGBUS, regs, BUS_ADRERR, ea);
-		} else {
-			bad_page_fault(regs, SIGBUS);
-		}
-		err = 0;
-
-	} else if (err) {
-		hash__do_page_fault(regs);
-	}
+	return hash_page_mm(mm, ea, access, trap, flags);
 }
 
+#ifdef CONFIG_PPC_MM_SLICES
 static bool should_hash_preload(struct mm_struct *mm, unsigned long ea)
 {
 	int psize = get_slice_psize(mm, ea);
@@ -2009,6 +1572,12 @@ static bool should_hash_preload(struct mm_struct *mm, unsigned long ea)
 
 	return true;
 }
+#else
+static bool should_hash_preload(struct mm_struct *mm, unsigned long ea)
+{
+	return true;
+}
+#endif
 
 static void hash_preload(struct mm_struct *mm, pte_t *ptep, unsigned long ea,
 			 bool is_exec, unsigned long trap)
@@ -2052,18 +1621,26 @@ static void hash_preload(struct mm_struct *mm, pte_t *ptep, unsigned long ea,
 #endif /* CONFIG_PPC_64K_PAGES */
 
 	/*
-	 * __hash_page_* must run with interrupts off, including PMI interrupts
-	 * off, as it sets the H_PAGE_BUSY bit.
+	 * __hash_page_* must run with interrupts off, as it sets the
+	 * H_PAGE_BUSY bit. It's possible for perf interrupts to hit at any
+	 * time and may take a hash fault reading the user stack, see
+	 * read_user_stack_slow() in the powerpc/perf code.
 	 *
-	 * It's otherwise possible for perf interrupts to hit at any time and
-	 * may take a hash fault reading the user stack, which could take a
-	 * hash miss and deadlock on the same H_PAGE_BUSY bit.
+	 * If that takes a hash fault on the same page as we lock here, it
+	 * will bail out when seeing H_PAGE_BUSY set, and retry the access
+	 * leading to an infinite loop.
+	 *
+	 * Disabling interrupts here does not prevent perf interrupts, but it
+	 * will prevent them taking hash faults (see the NMI test in
+	 * do_hash_page), then read_user_stack's copy_from_user_nofault will
+	 * fail and perf will fall back to read_user_stack_slow(), which
+	 * walks the Linux page tables.
 	 *
 	 * Interrupts must also be off for the duration of the
 	 * mm_is_thread_local test and update, to prevent preempt running the
 	 * mm on another CPU (XXX: this may be racy vs kthread_use_mm).
 	 */
-	powerpc_local_irq_pmu_save(flags);
+	local_irq_save(flags);
 
 	/* Is that local to this CPU ? */
 	if (mm_is_thread_local(mm))
@@ -2088,7 +1665,7 @@ static void hash_preload(struct mm_struct *mm, pte_t *ptep, unsigned long ea,
 				   mm_ctx_user_psize(&mm->context),
 				   pte_val(*ptep));
 
-	powerpc_local_irq_pmu_restore(flags);
+	local_irq_restore(flags);
 }
 
 /*
@@ -2099,7 +1676,7 @@ static void hash_preload(struct mm_struct *mm, pte_t *ptep, unsigned long ea,
  *
  * This must always be called with the pte lock held.
  */
-void __update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
+void update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
 		      pte_t *ptep)
 {
 	/*
@@ -2108,6 +1685,9 @@ void __update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
 	 */
 	unsigned long trap;
 	bool is_exec;
+
+	if (radix_enabled())
+		return;
 
 	/* We only want HPTEs for linux PTEs that have _PAGE_ACCESSED set */
 	if (!pte_young(*ptep) || address >= TASK_SIZE)
@@ -2272,6 +1852,27 @@ void flush_hash_range(unsigned long number, int local)
 	}
 }
 
+/*
+ * low_hash_fault is called when we the low level hash code failed
+ * to instert a PTE due to an hypervisor error
+ */
+void low_hash_fault(struct pt_regs *regs, unsigned long address, int rc)
+{
+	enum ctx_state prev_state = exception_enter();
+
+	if (user_mode(regs)) {
+#ifdef CONFIG_PPC_SUBPAGE_PROT
+		if (rc == -2)
+			_exception(SIGSEGV, regs, SEGV_ACCERR, address);
+		else
+#endif
+			_exception(SIGBUS, regs, BUS_ADRERR, address);
+	} else
+		bad_page_fault(regs, address, SIGBUS);
+
+	exception_exit(prev_state);
+}
+
 long hpte_insert_repeating(unsigned long hash, unsigned long vpn,
 			   unsigned long pa, unsigned long rflags,
 			   unsigned long vflags, int psize, int ssize)
@@ -2305,68 +1906,72 @@ repeat:
 	return slot;
 }
 
-void hpt_clear_stress(void)
+#ifdef CONFIG_DEBUG_PAGEALLOC
+static void kernel_map_linear_page(unsigned long vaddr, unsigned long lmi)
 {
-	int cpu = raw_smp_processor_id();
-	int g;
+	unsigned long hash;
+	unsigned long vsid = get_kernel_vsid(vaddr, mmu_kernel_ssize);
+	unsigned long vpn = hpt_vpn(vaddr, vsid, mmu_kernel_ssize);
+	unsigned long mode = htab_convert_pte_flags(pgprot_val(PAGE_KERNEL));
+	long ret;
 
-	for (g = 0; g < stress_nr_groups(); g++) {
-		unsigned long last_group;
-		last_group = stress_hpt_struct[cpu].last_group[g];
+	hash = hpt_hash(vpn, PAGE_SHIFT, mmu_kernel_ssize);
 
-		if (last_group != -1UL) {
-			int i;
-			for (i = 0; i < HPTES_PER_GROUP; i++) {
-				if (mmu_hash_ops.hpte_remove(last_group) == -1)
-					break;
-			}
-			stress_hpt_struct[cpu].last_group[g] = -1;
-		}
-	}
-}
-
-void hpt_do_stress(unsigned long ea, unsigned long hpte_group)
-{
-	unsigned long last_group;
-	int cpu = raw_smp_processor_id();
-
-	last_group = stress_hpt_struct[cpu].last_group[stress_nr_groups() - 1];
-	if (hpte_group == last_group)
+	/* Don't create HPTE entries for bad address */
+	if (!vsid)
 		return;
 
-	if (last_group != -1UL) {
-		int i;
-		/*
-		 * Concurrent CPUs might be inserting into this group, so
-		 * give up after a number of iterations, to prevent a live
-		 * lock.
-		 */
-		for (i = 0; i < HPTES_PER_GROUP; i++) {
-			if (mmu_hash_ops.hpte_remove(last_group) == -1)
-				break;
-		}
-		stress_hpt_struct[cpu].last_group[stress_nr_groups() - 1] = -1;
-	}
+	ret = hpte_insert_repeating(hash, vpn, __pa(vaddr), mode,
+				    HPTE_V_BOLTED,
+				    mmu_linear_psize, mmu_kernel_ssize);
 
-	if (ea >= PAGE_OFFSET) {
-		/*
-		 * We would really like to prefetch to get the TLB loaded, then
-		 * remove the PTE before returning from fault interrupt, to
-		 * increase the hash fault rate.
-		 *
-		 * Unfortunately QEMU TCG does not model the TLB in a way that
-		 * makes this possible, and systemsim (mambo) emulator does not
-		 * bring in TLBs with prefetches (although loads/stores do
-		 * work for non-CI PTEs).
-		 *
-		 * So remember this PTE and clear it on the next hash fault.
-		 */
-		memmove(&stress_hpt_struct[cpu].last_group[1],
-			&stress_hpt_struct[cpu].last_group[0],
-			(stress_nr_groups() - 1) * sizeof(unsigned long));
-		stress_hpt_struct[cpu].last_group[0] = hpte_group;
-	}
+	BUG_ON (ret < 0);
+	spin_lock(&linear_map_hash_lock);
+	BUG_ON(linear_map_hash_slots[lmi] & 0x80);
+	linear_map_hash_slots[lmi] = ret | 0x80;
+	spin_unlock(&linear_map_hash_lock);
 }
+
+static void kernel_unmap_linear_page(unsigned long vaddr, unsigned long lmi)
+{
+	unsigned long hash, hidx, slot;
+	unsigned long vsid = get_kernel_vsid(vaddr, mmu_kernel_ssize);
+	unsigned long vpn = hpt_vpn(vaddr, vsid, mmu_kernel_ssize);
+
+	hash = hpt_hash(vpn, PAGE_SHIFT, mmu_kernel_ssize);
+	spin_lock(&linear_map_hash_lock);
+	BUG_ON(!(linear_map_hash_slots[lmi] & 0x80));
+	hidx = linear_map_hash_slots[lmi] & 0x7f;
+	linear_map_hash_slots[lmi] = 0;
+	spin_unlock(&linear_map_hash_lock);
+	if (hidx & _PTEIDX_SECONDARY)
+		hash = ~hash;
+	slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
+	slot += hidx & _PTEIDX_GROUP_IX;
+	mmu_hash_ops.hpte_invalidate(slot, vpn, mmu_linear_psize,
+				     mmu_linear_psize,
+				     mmu_kernel_ssize, 0);
+}
+
+void __kernel_map_pages(struct page *page, int numpages, int enable)
+{
+	unsigned long flags, vaddr, lmi;
+	int i;
+
+	local_irq_save(flags);
+	for (i = 0; i < numpages; i++, page++) {
+		vaddr = (unsigned long)page_address(page);
+		lmi = __pa(vaddr) >> PAGE_SHIFT;
+		if (lmi >= linear_map_hash_count)
+			continue;
+		if (enable)
+			kernel_map_linear_page(vaddr, lmi);
+		else
+			kernel_unmap_linear_page(vaddr, lmi);
+	}
+	local_irq_restore(flags);
+}
+#endif /* CONFIG_DEBUG_PAGEALLOC */
 
 void hash__setup_initial_memory_limit(phys_addr_t first_memblock_base,
 				phys_addr_t first_memblock_size)
@@ -2432,7 +2037,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(fops_hpt_order, hpt_order_get, hpt_order_set, "%llu\n")
 
 static int __init hash64_debugfs(void)
 {
-	debugfs_create_file("hpt_order", 0600, arch_debugfs_dir, NULL,
+	debugfs_create_file("hpt_order", 0600, powerpc_debugfs_root, NULL,
 			    &fops_hpt_order);
 	return 0;
 }
@@ -2445,21 +2050,4 @@ void __init print_system_hash_info(void)
 
 	if (htab_hash_mask)
 		pr_info("htab_hash_mask    = 0x%lx\n", htab_hash_mask);
-}
-
-unsigned long arch_randomize_brk(struct mm_struct *mm)
-{
-	/*
-	 * If we are using 1TB segments and we are allowed to randomise
-	 * the heap, we can put it above 1TB so it is backed by a 1TB
-	 * segment. Otherwise the heap will be in the bottom 1TB
-	 * which always uses 256MB segments and this may result in a
-	 * performance penalty.
-	 */
-	if (is_32bit_task())
-		return randomize_page(mm->brk, SZ_32M);
-	else if (!radix_enabled() && mmu_highuser_ssize == MMU_SEGSIZE_1T)
-		return randomize_page(max_t(unsigned long, mm->brk, SZ_1T), SZ_1G);
-	else
-		return randomize_page(mm->brk, SZ_1G);
 }

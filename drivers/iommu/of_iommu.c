@@ -9,31 +9,108 @@
 #include <linux/iommu.h>
 #include <linux/limits.h>
 #include <linux/module.h>
+#include <linux/msi.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
 #include <linux/of_iommu.h>
 #include <linux/of_pci.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/fsl/mc.h>
 
-#include "iommu-priv.h"
+#define NO_IOMMU	1
+
+/**
+ * of_get_dma_window - Parse *dma-window property and returns 0 if found.
+ *
+ * @dn: device node
+ * @prefix: prefix for property name if any
+ * @index: index to start to parse
+ * @busno: Returns busno if supported. Otherwise pass NULL
+ * @addr: Returns address that DMA starts
+ * @size: Returns the range that DMA can handle
+ *
+ * This supports different formats flexibly. "prefix" can be
+ * configured if any. "busno" and "index" are optionally
+ * specified. Set 0(or NULL) if not used.
+ */
+int of_get_dma_window(struct device_node *dn, const char *prefix, int index,
+		      unsigned long *busno, dma_addr_t *addr, size_t *size)
+{
+	const __be32 *dma_window, *end;
+	int bytes, cur_index = 0;
+	char propname[NAME_MAX], addrname[NAME_MAX], sizename[NAME_MAX];
+
+	if (!dn || !addr || !size)
+		return -EINVAL;
+
+	if (!prefix)
+		prefix = "";
+
+	snprintf(propname, sizeof(propname), "%sdma-window", prefix);
+	snprintf(addrname, sizeof(addrname), "%s#dma-address-cells", prefix);
+	snprintf(sizename, sizeof(sizename), "%s#dma-size-cells", prefix);
+
+	dma_window = of_get_property(dn, propname, &bytes);
+	if (!dma_window)
+		return -ENODEV;
+	end = dma_window + bytes / sizeof(*dma_window);
+
+	while (dma_window < end) {
+		u32 cells;
+		const void *prop;
+
+		/* busno is one cell if supported */
+		if (busno)
+			*busno = be32_to_cpup(dma_window++);
+
+		prop = of_get_property(dn, addrname, NULL);
+		if (!prop)
+			prop = of_get_property(dn, "#address-cells", NULL);
+
+		cells = prop ? be32_to_cpup(prop) : of_n_addr_cells(dn);
+		if (!cells)
+			return -EINVAL;
+		*addr = of_read_number(dma_window, cells);
+		dma_window += cells;
+
+		prop = of_get_property(dn, sizename, NULL);
+		cells = prop ? be32_to_cpup(prop) : of_n_size_cells(dn);
+		if (!cells)
+			return -EINVAL;
+		*size = of_read_number(dma_window, cells);
+		dma_window += cells;
+
+		if (cur_index++ == index)
+			break;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(of_get_dma_window);
 
 static int of_iommu_xlate(struct device *dev,
 			  struct of_phandle_args *iommu_spec)
 {
 	const struct iommu_ops *ops;
+	struct fwnode_handle *fwnode = &iommu_spec->np->fwnode;
 	int ret;
 
-	if (!of_device_is_available(iommu_spec->np))
-		return -ENODEV;
+	ops = iommu_ops_from_fwnode(fwnode);
+	if ((ops && !ops->of_xlate) ||
+	    !of_device_is_available(iommu_spec->np))
+		return NO_IOMMU;
 
-	ret = iommu_fwspec_init(dev, of_fwnode_handle(iommu_spec->np));
+	ret = iommu_fwspec_init(dev, &iommu_spec->np->fwnode, ops);
 	if (ret)
 		return ret;
+	/*
+	 * The otherwise-empty fwspec handily serves to indicate the specific
+	 * IOMMU device we're waiting for, which will be useful if we ever get
+	 * a proper probe-ordering dependency mechanism in future.
+	 */
+	if (!ops)
+		return driver_deferred_probe_check_state(dev);
 
-	ops = iommu_ops_from_fwnode(&iommu_spec->np->fwnode);
-	if (!ops->of_xlate || !try_module_get(ops->owner))
+	if (!try_module_get(ops->owner))
 		return -ENODEV;
 
 	ret = ops->of_xlate(dev, iommu_spec);
@@ -52,7 +129,7 @@ static int of_iommu_configure_dev_id(struct device_node *master_np,
 			 "iommu-map-mask", &iommu_spec.np,
 			 iommu_spec.args);
 	if (err)
-		return err;
+		return err == -ENODEV ? NO_IOMMU : err;
 
 	err = of_iommu_xlate(dev, &iommu_spec);
 	of_node_put(iommu_spec.np);
@@ -63,7 +140,7 @@ static int of_iommu_configure_dev(struct device_node *master_np,
 				  struct device *dev)
 {
 	struct of_phandle_args iommu_spec;
-	int err = -ENODEV, idx = 0;
+	int err = NO_IOMMU, idx = 0;
 
 	while (!of_parse_phandle_with_args(master_np, "iommus",
 					   "#iommu-cells",
@@ -98,37 +175,24 @@ static int of_iommu_configure_device(struct device_node *master_np,
 		      of_iommu_configure_dev(master_np, dev);
 }
 
-static void of_pci_check_device_ats(struct device *dev, struct device_node *np)
+const struct iommu_ops *of_iommu_configure(struct device *dev,
+					   struct device_node *master_np,
+					   const u32 *id)
 {
+	const struct iommu_ops *ops = NULL;
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
-
-	if (fwspec && of_property_read_bool(np, "ats-supported"))
-		fwspec->flags |= IOMMU_FWSPEC_PCI_RC_ATS;
-}
-
-/*
- * Returns:
- *  0 on success, an iommu was configured
- *  -ENODEV if the device does not have any IOMMU
- *  -EPROBEDEFER if probing should be tried again
- *  -errno fatal errors
- */
-int of_iommu_configure(struct device *dev, struct device_node *master_np,
-		       const u32 *id)
-{
-	bool dev_iommu_present;
-	int err;
+	int err = NO_IOMMU;
 
 	if (!master_np)
-		return -ENODEV;
+		return NULL;
 
-	/* Serialise to make dev->iommu stable under our potential fwspec */
-	mutex_lock(&iommu_probe_device_lock);
-	if (dev_iommu_fwspec_get(dev)) {
-		mutex_unlock(&iommu_probe_device_lock);
-		return 0;
+	if (fwspec) {
+		if (fwspec->ops)
+			return fwspec->ops;
+
+		/* In the deferred case, start again from scratch */
+		iommu_fwspec_free(dev);
 	}
-	dev_iommu_present = dev->iommu;
 
 	/*
 	 * We don't currently walk up the tree looking for a parent IOMMU.
@@ -144,129 +208,40 @@ int of_iommu_configure(struct device *dev, struct device_node *master_np,
 		pci_request_acs();
 		err = pci_for_each_dma_alias(to_pci_dev(dev),
 					     of_pci_iommu_init, &info);
-		of_pci_check_device_ats(dev, master_np);
 	} else {
 		err = of_iommu_configure_device(master_np, dev, id);
+
+		fwspec = dev_iommu_fwspec_get(dev);
+		if (!err && fwspec)
+			of_property_read_u32(master_np, "pasid-num-bits",
+					     &fwspec->num_pasid_bits);
 	}
 
-	if (err && dev_iommu_present)
-		iommu_fwspec_free(dev);
-	else if (err && dev->iommu)
-		dev_iommu_free(dev);
-	mutex_unlock(&iommu_probe_device_lock);
-
 	/*
-	 * If we're not on the iommu_probe_device() path (as indicated by the
-	 * initial dev->iommu) then try to simulate it. This should no longer
-	 * happen unless of_dma_configure() is being misused outside bus code.
+	 * Two success conditions can be represented by non-negative err here:
+	 * >0 : there is no IOMMU, or one was unavailable for non-fatal reasons
+	 *  0 : we found an IOMMU, and dev->fwspec is initialised appropriately
+	 * <0 : any actual error
 	 */
-	if (!err && dev->bus && !dev_iommu_present)
+	if (!err) {
+		/* The fwspec pointer changed, read it again */
+		fwspec = dev_iommu_fwspec_get(dev);
+		ops    = fwspec->ops;
+	}
+	/*
+	 * If we have reason to believe the IOMMU driver missed the initial
+	 * probe for dev, replay it to get things in order.
+	 */
+	if (!err && dev->bus && !device_iommu_mapped(dev))
 		err = iommu_probe_device(dev);
 
-	if (err && err != -EPROBE_DEFER)
+	/* Ignore all other errors apart from EPROBE_DEFER */
+	if (err == -EPROBE_DEFER) {
+		ops = ERR_PTR(err);
+	} else if (err < 0) {
 		dev_dbg(dev, "Adding to IOMMU failed: %d\n", err);
-
-	return err;
-}
-
-static enum iommu_resv_type __maybe_unused
-iommu_resv_region_get_type(struct device *dev,
-			   struct resource *phys,
-			   phys_addr_t start, size_t length)
-{
-	phys_addr_t end = start + length - 1;
-
-	/*
-	 * IOMMU regions without an associated physical region cannot be
-	 * mapped and are simply reservations.
-	 */
-	if (phys->start >= phys->end)
-		return IOMMU_RESV_RESERVED;
-
-	/* may be IOMMU_RESV_DIRECT_RELAXABLE for certain cases */
-	if (start == phys->start && end == phys->end)
-		return IOMMU_RESV_DIRECT;
-
-	dev_warn(dev, "treating non-direct mapping [%pr] -> [%pap-%pap] as reservation\n", phys,
-		 &start, &end);
-	return IOMMU_RESV_RESERVED;
-}
-
-/**
- * of_iommu_get_resv_regions - reserved region driver helper for device tree
- * @dev: device for which to get reserved regions
- * @list: reserved region list
- *
- * IOMMU drivers can use this to implement their .get_resv_regions() callback
- * for memory regions attached to a device tree node. See the reserved-memory
- * device tree bindings on how to use these:
- *
- *   Documentation/devicetree/bindings/reserved-memory/reserved-memory.txt
- */
-void of_iommu_get_resv_regions(struct device *dev, struct list_head *list)
-{
-#if IS_ENABLED(CONFIG_OF_ADDRESS)
-	struct of_phandle_iterator it;
-	int err;
-
-	of_for_each_phandle(&it, err, dev->of_node, "memory-region", NULL, 0) {
-		const __be32 *maps, *end;
-		struct resource phys;
-		int size;
-
-		memset(&phys, 0, sizeof(phys));
-
-		/*
-		 * The "reg" property is optional and can be omitted by reserved-memory regions
-		 * that represent reservations in the IOVA space, which are regions that should
-		 * not be mapped.
-		 */
-		if (of_property_present(it.node, "reg")) {
-			err = of_address_to_resource(it.node, 0, &phys);
-			if (err < 0) {
-				dev_err(dev, "failed to parse memory region %pOF: %d\n",
-					it.node, err);
-				continue;
-			}
-		}
-
-		maps = of_get_property(it.node, "iommu-addresses", &size);
-		if (!maps)
-			continue;
-
-		end = maps + size / sizeof(__be32);
-
-		while (maps < end) {
-			struct device_node *np;
-			u32 phandle;
-
-			phandle = be32_to_cpup(maps++);
-			np = of_find_node_by_phandle(phandle);
-
-			if (np == dev->of_node) {
-				int prot = IOMMU_READ | IOMMU_WRITE;
-				struct iommu_resv_region *region;
-				enum iommu_resv_type type;
-				phys_addr_t iova;
-				size_t length;
-
-				if (of_dma_is_coherent(dev->of_node))
-					prot |= IOMMU_CACHE;
-
-				maps = of_translate_dma_region(np, maps, &iova, &length);
-				if (length == 0) {
-					dev_warn(dev, "Cannot reserve IOVA region of 0 size\n");
-					continue;
-				}
-				type = iommu_resv_region_get_type(dev, &phys, iova, length);
-
-				region = iommu_alloc_resv_region(iova, length, prot, type,
-								 GFP_KERNEL);
-				if (region)
-					list_add_tail(&region->list, list);
-			}
-		}
+		ops = NULL;
 	}
-#endif
+
+	return ops;
 }
-EXPORT_SYMBOL(of_iommu_get_resv_regions);

@@ -6,13 +6,13 @@
 #include <linux/kconfig.h>
 
 struct request_queue;
-struct bio;
 
 #ifdef CONFIG_BLK_CGROUP_IOPRIO
-void blkcg_set_ioprio(struct bio *bio);
+int blk_ioprio_init(struct request_queue *q);
 #else
-static inline void blkcg_set_ioprio(struct bio *bio)
+static inline int blk_ioprio_init(struct request_queue *q)
 {
+	return 0;
 }
 #endif
 

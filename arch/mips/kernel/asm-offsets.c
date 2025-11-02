@@ -9,8 +9,6 @@
  * Kevin Kissell, kevink@mips.com and Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 2000 MIPS Technologies, Inc.
  */
-#define COMPILE_OFFSETS
-
 #include <linux/compat.h>
 #include <linux/types.h>
 #include <linux/sched.h>
@@ -25,16 +23,9 @@
 
 #include <linux/kvm_host.h>
 
-void output_ptreg_defines(void);
 void output_ptreg_defines(void)
 {
 	COMMENT("MIPS pt_regs offsets.");
-#ifdef CONFIG_32BIT
-	OFFSET(PT_ARG4, pt_regs, args[4]);
-	OFFSET(PT_ARG5, pt_regs, args[5]);
-	OFFSET(PT_ARG6, pt_regs, args[6]);
-	OFFSET(PT_ARG7, pt_regs, args[7]);
-#endif
 	OFFSET(PT_R0, pt_regs, regs[0]);
 	OFFSET(PT_R1, pt_regs, regs[1]);
 	OFFSET(PT_R2, pt_regs, regs[2]);
@@ -84,10 +75,10 @@ void output_ptreg_defines(void)
 	BLANK();
 }
 
-void output_task_defines(void);
 void output_task_defines(void)
 {
 	COMMENT("MIPS task_struct offsets.");
+	OFFSET(TASK_STATE, task_struct, state);
 	OFFSET(TASK_THREAD_INFO, task_struct, stack);
 	OFFSET(TASK_FLAGS, task_struct, flags);
 	OFFSET(TASK_MM, task_struct, mm);
@@ -99,7 +90,6 @@ void output_task_defines(void)
 	BLANK();
 }
 
-void output_thread_info_defines(void);
 void output_thread_info_defines(void)
 {
 	COMMENT("MIPS thread_info offsets.");
@@ -108,6 +98,7 @@ void output_thread_info_defines(void)
 	OFFSET(TI_TP_VALUE, thread_info, tp_value);
 	OFFSET(TI_CPU, thread_info, cpu);
 	OFFSET(TI_PRE_COUNT, thread_info, preempt_count);
+	OFFSET(TI_ADDR_LIMIT, thread_info, addr_limit);
 	OFFSET(TI_REGS, thread_info, regs);
 	OFFSET(TI_SYSCALL, thread_info, syscall);
 	DEFINE(_THREAD_SIZE, THREAD_SIZE);
@@ -117,7 +108,6 @@ void output_thread_info_defines(void)
 	BLANK();
 }
 
-void output_thread_defines(void);
 void output_thread_defines(void)
 {
 	COMMENT("MIPS specific thread_struct offsets.");
@@ -146,7 +136,6 @@ void output_thread_defines(void)
 }
 
 #ifdef CONFIG_MIPS_FP_SUPPORT
-void output_thread_fpu_defines(void);
 void output_thread_fpu_defines(void)
 {
 	OFFSET(THREAD_FPU, task_struct, thread.fpu);
@@ -190,7 +179,6 @@ void output_thread_fpu_defines(void)
 }
 #endif
 
-void output_mm_defines(void);
 void output_mm_defines(void)
 {
 	COMMENT("Size of struct page");
@@ -211,6 +199,11 @@ void output_mm_defines(void)
 #endif
 	DEFINE(_PTE_T_LOG2, PTE_T_LOG2);
 	BLANK();
+	DEFINE(_PGD_ORDER, PGD_ORDER);
+#ifndef __PAGETABLE_PMD_FOLDED
+	DEFINE(_PMD_ORDER, PMD_ORDER);
+#endif
+	DEFINE(_PTE_ORDER, PTE_ORDER);
 	BLANK();
 	DEFINE(_PMD_SHIFT, PMD_SHIFT);
 	DEFINE(_PGDIR_SHIFT, PGDIR_SHIFT);
@@ -225,7 +218,6 @@ void output_mm_defines(void)
 }
 
 #ifdef CONFIG_32BIT
-void output_sc_defines(void);
 void output_sc_defines(void)
 {
 	COMMENT("Linux sigcontext offsets.");
@@ -248,7 +240,6 @@ void output_sc_defines(void)
 #endif
 
 #ifdef CONFIG_64BIT
-void output_sc_defines(void);
 void output_sc_defines(void)
 {
 	COMMENT("Linux sigcontext offsets.");
@@ -262,7 +253,6 @@ void output_sc_defines(void)
 }
 #endif
 
-void output_signal_defined(void);
 void output_signal_defined(void)
 {
 	COMMENT("Linux signal numbers.");
@@ -302,7 +292,6 @@ void output_signal_defined(void)
 }
 
 #ifdef CONFIG_CPU_CAVIUM_OCTEON
-void output_octeon_cop2_state_defines(void);
 void output_octeon_cop2_state_defines(void)
 {
 	COMMENT("Octeon specific octeon_cop2_state offsets.");
@@ -325,16 +314,12 @@ void output_octeon_cop2_state_defines(void)
 	OFFSET(OCTEON_CP2_HSH_IVW,	octeon_cop2_state, cop2_hsh_ivw);
 	OFFSET(OCTEON_CP2_SHA3,		octeon_cop2_state, cop2_sha3);
 	OFFSET(THREAD_CP2,	task_struct, thread.cp2);
-#if defined(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE) && \
-    CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
 	OFFSET(THREAD_CVMSEG,	task_struct, thread.cvmseg.cvmseg);
-#endif
 	BLANK();
 }
 #endif
 
 #ifdef CONFIG_HIBERNATION
-void output_pbe_defines(void);
 void output_pbe_defines(void)
 {
 	COMMENT(" Linux struct pbe offsets. ");
@@ -347,7 +332,6 @@ void output_pbe_defines(void)
 #endif
 
 #ifdef CONFIG_CPU_PM
-void output_pm_defines(void);
 void output_pm_defines(void)
 {
 	COMMENT(" PM offsets. ");
@@ -362,7 +346,6 @@ void output_pm_defines(void)
 #endif
 
 #ifdef CONFIG_MIPS_FP_SUPPORT
-void output_kvm_defines(void);
 void output_kvm_defines(void)
 {
 	COMMENT(" KVM/MIPS Specific offsets. ");
@@ -407,13 +390,9 @@ void output_kvm_defines(void)
 #endif
 
 #ifdef CONFIG_MIPS_CPS
-void output_cps_defines(void);
 void output_cps_defines(void)
 {
 	COMMENT(" MIPS CPS offsets. ");
-
-	OFFSET(CLUSTERBOOTCFG_CORECONFIG, cluster_boot_config, core_config);
-	DEFINE(CLUSTERBOOTCFG_SIZE, sizeof(struct cluster_boot_config));
 
 	OFFSET(COREBOOTCFG_VPEMASK, core_boot_config, vpe_mask);
 	OFFSET(COREBOOTCFG_VPECONFIG, core_boot_config, vpe_config);

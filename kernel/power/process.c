@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * drivers/power/process.c - Functions for starting/stopping processes on
+ * drivers/power/process.c - Functions for starting/stopping processes on 
  *                           suspend transitions.
  *
  * Originally from swsusp.
  */
+
+
+#undef DEBUG
 
 #include <linux/interrupt.h>
 #include <linux/oom.h>
@@ -19,6 +22,9 @@
 #include <linux/kmod.h>
 #include <trace/events/power.h>
 #include <linux/cpuset.h>
+#include <linux/sec_debug.h>
+
+#include <trace/hooks/power.h>
 
 /*
  * Timeout for stopping processes
@@ -27,8 +33,6 @@ unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
 
 static int try_to_freeze_tasks(bool user_only)
 {
-	const char *what = user_only ? "user space processes" :
-					"remaining freezable tasks";
 	struct task_struct *g, *p;
 	unsigned long end_time;
 	unsigned int todo;
@@ -38,14 +42,14 @@ static int try_to_freeze_tasks(bool user_only)
 	bool wakeup = false;
 	int sleep_usecs = USEC_PER_MSEC;
 
-	pr_info("Freezing %s\n", what);
-
 	start = ktime_get_boottime();
 
 	end_time = jiffies + msecs_to_jiffies(freeze_timeout_msecs);
 
 	if (!user_only)
 		freeze_workqueues_begin();
+
+	secdbg_base_built_set_unfrozen_task(NULL, 0);
 
 	while (true) {
 		todo = 0;
@@ -54,7 +58,10 @@ static int try_to_freeze_tasks(bool user_only)
 			if (p == current || !freeze_task(p))
 				continue;
 
-			todo++;
+			if (!freezer_should_skip(p)) {
+				todo++;
+				secdbg_base_built_set_unfrozen_task(p, (uint64_t)todo);
+			}
 		}
 		read_unlock(&tasklist_lock);
 
@@ -85,28 +92,43 @@ static int try_to_freeze_tasks(bool user_only)
 	elapsed = ktime_sub(end, start);
 	elapsed_msecs = ktime_to_ms(elapsed);
 
-	if (todo) {
-		pr_err("Freezing %s %s after %d.%03d seconds "
-		       "(%d tasks refusing to freeze, wq_busy=%d):\n", what,
-		       wakeup ? "aborted" : "failed",
+	if (wakeup) {
+		pr_cont("\n");
+		pr_err("Freezing of tasks aborted after %d.%03d seconds",
+		       elapsed_msecs / 1000, elapsed_msecs % 1000);
+	} else if (todo) {
+		pr_cont("\n");
+		pr_auto(ASL1, "Freezing of tasks failed after %d.%03d seconds"
+		       " (%d tasks refusing to freeze, wq_busy=%d):\n",
 		       elapsed_msecs / 1000, elapsed_msecs % 1000,
 		       todo - wq_busy, wq_busy);
 
 		if (wq_busy)
-			show_freezable_workqueues();
+			show_workqueue_state();
 
-		if (!wakeup || pm_debug_messages_on) {
+		if (pm_debug_messages_on) {
 			read_lock(&tasklist_lock);
 			for_each_process_thread(g, p) {
-				if (p != current && freezing(p) && !frozen(p))
+				if (p != current && !freezer_should_skip(p)
+				    && freezing(p) && !frozen(p)) {
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+					sched_show_task_auto_comment(p);
+#else
 					sched_show_task(p);
+#endif
+					trace_android_vh_try_to_freeze_todo_unfrozen(p);
+				}
 			}
 			read_unlock(&tasklist_lock);
 		}
+
+		trace_android_vh_try_to_freeze_todo(todo, elapsed_msecs, wq_busy);
 	} else {
-		pr_info("Freezing %s completed (elapsed %d.%03d seconds)\n",
-			what, elapsed_msecs / 1000, elapsed_msecs % 1000);
+		pr_cont("(elapsed %d.%03d seconds) ", elapsed_msecs / 1000,
+			elapsed_msecs % 1000);
 	}
+
+	secdbg_base_built_set_unfrozen_task(NULL, 0);
 
 	return todo ? -EBUSY : 0;
 }
@@ -130,14 +152,17 @@ int freeze_processes(void)
 	current->flags |= PF_SUSPEND_TASK;
 
 	if (!pm_freezing)
-		static_branch_inc(&freezer_active);
+		atomic_inc(&system_freezing_cnt);
 
 	pm_wakeup_clear(0);
+	pr_info("Freezing user space processes ... ");
 	pm_freezing = true;
 	error = try_to_freeze_tasks(true);
-	if (!error)
+	if (!error) {
 		__usermodehelper_set_disable_depth(UMH_DISABLED);
-
+		pr_cont("done.");
+	}
+	pr_cont("\n");
 	BUG_ON(in_atomic());
 
 	/*
@@ -166,9 +191,14 @@ int freeze_kernel_threads(void)
 {
 	int error;
 
+	pr_info("Freezing remaining freezable tasks ... ");
+
 	pm_nosig_freezing = true;
 	error = try_to_freeze_tasks(false);
+	if (!error)
+		pr_cont("done.");
 
+	pr_cont("\n");
 	BUG_ON(in_atomic());
 
 	if (error)
@@ -183,16 +213,18 @@ void thaw_processes(void)
 
 	trace_suspend_resume(TPS("thaw_processes"), 0, true);
 	if (pm_freezing)
-		static_branch_dec(&freezer_active);
+		atomic_dec(&system_freezing_cnt);
 	pm_freezing = false;
 	pm_nosig_freezing = false;
 
 	oom_killer_enable();
 
-	pr_info("Restarting tasks: Starting\n");
+	pr_info("Restarting tasks ... ");
 
 	__usermodehelper_set_disable_depth(UMH_FREEZING);
 	thaw_workqueues();
+
+	cpuset_wait_for_hotplug();
 
 	read_lock(&tasklist_lock);
 	for_each_process_thread(g, p) {
@@ -208,7 +240,7 @@ void thaw_processes(void)
 	usermodehelper_enable();
 
 	schedule();
-	pr_info("Restarting tasks: Done\n");
+	pr_cont("done.\n");
 	trace_suspend_resume(TPS("thaw_processes"), 0, false);
 }
 
@@ -217,17 +249,17 @@ void thaw_kernel_threads(void)
 	struct task_struct *g, *p;
 
 	pm_nosig_freezing = false;
-	pr_info("Restarting kernel threads ...\n");
+	pr_info("Restarting kernel threads ... ");
 
 	thaw_workqueues();
 
 	read_lock(&tasklist_lock);
 	for_each_process_thread(g, p) {
-		if (p->flags & PF_KTHREAD)
+		if (p->flags & (PF_KTHREAD | PF_WQ_WORKER))
 			__thaw_task(p);
 	}
 	read_unlock(&tasklist_lock);
 
 	schedule();
-	pr_info("Done restarting kernel threads.\n");
+	pr_cont("done.\n");
 }

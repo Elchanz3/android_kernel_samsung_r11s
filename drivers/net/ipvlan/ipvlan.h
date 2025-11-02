@@ -47,11 +47,11 @@ typedef enum {
 } ipvl_hdr_type;
 
 struct ipvl_pcpu_stats {
-	u64_stats_t		rx_pkts;
-	u64_stats_t		rx_bytes;
-	u64_stats_t		rx_mcast;
-	u64_stats_t		tx_pkts;
-	u64_stats_t		tx_bytes;
+	u64			rx_pkts;
+	u64			rx_bytes;
+	u64			rx_mcast;
+	u64			tx_pkts;
+	u64			tx_bytes;
 	struct u64_stats_sync	syncp;
 	u32			rx_errs;
 	u32			tx_drps;
@@ -98,7 +98,6 @@ struct ipvl_port {
 	struct sk_buff_head	backlog;
 	int			count;
 	struct ida		ida;
-	netdevice_tracker	dev_tracker;
 };
 
 struct ipvl_skb_cb {
@@ -166,7 +165,8 @@ struct ipvl_addr *ipvlan_addr_lookup(struct ipvl_port *port, void *lyr3h,
 void *ipvlan_get_L3_hdr(struct ipvl_port *port, struct sk_buff *skb, int *type);
 void ipvlan_count_rx(const struct ipvl_dev *ipvlan,
 		     unsigned int len, bool success, bool mcast);
-int ipvlan_link_new(struct net_device *dev, struct rtnl_newlink_params *params,
+int ipvlan_link_new(struct net *src_net, struct net_device *dev,
+		    struct nlattr *tb[], struct nlattr *data[],
 		    struct netlink_ext_ack *extack);
 void ipvlan_link_delete(struct net_device *dev, struct list_head *head);
 void ipvlan_link_setup(struct net_device *dev);

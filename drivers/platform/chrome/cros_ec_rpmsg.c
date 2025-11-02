@@ -89,8 +89,6 @@ static int cros_ec_pkt_xfer_rpmsg(struct cros_ec_device *ec_dev,
 
 	ec_msg->result = 0;
 	len = cros_ec_prepare_tx(ec_dev, ec_msg);
-	if (len < 0)
-		return len;
 	dev_dbg(ec_dev->dev, "prepared, len=%d\n", len);
 
 	reinit_completion(&ec_rpmsg->xfer_ack);
@@ -151,8 +149,12 @@ cros_ec_rpmsg_host_event_function(struct work_struct *host_event_work)
 	struct cros_ec_rpmsg *ec_rpmsg = container_of(host_event_work,
 						      struct cros_ec_rpmsg,
 						      host_event_work);
+	struct cros_ec_device *ec_dev = dev_get_drvdata(&ec_rpmsg->rpdev->dev);
+	bool ec_has_more_events;
 
-	cros_ec_irq_thread(0, dev_get_drvdata(&ec_rpmsg->rpdev->dev));
+	do {
+		ec_has_more_events = cros_ec_handle_event(ec_dev);
+	} while (ec_has_more_events);
 }
 
 static int cros_ec_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
@@ -216,7 +218,7 @@ static int cros_ec_rpmsg_probe(struct rpmsg_device *rpdev)
 	struct cros_ec_device *ec_dev;
 	int ret;
 
-	ec_dev = cros_ec_device_alloc(dev);
+	ec_dev = devm_kzalloc(dev, sizeof(*ec_dev), GFP_KERNEL);
 	if (!ec_dev)
 		return -ENOMEM;
 
@@ -224,10 +226,14 @@ static int cros_ec_rpmsg_probe(struct rpmsg_device *rpdev)
 	if (!ec_rpmsg)
 		return -ENOMEM;
 
+	ec_dev->dev = dev;
 	ec_dev->priv = ec_rpmsg;
 	ec_dev->cmd_xfer = cros_ec_cmd_xfer_rpmsg;
 	ec_dev->pkt_xfer = cros_ec_pkt_xfer_rpmsg;
 	ec_dev->phys_name = dev_name(&rpdev->dev);
+	ec_dev->din_size = sizeof(struct ec_host_response) +
+			   sizeof(struct ec_response_get_protocol_info);
+	ec_dev->dout_size = sizeof(struct ec_host_request);
 	dev_set_drvdata(dev, ec_dev);
 
 	ec_rpmsg->rpdev = rpdev;

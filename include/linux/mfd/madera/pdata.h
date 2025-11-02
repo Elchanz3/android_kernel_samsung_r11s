@@ -8,11 +8,10 @@
 #ifndef MADERA_PDATA_H
 #define MADERA_PDATA_H
 
+#include <linux/kernel.h>
 #include <linux/regulator/arizona-ldo1.h>
 #include <linux/regulator/arizona-micsupp.h>
 #include <linux/regulator/machine.h>
-#include <linux/types.h>
-
 #include <sound/madera-pdata.h>
 
 #define MADERA_MAX_MICBIAS		4
@@ -32,7 +31,7 @@ struct pinctrl_map;
  * @irq_flags:	    Mode for primary IRQ (defaults to active low)
  * @gpio_base:	    Base GPIO number
  * @gpio_configs:   Array of GPIO configurations (See
- *		    Documentation/driver-api/pin-control.rst)
+ *		    Documentation/driver-api/pinctl.rst)
  * @n_gpio_configs: Number of entries in gpio_configs
  * @gpsw:	    General purpose switch mode setting. Depends on the external
  *		    hardware connected to the switch. (See the SW1_MODE field

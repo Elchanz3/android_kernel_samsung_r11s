@@ -7,12 +7,10 @@
  */
 #include <linux/kernel.h>
 #include <linux/jump_label.h>
-#include <linux/smp.h>
 #include <asm/insn.h>
-#include <asm/text-patching.h>
 
-bool arch_jump_label_transform_queue(struct jump_entry *entry,
-				     enum jump_label_type type)
+void arch_jump_label_transform(struct jump_entry *entry,
+			       enum jump_label_type type)
 {
 	void *addr = (void *)jump_entry_code(entry);
 	u32 insn;
@@ -26,10 +24,15 @@ bool arch_jump_label_transform_queue(struct jump_entry *entry,
 	}
 
 	aarch64_insn_patch_text_nosync(addr, insn);
-	return true;
 }
 
-void arch_jump_label_transform_apply(void)
+void arch_jump_label_transform_static(struct jump_entry *entry,
+				      enum jump_label_type type)
 {
-	kick_all_cpus_sync();
+	/*
+	 * We use the architected A64 NOP in arch_static_branch, so there's no
+	 * need to patch an identical A64 NOP over the top of it here. The core
+	 * will call arch_jump_label_transform from a module notifier if the
+	 * NOP needs to be replaced by a branch.
+	 */
 }

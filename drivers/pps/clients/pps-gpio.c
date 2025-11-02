@@ -12,14 +12,15 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/pps_kernel.h>
+#include <linux/pps-gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/list.h>
-#include <linux/property.h>
+#include <linux/of_device.h>
+#include <linux/of_gpio.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 
@@ -52,9 +53,7 @@ static irqreturn_t pps_gpio_irq_handler(int irq, void *data)
 
 	info = data;
 
-	/* Small trick to bypass the check on edge's direction when capture_clear is unset */
-	rising_edge = info->capture_clear ?
-		      gpiod_get_value(info->gpio_pin) : !info->assert_falling_edge;
+	rising_edge = gpiod_get_value(info->gpio_pin);
 	if ((rising_edge && !info->assert_falling_edge) ||
 			(!rising_edge && info->assert_falling_edge))
 		pps_event(info->pps, &ts, PPS_CAPTUREASSERT, data);
@@ -62,8 +61,6 @@ static irqreturn_t pps_gpio_irq_handler(int irq, void *data)
 			((rising_edge && info->assert_falling_edge) ||
 			(!rising_edge && !info->assert_falling_edge)))
 		pps_event(info->pps, &ts, PPS_CAPTURECLEAR, data);
-	else
-		dev_warn_ratelimited(&info->pps->dev, "IRQ did not trigger any PPS event\n");
 
 	return IRQ_HANDLED;
 }
@@ -98,47 +95,56 @@ static void pps_gpio_echo_timer_callback(struct timer_list *t)
 {
 	const struct pps_gpio_device_data *info;
 
-	info = timer_container_of(info, t, echo_timer);
+	info = from_timer(info, t, echo_timer);
 
 	gpiod_set_value(info->echo_pin, 0);
 }
 
-static int pps_gpio_setup(struct device *dev)
+static int pps_gpio_setup(struct platform_device *pdev)
 {
-	struct pps_gpio_device_data *data = dev_get_drvdata(dev);
+	struct pps_gpio_device_data *data = platform_get_drvdata(pdev);
+	struct device_node *np = pdev->dev.of_node;
 	int ret;
 	u32 value;
 
-	data->gpio_pin = devm_gpiod_get(dev, NULL, GPIOD_IN);
-	if (IS_ERR(data->gpio_pin))
-		return dev_err_probe(dev, PTR_ERR(data->gpio_pin),
-				     "failed to request PPS GPIO\n");
-
-	data->assert_falling_edge =
-		device_property_read_bool(dev, "assert-falling-edge");
-
-	data->echo_pin = devm_gpiod_get_optional(dev, "echo", GPIOD_OUT_LOW);
-	if (IS_ERR(data->echo_pin))
-		return dev_err_probe(dev, PTR_ERR(data->echo_pin),
-				     "failed to request ECHO GPIO\n");
-
-	if (!data->echo_pin)
-		return 0;
-
-	ret = device_property_read_u32(dev, "echo-active-ms", &value);
-	if (ret) {
-		dev_err(dev, "failed to get echo-active-ms from FW\n");
-		return ret;
+	data->gpio_pin = devm_gpiod_get(&pdev->dev,
+		NULL,	/* request "gpios" */
+		GPIOD_IN);
+	if (IS_ERR(data->gpio_pin)) {
+		dev_err(&pdev->dev,
+			"failed to request PPS GPIO\n");
+		return PTR_ERR(data->gpio_pin);
 	}
 
-	/* sanity check on echo_active_ms */
-	if (!value || value > 999) {
-		dev_err(dev, "echo-active-ms: %u - bad value from FW\n", value);
-		return -EINVAL;
+	data->echo_pin = devm_gpiod_get_optional(&pdev->dev,
+			"echo",
+			GPIOD_OUT_LOW);
+	if (data->echo_pin) {
+		if (IS_ERR(data->echo_pin)) {
+			dev_err(&pdev->dev, "failed to request ECHO GPIO\n");
+			return PTR_ERR(data->echo_pin);
+		}
+
+		ret = of_property_read_u32(np,
+			"echo-active-ms",
+			&value);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"failed to get echo-active-ms from OF\n");
+			return ret;
+		}
+		data->echo_active_ms = value;
+		/* sanity check on echo_active_ms */
+		if (!data->echo_active_ms || data->echo_active_ms > 999) {
+			dev_err(&pdev->dev,
+				"echo-active-ms: %u - bad value from OF\n",
+				data->echo_active_ms);
+			return -EINVAL;
+		}
 	}
 
-	data->echo_active_ms = value;
-
+	if (of_property_read_bool(np, "assert-falling-edge"))
+		data->assert_falling_edge = true;
 	return 0;
 }
 
@@ -159,26 +165,34 @@ get_irqf_trigger_flags(const struct pps_gpio_device_data *data)
 static int pps_gpio_probe(struct platform_device *pdev)
 {
 	struct pps_gpio_device_data *data;
-	struct device *dev = &pdev->dev;
 	int ret;
 	int pps_default_params;
+	const struct pps_gpio_platform_data *pdata = pdev->dev.platform_data;
 
 	/* allocate space for device info */
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
-
-	dev_set_drvdata(dev, data);
+	platform_set_drvdata(pdev, data);
 
 	/* GPIO setup */
-	ret = pps_gpio_setup(dev);
-	if (ret)
-		return ret;
+	if (pdata) {
+		data->gpio_pin = pdata->gpio_pin;
+		data->echo_pin = pdata->echo_pin;
+
+		data->assert_falling_edge = pdata->assert_falling_edge;
+		data->capture_clear = pdata->capture_clear;
+		data->echo_active_ms = pdata->echo_active_ms;
+	} else {
+		ret = pps_gpio_setup(pdev);
+		if (ret)
+			return -EINVAL;
+	}
 
 	/* IRQ setup */
 	ret = gpiod_to_irq(data->gpio_pin);
 	if (ret < 0) {
-		dev_err(dev, "failed to map GPIO to IRQ: %d\n", ret);
+		dev_err(&pdev->dev, "failed to map GPIO to IRQ: %d\n", ret);
 		return -EINVAL;
 	}
 	data->irq = ret;
@@ -204,36 +218,38 @@ static int pps_gpio_probe(struct platform_device *pdev)
 		pps_default_params |= PPS_CAPTURECLEAR | PPS_OFFSETCLEAR;
 	data->pps = pps_register_source(&data->info, pps_default_params);
 	if (IS_ERR(data->pps)) {
-		dev_err(dev, "failed to register IRQ %d as PPS source\n",
+		dev_err(&pdev->dev, "failed to register IRQ %d as PPS source\n",
 			data->irq);
 		return PTR_ERR(data->pps);
 	}
 
 	/* register IRQ interrupt handler */
-	ret = request_irq(data->irq, pps_gpio_irq_handler,
-			  get_irqf_trigger_flags(data), data->info.name, data);
+	ret = devm_request_irq(&pdev->dev, data->irq, pps_gpio_irq_handler,
+			get_irqf_trigger_flags(data), data->info.name, data);
 	if (ret) {
 		pps_unregister_source(data->pps);
-		dev_err(dev, "failed to acquire IRQ %d\n", data->irq);
+		dev_err(&pdev->dev, "failed to acquire IRQ %d\n", data->irq);
 		return -EINVAL;
 	}
 
-	dev_dbg(&data->pps->dev, "Registered IRQ %d as PPS source\n",
-		data->irq);
+	dev_info(data->pps->dev, "Registered IRQ %d as PPS source\n",
+		 data->irq);
 
 	return 0;
 }
 
-static void pps_gpio_remove(struct platform_device *pdev)
+static int pps_gpio_remove(struct platform_device *pdev)
 {
 	struct pps_gpio_device_data *data = platform_get_drvdata(pdev);
 
-	free_irq(data->irq, data);
 	pps_unregister_source(data->pps);
-	timer_delete_sync(&data->echo_timer);
-	/* reset echo pin in any case */
-	gpiod_set_value(data->echo_pin, 0);
+	if (data->echo_pin) {
+		del_timer_sync(&data->echo_timer);
+		/* reset echo pin in any case */
+		gpiod_set_value(data->echo_pin, 0);
+	}
 	dev_info(&pdev->dev, "removed IRQ %d as PPS source\n", data->irq);
+	return 0;
 }
 
 static const struct of_device_id pps_gpio_dt_ids[] = {

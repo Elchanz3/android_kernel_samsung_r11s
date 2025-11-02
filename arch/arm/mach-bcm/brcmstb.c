@@ -1,8 +1,19 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Copyright (C) 2013-2014 Broadcom Corporation
+/*
+ * Copyright (C) 2013-2014 Broadcom Corporation
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation version 2.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
 
 #include <linux/init.h>
 #include <linux/irqchip.h>
+#include <linux/of_platform.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -23,6 +34,11 @@ u32 brcmstb_uart_config[3] = {
 	0,
 };
 
+static void __init brcmstb_init_irq(void)
+{
+	irqchip_init();
+}
+
 static const char *const brcmstb_match[] __initconst = {
 	"brcm,bcm7445",
 	"brcm,brcmstb",
@@ -31,4 +47,5 @@ static const char *const brcmstb_match[] __initconst = {
 
 DT_MACHINE_START(BRCMSTB, "Broadcom STB (Flattened Device Tree)")
 	.dt_compat	= brcmstb_match,
+	.init_irq	= brcmstb_init_irq,
 MACHINE_END

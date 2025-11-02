@@ -13,8 +13,11 @@
 #include <asm/kvm_arm.h>
 #include <asm/sysreg.h>
 
-#define ack_bad_irq ack_bad_irq
-#include <asm-generic/hardirq.h>
+typedef struct {
+	unsigned int __softirq_pending;
+} ____cacheline_aligned irq_cpustat_t;
+
+#include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
 
 #define __ARCH_IRQ_EXIT_IRQS_DISABLED	1
 
@@ -41,7 +44,7 @@ do {									\
 									\
 	___hcr = read_sysreg(hcr_el2);					\
 	if (!(___hcr & HCR_TGE)) {					\
-		write_sysreg_hcr(___hcr | HCR_TGE);			\
+		write_sysreg(___hcr | HCR_TGE, hcr_el2);		\
 		isb();							\
 	}								\
 	/*								\
@@ -82,7 +85,7 @@ do {									\
 	 */								\
 	barrier();							\
 	if (!___ctx->cnt && !(___hcr & HCR_TGE))			\
-		write_sysreg_hcr(___hcr);				\
+		write_sysreg(___hcr, hcr_el2);				\
 } while (0)
 
 static inline void ack_bad_irq(unsigned int irq)

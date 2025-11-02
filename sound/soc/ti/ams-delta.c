@@ -16,6 +16,8 @@
 #include <sound/soc.h>
 #include <sound/jack.h>
 
+#include <asm/mach-types.h>
+
 #include <linux/platform_data/asoc-ti-mcbsp.h>
 
 #include "omap-mcbsp.h"
@@ -303,7 +305,7 @@ static void cx81801_close(struct tty_struct *tty)
 	struct snd_soc_component *component = tty->disc_data;
 	struct snd_soc_dapm_context *dapm;
 
-	timer_delete_sync(&cx81801_timer);
+	del_timer_sync(&cx81801_timer);
 
 	/* Prevent the hook switch from further changing the DAPM pins */
 	INIT_LIST_HEAD(&ams_delta_hook_switch.pins);
@@ -330,14 +332,15 @@ static void cx81801_close(struct tty_struct *tty)
 }
 
 /* Line discipline .hangup() */
-static void cx81801_hangup(struct tty_struct *tty)
+static int cx81801_hangup(struct tty_struct *tty)
 {
 	cx81801_close(tty);
+	return 0;
 }
 
 /* Line discipline .receive_buf() */
-static void cx81801_receive(struct tty_struct *tty, const u8 *cp, const u8 *fp,
-			    size_t count)
+static void cx81801_receive(struct tty_struct *tty,
+				const unsigned char *cp, char *fp, int count)
 {
 	struct snd_soc_component *component = tty->disc_data;
 	const unsigned char *c;
@@ -394,8 +397,8 @@ static void cx81801_wakeup(struct tty_struct *tty)
 }
 
 static struct tty_ldisc_ops cx81801_ops = {
+	.magic = TTY_LDISC_MAGIC,
 	.name = "cx81801",
-	.num = N_V253,
 	.owner = THIS_MODULE,
 	.open = cx81801_open,
 	.close = cx81801_close,
@@ -407,7 +410,7 @@ static struct tty_ldisc_ops cx81801_ops = {
 
 /*
  * Even if not very useful, the sound card can still work without any of the
- * above functionality activated.  You can still control its audio input/output
+ * above functonality activated.  You can still control its audio input/output
  * constellation and speakerphone gain from userspace by issuing AT commands
  * over the modem port.
  */
@@ -460,19 +463,19 @@ static void ams_delta_shutdown(struct snd_pcm_substream *substream)
 
 static int ams_delta_cx20442_init(struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
 	struct snd_soc_card *card = rtd->card;
 	struct snd_soc_dapm_context *dapm = &card->dapm;
 	int ret;
 	/* Codec is ready, now add/activate board specific controls */
 
 	/* Store a pointer to the codec structure for tty ldisc use */
-	cx20442_codec = snd_soc_rtd_to_codec(rtd, 0)->component;
+	cx20442_codec = asoc_rtd_to_codec(rtd, 0)->component;
 
 	/* Add hook switch - can be used to control the codec from userspace
 	 * even if line discipline fails */
-	ret = snd_soc_card_jack_new_pins(card, "hook_switch", SND_JACK_HEADSET,
-					 &ams_delta_hook_switch, NULL, 0);
+	ret = snd_soc_card_jack_new(card, "hook_switch", SND_JACK_HEADSET,
+				    &ams_delta_hook_switch, NULL, 0);
 	if (ret)
 		dev_warn(card->dev,
 				"Failed to allocate resources for hook switch, "
@@ -503,7 +506,7 @@ static int ams_delta_cx20442_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	/* Register optional line discipline for over the modem control */
-	ret = tty_register_ldisc(&cx81801_ops);
+	ret = tty_register_ldisc(N_V253, &cx81801_ops);
 	if (ret) {
 		dev_warn(card->dev,
 				"Failed to register line discipline, "
@@ -532,7 +535,7 @@ static struct snd_soc_dai_link ams_delta_dai_link = {
 	.init = ams_delta_cx20442_init,
 	.ops = &ams_delta_ops,
 	.dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBP_CFP,
+		   SND_SOC_DAIFMT_CBM_CFM,
 	SND_SOC_DAILINK_REG(cx20442),
 };
 
@@ -578,14 +581,17 @@ static int ams_delta_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void ams_delta_remove(struct platform_device *pdev)
+static int ams_delta_remove(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = platform_get_drvdata(pdev);
 
-	tty_unregister_ldisc(&cx81801_ops);
+	if (tty_unregister_ldisc(N_V253) != 0)
+		dev_warn(&pdev->dev,
+			"failed to unregister V253 line discipline\n");
 
 	snd_soc_unregister_card(card);
 	card->dev = NULL;
+	return 0;
 }
 
 #define DRV_NAME "ams-delta-audio"

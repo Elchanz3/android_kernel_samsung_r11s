@@ -40,16 +40,16 @@ MODULE_LICENSE("GPL");
 /*
  * bus definition
  */
-static int snd_seq_bus_match(struct device *dev, const struct device_driver *drv)
+static int snd_seq_bus_match(struct device *dev, struct device_driver *drv)
 {
 	struct snd_seq_device *sdev = to_seq_dev(dev);
-	const struct snd_seq_driver *sdrv = to_seq_drv(drv);
+	struct snd_seq_driver *sdrv = to_seq_drv(drv);
 
 	return strcmp(sdrv->id, sdev->id) == 0 &&
 		sdrv->argsize == sdev->argsize;
 }
 
-static const struct bus_type snd_seq_bus_type = {
+static struct bus_type snd_seq_bus_type = {
 	.name = "snd_seq",
 	.match = snd_seq_bus_match,
 };
@@ -133,19 +133,10 @@ void snd_seq_device_load_drivers(void)
 	flush_work(&autoload_work);
 }
 EXPORT_SYMBOL(snd_seq_device_load_drivers);
-
-static inline void cancel_autoload_drivers(void)
-{
-	cancel_work_sync(&autoload_work);
-}
+#define cancel_autoload_drivers()	cancel_work_sync(&autoload_work)
 #else
-static inline void queue_autoload_drivers(void)
-{
-}
-
-static inline void cancel_autoload_drivers(void)
-{
-}
+#define queue_autoload_drivers() /* NOP */
+#define cancel_autoload_drivers() /* NOP */
 #endif
 
 /*
@@ -234,7 +225,7 @@ int snd_seq_device_new(struct snd_card *card, int device, const char *id,
 		put_device(&dev->dev);
 		return err;
 	}
-
+	
 	if (result)
 		*result = dev;
 

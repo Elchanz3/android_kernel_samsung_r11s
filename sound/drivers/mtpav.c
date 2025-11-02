@@ -46,7 +46,6 @@
 #include <sound/initval.h>
 #include <sound/rawmidi.h>
 #include <linux/delay.h>
-#include <linux/string.h>
 
 /*
  *      globals
@@ -54,6 +53,7 @@
 MODULE_AUTHOR("Michael T. Mayers");
 MODULE_DESCRIPTION("MOTU MidiTimePiece AV multiport MIDI");
 MODULE_LICENSE("GPL");
+MODULE_SUPPORTED_DEVICE("{{MOTU,MidiTimePiece AV multiport MIDI}}");
 
 // io resources
 #define MTPAV_IOBASE		0x378
@@ -286,6 +286,10 @@ static void snd_mtpav_output_port_write(struct mtpav *mtp_card,
 
 		snd_mtpav_send_byte(mtp_card, 0xf5);
 		snd_mtpav_send_byte(mtp_card, portp->hwport);
+		/*
+		snd_printk(KERN_DEBUG "new outport: 0x%x\n",
+			   (unsigned int) portp->hwport);
+		*/
 		if (!(outbyte & 0x80) && portp->running_status)
 			snd_mtpav_send_byte(mtp_card, portp->running_status);
 	}
@@ -304,9 +308,11 @@ static void snd_mtpav_output_write(struct snd_rawmidi_substream *substream)
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&mtp_card->spinlock);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
 	snd_mtpav_output_port_write(mtp_card, portp, substream);
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
 }
 
 
@@ -332,12 +338,14 @@ static int snd_mtpav_input_open(struct snd_rawmidi_substream *substream)
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&mtp_card->spinlock);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
 	portp->mode |= MTPAV_MODE_INPUT_OPENED;
 	portp->input = substream;
 	if (mtp_card->share_irq++ == 0)
 		snd_mtpav_mputreg(mtp_card, CREG, (SIGC_INTEN | SIGC_WRITE));	// enable pport interrupts
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
 	return 0;
 }
 
@@ -348,12 +356,14 @@ static int snd_mtpav_input_close(struct snd_rawmidi_substream *substream)
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&mtp_card->spinlock);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
 	portp->mode &= ~MTPAV_MODE_INPUT_OPENED;
 	portp->input = NULL;
 	if (--mtp_card->share_irq == 0)
 		snd_mtpav_mputreg(mtp_card, CREG, 0);	// disable pport interrupts
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
 	return 0;
 }
 
@@ -364,12 +374,15 @@ static void snd_mtpav_input_trigger(struct snd_rawmidi_substream *substream, int
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&mtp_card->spinlock);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
 	if (up)
 		portp->mode |= MTPAV_MODE_INPUT_TRIGGERED;
 	else
 		portp->mode &= ~MTPAV_MODE_INPUT_TRIGGERED;
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
+
 }
 
 
@@ -379,10 +392,11 @@ static void snd_mtpav_input_trigger(struct snd_rawmidi_substream *substream, int
 
 static void snd_mtpav_output_timer(struct timer_list *t)
 {
-	struct mtpav *chip = timer_container_of(chip, t, timer);
+	unsigned long flags;
+	struct mtpav *chip = from_timer(chip, t, timer);
 	int p;
 
-	guard(spinlock_irqsave)(&chip->spinlock);
+	spin_lock_irqsave(&chip->spinlock, flags);
 	/* reprogram timer */
 	mod_timer(&chip->timer, 1 + jiffies);
 	/* process each port */
@@ -391,6 +405,7 @@ static void snd_mtpav_output_timer(struct timer_list *t)
 		if ((portp->mode & MTPAV_MODE_OUTPUT_TRIGGERED) && portp->output)
 			snd_mtpav_output_port_write(chip, portp, portp->output);
 	}
+	spin_unlock_irqrestore(&chip->spinlock, flags);
 }
 
 /* spinlock held! */
@@ -402,7 +417,7 @@ static void snd_mtpav_add_output_timer(struct mtpav *chip)
 /* spinlock held! */
 static void snd_mtpav_remove_output_timer(struct mtpav *chip)
 {
-	timer_delete(&chip->timer);
+	del_timer(&chip->timer);
 }
 
 /*
@@ -412,10 +427,12 @@ static int snd_mtpav_output_open(struct snd_rawmidi_substream *substream)
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&mtp_card->spinlock);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
 	portp->mode |= MTPAV_MODE_OUTPUT_OPENED;
 	portp->output = substream;
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
 	return 0;
 };
 
@@ -426,10 +443,12 @@ static int snd_mtpav_output_close(struct snd_rawmidi_substream *substream)
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&mtp_card->spinlock);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
 	portp->mode &= ~MTPAV_MODE_OUTPUT_OPENED;
 	portp->output = NULL;
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
 	return 0;
 };
 
@@ -440,20 +459,21 @@ static void snd_mtpav_output_trigger(struct snd_rawmidi_substream *substream, in
 {
 	struct mtpav *mtp_card = substream->rmidi->private_data;
 	struct mtpav_port *portp = &mtp_card->ports[substream->number];
+	unsigned long flags;
 
-	scoped_guard(spinlock_irqsave, &mtp_card->spinlock) {
-		if (up) {
-			if ((portp->mode & MTPAV_MODE_OUTPUT_TRIGGERED)) {
-				if (mtp_card->istimer++ == 0)
-					snd_mtpav_add_output_timer(mtp_card);
-				portp->mode |= MTPAV_MODE_OUTPUT_TRIGGERED;
-			}
-		} else {
-			portp->mode &= ~MTPAV_MODE_OUTPUT_TRIGGERED;
-			if (--mtp_card->istimer == 0)
-				snd_mtpav_remove_output_timer(mtp_card);
+	spin_lock_irqsave(&mtp_card->spinlock, flags);
+	if (up) {
+		if (! (portp->mode & MTPAV_MODE_OUTPUT_TRIGGERED)) {
+			if (mtp_card->istimer++ == 0)
+				snd_mtpav_add_output_timer(mtp_card);
+			portp->mode |= MTPAV_MODE_OUTPUT_TRIGGERED;
 		}
+	} else {
+		portp->mode &= ~MTPAV_MODE_OUTPUT_TRIGGERED;
+		if (--mtp_card->istimer == 0)
+			snd_mtpav_remove_output_timer(mtp_card);
 	}
+	spin_unlock_irqrestore(&mtp_card->spinlock, flags);
 
 	if (up)
 		snd_mtpav_output_write(substream);
@@ -503,6 +523,8 @@ static void snd_mtpav_read_bytes(struct mtpav *mcrd)
 
 	u8 sbyt = snd_mtpav_getreg(mcrd, SREG);
 
+	/* printk(KERN_DEBUG "snd_mtpav_read_bytes() sbyt: 0x%x\n", sbyt); */
+
 	if (!(sbyt & SIGS_BYTE))
 		return;
 
@@ -534,8 +556,9 @@ static irqreturn_t snd_mtpav_irqh(int irq, void *dev_id)
 {
 	struct mtpav *mcard = dev_id;
 
-	guard(spinlock)(&mcard->spinlock);
+	spin_lock(&mcard->spinlock);
 	snd_mtpav_read_bytes(mcard);
+	spin_unlock(&mcard->spinlock);
 	return IRQ_HANDLED;
 }
 
@@ -544,16 +567,13 @@ static irqreturn_t snd_mtpav_irqh(int irq, void *dev_id)
  */
 static int snd_mtpav_get_ISA(struct mtpav *mcard)
 {
-	mcard->res_port = devm_request_region(mcard->card->dev, port, 3,
-					      "MotuMTPAV MIDI");
-	if (!mcard->res_port) {
-		dev_err(mcard->card->dev, "MTVAP port 0x%lx is busy\n", port);
+	if ((mcard->res_port = request_region(port, 3, "MotuMTPAV MIDI")) == NULL) {
+		snd_printk(KERN_ERR "MTVAP port 0x%lx is busy\n", port);
 		return -EBUSY;
 	}
 	mcard->port = port;
-	if (devm_request_irq(mcard->card->dev, irq, snd_mtpav_irqh, 0,
-			     "MOTU MTPAV", mcard)) {
-		dev_err(mcard->card->dev, "MTVAP IRQ %d busy\n", irq);
+	if (request_irq(irq, snd_mtpav_irqh, 0, "MOTU MTPAV", mcard)) {
+		snd_printk(KERN_ERR "MTVAP IRQ %d busy\n", irq);
 		return -EBUSY;
 	}
 	mcard->irq = irq;
@@ -589,11 +609,11 @@ static void snd_mtpav_set_name(struct mtpav *chip,
 	else if (substream->number >= 8 && substream->number < chip->num_ports * 2)
 		sprintf(substream->name, "MTP remote %d", (substream->number % chip->num_ports) + 1);
 	else if (substream->number == chip->num_ports * 2)
-		strscpy(substream->name, "MTP computer");
+		strcpy(substream->name, "MTP computer");
 	else if (substream->number == chip->num_ports * 2 + 1)
-		strscpy(substream->name, "MTP ADAT");
+		strcpy(substream->name, "MTP ADAT");
 	else
-		strscpy(substream->name, "MTP broadcast");
+		strcpy(substream->name, "MTP broadcast");
 }
 
 static int snd_mtpav_get_RAWMIDI(struct mtpav *mcard)
@@ -609,11 +629,10 @@ static int snd_mtpav_get_RAWMIDI(struct mtpav *mcard)
 		hwports = 8;
 	mcard->num_ports = hwports;
 
-	rval = snd_rawmidi_new(mcard->card, "MotuMIDI", 0,
-			       mcard->num_ports * 2 + MTPAV_PIDX_BROADCAST + 1,
-			       mcard->num_ports * 2 + MTPAV_PIDX_BROADCAST + 1,
-			       &mcard->rmidi);
-	if (rval < 0)
+	if ((rval = snd_rawmidi_new(mcard->card, "MotuMIDI", 0,
+				    mcard->num_ports * 2 + MTPAV_PIDX_BROADCAST + 1,
+				    mcard->num_ports * 2 + MTPAV_PIDX_BROADCAST + 1,
+				    &mcard->rmidi)) < 0)
 		return rval;
 	rawmidi = mcard->rmidi;
 	rawmidi->private_data = mcard;
@@ -641,10 +660,15 @@ static int snd_mtpav_get_RAWMIDI(struct mtpav *mcard)
 static void snd_mtpav_free(struct snd_card *card)
 {
 	struct mtpav *crd = card->private_data;
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&crd->spinlock);
+	spin_lock_irqsave(&crd->spinlock, flags);
 	if (crd->istimer > 0)
 		snd_mtpav_remove_output_timer(crd);
+	spin_unlock_irqrestore(&crd->spinlock, flags);
+	if (crd->irq >= 0)
+		free_irq(crd->irq, (void *)crd);
+	release_and_free_resource(crd->res_port);
 }
 
 /*
@@ -655,8 +679,8 @@ static int snd_mtpav_probe(struct platform_device *dev)
 	int err;
 	struct mtpav *mtp_card;
 
-	err = snd_devm_card_new(&dev->dev, index, id, THIS_MODULE,
-				sizeof(*mtp_card), &card);
+	err = snd_card_new(&dev->dev, index, id, THIS_MODULE,
+			   sizeof(*mtp_card), &card);
 	if (err < 0)
 		return err;
 
@@ -669,18 +693,20 @@ static int snd_mtpav_probe(struct platform_device *dev)
 	mtp_card->outmidihwport = 0xffffffff;
 	timer_setup(&mtp_card->timer, snd_mtpav_output_timer, 0);
 
+	card->private_free = snd_mtpav_free;
+
 	err = snd_mtpav_get_RAWMIDI(mtp_card);
 	if (err < 0)
-		return err;
+		goto __error;
 
 	mtp_card->inmidiport = mtp_card->num_ports + MTPAV_PIDX_BROADCAST;
 
 	err = snd_mtpav_get_ISA(mtp_card);
 	if (err < 0)
-		return err;
+		goto __error;
 
-	strscpy(card->driver, "MTPAV");
-	strscpy(card->shortname, "MTPAV on parallel port");
+	strcpy(card->driver, "MTPAV");
+	strcpy(card->shortname, "MTPAV on parallel port");
 	snprintf(card->longname, sizeof(card->longname),
 		 "MTPAV on parallel port at 0x%lx", port);
 
@@ -688,14 +714,20 @@ static int snd_mtpav_probe(struct platform_device *dev)
 
 	err = snd_card_register(mtp_card->card);
 	if (err < 0)
-		return err;
-
-	card->private_free = snd_mtpav_free;
+		goto __error;
 
 	platform_set_drvdata(dev, card);
-	dev_info(card->dev,
-		 "Motu MidiTimePiece on parallel port irq: %d ioport: 0x%lx\n",
-		 irq, port);
+	printk(KERN_INFO "Motu MidiTimePiece on parallel port irq: %d ioport: 0x%lx\n", irq, port);
+	return 0;
+
+ __error:
+	snd_card_free(card);
+	return err;
+}
+
+static int snd_mtpav_remove(struct platform_device *devptr)
+{
+	snd_card_free(platform_get_drvdata(devptr));
 	return 0;
 }
 
@@ -703,6 +735,7 @@ static int snd_mtpav_probe(struct platform_device *dev)
 
 static struct platform_driver snd_mtpav_driver = {
 	.probe		= snd_mtpav_probe,
+	.remove		= snd_mtpav_remove,
 	.driver		= {
 		.name	= SND_MTPAV_DRIVER,
 	},
@@ -712,8 +745,7 @@ static int __init alsa_card_mtpav_init(void)
 {
 	int err;
 
-	err = platform_driver_register(&snd_mtpav_driver);
-	if (err < 0)
+	if ((err = platform_driver_register(&snd_mtpav_driver)) < 0)
 		return err;
 
 	device = platform_device_register_simple(SND_MTPAV_DRIVER, -1, NULL, 0);

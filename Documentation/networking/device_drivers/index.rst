@@ -8,14 +8,15 @@ Contents:
 .. toctree::
    :maxdepth: 2
 
+   appletalk/index
    atm/index
-   can/index
+   cable/index
    cellular/index
    ethernet/index
    fddi/index
    hamradio/index
+   wan/index
    wifi/index
-   wwan/index
 
 .. only::  subproject and html
 

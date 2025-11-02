@@ -36,15 +36,13 @@
 #ifndef __GVT_RENDER_H__
 #define __GVT_RENDER_H__
 
-#include <linux/types.h>
-
-#include "gt/intel_engine_regs.h"
-
-struct i915_request;
-struct intel_context;
-struct intel_engine_cs;
-struct intel_gvt;
-struct intel_vgpu;
+struct engine_mmio {
+	enum intel_engine_id id;
+	i915_reg_t reg;
+	u32 mask;
+	bool in_context;
+	u32 value;
+};
 
 void intel_gvt_switch_mmio(struct intel_vgpu *pre,
 			   struct intel_vgpu *next,

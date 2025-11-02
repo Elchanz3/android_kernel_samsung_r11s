@@ -8,6 +8,7 @@
 
 #include <sound/jack.h>
 #include <sound/soc.h>
+#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
@@ -15,6 +16,12 @@
 #include <linux/export.h>
 #include <linux/suspend.h>
 #include <trace/events/asoc.h>
+
+struct jack_gpio_tbl {
+	int count;
+	struct snd_soc_jack *jack;
+	struct snd_soc_jack_gpio *gpios;
+};
 
 /**
  * snd_soc_jack_report - Report the current status for a jack
@@ -35,8 +42,9 @@ void snd_soc_jack_report(struct snd_soc_jack *jack, int status, int mask)
 	struct snd_soc_dapm_context *dapm;
 	struct snd_soc_jack_pin *pin;
 	unsigned int sync = 0;
+	int enable;
 
-	if (!jack || !jack->jack)
+	if (!jack)
 		return;
 	trace_snd_soc_jack_report(jack, mask, status);
 
@@ -50,7 +58,7 @@ void snd_soc_jack_report(struct snd_soc_jack *jack, int status, int mask)
 	trace_snd_soc_jack_notify(jack, status);
 
 	list_for_each_entry(pin, &jack->pins, list) {
-		int enable = pin->mask & jack->status;
+		enable = pin->mask & jack->status;
 
 		if (pin->invert)
 			enable = !enable;
@@ -125,7 +133,7 @@ EXPORT_SYMBOL_GPL(snd_soc_jack_get_type);
 /**
  * snd_soc_jack_add_pins - Associate DAPM pins with an ASoC jack
  *
- * @jack:  ASoC jack created with snd_soc_card_jack_new_pins()
+ * @jack:  ASoC jack
  * @count: Number of pins
  * @pins:  Array of pins
  *
@@ -200,12 +208,6 @@ void snd_soc_jack_notifier_unregister(struct snd_soc_jack *jack,
 EXPORT_SYMBOL_GPL(snd_soc_jack_notifier_unregister);
 
 #ifdef CONFIG_GPIOLIB
-struct jack_gpio_tbl {
-	int count;
-	struct snd_soc_jack *jack;
-	struct snd_soc_jack_gpio *gpios;
-};
-
 /* gpio detect */
 static void snd_soc_jack_gpio_detect(struct snd_soc_jack_gpio *gpio)
 {
@@ -344,9 +346,21 @@ int snd_soc_jack_add_gpios(struct snd_soc_jack *jack, int count,
 				goto undo;
 			}
 		} else {
-			dev_err(jack->card->dev, "ASoC: Invalid gpio at index %d\n", i);
-		        ret = -EINVAL;
-		        goto undo;
+			/* legacy GPIO number */
+			if (!gpio_is_valid(gpios[i].gpio)) {
+				dev_err(jack->card->dev,
+					"ASoC: Invalid gpio %d\n",
+					gpios[i].gpio);
+				ret = -EINVAL;
+				goto undo;
+			}
+
+			ret = gpio_request_one(gpios[i].gpio, GPIOF_IN,
+					       gpios[i].name);
+			if (ret)
+				goto undo;
+
+			gpios[i].desc = gpio_to_desc(gpios[i].gpio);
 		}
 got_gpio:
 		INIT_DELAYED_WORK(&gpios[i].work, gpio_work);
@@ -354,13 +368,12 @@ got_gpio:
 
 		ret = request_any_context_irq(gpiod_to_irq(gpios[i].desc),
 					      gpio_handler,
-					      IRQF_SHARED |
 					      IRQF_TRIGGER_RISING |
 					      IRQF_TRIGGER_FALLING,
 					      gpios[i].name,
 					      &gpios[i]);
 		if (ret < 0)
-			goto undo;
+			goto err;
 
 		if (gpios[i].wake) {
 			ret = irq_set_irq_wake(gpiod_to_irq(gpios[i].desc), 1);
@@ -388,6 +401,8 @@ got_gpio:
 	devres_add(jack->card->dev, tbl);
 	return 0;
 
+err:
+	gpio_free(gpios[i].gpio);
 undo:
 	jack_free_gpios(jack, i, gpios);
 	devres_free(tbl);

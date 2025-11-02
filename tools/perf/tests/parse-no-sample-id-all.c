@@ -8,12 +8,10 @@
 #include "evlist.h"
 #include "header.h"
 #include "debug.h"
-#include "util/sample.h"
 
 static int process_event(struct evlist **pevlist, union perf_event *event)
 {
 	struct perf_sample sample;
-	int ret;
 
 	if (event->header.type == PERF_RECORD_HEADER_ATTR) {
 		if (perf_event__process_attr(NULL, event, pevlist)) {
@@ -29,11 +27,8 @@ static int process_event(struct evlist **pevlist, union perf_event *event)
 	if (!*pevlist)
 		return -1;
 
-	perf_sample__init(&sample, /*all=*/false);
-	ret = evlist__parse_sample(*pevlist, event, &sample);
-	perf_sample__exit(&sample);
-	if (ret) {
-		pr_debug("evlist__parse_sample failed\n");
+	if (perf_evlist__parse_sample(*pevlist, event, &sample)) {
+		pr_debug("perf_evlist__parse_sample failed\n");
 		return -1;
 	}
 
@@ -72,8 +67,7 @@ struct test_attr_event {
  *
  * Return: %0 on success, %-1 if the test fails.
  */
-static int test__parse_no_sample_id_all(struct test_suite *test __maybe_unused,
-					int subtest __maybe_unused)
+int test__parse_no_sample_id_all(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	int err;
 
@@ -109,5 +103,3 @@ static int test__parse_no_sample_id_all(struct test_suite *test __maybe_unused,
 
 	return 0;
 }
-
-DEFINE_SUITE("Parse with no sample_id_all bit set", parse_no_sample_id_all);

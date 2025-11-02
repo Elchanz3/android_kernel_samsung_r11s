@@ -1,4 +1,4 @@
-.. SPDX-License-Identifier: GPL-2.0 OR GFDL-1.1-no-invariants-or-later
+.. SPDX-License-Identifier: GFDL-1.1-no-invariants-or-later
 
 .. _remote_controllers_sysfs_nodes:
 
@@ -6,7 +6,7 @@
 Remote Controller's sysfs nodes
 *******************************
 
-As defined at Documentation/ABI/testing/sysfs-class-rc, those are
+As defined at ``Documentation/ABI/testing/sysfs-class-rc``, those are
 the sysfs nodes that control the Remote Controllers:
 
 

@@ -9,11 +9,13 @@
 #include <linux/mm.h>
 #include <linux/uio.h>
 #include <linux/sched.h>
+#include <linux/compat.h>
 #include <linux/sched/mm.h>
 #include <linux/highmem.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
+#include <linux/task_integrity.h>
 
 /**
  * process_vm_rw_pages - read/write pages from task specified
@@ -53,10 +55,7 @@ static int process_vm_rw_pages(struct page **pages,
 }
 
 /* Maximum number of pages kmalloc'd to hold struct page's during copy */
-#define PVM_MAX_KMALLOC_PAGES 2
-
-/* Maximum number of pages that can be stored at a time */
-#define PVM_MAX_USER_PAGES (PVM_MAX_KMALLOC_PAGES * PAGE_SIZE / sizeof(struct page *))
+#define PVM_MAX_KMALLOC_PAGES (PAGE_SIZE * 2)
 
 /**
  * process_vm_rw_single_vec - read/write pages from task specified
@@ -82,6 +81,8 @@ static int process_vm_rw_single_vec(unsigned long addr,
 	unsigned long start_offset = addr - pa;
 	unsigned long nr_pages;
 	ssize_t rc = 0;
+	unsigned long max_pages_per_loop = PVM_MAX_KMALLOC_PAGES
+		/ sizeof(struct pages *);
 	unsigned int flags = 0;
 
 	/* Work out address and page range required */
@@ -93,7 +94,7 @@ static int process_vm_rw_single_vec(unsigned long addr,
 		flags |= FOLL_WRITE;
 
 	while (!rc && nr_pages && iov_iter_count(iter)) {
-		int pinned_pages = min_t(unsigned long, nr_pages, PVM_MAX_USER_PAGES);
+		int pinned_pages = min(nr_pages, max_pages_per_loop);
 		int locked = 1;
 		size_t bytes;
 
@@ -105,7 +106,7 @@ static int process_vm_rw_single_vec(unsigned long addr,
 		mmap_read_lock(mm);
 		pinned_pages = pin_user_pages_remote(mm, pa, pinned_pages,
 						     flags, process_pages,
-						     &locked);
+						     NULL, &locked);
 		if (locked)
 			mmap_read_unlock(mm);
 		if (pinned_pages <= 0)
@@ -172,7 +173,7 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 		iov_len = rvec[i].iov_len;
 		if (iov_len > 0) {
 			nr_pages_iov = ((unsigned long)rvec[i].iov_base
-					+ iov_len - 1)
+					+ iov_len)
 				/ PAGE_SIZE - (unsigned long)rvec[i].iov_base
 				/ PAGE_SIZE + 1;
 			nr_pages = max(nr_pages, nr_pages_iov);
@@ -185,8 +186,8 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 	if (nr_pages > PVM_MAX_PP_ARRAY_COUNT) {
 		/* For reliability don't try to kmalloc more than
 		   2 pages worth */
-		process_pages = kmalloc(min_t(size_t, PVM_MAX_KMALLOC_PAGES * PAGE_SIZE,
-					      sizeof(struct page *)*nr_pages),
+		process_pages = kmalloc(min_t(size_t, PVM_MAX_KMALLOC_PAGES,
+					      sizeof(struct pages *)*nr_pages),
 					GFP_KERNEL);
 
 		if (!process_pages)
@@ -201,8 +202,8 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 	}
 
 	mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS);
-	if (IS_ERR(mm)) {
-		rc = PTR_ERR(mm);
+	if (!mm || IS_ERR(mm)) {
+		rc = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
 		/*
 		 * Explicitly map EACCES to EPERM as EPERM is a more
 		 * appropriate error code for process_vw_readv/writev
@@ -211,6 +212,10 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 			rc = -EPERM;
 		goto put_task_struct;
 	}
+
+	rc = five_process_vm_rw(task, vm_write);
+	if (rc)
+		goto put_task_struct;
 
 	for (i = 0; i < riovcnt && iov_iter_count(iter) && !rc; i++)
 		rc = process_vm_rw_single_vec(
@@ -261,10 +266,10 @@ static ssize_t process_vm_rw(pid_t pid,
 	struct iovec iovstack_l[UIO_FASTIOV];
 	struct iovec iovstack_r[UIO_FASTIOV];
 	struct iovec *iov_l = iovstack_l;
-	struct iovec *iov_r;
+	struct iovec *iov_r = iovstack_r;
 	struct iov_iter iter;
 	ssize_t rc;
-	int dir = vm_write ? ITER_SOURCE : ITER_DEST;
+	int dir = vm_write ? WRITE : READ;
 
 	if (flags != 0)
 		return -EINVAL;

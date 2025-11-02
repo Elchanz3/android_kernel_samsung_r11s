@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*****************************************************************************
  *                                                                           *
  * File: pm3393.c                                                            *
@@ -8,6 +7,16 @@
  *  PMC/SIERRA (pm3393) MAC-PHY functionality.                               *
  *  part of the Chelsio 10Gb Ethernet Driver.                                *
  *                                                                           *
+ * This program is free software; you can redistribute it and/or modify      *
+ * it under the terms of the GNU General Public License, version 2, as       *
+ * published by the Free Software Foundation.                                *
+ *                                                                           *
+ * You should have received a copy of the GNU General Public License along   *
+ * with this program; if not, see <http://www.gnu.org/licenses/>.            *
+ *                                                                           *
+ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR IMPLIED    *
+ * WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF      *
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.                     *
  *                                                                           *
  * http://www.chelsio.com                                                    *
  *                                                                           *
@@ -141,7 +150,7 @@ static int pm3393_interrupt_enable(struct cmac *cmac)
 	pmwrite(cmac, SUNI1x10GEXP_REG_GLOBAL_INTERRUPT_ENABLE,
 		0 /*SUNI1x10GEXP_BITMSK_TOP_INTE */ );
 
-	/* TERMINATOR - PL_INTERRUPTS_EXT */
+	/* TERMINATOR - PL_INTERUPTS_EXT */
 	pl_intr = readl(cmac->adapter->regs + A_PL_ENABLE);
 	pl_intr |= F_PL_INTR_EXT;
 	writel(pl_intr, cmac->adapter->regs + A_PL_ENABLE);
@@ -179,7 +188,7 @@ static int pm3393_interrupt_disable(struct cmac *cmac)
 	elmer &= ~ELMER0_GP_BIT1;
 	t1_tpi_write(cmac->adapter, A_ELMER0_INT_ENABLE, elmer);
 
-	/* TERMINATOR - PL_INTERRUPTS_EXT */
+	/* TERMINATOR - PL_INTERUPTS_EXT */
 	/* DO NOT DISABLE TERMINATOR's EXTERNAL INTERRUPTS. ANOTHER CHIP
 	 * COULD WANT THEM ENABLED. We disable PM3393 at the ELMER level.
 	 */
@@ -222,7 +231,7 @@ static int pm3393_interrupt_clear(struct cmac *cmac)
 	elmer |= ELMER0_GP_BIT1;
 	t1_tpi_write(cmac->adapter, A_ELMER0_INT_CAUSE, elmer);
 
-	/* TERMINATOR - PL_INTERRUPTS_EXT
+	/* TERMINATOR - PL_INTERUPTS_EXT
 	 */
 	pl_intr = readl(cmac->adapter->regs + A_PL_CAUSE);
 	pl_intr |= F_PL_INTR_EXT;
@@ -487,7 +496,7 @@ static int pm3393_macaddress_get(struct cmac *cmac, u8 mac_addr[6])
 	return 0;
 }
 
-static int pm3393_macaddress_set(struct cmac *cmac, const u8 ma[6])
+static int pm3393_macaddress_set(struct cmac *cmac, u8 ma[6])
 {
 	u32 val, lo, mid, hi, enabled = cmac->instance->enabled;
 
@@ -756,7 +765,7 @@ static int pm3393_mac_reset(adapter_t * adapter)
 
 		/* ??? If this fails, might be able to software reset the XAUI part
 		 *     and try to recover... thus saving us from doing another HW reset */
-		/* Has the XAUI MABC PLL circuitry stabilized? */
+		/* Has the XAUI MABC PLL circuitry stablized? */
 		is_xaui_mabc_pll_locked =
 		    (val & SUNI1x10GEXP_BITMSK_TOP_SXRA_EXPIRED);
 

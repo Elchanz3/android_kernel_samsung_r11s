@@ -454,10 +454,8 @@ static int qlcnic_sriov_set_guest_vlan_mode(struct qlcnic_adapter *adapter,
 
 	num_vlans = sriov->num_allowed_vlans;
 	sriov->allowed_vlans = kcalloc(num_vlans, sizeof(u16), GFP_KERNEL);
-	if (!sriov->allowed_vlans) {
-		qlcnic_sriov_free_vlans(adapter);
+	if (!sriov->allowed_vlans)
 		return -ENOMEM;
-	}
 
 	vlans = (u16 *)&cmd->rsp.arg[3];
 	for (i = 0; i < num_vlans; i++)
@@ -529,7 +527,8 @@ static int qlcnic_sriov_vf_init_driver(struct qlcnic_adapter *adapter)
 	return 0;
 }
 
-static int qlcnic_sriov_setup_vf(struct qlcnic_adapter *adapter)
+static int qlcnic_sriov_setup_vf(struct qlcnic_adapter *adapter,
+				 int pci_using_dac)
 {
 	int err;
 
@@ -574,7 +573,7 @@ static int qlcnic_sriov_setup_vf(struct qlcnic_adapter *adapter)
 	if (err)
 		goto err_out_send_channel_term;
 
-	err = qlcnic_setup_netdev(adapter, adapter->netdev);
+	err = qlcnic_setup_netdev(adapter, adapter->netdev, pci_using_dac);
 	if (err)
 		goto err_out_send_channel_term;
 
@@ -617,7 +616,7 @@ static int qlcnic_sriov_check_dev_ready(struct qlcnic_adapter *adapter)
 	return 0;
 }
 
-int qlcnic_sriov_vf_init(struct qlcnic_adapter *adapter)
+int qlcnic_sriov_vf_init(struct qlcnic_adapter *adapter, int pci_using_dac)
 {
 	struct qlcnic_hardware_context *ahw = adapter->ahw;
 	int err;
@@ -634,7 +633,7 @@ int qlcnic_sriov_vf_init(struct qlcnic_adapter *adapter)
 	if (err)
 		return err;
 
-	err = qlcnic_sriov_setup_vf(adapter);
+	err = qlcnic_sriov_setup_vf(adapter, pci_using_dac);
 	if (err)
 		return err;
 
@@ -1484,11 +1483,8 @@ static int qlcnic_sriov_channel_cfg_cmd(struct qlcnic_adapter *adapter, u8 cmd_o
 	}
 
 	cmd_op = (cmd.rsp.arg[0] & 0xff);
-	if (cmd.rsp.arg[0] >> 25 == 2) {
-		ret = 2;
-		goto out;
-	}
-
+	if (cmd.rsp.arg[0] >> 25 == 2)
+		return 2;
 	if (cmd_op == QLCNIC_BC_CMD_CHANNEL_INIT)
 		set_bit(QLC_BC_VF_STATE, &vf->state);
 	else
@@ -2120,6 +2116,7 @@ static int qlcnic_sriov_vf_shutdown(struct pci_dev *pdev)
 {
 	struct qlcnic_adapter *adapter = pci_get_drvdata(pdev);
 	struct net_device *netdev = adapter->netdev;
+	int retval;
 
 	netif_device_detach(netdev);
 	qlcnic_cancel_idc_work(adapter);
@@ -2132,7 +2129,11 @@ static int qlcnic_sriov_vf_shutdown(struct pci_dev *pdev)
 	qlcnic_83xx_disable_mbx_intr(adapter);
 	cancel_delayed_work_sync(&adapter->idc_aen_work);
 
-	return pci_save_state(pdev);
+	retval = pci_save_state(pdev);
+	if (retval)
+		return retval;
+
+	return 0;
 }
 
 static int qlcnic_sriov_vf_resume(struct qlcnic_adapter *adapter)
@@ -2172,10 +2173,8 @@ int qlcnic_sriov_alloc_vlans(struct qlcnic_adapter *adapter)
 		vf = &sriov->vf_info[i];
 		vf->sriov_vlans = kcalloc(sriov->num_allowed_vlans,
 					  sizeof(*vf->sriov_vlans), GFP_KERNEL);
-		if (!vf->sriov_vlans) {
-			qlcnic_sriov_free_vlans(adapter);
+		if (!vf->sriov_vlans)
 			return -ENOMEM;
-		}
 	}
 
 	return 0;

@@ -28,11 +28,6 @@
 #define CACHE_NONE			0x00
 #define CACHE_WB_NO_ALLOC		0xb7
 
-#define PLATFORM_FEATURE_DBC		0x1
-#define PLATFORM_FEATURE_HSTI		0x2
-
-#define PSP_FEATURE(psp, feat)	(psp->vdata && psp->vdata->platform_features & PLATFORM_FEATURE_##feat)
-
 /* Structure to hold CCP device data */
 struct ccp_device;
 struct ccp_vdata {
@@ -56,30 +51,14 @@ struct tee_vdata {
 	const unsigned int cmdbuff_addr_hi_reg;
 	const unsigned int ring_wptr_reg;
 	const unsigned int ring_rptr_reg;
-	const unsigned int info_reg;
-};
-
-struct platform_access_vdata {
-	const unsigned int cmdresp_reg;
-	const unsigned int cmdbuff_addr_lo_reg;
-	const unsigned int cmdbuff_addr_hi_reg;
-	const unsigned int doorbell_button_reg;
-	const unsigned int doorbell_cmd_reg;
-
 };
 
 struct psp_vdata {
 	const struct sev_vdata *sev;
 	const struct tee_vdata *tee;
-	const struct platform_access_vdata *platform_access;
-	const unsigned int cmdresp_reg;
-	const unsigned int cmdbuff_addr_lo_reg;
-	const unsigned int cmdbuff_addr_hi_reg;
 	const unsigned int feature_reg;
 	const unsigned int inten_reg;
 	const unsigned int intsts_reg;
-	const unsigned int bootloader_info_reg;
-	const unsigned int platform_features;
 };
 
 /* Structure to hold SP device data */
@@ -138,6 +117,7 @@ struct sp_device *sp_alloc_struct(struct device *dev);
 
 int sp_init(struct sp_device *sp);
 void sp_destroy(struct sp_device *sp);
+struct sp_device *sp_get_master(void);
 
 int sp_suspend(struct sp_device *sp);
 int sp_resume(struct sp_device *sp);
@@ -154,8 +134,8 @@ struct sp_device *sp_get_psp_master_device(void);
 int ccp_dev_init(struct sp_device *sp);
 void ccp_dev_destroy(struct sp_device *sp);
 
-void ccp_dev_suspend(struct sp_device *sp);
-void ccp_dev_resume(struct sp_device *sp);
+int ccp_dev_suspend(struct sp_device *sp);
+int ccp_dev_resume(struct sp_device *sp);
 
 #else	/* !CONFIG_CRYPTO_DEV_SP_CCP */
 
@@ -164,8 +144,15 @@ static inline int ccp_dev_init(struct sp_device *sp)
 	return 0;
 }
 static inline void ccp_dev_destroy(struct sp_device *sp) { }
-static inline void ccp_dev_suspend(struct sp_device *sp) { }
-static inline void ccp_dev_resume(struct sp_device *sp) { }
+
+static inline int ccp_dev_suspend(struct sp_device *sp)
+{
+	return 0;
+}
+static inline int ccp_dev_resume(struct sp_device *sp)
+{
+	return 0;
+}
 #endif	/* CONFIG_CRYPTO_DEV_SP_CCP */
 
 #ifdef CONFIG_CRYPTO_DEV_SP_PSP

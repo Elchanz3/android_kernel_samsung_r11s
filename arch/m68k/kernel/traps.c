@@ -37,12 +37,8 @@
 #include <linux/uaccess.h>
 #include <asm/traps.h>
 #include <asm/machdep.h>
-#include <asm/processor.h>
 #include <asm/siginfo.h>
 #include <asm/tlbflush.h>
-
-#include "traps.h"
-#include "../mm/fault.h"
 
 static const char *vec_names[] = {
 	[VEC_RESETSP]	= "RESET SP",
@@ -127,6 +123,10 @@ static const char *space_names[] = {
 };
 
 void die_if_kernel(char *,struct pt_regs *,int);
+asmlinkage int do_page_fault(struct pt_regs *regs, unsigned long address,
+                             unsigned long error_code);
+int send_fault_sig(struct pt_regs *regs);
+
 asmlinkage void trap_c(struct frame *fp);
 
 #if defined (CONFIG_M68060)
@@ -182,8 +182,9 @@ static inline void access_error060 (struct frame *fp)
 static inline unsigned long probe040(int iswrite, unsigned long addr, int wbs)
 {
 	unsigned long mmusr;
+	mm_segment_t old_fs = get_fs();
 
-	set_fc(wbs);
+	set_fs(MAKE_MM_SEG(wbs));
 
 	if (iswrite)
 		asm volatile (".chip 68040; ptestw (%0); .chip 68k" : : "a" (addr));
@@ -192,7 +193,7 @@ static inline unsigned long probe040(int iswrite, unsigned long addr, int wbs)
 
 	asm volatile (".chip 68040; movec %%mmusr,%0; .chip 68k" : "=r" (mmusr));
 
-	set_fc(USER_DATA);
+	set_fs(old_fs);
 
 	return mmusr;
 }
@@ -201,8 +202,10 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 				   unsigned long wbd)
 {
 	int res = 0;
+	mm_segment_t old_fs = get_fs();
 
-	set_fc(wbs);
+	/* set_fs can not be moved, otherwise put_user() may oops */
+	set_fs(MAKE_MM_SEG(wbs));
 
 	switch (wbs & WBSIZ_040) {
 	case BA_SIZE_BYTE:
@@ -216,7 +219,9 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 		break;
 	}
 
-	set_fc(USER_DATA);
+	/* set_fs can not be moved, otherwise put_user() may oops */
+	set_fs(old_fs);
+
 
 	pr_debug("do_040writeback1, res=%d\n", res);
 
@@ -364,7 +369,7 @@ disable_wb:
 #if defined(CONFIG_SUN3)
 #include <asm/sun3mmu.h>
 
-#include "../sun3/sun3.h"
+extern int mmu_emu_handle_fault (unsigned long, int, int);
 
 /* sun3 version of bus_error030 */
 
@@ -383,7 +388,7 @@ static inline void bus_error030 (struct frame *fp)
 			fp->ptregs.format == 0xa ? fp->ptregs.pc + 4 : fp->un.fmtb.baddr);
 	if (ssw & DF)
 		pr_debug("Data %s fault at %#010lx in %s (pc=%#lx)\n",
-			str_read_write(ssw & RW),
+			ssw & RW ? "read" : "write",
 			fp->un.fmtb.daddr,
 			space_names[ssw & DFC], fp->ptregs.pc);
 
@@ -419,7 +424,7 @@ static inline void bus_error030 (struct frame *fp)
 				}
 
 				pr_err("Data %s fault at %#010lx in %s (pc=%#lx)\n",
-					str_read_write(ssw & RW),
+					ssw & RW ? "read" : "write",
 					fp->un.fmtb.daddr,
 					space_names[ssw & DFC], fp->ptregs.pc);
 			}
@@ -455,7 +460,7 @@ static inline void bus_error030 (struct frame *fp)
 			pr_debug("*** unexpected busfault type=%#04x\n",
 				 buserr_type);
 			pr_debug("invalid %s access at %#lx from pc %#lx\n",
-				 str_read_write(ssw & RW), addr,
+				 !(ssw & RW) ? "write" : "read", addr,
 				 fp->ptregs.pc);
 			die_if_kernel ("Oops", &fp->ptregs, buserr_type);
 			force_sig (SIGBUS);
@@ -486,10 +491,10 @@ static inline void bus_error030 (struct frame *fp)
 	if (buserr_type & SUN3_BUSERR_INVALID) {
 		if (!mmu_emu_handle_fault(addr, 1, 0))
 			do_page_fault (&fp->ptregs, addr, 0);
-	} else {
+       } else {
 		pr_debug("protection fault on insn access (segv).\n");
 		force_sig (SIGSEGV);
-	}
+       }
 }
 #else
 #if defined(CPU_M68020_OR_M68030)
@@ -514,7 +519,7 @@ static inline void bus_error030 (struct frame *fp)
 			fp->ptregs.format == 0xa ? fp->ptregs.pc + 4 : fp->un.fmtb.baddr);
 	if (ssw & DF)
 		pr_debug("Data %s fault at %#010lx in %s (pc=%#lx)\n",
-			str_read_write(ssw & RW),
+			ssw & RW ? "read" : "write",
 			fp->un.fmtb.daddr,
 			space_names[ssw & DFC], fp->ptregs.pc);
 
@@ -548,7 +553,7 @@ static inline void bus_error030 (struct frame *fp)
 			/* We might have an exception table for this PC */
 			if (ssw & 4 && !search_exception_tables(fp->ptregs.pc)) {
 				pr_err("Data %s fault at %#010lx in %s (pc=%#lx)\n",
-				       str_read_write(ssw & RW),
+				       ssw & RW ? "read" : "write",
 				       fp->un.fmtb.daddr,
 				       space_names[ssw & DFC], fp->ptregs.pc);
 				goto buserr;
@@ -564,7 +569,7 @@ static inline void bus_error030 (struct frame *fp)
 				       mmusr);
 		} else if (mmusr & (MMU_B|MMU_L|MMU_S)) {
 			pr_err("invalid %s access at %#lx from pc %#lx\n",
-			       str_read_write(ssw & RW), addr,
+			       !(ssw & RW) ? "write" : "read", addr,
 			       fp->ptregs.pc);
 			die_if_kernel("Oops",&fp->ptregs,mmusr);
 			force_sig(SIGSEGV);
@@ -575,7 +580,7 @@ static inline void bus_error030 (struct frame *fp)
 #endif
 
 			pr_err("weird %s access at %#lx from pc %#lx (ssw is %#x)\n",
-			       str_read_write(ssw & RW), addr,
+			       !(ssw & RW) ? "write" : "read", addr,
 			       fp->ptregs.pc, ssw);
 			asm volatile ("ptestr #1,%1@,#0\n\t"
 				      "pmove %%psr,%0"
@@ -850,9 +855,9 @@ void show_registers(struct pt_regs *regs)
 	pr_info("PC: [<%08lx>] %pS\n", regs->pc, (void *)regs->pc);
 	pr_info("SR: %04x  SP: %p  a2: %08lx\n", regs->sr, regs, regs->a2);
 	pr_info("d0: %08lx    d1: %08lx    d2: %08lx    d3: %08lx\n",
-		regs->d0, regs->d1, regs->d2, regs->d3);
+	       regs->d0, regs->d1, regs->d2, regs->d3);
 	pr_info("d4: %08lx    d5: %08lx    a0: %08lx    a1: %08lx\n",
-		regs->d4, regs->d5, regs->a0, regs->a1);
+	       regs->d4, regs->d5, regs->a0, regs->a1);
 
 	pr_info("Process %s (pid: %d, task=%p)\n",
 		current->comm, task_pid_nr(current), current);
@@ -964,7 +969,7 @@ void show_stack(struct task_struct *task, unsigned long *stack,
  * real 68k parts, but it won't hurt either.
  */
 
-static void bad_super_trap(struct frame *fp)
+void bad_super_trap (struct frame *fp)
 {
 	int vector = (fp->ptregs.vector >> 2) & 0xff;
 
@@ -991,7 +996,7 @@ static void bad_super_trap(struct frame *fp)
 				fp->ptregs.pc + 4 : fp->un.fmtb.baddr);
 		if (ssw & DF)
 			pr_err("Data %s fault at %#010lx in %s (pc=%#lx)\n",
-				str_read_write(ssw & RW),
+				ssw & RW ? "read" : "write",
 				fp->un.fmtb.daddr, space_names[ssw & DFC],
 				fp->ptregs.pc);
 	}
@@ -1147,7 +1152,7 @@ asmlinkage void set_esp0(unsigned long ssp)
  */
 asmlinkage void fpsp040_die(void)
 {
-	force_exit_sig(SIGSEGV);
+	do_exit(SIGSEGV);
 }
 
 #ifdef CONFIG_M68KFPU_EMU

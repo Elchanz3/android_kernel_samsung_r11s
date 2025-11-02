@@ -6,6 +6,7 @@
 #include <linux/export.h>
 #include <net/net_namespace.h>
 #include <net/fib_notifier.h>
+#include <net/netns/ipv4.h>
 #include <net/ip_fib.h>
 
 int call_fib4_notifier(struct notifier_block *nb,
@@ -22,15 +23,15 @@ int call_fib4_notifiers(struct net *net, enum fib_event_type event_type,
 	ASSERT_RTNL();
 
 	info->family = AF_INET;
-	/* Paired with READ_ONCE() in fib4_seq_read() */
-	WRITE_ONCE(net->ipv4.fib_seq, net->ipv4.fib_seq + 1);
+	net->ipv4.fib_seq++;
 	return call_fib_notifiers(net, event_type, info);
 }
 
-static unsigned int fib4_seq_read(const struct net *net)
+static unsigned int fib4_seq_read(struct net *net)
 {
-	/* Paired with WRITE_ONCE() in call_fib4_notifiers() */
-	return READ_ONCE(net->ipv4.fib_seq) + fib4_rules_seq_read(net);
+	ASSERT_RTNL();
+
+	return net->ipv4.fib_seq + fib4_rules_seq_read(net);
 }
 
 static int fib4_dump(struct net *net, struct notifier_block *nb,

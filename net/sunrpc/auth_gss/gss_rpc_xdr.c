@@ -782,6 +782,7 @@ void gssx_enc_accept_sec_context(struct rpc_rqst *req,
 	xdr_inline_pages(&req->rq_rcv_buf,
 		PAGE_SIZE/2 /* pretty arbitrary */,
 		arg->pages, 0 /* page base */, arg->npages * PAGE_SIZE);
+	req->rq_rcv_buf.flags |= XDRBUF_SPARSE_PAGES;
 done:
 	if (err)
 		dprintk("RPC:       gssx_enc_accept_sec_context: %d\n", err);
@@ -794,12 +795,12 @@ int gssx_dec_accept_sec_context(struct rpc_rqst *rqstp,
 	struct gssx_res_accept_sec_context *res = data;
 	u32 value_follows;
 	int err;
-	struct folio *scratch;
+	struct page *scratch;
 
-	scratch = folio_alloc(GFP_KERNEL, 0);
+	scratch = alloc_page(GFP_KERNEL);
 	if (!scratch)
 		return -ENOMEM;
-	xdr_set_scratch_folio(xdr, scratch);
+	xdr_set_scratch_buffer(xdr, page_address(scratch), PAGE_SIZE);
 
 	/* res->status */
 	err = gssx_dec_status(xdr, &res->status);
@@ -844,6 +845,6 @@ int gssx_dec_accept_sec_context(struct rpc_rqst *rqstp,
 	err = gssx_dec_option_array(xdr, &res->options);
 
 out_free:
-	folio_put(scratch);
+	__free_page(scratch);
 	return err;
 }

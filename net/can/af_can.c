@@ -171,9 +171,6 @@ static int can_create(struct net *net, struct socket *sock, int protocol,
 		/* release sk on errors */
 		sock_orphan(sk);
 		sock_put(sk);
-		sock->sk = NULL;
-	} else {
-		sock_prot_inuse_add(net, sk->sk_prot, 1);
 	}
 
  errout:
@@ -202,26 +199,27 @@ static int can_create(struct net *net, struct socket *sock, int protocol,
 int can_send(struct sk_buff *skb, int loop)
 {
 	struct sk_buff *newskb = NULL;
+	struct canfd_frame *cfd = (struct canfd_frame *)skb->data;
 	struct can_pkg_stats *pkg_stats = dev_net(skb->dev)->can.pkg_stats;
 	int err = -EINVAL;
 
-	if (can_is_canxl_skb(skb)) {
-		skb->protocol = htons(ETH_P_CANXL);
-	} else if (can_is_can_skb(skb)) {
+	if (skb->len == CAN_MTU) {
 		skb->protocol = htons(ETH_P_CAN);
-	} else if (can_is_canfd_skb(skb)) {
-		struct canfd_frame *cfd = (struct canfd_frame *)skb->data;
-
+		if (unlikely(cfd->len > CAN_MAX_DLEN))
+			goto inval_skb;
+	} else if (skb->len == CANFD_MTU) {
 		skb->protocol = htons(ETH_P_CANFD);
-
-		/* set CAN FD flag for CAN FD frames by default */
-		cfd->flags |= CANFD_FDF;
+		if (unlikely(cfd->len > CANFD_MAX_DLEN))
+			goto inval_skb;
 	} else {
 		goto inval_skb;
 	}
 
-	/* Make sure the CAN frame can pass the selected CAN netdevice. */
-	if (unlikely(skb->len > READ_ONCE(skb->dev->mtu))) {
+	/* Make sure the CAN frame can pass the selected CAN netdevice.
+	 * As structs can_frame and canfd_frame are similar, we can provide
+	 * CAN FD frames to legacy CAN drivers as long as the length is <= 8
+	 */
+	if (unlikely(skb->len > skb->dev->mtu && cfd->len > CAN_MAX_DLEN)) {
 		err = -EMSGSIZE;
 		goto inval_skb;
 	}
@@ -286,11 +284,11 @@ int can_send(struct sk_buff *skb, int loop)
 	}
 
 	if (newskb)
-		netif_rx(newskb);
+		netif_rx_ni(newskb);
 
 	/* update statistics */
-	atomic_long_inc(&pkg_stats->tx_frames);
-	atomic_long_inc(&pkg_stats->tx_frames_delta);
+	pkg_stats->tx_frames++;
+	pkg_stats->tx_frames_delta++;
 
 	return 0;
 
@@ -449,6 +447,7 @@ int can_rx_register(struct net *net, struct net_device *dev, canid_t can_id,
 	struct hlist_head *rcv_list;
 	struct can_dev_rcv_lists *dev_rcv_lists;
 	struct can_rcv_lists_stats *rcv_lists_stats = net->can.rcv_lists_stats;
+	int err = 0;
 
 	/* insert new receiver  (dev,canid,mask) -> (func,data) */
 
@@ -483,7 +482,7 @@ int can_rx_register(struct net *net, struct net_device *dev, canid_t can_id,
 					       rcv_lists_stats->rcv_entries);
 	spin_unlock_bh(&net->can.rcvlists_lock);
 
-	return 0;
+	return err;
 }
 EXPORT_SYMBOL(can_rx_register);
 
@@ -649,8 +648,8 @@ static void can_receive(struct sk_buff *skb, struct net_device *dev)
 	int matches;
 
 	/* update statistics */
-	atomic_long_inc(&pkg_stats->rx_frames);
-	atomic_long_inc(&pkg_stats->rx_frames_delta);
+	pkg_stats->rx_frames++;
+	pkg_stats->rx_frames_delta++;
 
 	/* create non-zero unique skb identifier together with *skb */
 	while (!(can_skb_prv(skb)->skbcnt))
@@ -671,54 +670,61 @@ static void can_receive(struct sk_buff *skb, struct net_device *dev)
 	consume_skb(skb);
 
 	if (matches > 0) {
-		atomic_long_inc(&pkg_stats->matches);
-		atomic_long_inc(&pkg_stats->matches_delta);
+		pkg_stats->matches++;
+		pkg_stats->matches_delta++;
 	}
 }
 
 static int can_rcv(struct sk_buff *skb, struct net_device *dev,
 		   struct packet_type *pt, struct net_device *orig_dev)
 {
-	if (unlikely(dev->type != ARPHRD_CAN || !can_get_ml_priv(dev) || !can_is_can_skb(skb))) {
+	struct canfd_frame *cfd = (struct canfd_frame *)skb->data;
+
+	if (unlikely(dev->type != ARPHRD_CAN || !can_get_ml_priv(dev) || skb->len != CAN_MTU)) {
 		pr_warn_once("PF_CAN: dropped non conform CAN skbuff: dev type %d, len %d\n",
 			     dev->type, skb->len);
+		goto free_skb;
+	}
 
-		kfree_skb_reason(skb, SKB_DROP_REASON_CAN_RX_INVALID_FRAME);
-		return NET_RX_DROP;
+	/* This check is made separately since cfd->len would be uninitialized if skb->len = 0. */
+	if (unlikely(cfd->len > CAN_MAX_DLEN)) {
+		pr_warn_once("PF_CAN: dropped non conform CAN skbuff: dev type %d, len %d, datalen %d\n",
+			     dev->type, skb->len, cfd->len);
+		goto free_skb;
 	}
 
 	can_receive(skb, dev);
 	return NET_RX_SUCCESS;
+
+free_skb:
+	kfree_skb(skb);
+	return NET_RX_DROP;
 }
 
 static int canfd_rcv(struct sk_buff *skb, struct net_device *dev,
 		     struct packet_type *pt, struct net_device *orig_dev)
 {
-	if (unlikely(dev->type != ARPHRD_CAN || !can_get_ml_priv(dev) || !can_is_canfd_skb(skb))) {
+	struct canfd_frame *cfd = (struct canfd_frame *)skb->data;
+
+	if (unlikely(dev->type != ARPHRD_CAN || !can_get_ml_priv(dev) || skb->len != CANFD_MTU)) {
 		pr_warn_once("PF_CAN: dropped non conform CAN FD skbuff: dev type %d, len %d\n",
 			     dev->type, skb->len);
+		goto free_skb;
+	}
 
-		kfree_skb_reason(skb, SKB_DROP_REASON_CANFD_RX_INVALID_FRAME);
-		return NET_RX_DROP;
+	/* This check is made separately since cfd->len would be uninitialized if skb->len = 0. */
+	if (unlikely(cfd->len > CANFD_MAX_DLEN)) {
+		pr_warn_once("PF_CAN: dropped non conform CAN FD skbuff: dev type %d, len %d, datalen %d\n",
+			     dev->type, skb->len, cfd->len);
+		goto free_skb;
 	}
 
 	can_receive(skb, dev);
 	return NET_RX_SUCCESS;
-}
 
-static int canxl_rcv(struct sk_buff *skb, struct net_device *dev,
-		     struct packet_type *pt, struct net_device *orig_dev)
-{
-	if (unlikely(dev->type != ARPHRD_CAN || !can_get_ml_priv(dev) || !can_is_canxl_skb(skb))) {
-		pr_warn_once("PF_CAN: dropped non conform CAN XL skbuff: dev type %d, len %d\n",
-			     dev->type, skb->len);
-
-		kfree_skb_reason(skb, SKB_DROP_REASON_CANXL_RX_INVALID_FRAME);
-		return NET_RX_DROP;
-	}
-
-	can_receive(skb, dev);
-	return NET_RX_SUCCESS;
+free_skb:
+	kfree_skb(skb);
+	return NET_RX_DROP;
 }
 
 /* af_can protocol functions */
@@ -825,7 +831,7 @@ static void can_pernet_exit(struct net *net)
 	if (IS_ENABLED(CONFIG_PROC_FS)) {
 		can_remove_proc(net);
 		if (stats_timer)
-			timer_delete_sync(&net->can.stattimer);
+			del_timer_sync(&net->can.stattimer);
 	}
 
 	kfree(net->can.rx_alldev_list);
@@ -845,11 +851,6 @@ static struct packet_type canfd_packet __read_mostly = {
 	.func = canfd_rcv,
 };
 
-static struct packet_type canxl_packet __read_mostly = {
-	.type = cpu_to_be16(ETH_P_CANXL),
-	.func = canxl_rcv,
-};
-
 static const struct net_proto_family can_family_ops = {
 	.family = PF_CAN,
 	.create = can_create,
@@ -866,10 +867,8 @@ static __init int can_init(void)
 	int err;
 
 	/* check for correct padding to be able to use the structs similarly */
-	BUILD_BUG_ON(offsetof(struct can_frame, len) !=
+	BUILD_BUG_ON(offsetof(struct can_frame, can_dlc) !=
 		     offsetof(struct canfd_frame, len) ||
-		     offsetof(struct can_frame, len) !=
-		     offsetof(struct canxl_frame, flags) ||
 		     offsetof(struct can_frame, data) !=
 		     offsetof(struct canfd_frame, data));
 
@@ -891,7 +890,6 @@ static __init int can_init(void)
 
 	dev_add_pack(&can_packet);
 	dev_add_pack(&canfd_packet);
-	dev_add_pack(&canxl_packet);
 
 	return 0;
 
@@ -906,7 +904,6 @@ out_pernet:
 static __exit void can_exit(void)
 {
 	/* protocol unregister */
-	dev_remove_pack(&canxl_packet);
 	dev_remove_pack(&canfd_packet);
 	dev_remove_pack(&can_packet);
 	sock_unregister(PF_CAN);

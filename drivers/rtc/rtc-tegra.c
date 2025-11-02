@@ -232,7 +232,7 @@ static irqreturn_t tegra_rtc_irq_handler(int irq, void *data)
 {
 	struct device *dev = data;
 	struct tegra_rtc_info *info = dev_get_drvdata(dev);
-	unsigned long events = 0;
+	unsigned long events = 0, flags;
 	u32 status;
 
 	status = readl(info->base + TEGRA_RTC_REG_INTR_STATUS);
@@ -240,10 +240,10 @@ static irqreturn_t tegra_rtc_irq_handler(int irq, void *data)
 		/* clear the interrupt masks and status on any IRQ */
 		tegra_rtc_wait_while_busy(dev);
 
-		spin_lock(&info->lock);
+		spin_lock_irqsave(&info->lock, flags);
 		writel(0, info->base + TEGRA_RTC_REG_INTR_MASK);
 		writel(status, info->base + TEGRA_RTC_REG_INTR_STATUS);
-		spin_unlock(&info->lock);
+		spin_unlock_irqrestore(&info->lock, flags);
 	}
 
 	/* check if alarm */
@@ -319,7 +319,7 @@ static int tegra_rtc_probe(struct platform_device *pdev)
 	writel(0xffffffff, info->base + TEGRA_RTC_REG_INTR_STATUS);
 	writel(0, info->base + TEGRA_RTC_REG_INTR_MASK);
 
-	device_init_wakeup(&pdev->dev, true);
+	device_init_wakeup(&pdev->dev, 1);
 
 	ret = devm_request_irq(&pdev->dev, info->irq, tegra_rtc_irq_handler,
 			       IRQF_TRIGGER_HIGH, dev_name(&pdev->dev),
@@ -329,7 +329,7 @@ static int tegra_rtc_probe(struct platform_device *pdev)
 		goto disable_clk;
 	}
 
-	ret = devm_rtc_register_device(info->rtc);
+	ret = rtc_register_device(info->rtc);
 	if (ret)
 		goto disable_clk;
 
@@ -342,11 +342,13 @@ disable_clk:
 	return ret;
 }
 
-static void tegra_rtc_remove(struct platform_device *pdev)
+static int tegra_rtc_remove(struct platform_device *pdev)
 {
 	struct tegra_rtc_info *info = platform_get_drvdata(pdev);
 
 	clk_disable_unprepare(info->clk);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

@@ -20,9 +20,7 @@
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
-#include <linux/panic_notifier.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
@@ -99,7 +97,7 @@ static irqreturn_t altr_sdram_mc_err_handler(int irq, void *dev_id)
 	if (status & priv->ecc_stat_ce_mask) {
 		regmap_read(drvdata->mc_vbase, priv->ecc_saddr_offset,
 			    &err_addr);
-		if (priv->ecc_cecnt_offset)
+		if (priv->ecc_uecnt_offset)
 			regmap_read(drvdata->mc_vbase,  priv->ecc_cecnt_offset,
 				    &err_count);
 		edac_mc_handle_error(HW_EVENT_ERR_CORRECTED, mci, err_count,
@@ -128,6 +126,7 @@ static ssize_t altr_sdr_mc_err_inject_write(struct file *file,
 
 	ptemp = dma_alloc_coherent(mci->pdev, 16, &dma_handle, GFP_KERNEL);
 	if (!ptemp) {
+		dma_free_coherent(mci->pdev, 16, ptemp, dma_handle);
 		edac_printk(KERN_ERR, EDAC_MC,
 			    "Inject: Buffer Allocation error\n");
 		return -ENOMEM;
@@ -279,6 +278,7 @@ release:
 
 static int altr_sdram_probe(struct platform_device *pdev)
 {
+	const struct of_device_id *id;
 	struct edac_mc_layer layers[2];
 	struct mem_ctl_info *mci;
 	struct altr_sdram_mc_data *drvdata;
@@ -288,6 +288,10 @@ static int altr_sdram_probe(struct platform_device *pdev)
 	u32 read_reg;
 	int irq, irq2, res = 0;
 	unsigned long mem_size, irqflags = 0;
+
+	id = of_match_device(altr_sdram_ctrl_of_match, &pdev->dev);
+	if (!id)
+		return -ENODEV;
 
 	/* Grab the register range from the sdr controller in device tree */
 	mc_vbase = syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
@@ -299,7 +303,8 @@ static int altr_sdram_probe(struct platform_device *pdev)
 	}
 
 	/* Check specific dependencies for the module */
-	priv = device_get_match_data(&pdev->dev);
+	priv = of_match_node(altr_sdram_ctrl_of_match,
+			     pdev->dev.of_node)->data;
 
 	/* Validate the SDRAM controller has ECC enabled */
 	if (regmap_read(mc_vbase, priv->ecc_ctrl_offset, &read_reg) ||
@@ -453,13 +458,15 @@ free:
 	return res;
 }
 
-static void altr_sdram_remove(struct platform_device *pdev)
+static int altr_sdram_remove(struct platform_device *pdev)
 {
 	struct mem_ctl_info *mci = platform_get_drvdata(pdev);
 
 	edac_mc_del_mc(&pdev->dev);
 	edac_mc_free(mci);
 	platform_set_drvdata(pdev, NULL);
+
+	return 0;
 }
 
 /*
@@ -531,18 +538,10 @@ module_platform_driver(altr_edac_driver);
  * trigger testing are different for each memory.
  */
 
-#ifdef CONFIG_EDAC_ALTERA_OCRAM
 static const struct edac_device_prv_data ocramecc_data;
-#endif
-#ifdef CONFIG_EDAC_ALTERA_L2C
 static const struct edac_device_prv_data l2ecc_data;
-#endif
-#ifdef CONFIG_EDAC_ALTERA_OCRAM
 static const struct edac_device_prv_data a10_ocramecc_data;
-#endif
-#ifdef CONFIG_EDAC_ALTERA_L2C
 static const struct edac_device_prv_data a10_l2ecc_data;
-#endif
 
 static irqreturn_t altr_edac_device_handler(int irq, void *dev_id)
 {
@@ -569,9 +568,9 @@ static irqreturn_t altr_edac_device_handler(int irq, void *dev_id)
 	return ret_value;
 }
 
-static ssize_t __maybe_unused
-altr_edac_device_trig(struct file *file, const char __user *user_buf,
-		      size_t count, loff_t *ppos)
+static ssize_t altr_edac_device_trig(struct file *file,
+				     const char __user *user_buf,
+				     size_t count, loff_t *ppos)
 
 {
 	u32 *ptemp, i, error_mask;
@@ -640,27 +639,27 @@ altr_edac_device_trig(struct file *file, const char __user *user_buf,
 	return count;
 }
 
-static const struct file_operations altr_edac_device_inject_fops __maybe_unused = {
+static const struct file_operations altr_edac_device_inject_fops = {
 	.open = simple_open,
 	.write = altr_edac_device_trig,
 	.llseek = generic_file_llseek,
 };
 
-static ssize_t __maybe_unused
-altr_edac_a10_device_trig(struct file *file, const char __user *user_buf,
-			  size_t count, loff_t *ppos);
+static ssize_t altr_edac_a10_device_trig(struct file *file,
+					 const char __user *user_buf,
+					 size_t count, loff_t *ppos);
 
-static const struct file_operations altr_edac_a10_device_inject_fops __maybe_unused = {
+static const struct file_operations altr_edac_a10_device_inject_fops = {
 	.open = simple_open,
 	.write = altr_edac_a10_device_trig,
 	.llseek = generic_file_llseek,
 };
 
-static ssize_t __maybe_unused
-altr_edac_a10_device_trig2(struct file *file, const char __user *user_buf,
-			   size_t count, loff_t *ppos);
+static ssize_t altr_edac_a10_device_trig2(struct file *file,
+					  const char __user *user_buf,
+					  size_t count, loff_t *ppos);
 
-static const struct file_operations altr_edac_a10_device_inject2_fops __maybe_unused = {
+static const struct file_operations altr_edac_a10_device_inject2_fops = {
 	.open = simple_open,
 	.write = altr_edac_a10_device_trig2,
 	.llseek = generic_file_llseek,
@@ -736,7 +735,8 @@ static int altr_edac_device_probe(struct platform_device *pdev)
 	}
 
 	dci = edac_device_alloc_ctl_info(sizeof(*drvdata), ecc_name,
-					 1, ecc_name, 1, 0, dev_instance++);
+					 1, ecc_name, 1, 0, NULL, 0,
+					 dev_instance++);
 
 	if (!dci) {
 		edac_printk(KERN_ERR, EDAC_DEVICE,
@@ -803,7 +803,7 @@ fail:
 	return res;
 }
 
-static void altr_edac_device_remove(struct platform_device *pdev)
+static int altr_edac_device_remove(struct platform_device *pdev)
 {
 	struct edac_device_ctl_info *dci = platform_get_drvdata(pdev);
 	struct altr_edac_device_dev *drvdata = dci->pvt_info;
@@ -811,6 +811,8 @@ static void altr_edac_device_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(drvdata->debugfs_dir);
 	edac_device_del_device(&pdev->dev);
 	edac_device_free_ctl_info(dci);
+
+	return 0;
 }
 
 static struct platform_driver altr_edac_device_driver = {
@@ -1004,6 +1006,9 @@ altr_init_a10_ecc_block(struct device_node *np, u32 irq_mask,
 		}
 	}
 
+	/* Interrupt mode set to every SBERR */
+	regmap_write(ecc_mgr_map, ALTR_A10_ECC_INTMODE_OFST,
+		     ALTR_A10_ECC_INTMODE);
 	/* Enable ECC */
 	ecc_set_bits(ecc_ctrl_en_mask, (ecc_block_base +
 					ALTR_A10_ECC_CTRL_OFST));
@@ -1069,46 +1074,8 @@ static int __init __maybe_unused altr_init_a10_ecc_device_type(char *compat)
 
 #ifdef CONFIG_EDAC_ALTERA_SDRAM
 
-/*
- * A legacy U-Boot bug only enabled memory mapped access to the ECC Enable
- * register if ECC is enabled. Linux checks the ECC Enable register to
- * determine ECC status.
- * Use an SMC call (which always works) to determine ECC enablement.
- */
-static int altr_s10_sdram_check_ecc_deps(struct altr_edac_device_dev *device)
-{
-	const struct edac_device_prv_data *prv = device->data;
-	unsigned long sdram_ecc_addr;
-	struct arm_smccc_res result;
-	struct device_node *np;
-	phys_addr_t sdram_addr;
-	u32 read_reg;
-	int ret;
-
-	np = of_find_compatible_node(NULL, NULL, "altr,sdr-ctl");
-	if (!np)
-		goto sdram_err;
-
-	sdram_addr = of_translate_address(np, of_get_address(np, 0,
-							     NULL, NULL));
-	of_node_put(np);
-	sdram_ecc_addr = (unsigned long)sdram_addr + prv->ecc_en_ofst;
-	arm_smccc_smc(INTEL_SIP_SMC_REG_READ, sdram_ecc_addr,
-		      0, 0, 0, 0, 0, 0, &result);
-	read_reg = (unsigned int)result.a1;
-	ret = (int)result.a0;
-	if (!ret && (read_reg & prv->ecc_enable_mask))
-		return 0;
-
-sdram_err:
-	edac_printk(KERN_ERR, EDAC_DEVICE,
-		    "%s: No ECC present or ECC disabled.\n",
-		    device->edac_dev_name);
-	return -ENODEV;
-}
-
 static const struct edac_device_prv_data s10_sdramecc_data = {
-	.setup = altr_s10_sdram_check_ecc_deps,
+	.setup = altr_check_ecc_deps,
 	.ce_clear_mask = ALTR_S10_ECC_SERRPENA,
 	.ue_clear_mask = ALTR_S10_ECC_DERRPENA,
 	.ecc_enable_mask = ALTR_S10_ECC_EN,
@@ -1509,7 +1476,7 @@ static int altr_portb_setup(struct altr_edac_device_dev *device)
 	/* Create the PortB EDAC device */
 	edac_idx = edac_device_alloc_index();
 	dci = edac_device_alloc_ctl_info(sizeof(*altdev), ecc_name, 1,
-					 ecc_name, 1, 0, edac_idx);
+					 ecc_name, 1, 0, NULL, 0, edac_idx);
 	if (!dci) {
 		edac_printk(KERN_ERR, EDAC_DEVICE,
 			    "%s: Unable to allocate PortB EDAC device\n",
@@ -1534,13 +1501,8 @@ static int altr_portb_setup(struct altr_edac_device_dev *device)
 	dci->mod_name = ecc_name;
 	dci->dev_name = ecc_name;
 
-	/*
-	 * Update the PortB IRQs - A10 has 4, S10 has 2, Index accordingly
-	 *
-	 * FIXME: Instead of ifdefs with different architectures the driver
-	 *        should properly use compatibles.
-	 */
-#ifdef CONFIG_64BIT
+	/* Update the PortB IRQs - A10 has 4, S10 has 2, Index accordingly */
+#ifdef CONFIG_ARCH_STRATIX10
 	altdev->sb_irq = irq_of_parse_and_map(np, 1);
 #else
 	altdev->sb_irq = irq_of_parse_and_map(np, 2);
@@ -1559,7 +1521,7 @@ static int altr_portb_setup(struct altr_edac_device_dev *device)
 		goto err_release_group_1;
 	}
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_ARCH_STRATIX10
 	/* Use IRQ to determine SError origin instead of assigning IRQ */
 	rc = of_property_read_u32_index(np, "interrupts", 1, &altdev->db_irq);
 	if (rc) {
@@ -1729,9 +1691,9 @@ MODULE_DEVICE_TABLE(of, altr_edac_a10_device_of_match);
  * Based on xgene_edac.c peripheral code.
  */
 
-static ssize_t __maybe_unused
-altr_edac_a10_device_trig(struct file *file, const char __user *user_buf,
-			  size_t count, loff_t *ppos)
+static ssize_t altr_edac_a10_device_trig(struct file *file,
+					 const char __user *user_buf,
+					 size_t count, loff_t *ppos)
 {
 	struct edac_device_ctl_info *edac_dci = file->private_data;
 	struct altr_edac_device_dev *drvdata = edac_dci->pvt_info;
@@ -1745,9 +1707,9 @@ altr_edac_a10_device_trig(struct file *file, const char __user *user_buf,
 
 	local_irq_save(flags);
 	if (trig_type == ALTR_UE_TRIGGER_CHAR)
-		writew(priv->ue_set_mask, set_addr);
+		writel(priv->ue_set_mask, set_addr);
 	else
-		writew(priv->ce_set_mask, set_addr);
+		writel(priv->ce_set_mask, set_addr);
 
 	/* Ensure the interrupt test bits are set */
 	wmb();
@@ -1761,9 +1723,9 @@ altr_edac_a10_device_trig(struct file *file, const char __user *user_buf,
  * slightly. A few Arria10 peripherals can use this injection function.
  * Inject the error into the memory and then readback to trigger the IRQ.
  */
-static ssize_t __maybe_unused
-altr_edac_a10_device_trig2(struct file *file, const char __user *user_buf,
-			   size_t count, loff_t *ppos)
+static ssize_t altr_edac_a10_device_trig2(struct file *file,
+					  const char __user *user_buf,
+					  size_t count, loff_t *ppos)
 {
 	struct edac_device_ctl_info *edac_dci = file->private_data;
 	struct altr_edac_device_dev *drvdata = edac_dci->pvt_info;
@@ -1777,7 +1739,7 @@ altr_edac_a10_device_trig2(struct file *file, const char __user *user_buf,
 
 	local_irq_save(flags);
 	if (trig_type == ALTR_UE_TRIGGER_CHAR) {
-		writew(priv->ue_set_mask, set_addr);
+		writel(priv->ue_set_mask, set_addr);
 	} else {
 		/* Setup read/write of 4 bytes */
 		writel(ECC_WORD_WRITE, drvdata->base + ECC_BLK_DBYTECTRL_OFST);
@@ -1836,8 +1798,11 @@ static void altr_edac_a10_irq_handler(struct irq_desc *desc)
 	regmap_read(edac->ecc_mgr_map, sm_offset, &irq_status);
 
 	bits = irq_status;
-	for_each_set_bit(bit, &bits, 32)
-		generic_handle_domain_irq(edac->domain, dberr * 32 + bit);
+	for_each_set_bit(bit, &bits, 32) {
+		irq = irq_linear_revmap(edac->domain, dberr * 32 + bit);
+		if (irq)
+			generic_handle_irq(irq);
+	}
 
 	chained_irq_exit(chip, desc);
 }
@@ -1916,7 +1881,8 @@ static int altr_edac_a10_device_add(struct altr_arria10_edac *edac,
 
 	edac_idx = edac_device_alloc_index();
 	dci = edac_device_alloc_ctl_info(sizeof(*altdev), ecc_name,
-					 1, ecc_name, 1, 0, edac_idx);
+					 1, ecc_name, 1, 0, NULL, 0,
+					 edac_idx);
 
 	if (!dci) {
 		edac_printk(KERN_ERR, EDAC_DEVICE,
@@ -1965,7 +1931,7 @@ static int altr_edac_a10_device_add(struct altr_arria10_edac *edac,
 		goto err_release_group1;
 	}
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_ARCH_STRATIX10
 	/* Use IRQ to determine SError origin instead of assigning IRQ */
 	rc = of_property_read_u32_index(np, "interrupts", 0, &altdev->db_irq);
 	if (rc) {
@@ -2050,7 +2016,7 @@ static const struct irq_domain_ops a10_eccmgr_ic_ops = {
 /************** Stratix 10 EDAC Double Bit Error Handler ************/
 #define to_a10edac(p, m) container_of(p, struct altr_arria10_edac, m)
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_ARCH_STRATIX10
 /* panic routine issues reboot on non-zero panic_timeout */
 extern int panic_timeout;
 
@@ -2123,29 +2089,27 @@ static int altr_edac_a10_probe(struct platform_device *pdev)
 		return PTR_ERR(edac->ecc_mgr_map);
 	}
 
-	/* Set irq mask for DDR SBE to avoid any pending irq before registration */
-	regmap_write(edac->ecc_mgr_map, A10_SYSMGR_ECC_INTMASK_SET_OFST,
-		     (A10_SYSMGR_ECC_INTMASK_SDMMCB | A10_SYSMGR_ECC_INTMASK_DDR0));
-
 	edac->irq_chip.name = pdev->dev.of_node->name;
 	edac->irq_chip.irq_mask = a10_eccmgr_irq_mask;
 	edac->irq_chip.irq_unmask = a10_eccmgr_irq_unmask;
-	edac->domain = irq_domain_create_linear(dev_fwnode(&pdev->dev), 64, &a10_eccmgr_ic_ops,
-						edac);
+	edac->domain = irq_domain_add_linear(pdev->dev.of_node, 64,
+					     &a10_eccmgr_ic_ops, edac);
 	if (!edac->domain) {
 		dev_err(&pdev->dev, "Error adding IRQ domain\n");
 		return -ENOMEM;
 	}
 
 	edac->sb_irq = platform_get_irq(pdev, 0);
-	if (edac->sb_irq < 0)
+	if (edac->sb_irq < 0) {
+		dev_err(&pdev->dev, "No SBERR IRQ resource\n");
 		return edac->sb_irq;
+	}
 
 	irq_set_chained_handler_and_data(edac->sb_irq,
 					 altr_edac_a10_irq_handler,
 					 edac);
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_ARCH_STRATIX10
 	{
 		int dberror, err_addr;
 
@@ -2171,9 +2135,10 @@ static int altr_edac_a10_probe(struct platform_device *pdev)
 	}
 #else
 	edac->db_irq = platform_get_irq(pdev, 1);
-	if (edac->db_irq < 0)
+	if (edac->db_irq < 0) {
+		dev_err(&pdev->dev, "No DBERR IRQ resource\n");
 		return edac->db_irq;
-
+	}
 	irq_set_chained_handler_and_data(edac->db_irq,
 					 altr_edac_a10_irq_handler, edac);
 #endif
@@ -2212,5 +2177,6 @@ static struct platform_driver altr_edac_a10_driver = {
 };
 module_platform_driver(altr_edac_a10_driver);
 
+MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Thor Thayer");
 MODULE_DESCRIPTION("EDAC Driver for Altera Memories");

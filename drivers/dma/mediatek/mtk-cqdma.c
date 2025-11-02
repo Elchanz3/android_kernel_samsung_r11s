@@ -18,6 +18,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_dma.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -372,7 +373,7 @@ static void mtk_cqdma_tasklet_cb(struct tasklet_struct *t)
 
 		/*
 		 * free child CVD after completion.
-		 * the parent CVD would be freed with desc_free by user.
+		 * the parent CVD would be freeed with desc_free by user.
 		 */
 		if (cvd->parent != cvd)
 			kfree(cvd);
@@ -420,11 +421,15 @@ static struct virt_dma_desc *mtk_cqdma_find_active_desc(struct dma_chan *c,
 {
 	struct mtk_cqdma_vchan *cvc = to_cqdma_vchan(c);
 	struct virt_dma_desc *vd;
+	unsigned long flags;
 
+	spin_lock_irqsave(&cvc->pc->lock, flags);
 	list_for_each_entry(vd, &cvc->pc->queue, node)
 		if (vd->tx.cookie == cookie) {
+			spin_unlock_irqrestore(&cvc->pc->lock, flags);
 			return vd;
 		}
+	spin_unlock_irqrestore(&cvc->pc->lock, flags);
 
 	list_for_each_entry(vd, &cvc->vc.desc_issued, node)
 		if (vd->tx.cookie == cookie)
@@ -448,11 +453,9 @@ static enum dma_status mtk_cqdma_tx_status(struct dma_chan *c,
 	if (ret == DMA_COMPLETE || !txstate)
 		return ret;
 
-	spin_lock_irqsave(&cvc->pc->lock, flags);
-	spin_lock(&cvc->vc.lock);
+	spin_lock_irqsave(&cvc->vc.lock, flags);
 	vd = mtk_cqdma_find_active_desc(c, cookie);
-	spin_unlock(&cvc->vc.lock);
-	spin_unlock_irqrestore(&cvc->pc->lock, flags);
+	spin_unlock_irqrestore(&cvc->vc.lock, flags);
 
 	if (vd) {
 		cvd = to_cqdma_vdesc(vd);
@@ -516,7 +519,7 @@ mtk_cqdma_prep_dma_memcpy(struct dma_chan *c, dma_addr_t dest,
 		/* setup dma channel */
 		cvd[i]->ch = c;
 
-		/* setup source, destination, and length */
+		/* setup sourece, destination, and length */
 		tlen = (len > MTK_CQDMA_MAX_LEN) ? MTK_CQDMA_MAX_LEN : len;
 		cvd[i]->len = tlen;
 		cvd[i]->src = src;
@@ -615,7 +618,7 @@ static int mtk_cqdma_alloc_chan_resources(struct dma_chan *c)
 	u32 i, min_refcnt = U32_MAX, refcnt;
 	unsigned long flags;
 
-	/* allocate PC with the minimum refcount */
+	/* allocate PC with the minimun refcount */
 	for (i = 0; i < cqdma->dma_channels; ++i) {
 		refcnt = refcount_read(&cqdma->pc[i]->refcnt);
 		if (refcnt < min_refcnt) {
@@ -748,6 +751,7 @@ static int mtk_cqdma_probe(struct platform_device *pdev)
 	struct mtk_cqdma_device *cqdma;
 	struct mtk_cqdma_vchan *vc;
 	struct dma_device *dd;
+	struct resource *res;
 	int err;
 	u32 i;
 
@@ -820,10 +824,13 @@ static int mtk_cqdma_probe(struct platform_device *pdev)
 			return PTR_ERR(cqdma->pc[i]->base);
 
 		/* allocate IRQ resource */
-		err = platform_get_irq(pdev, i);
-		if (err < 0)
-			return err;
-		cqdma->pc[i]->irq = err;
+		res = platform_get_resource(pdev, IORESOURCE_IRQ, i);
+		if (!res) {
+			dev_err(&pdev->dev, "No irq resource for %s\n",
+				dev_name(&pdev->dev));
+			return -EINVAL;
+		}
+		cqdma->pc[i]->irq = res->start;
 
 		err = devm_request_irq(&pdev->dev, cqdma->pc[i]->irq,
 				       mtk_cqdma_irq, 0, dev_name(&pdev->dev),
@@ -883,7 +890,7 @@ err_unregister:
 	return err;
 }
 
-static void mtk_cqdma_remove(struct platform_device *pdev)
+static int mtk_cqdma_remove(struct platform_device *pdev)
 {
 	struct mtk_cqdma_device *cqdma = platform_get_drvdata(pdev);
 	struct mtk_cqdma_vchan *vc;
@@ -916,6 +923,8 @@ static void mtk_cqdma_remove(struct platform_device *pdev)
 
 	dma_async_device_unregister(&cqdma->ddev);
 	of_dma_controller_free(pdev->dev.of_node);
+
+	return 0;
 }
 
 static struct platform_driver mtk_cqdma_driver = {

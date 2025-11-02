@@ -232,14 +232,12 @@ static int chip_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return cs5535_gpio_isset(offset, GPIO_READ_BACK);
 }
 
-static int chip_gpio_set(struct gpio_chip *chip, unsigned int offset, int val)
+static void chip_gpio_set(struct gpio_chip *chip, unsigned offset, int val)
 {
 	if (val)
 		cs5535_gpio_set(offset, GPIO_OUTPUT_VAL);
 	else
 		cs5535_gpio_clear(offset, GPIO_OUTPUT_VAL);
-
-	return 0;
 }
 
 static int chip_direction_input(struct gpio_chip *c, unsigned offset)
@@ -347,8 +345,12 @@ static int cs5535_gpio_probe(struct platform_device *pdev)
 				mask_orig, mask);
 
 	/* finally, register with the generic GPIO API */
-	return devm_gpiochip_add_data(&pdev->dev, &cs5535_gpio_chip.chip,
-				      &cs5535_gpio_chip);
+	err = devm_gpiochip_add_data(&pdev->dev, &cs5535_gpio_chip.chip,
+				     &cs5535_gpio_chip);
+	if (err)
+		return err;
+
+	return 0;
 }
 
 static struct platform_driver cs5535_gpio_driver = {

@@ -7,9 +7,9 @@
 #define __CHTLS_H__
 
 #include <crypto/aes.h>
+#include <crypto/algapi.h>
 #include <crypto/hash.h>
-#include <crypto/sha1.h>
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <crypto/authenc.h>
 #include <crypto/ctr.h>
 #include <crypto/gf128mul.h>
@@ -21,7 +21,6 @@
 #include <crypto/internal/hash.h>
 #include <linux/tls.h>
 #include <net/tls.h>
-#include <net/tls_prot.h>
 #include <net/tls_toe.h>
 
 #include "t4fw_api.h"
@@ -236,7 +235,6 @@ struct chtls_dev {
 	struct list_head na_node;
 	unsigned int send_page_order;
 	int max_host_sndbuf;
-	u32 round_robin_cnt;
 	struct key_map kmap;
 	unsigned int cdev_state;
 };
@@ -567,12 +565,14 @@ void chtls_shutdown(struct sock *sk, int how);
 void chtls_destroy_sock(struct sock *sk);
 int chtls_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
 int chtls_recvmsg(struct sock *sk, struct msghdr *msg,
-		  size_t len, int flags, int *addr_len);
-void chtls_splice_eof(struct socket *sock);
+		  size_t len, int nonblock, int flags, int *addr_len);
+int chtls_sendpage(struct sock *sk, struct page *page,
+		   int offset, size_t size, int flags);
 int send_tx_flowc_wr(struct sock *sk, int compl,
 		     u32 snd_nxt, u32 rcv_nxt);
 void chtls_tcp_push(struct sock *sk, int flags);
 int chtls_push_frames(struct chtls_sock *csk, int comp);
+int chtls_set_tcb_tflag(struct sock *sk, unsigned int bit_pos, int val);
 void chtls_set_tcb_field_rpl_skb(struct sock *sk, u16 word,
 				 u64 mask, u64 val, u8 cookie,
 				 int through_l2t);

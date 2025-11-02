@@ -42,8 +42,6 @@
 /**
  * enum rmi_f54_report_type - RMI4 F54 report types
  *
- * @F54_REPORT_NONE:	No Image Report.
- *
  * @F54_8BIT_IMAGE:	Normalized 8-Bit Image Report. The capacitance variance
  *			from baseline for each pixel.
  *
@@ -66,10 +64,6 @@
  *			Report. Set Low reference to its minimum value and high
  *			references to its maximum value, then report the raw
  *			capacitance for each pixel.
- *
- * @F54_MAX_REPORT_TYPE:
- *			Maximum number of Report Types.  Used for sanity
- *			checking.
  */
 enum rmi_f54_report_type {
 	F54_REPORT_NONE = 0,
@@ -372,6 +366,8 @@ static const struct vb2_ops rmi_f54_queue_ops = {
 	.queue_setup            = rmi_f54_queue_setup,
 	.buf_queue              = rmi_f54_buffer_queue,
 	.stop_streaming		= rmi_f54_stop_streaming,
+	.wait_prepare           = vb2_ops_wait_prepare,
+	.wait_finish            = vb2_ops_wait_finish,
 };
 
 static const struct vb2_queue rmi_f54_queue = {
@@ -388,8 +384,8 @@ static int rmi_f54_vidioc_querycap(struct file *file, void *priv,
 {
 	struct f54_data *f54 = video_drvdata(file);
 
-	strscpy(cap->driver, F54_NAME, sizeof(cap->driver));
-	strscpy(cap->card, SYNAPTICS_INPUT_DEVICE_NAME, sizeof(cap->card));
+	strlcpy(cap->driver, F54_NAME, sizeof(cap->driver));
+	strlcpy(cap->card, SYNAPTICS_INPUT_DEVICE_NAME, sizeof(cap->card));
 	snprintf(cap->bus_info, sizeof(cap->bus_info),
 		"rmi4:%s", dev_name(&f54->fn->dev));
 
@@ -408,7 +404,7 @@ static int rmi_f54_vidioc_enum_input(struct file *file, void *priv,
 
 	i->type = V4L2_INPUT_TYPE_TOUCH;
 
-	strscpy(i->name, rmi_f54_report_type_names[reptype], sizeof(i->name));
+	strlcpy(i->name, rmi_f54_report_type_names[reptype], sizeof(i->name));
 	return 0;
 }
 
@@ -694,7 +690,7 @@ static int rmi_f54_probe(struct rmi_function *fn)
 	rmi_f54_set_input(f54, 0);
 
 	/* register video device */
-	strscpy(f54->v4l2.name, F54_NAME, sizeof(f54->v4l2.name));
+	strlcpy(f54->v4l2.name, F54_NAME, sizeof(f54->v4l2.name));
 	ret = v4l2_device_register(&fn->dev, &f54->v4l2);
 	if (ret) {
 		dev_err(&fn->dev, "Unable to register video dev.\n");
@@ -731,6 +727,7 @@ remove_v4l2:
 	v4l2_device_unregister(&f54->v4l2);
 remove_wq:
 	cancel_delayed_work_sync(&f54->work);
+	flush_workqueue(f54->workqueue);
 	destroy_workqueue(f54->workqueue);
 	return ret;
 }

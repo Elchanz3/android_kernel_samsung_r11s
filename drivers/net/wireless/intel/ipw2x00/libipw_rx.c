@@ -27,6 +27,9 @@
 #include <linux/etherdevice.h>
 #include <linux/uaccess.h>
 #include <linux/ctype.h>
+
+#include <net/lib80211.h>
+
 #include "libipw.h"
 
 static void libipw_monitor_rx(struct libipw_device *ieee,
@@ -263,7 +266,7 @@ static int libipw_is_eapol_frame(struct libipw_device *ieee,
 /* Called only as a tasklet (software IRQ), by libipw_rx */
 static int
 libipw_rx_frame_decrypt(struct libipw_device *ieee, struct sk_buff *skb,
-			   struct libipw_crypt_data *crypt)
+			   struct lib80211_crypt_data *crypt)
 {
 	struct libipw_hdr_3addr *hdr;
 	int res, hdrlen;
@@ -295,7 +298,7 @@ libipw_rx_frame_decrypt(struct libipw_device *ieee, struct sk_buff *skb,
 static int
 libipw_rx_frame_decrypt_msdu(struct libipw_device *ieee,
 				struct sk_buff *skb, int keyidx,
-				struct libipw_crypt_data *crypt)
+				struct lib80211_crypt_data *crypt)
 {
 	struct libipw_hdr_3addr *hdr;
 	int res, hdrlen;
@@ -342,7 +345,7 @@ int libipw_rx(struct libipw_device *ieee, struct sk_buff *skb,
 #endif
 	u8 dst[ETH_ALEN];
 	u8 src[ETH_ALEN];
-	struct libipw_crypt_data *crypt = NULL;
+	struct lib80211_crypt_data *crypt = NULL;
 	int keyidx = 0;
 	int can_be_decrypted = 0;
 
@@ -393,7 +396,7 @@ int libipw_rx(struct libipw_device *ieee, struct sk_buff *skb,
 			wstats.updated |= IW_QUAL_QUAL_INVALID;
 
 		/* Update spy records */
-		libipw_spy_update(ieee->dev, hdr->addr2, &wstats);
+		wireless_spy_update(ieee->dev, hdr->addr2, &wstats);
 	}
 #endif				/* IW_WIRELESS_SPY */
 #endif				/* CONFIG_WIRELESS_EXT */
@@ -823,6 +826,96 @@ int libipw_rx(struct libipw_device *ieee, struct sk_buff *skb,
 	return 0;
 }
 
+/* Filter out unrelated packets, call libipw_rx[_mgt]
+ * This function takes over the skb, it should not be used again after calling
+ * this function. */
+void libipw_rx_any(struct libipw_device *ieee,
+		     struct sk_buff *skb, struct libipw_rx_stats *stats)
+{
+	struct libipw_hdr_4addr *hdr;
+	int is_packet_for_us;
+	u16 fc;
+
+	if (ieee->iw_mode == IW_MODE_MONITOR) {
+		if (!libipw_rx(ieee, skb, stats))
+			dev_kfree_skb_irq(skb);
+		return;
+	}
+
+	if (skb->len < sizeof(struct ieee80211_hdr))
+		goto drop_free;
+
+	hdr = (struct libipw_hdr_4addr *)skb->data;
+	fc = le16_to_cpu(hdr->frame_ctl);
+
+	if ((fc & IEEE80211_FCTL_VERS) != 0)
+		goto drop_free;
+
+	switch (fc & IEEE80211_FCTL_FTYPE) {
+	case IEEE80211_FTYPE_MGMT:
+		if (skb->len < sizeof(struct libipw_hdr_3addr))
+			goto drop_free;
+		libipw_rx_mgt(ieee, hdr, stats);
+		dev_kfree_skb_irq(skb);
+		return;
+	case IEEE80211_FTYPE_DATA:
+		break;
+	case IEEE80211_FTYPE_CTL:
+		return;
+	default:
+		return;
+	}
+
+	is_packet_for_us = 0;
+	switch (ieee->iw_mode) {
+	case IW_MODE_ADHOC:
+		/* our BSS and not from/to DS */
+		if (ether_addr_equal(hdr->addr3, ieee->bssid))
+		if ((fc & (IEEE80211_FCTL_TODS+IEEE80211_FCTL_FROMDS)) == 0) {
+			/* promisc: get all */
+			if (ieee->dev->flags & IFF_PROMISC)
+				is_packet_for_us = 1;
+			/* to us */
+			else if (ether_addr_equal(hdr->addr1, ieee->dev->dev_addr))
+				is_packet_for_us = 1;
+			/* mcast */
+			else if (is_multicast_ether_addr(hdr->addr1))
+				is_packet_for_us = 1;
+		}
+		break;
+	case IW_MODE_INFRA:
+		/* our BSS (== from our AP) and from DS */
+		if (ether_addr_equal(hdr->addr2, ieee->bssid))
+		if ((fc & (IEEE80211_FCTL_TODS+IEEE80211_FCTL_FROMDS)) == IEEE80211_FCTL_FROMDS) {
+			/* promisc: get all */
+			if (ieee->dev->flags & IFF_PROMISC)
+				is_packet_for_us = 1;
+			/* to us */
+			else if (ether_addr_equal(hdr->addr1, ieee->dev->dev_addr))
+				is_packet_for_us = 1;
+			/* mcast */
+			else if (is_multicast_ether_addr(hdr->addr1)) {
+				/* not our own packet bcasted from AP */
+				if (!ether_addr_equal(hdr->addr3, ieee->dev->dev_addr))
+					is_packet_for_us = 1;
+			}
+		}
+		break;
+	default:
+		/* ? */
+		break;
+	}
+
+	if (is_packet_for_us)
+		if (!libipw_rx(ieee, skb, stats))
+			dev_kfree_skb_irq(skb);
+	return;
+
+drop_free:
+	dev_kfree_skb_irq(skb);
+	ieee->dev->stats.rx_dropped++;
+}
+
 #define MGMT_FRAME_FIXED_PART_LENGTH		0x24
 
 static u8 qos_oui[QOS_OUI_LEN] = { 0x00, 0x50, 0xF2 };
@@ -834,8 +927,7 @@ static u8 qos_oui[QOS_OUI_LEN] = { 0x00, 0x50, 0xF2 };
 static int libipw_verify_qos_info(struct libipw_qos_information_element
 				     *info_element, int sub_type)
 {
-	if (info_element->elementID != QOS_ELEMENT_ID)
-		return -1;
+
 	if (info_element->qui_subtype != sub_type)
 		return -1;
 	if (memcmp(info_element->qui, qos_oui, QOS_OUI_LEN))
@@ -851,34 +943,57 @@ static int libipw_verify_qos_info(struct libipw_qos_information_element
 /*
  * Parse a QoS parameter element
  */
-static int libipw_read_qos_param_element(
-			struct libipw_qos_parameter_info *element_param,
-			struct libipw_info_element *info_element)
+static int libipw_read_qos_param_element(struct libipw_qos_parameter_info
+					    *element_param, struct libipw_info_element
+					    *info_element)
 {
-	size_t size = sizeof(*element_param);
+	int ret = 0;
+	u16 size = sizeof(struct libipw_qos_parameter_info) - 2;
 
-	if (!element_param || !info_element || info_element->len != size - 2)
+	if ((info_element == NULL) || (element_param == NULL))
 		return -1;
 
-	memcpy(element_param, info_element, size);
-	return libipw_verify_qos_info(&element_param->info_element,
-				      QOS_OUI_PARAM_SUB_TYPE);
+	if (info_element->id == QOS_ELEMENT_ID && info_element->len == size) {
+		memcpy(element_param->info_element.qui, info_element->data,
+		       info_element->len);
+		element_param->info_element.elementID = info_element->id;
+		element_param->info_element.length = info_element->len;
+	} else
+		ret = -1;
+	if (ret == 0)
+		ret = libipw_verify_qos_info(&element_param->info_element,
+						QOS_OUI_PARAM_SUB_TYPE);
+	return ret;
 }
 
 /*
  * Parse a QoS information element
  */
-static int libipw_read_qos_info_element(
-			struct libipw_qos_information_element *element_info,
-			struct libipw_info_element *info_element)
+static int libipw_read_qos_info_element(struct
+					   libipw_qos_information_element
+					   *element_info, struct libipw_info_element
+					   *info_element)
 {
-	size_t size = sizeof(struct libipw_qos_information_element) - 2;
+	int ret = 0;
+	u16 size = sizeof(struct libipw_qos_information_element) - 2;
 
-	if (!element_info || !info_element || info_element->len != size - 2)
+	if (element_info == NULL)
+		return -1;
+	if (info_element == NULL)
 		return -1;
 
-	memcpy(element_info, info_element, size);
-	return libipw_verify_qos_info(element_info, QOS_OUI_INFO_SUB_TYPE);
+	if ((info_element->id == QOS_ELEMENT_ID) && (info_element->len == size)) {
+		memcpy(element_info->qui, info_element->data,
+		       info_element->len);
+		element_info->elementID = info_element->id;
+		element_info->length = info_element->len;
+	} else
+		ret = -1;
+
+	if (ret == 0)
+		ret = libipw_verify_qos_info(element_info,
+						QOS_OUI_INFO_SUB_TYPE);
+	return ret;
 }
 
 /*
@@ -1236,8 +1351,8 @@ static int libipw_handle_assoc_resp(struct libipw_device *ieee, struct libipw_as
 	network->wpa_ie_len = 0;
 	network->rsn_ie_len = 0;
 
-	if (libipw_parse_info_param((void *)frame->variable,
-				    stats->len - sizeof(*frame), network))
+	if (libipw_parse_info_param
+	    (frame->info_element, stats->len - sizeof(*frame), network))
 		return 1;
 
 	network->mode = 0;
@@ -1296,8 +1411,8 @@ static int libipw_network_init(struct libipw_device *ieee, struct libipw_probe_r
 	network->wpa_ie_len = 0;
 	network->rsn_ie_len = 0;
 
-	if (libipw_parse_info_param((void *)beacon->variable,
-				    stats->len - sizeof(*beacon), network))
+	if (libipw_parse_info_param
+	    (beacon->info_element, stats->len - sizeof(*beacon), network))
 		return 1;
 
 	network->mode = 0;
@@ -1417,7 +1532,7 @@ static void libipw_process_probe_response(struct libipw_device
 	struct libipw_network *target;
 	struct libipw_network *oldest = NULL;
 #ifdef CONFIG_LIBIPW_DEBUG
-	struct libipw_info_element *info_element = (void *)beacon->variable;
+	struct libipw_info_element *info_element = beacon->info_element;
 #endif
 	unsigned long flags;
 
@@ -1639,5 +1754,6 @@ void libipw_rx_mgt(struct libipw_device *ieee,
 	}
 }
 
+EXPORT_SYMBOL_GPL(libipw_rx_any);
 EXPORT_SYMBOL(libipw_rx_mgt);
 EXPORT_SYMBOL(libipw_rx);

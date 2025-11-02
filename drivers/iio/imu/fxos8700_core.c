@@ -8,6 +8,7 @@
  */
 #include <linux/module.h>
 #include <linux/regmap.h>
+#include <linux/acpi.h>
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 
@@ -166,7 +167,7 @@
 struct fxos8700_data {
 	struct regmap *regmap;
 	struct iio_trigger *trig;
-	__be16 buf[FXOS8700_DATA_BUF_SIZE] __aligned(IIO_DMA_MINALIGN);
+	__be16 buf[FXOS8700_DATA_BUF_SIZE] ____cacheline_aligned;
 };
 
 /* Regmap info */

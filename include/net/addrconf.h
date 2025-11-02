@@ -8,9 +8,8 @@
 
 #define MIN_VALID_LIFETIME		(2*3600)	/* 2 hours */
 
-#define TEMP_VALID_LIFETIME		(7*86400)       /* 1 week */
-#define TEMP_PREFERRED_LIFETIME		(86400)         /* 24 hours */
-#define REGEN_MIN_ADVANCE		(2)             /* 2 seconds */
+#define TEMP_VALID_LIFETIME		(7*86400)
+#define TEMP_PREFERRED_LIFETIME		(86400)
 #define REGEN_MAX_RETRY			(3)
 #define MAX_DESYNC_FACTOR		(600)
 
@@ -32,26 +31,30 @@ struct prefix_info {
 	__u8			length;
 	__u8			prefix_len;
 
+/*
+ * ANDROID: crc fix for commit 9354e0acdb74 ("net: ipv6: support
+ * reporting otherwise unknown prefix * flags in RTM_NEWPREFIX")
+ */
+#ifndef __GENKSYMS__
 	union __packed {
 		__u8		flags;
 		struct __packed {
+#endif
 #if defined(__BIG_ENDIAN_BITFIELD)
 			__u8	onlink : 1,
-				autoconf : 1,
-				routeraddr : 1,
-				preferpd : 1,
-				reserved : 4;
+			 	autoconf : 1,
+				reserved : 6;
 #elif defined(__LITTLE_ENDIAN_BITFIELD)
-			__u8	reserved : 4,
-				preferpd : 1,
-				routeraddr : 1,
+			__u8	reserved : 6,
 				autoconf : 1,
 				onlink : 1;
 #else
 #error "Please fix <asm/byteorder.h>"
 #endif
+#ifndef __GENKSYMS__
 		};
 	};
+#endif
 	__be32			valid;
 	__be32			prefered;
 	__be32			reserved2;
@@ -77,8 +80,6 @@ struct ifa6_config {
 	const struct in6_addr	*pfx;
 	unsigned int		plen;
 
-	u8			ifa_proto;
-
 	const struct in6_addr	*peer_pfx;
 
 	u32			rt_priority;
@@ -86,23 +87,6 @@ struct ifa6_config {
 	u32			preferred_lft;
 	u32			valid_lft;
 	u16			scope;
-};
-
-enum addr_type_t {
-	UNICAST_ADDR,
-	MULTICAST_ADDR,
-	ANYCAST_ADDR,
-};
-
-struct inet6_fill_args {
-	u32 portid;
-	u32 seq;
-	int event;
-	unsigned int flags;
-	int netnsid;
-	int ifindex;
-	enum addr_type_t type;
-	bool force_rt_scope_universe;
 };
 
 int addrconf_init(void);
@@ -141,6 +125,8 @@ struct inet6_ifaddr *ipv6_get_ifaddr(struct net *net,
 int ipv6_dev_get_saddr(struct net *net, const struct net_device *dev,
 		       const struct in6_addr *daddr, unsigned int srcprefs,
 		       struct in6_addr *saddr);
+int __ipv6_get_lladdr(struct inet6_dev *idev, struct in6_addr *addr,
+		      u32 banned_flags);
 int ipv6_get_lladdr(struct net_device *dev, struct in6_addr *addr,
 		    u32 banned_flags);
 bool inet_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2,
@@ -204,12 +190,10 @@ static inline int addrconf_ifid_eui48(u8 *eui, struct net_device *dev)
 	return 0;
 }
 
-#define INFINITY_LIFE_TIME 0xFFFFFFFF
-
 static inline unsigned long addrconf_timeout_fixup(u32 timeout,
 						   unsigned int unit)
 {
-	if (timeout == INFINITY_LIFE_TIME)
+	if (timeout == 0xffffffff)
 		return ~0UL;
 
 	/*
@@ -255,7 +239,7 @@ int ipv6_sock_mc_drop(struct sock *sk, int ifindex,
 		      const struct in6_addr *addr);
 void __ipv6_sock_mc_close(struct sock *sk);
 void ipv6_sock_mc_close(struct sock *sk);
-bool inet6_mc_check(const struct sock *sk, const struct in6_addr *mc_addr,
+bool inet6_mc_check(struct sock *sk, const struct in6_addr *mc_addr,
 		    const struct in6_addr *src_addr);
 
 int ipv6_dev_mc_inc(struct net_device *dev, const struct in6_addr *addr);
@@ -303,6 +287,18 @@ static inline bool ipv6_is_mld(struct sk_buff *skb, int nexthdr, int offset)
 void addrconf_prefix_rcv(struct net_device *dev,
 			 u8 *opt, int len, bool sllao);
 
+/* Determines into what table to put autoconf PIO/RIO/default routes
+ * learned on this device.
+ *
+ * - If 0, use the same table for every device. This puts routes into
+ *   one of RT_TABLE_{PREFIX,INFO,DFLT} depending on the type of route
+ *   (but note that these three are currently all equal to
+ *   RT6_TABLE_MAIN).
+ * - If > 0, use the specified table.
+ * - If < 0, put routes into table dev->ifindex + (-rt_table).
+ */
+u32 addrconf_rt_table(const struct net_device *dev, u32 default_table);
+
 /*
  *	anycast prototypes (anycast.c)
  */
@@ -347,15 +343,10 @@ static inline struct inet6_dev *__in6_dev_get(const struct net_device *dev)
 	return rcu_dereference_rtnl(dev->ip6_ptr);
 }
 
-static inline struct inet6_dev *__in6_dev_get_rtnl_net(const struct net_device *dev)
-{
-	return rtnl_net_dereference(dev_net(dev), dev->ip6_ptr);
-}
-
 /**
  * __in6_dev_stats_get - get inet6_dev pointer for stats
  * @dev: network device
- * @skb: skb for original incoming interface if needed
+ * @skb: skb for original incoming interface if neeeded
  *
  * Caller must hold rcu_read_lock or RTNL, because this function
  * does not take a reference on the inet6_dev.
@@ -445,7 +436,7 @@ static inline bool ip6_ignore_linkdown(const struct net_device *dev)
 	if (unlikely(!idev))
 		return true;
 
-	return !!READ_ONCE(idev->cnf.ignore_routes_with_linkdown);
+	return !!idev->cnf.ignore_routes_with_linkdown;
 }
 
 void inet6_ifa_finish_destroy(struct inet6_ifaddr *ifp);
@@ -547,11 +538,4 @@ int if6_proc_init(void);
 void if6_proc_exit(void);
 #endif
 
-int inet6_fill_ifmcaddr(struct sk_buff *skb,
-			const struct ifmcaddr6 *ifmca,
-			struct inet6_fill_args *args);
-
-int inet6_fill_ifacaddr(struct sk_buff *skb,
-			const struct ifacaddr6 *ifaca,
-			struct inet6_fill_args *args);
 #endif

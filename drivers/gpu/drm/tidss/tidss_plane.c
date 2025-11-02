@@ -6,33 +6,21 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
-#include <drm/drm_blend.h>
 #include <drm/drm_crtc.h>
-#include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_crtc_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_framebuffer.h>
-#include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_fb_cma_helper.h>
 
 #include "tidss_crtc.h"
 #include "tidss_dispc.h"
 #include "tidss_drv.h"
 #include "tidss_plane.h"
 
-void tidss_plane_error_irq(struct drm_plane *plane, u64 irqstatus)
-{
-	struct tidss_plane *tplane = to_tidss_plane(plane);
-
-	dev_err_ratelimited(plane->dev->dev, "Plane%u underflow (irq %llx)\n",
-			    tplane->hw_plane_id, irqstatus);
-}
-
 /* drm_plane_helper_funcs */
 
 static int tidss_plane_atomic_check(struct drm_plane *plane,
-				    struct drm_atomic_state *state)
+				    struct drm_plane_state *state)
 {
-	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
-										 plane);
 	struct drm_device *ddev = plane->dev;
 	struct tidss_device *tidss = to_tidss(ddev);
 	struct tidss_plane *tplane = to_tidss_plane(plane);
@@ -44,30 +32,27 @@ static int tidss_plane_atomic_check(struct drm_plane *plane,
 
 	dev_dbg(ddev->dev, "%s\n", __func__);
 
-	if (!new_plane_state->crtc) {
+	if (!state->crtc) {
 		/*
 		 * The visible field is not reset by the DRM core but only
-		 * updated by drm_atomic_helper_check_plane_state(), set it
-		 * manually.
+		 * updated by drm_plane_helper_check_state(), set it manually.
 		 */
-		new_plane_state->visible = false;
+		state->visible = false;
 		return 0;
 	}
 
-	crtc_state = drm_atomic_get_crtc_state(state,
-					       new_plane_state->crtc);
+	crtc_state = drm_atomic_get_crtc_state(state->state, state->crtc);
 	if (IS_ERR(crtc_state))
 		return PTR_ERR(crtc_state);
 
-	ret = drm_atomic_helper_check_plane_state(new_plane_state, crtc_state,
-						  0,
+	ret = drm_atomic_helper_check_plane_state(state, crtc_state, 0,
 						  INT_MAX, true, true);
 	if (ret < 0)
 		return ret;
 
 	/*
 	 * The HW is only able to start drawing at subpixel boundary
-	 * (the two first checks below). At the end of a row the HW
+	 * (the two first checks bellow). At the end of a row the HW
 	 * can only jump integer number of subpixels forward to the
 	 * beginning of the next row. So we can only show picture with
 	 * integer subpixel width (the third check). However, after
@@ -77,37 +62,35 @@ static int tidss_plane_atomic_check(struct drm_plane *plane,
 	 * check for odd height).
 	 */
 
-	finfo = drm_format_info(new_plane_state->fb->format->format);
+	finfo = drm_format_info(state->fb->format->format);
 
-	if ((new_plane_state->src_x >> 16) % finfo->hsub != 0) {
+	if ((state->src_x >> 16) % finfo->hsub != 0) {
 		dev_dbg(ddev->dev,
 			"%s: x-position %u not divisible subpixel size %u\n",
-			__func__, (new_plane_state->src_x >> 16), finfo->hsub);
+			__func__, (state->src_x >> 16), finfo->hsub);
 		return -EINVAL;
 	}
 
-	if ((new_plane_state->src_y >> 16) % finfo->vsub != 0) {
+	if ((state->src_y >> 16) % finfo->vsub != 0) {
 		dev_dbg(ddev->dev,
 			"%s: y-position %u not divisible subpixel size %u\n",
-			__func__, (new_plane_state->src_y >> 16), finfo->vsub);
+			__func__, (state->src_y >> 16), finfo->vsub);
 		return -EINVAL;
 	}
 
-	if ((new_plane_state->src_w >> 16) % finfo->hsub != 0) {
+	if ((state->src_w >> 16) % finfo->hsub != 0) {
 		dev_dbg(ddev->dev,
 			"%s: src width %u not divisible by subpixel size %u\n",
-			 __func__, (new_plane_state->src_w >> 16),
-			 finfo->hsub);
+			 __func__, (state->src_w >> 16), finfo->hsub);
 		return -EINVAL;
 	}
 
-	if (!new_plane_state->visible)
+	if (!state->visible)
 		return 0;
 
-	hw_videoport = to_tidss_crtc(new_plane_state->crtc)->hw_videoport;
+	hw_videoport = to_tidss_crtc(state->crtc)->hw_videoport;
 
-	ret = dispc_plane_check(tidss->dispc, hw_plane, new_plane_state,
-				hw_videoport);
+	ret = dispc_plane_check(tidss->dispc, hw_plane, state, hw_videoport);
 	if (ret)
 		return ret;
 
@@ -115,41 +98,39 @@ static int tidss_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void tidss_plane_atomic_update(struct drm_plane *plane,
-				      struct drm_atomic_state *state)
+				      struct drm_plane_state *old_state)
 {
 	struct drm_device *ddev = plane->dev;
 	struct tidss_device *tidss = to_tidss(ddev);
 	struct tidss_plane *tplane = to_tidss_plane(plane);
-	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
-									   plane);
+	struct drm_plane_state *state = plane->state;
 	u32 hw_videoport;
+	int ret;
 
 	dev_dbg(ddev->dev, "%s\n", __func__);
 
-	if (!new_state->visible) {
+	if (!state->visible) {
 		dispc_plane_enable(tidss->dispc, tplane->hw_plane_id, false);
 		return;
 	}
 
-	hw_videoport = to_tidss_crtc(new_state->crtc)->hw_videoport;
+	hw_videoport = to_tidss_crtc(state->crtc)->hw_videoport;
 
-	dispc_plane_setup(tidss->dispc, tplane->hw_plane_id, new_state, hw_videoport);
-}
+	ret = dispc_plane_setup(tidss->dispc, tplane->hw_plane_id,
+				state, hw_videoport);
 
-static void tidss_plane_atomic_enable(struct drm_plane *plane,
-				      struct drm_atomic_state *state)
-{
-	struct drm_device *ddev = plane->dev;
-	struct tidss_device *tidss = to_tidss(ddev);
-	struct tidss_plane *tplane = to_tidss_plane(plane);
-
-	dev_dbg(ddev->dev, "%s\n", __func__);
+	if (ret) {
+		dev_err(plane->dev->dev, "%s: Failed to setup plane %d\n",
+			__func__, tplane->hw_plane_id);
+		dispc_plane_enable(tidss->dispc, tplane->hw_plane_id, false);
+		return;
+	}
 
 	dispc_plane_enable(tidss->dispc, tplane->hw_plane_id, true);
 }
 
 static void tidss_plane_atomic_disable(struct drm_plane *plane,
-				       struct drm_atomic_state *state)
+				       struct drm_plane_state *old_state)
 {
 	struct drm_device *ddev = plane->dev;
 	struct tidss_device *tidss = to_tidss(ddev);
@@ -171,16 +152,7 @@ static void drm_plane_destroy(struct drm_plane *plane)
 static const struct drm_plane_helper_funcs tidss_plane_helper_funcs = {
 	.atomic_check = tidss_plane_atomic_check,
 	.atomic_update = tidss_plane_atomic_update,
-	.atomic_enable = tidss_plane_atomic_enable,
 	.atomic_disable = tidss_plane_atomic_disable,
-};
-
-static const struct drm_plane_helper_funcs tidss_primary_plane_helper_funcs = {
-	.atomic_check = tidss_plane_atomic_check,
-	.atomic_update = tidss_plane_atomic_update,
-	.atomic_enable = tidss_plane_atomic_enable,
-	.atomic_disable = tidss_plane_atomic_disable,
-	.get_scanout_buffer = drm_fb_dma_get_scanout_buffer,
 };
 
 static const struct drm_plane_funcs tidss_plane_funcs = {
@@ -200,7 +172,7 @@ struct tidss_plane *tidss_plane_create(struct tidss_device *tidss,
 	struct tidss_plane *tplane;
 	enum drm_plane_type type;
 	u32 possible_crtcs;
-	u32 num_planes = tidss->feat->num_vids;
+	u32 num_planes = tidss->feat->num_planes;
 	u32 color_encodings = (BIT(DRM_COLOR_YCBCR_BT601) |
 			       BIT(DRM_COLOR_YCBCR_BT709));
 	u32 color_ranges = (BIT(DRM_COLOR_YCBCR_FULL_RANGE) |
@@ -228,10 +200,7 @@ struct tidss_plane *tidss_plane_create(struct tidss_device *tidss,
 	if (ret < 0)
 		goto err;
 
-	if (type == DRM_PLANE_TYPE_PRIMARY)
-		drm_plane_helper_add(&tplane->plane, &tidss_primary_plane_helper_funcs);
-	else
-		drm_plane_helper_add(&tplane->plane, &tidss_plane_helper_funcs);
+	drm_plane_helper_add(&tplane->plane, &tidss_plane_helper_funcs);
 
 	drm_plane_create_zpos_property(&tplane->plane, tidss->num_planes, 0,
 				       num_planes - 1);

@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * linear.c : Multiple Devices driver for Linux Copyright (C) 1994-96 Marc
- * ZYNGIER <zyngier@ufr-info-p7.ibp.fr> or <maz@gloups.fdn.fr>
- */
+   linear.c : Multiple Devices driver for Linux
+	      Copyright (C) 1994-96 Marc ZYNGIER
+	      <zyngier@ufr-info-p7.ibp.fr> or
+	      <maz@gloups.fdn.fr>
+
+   Linear mode management functions.
+
+*/
 
 #include <linux/blkdev.h>
+#include <linux/raid/md_u.h>
 #include <linux/seq_file.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <trace/events/block.h>
 #include "md.h"
-
-struct dev_info {
-	struct md_rdev	*rdev;
-	sector_t	end_sector;
-};
-
-struct linear_conf {
-	struct rcu_head         rcu;
-	sector_t                array_sectors;
-	/* a copy of mddev->raid_disks */
-	int                     raid_disks;
-	struct dev_info         disks[] __counted_by(raid_disks);
-};
+#include "md-linear.h"
 
 /*
  * find which device holds a particular offset
@@ -65,47 +59,16 @@ static sector_t linear_size(struct mddev *mddev, sector_t sectors, int raid_disk
 	return array_sectors;
 }
 
-static int linear_set_limits(struct mddev *mddev)
-{
-	struct queue_limits lim;
-	int err;
-
-	md_init_stacking_limits(&lim);
-	lim.max_hw_sectors = mddev->chunk_sectors;
-	lim.max_write_zeroes_sectors = mddev->chunk_sectors;
-	lim.max_hw_wzeroes_unmap_sectors = mddev->chunk_sectors;
-	lim.io_min = mddev->chunk_sectors << 9;
-	err = mddev_stack_rdev_limits(mddev, &lim, MDDEV_STACK_INTEGRITY);
-	if (err)
-		return err;
-
-	return queue_limits_set(mddev->gendisk->queue, &lim);
-}
-
 static struct linear_conf *linear_conf(struct mddev *mddev, int raid_disks)
 {
 	struct linear_conf *conf;
 	struct md_rdev *rdev;
-	int ret = -EINVAL;
-	int cnt;
-	int i;
+	int i, cnt;
+	bool discard_supported = false;
 
 	conf = kzalloc(struct_size(conf, disks, raid_disks), GFP_KERNEL);
 	if (!conf)
-		return ERR_PTR(-ENOMEM);
-
-	/*
-	 * conf->raid_disks is copy of mddev->raid_disks. The reason to
-	 * keep a copy of mddev->raid_disks in struct linear_conf is,
-	 * mddev->raid_disks may not be consistent with pointers number of
-	 * conf->disks[] when it is updated in linear_add() and used to
-	 * iterate old conf->disks[] earray in linear_congested().
-	 * Here conf->raid_disks is always consitent with number of
-	 * pointers in conf->disks[] array, and mddev->private is updated
-	 * with rcu_assign_pointer() in linear_addr(), such race can be
-	 * avoided.
-	 */
-	conf->raid_disks = raid_disks;
+		return NULL;
 
 	cnt = 0;
 	conf->array_sectors = 0;
@@ -128,14 +91,25 @@ static struct linear_conf *linear_conf(struct mddev *mddev, int raid_disks)
 			rdev->sectors = sectors * mddev->chunk_sectors;
 		}
 
+		disk_stack_limits(mddev->gendisk, rdev->bdev,
+				  rdev->data_offset << 9);
+
 		conf->array_sectors += rdev->sectors;
 		cnt++;
+
+		if (blk_queue_discard(bdev_get_queue(rdev->bdev)))
+			discard_supported = true;
 	}
 	if (cnt != raid_disks) {
 		pr_warn("md/linear:%s: not enough drives present. Aborting!\n",
 			mdname(mddev));
 		goto out;
 	}
+
+	if (!discard_supported)
+		blk_queue_flag_clear(QUEUE_FLAG_DISCARD, mddev->queue);
+	else
+		blk_queue_flag_set(QUEUE_FLAG_DISCARD, mddev->queue);
 
 	/*
 	 * Here we calculate the device offsets.
@@ -147,31 +121,37 @@ static struct linear_conf *linear_conf(struct mddev *mddev, int raid_disks)
 			conf->disks[i-1].end_sector +
 			conf->disks[i].rdev->sectors;
 
-	if (!mddev_is_dm(mddev)) {
-		ret = linear_set_limits(mddev);
-		if (ret)
-			goto out;
-	}
+	/*
+	 * conf->raid_disks is copy of mddev->raid_disks. The reason to
+	 * keep a copy of mddev->raid_disks in struct linear_conf is,
+	 * mddev->raid_disks may not be consistent with pointers number of
+	 * conf->disks[] when it is updated in linear_add() and used to
+	 * iterate old conf->disks[] earray in linear_congested().
+	 * Here conf->raid_disks is always consitent with number of
+	 * pointers in conf->disks[] array, and mddev->private is updated
+	 * with rcu_assign_pointer() in linear_addr(), such race can be
+	 * avoided.
+	 */
+	conf->raid_disks = raid_disks;
 
 	return conf;
 
 out:
 	kfree(conf);
-	return ERR_PTR(ret);
+	return NULL;
 }
 
-static int linear_run(struct mddev *mddev)
+static int linear_run (struct mddev *mddev)
 {
 	struct linear_conf *conf;
 	int ret;
 
 	if (md_check_no_bitmap(mddev))
 		return -EINVAL;
-
 	conf = linear_conf(mddev, mddev->raid_disks);
-	if (IS_ERR(conf))
-		return PTR_ERR(conf);
 
+	if (!conf)
+		return 1;
 	mddev->private = conf;
 	md_set_array_sectors(mddev, linear_size(mddev, 0, 0));
 
@@ -201,9 +181,10 @@ static int linear_add(struct mddev *mddev, struct md_rdev *rdev)
 	rdev->raid_disk = rdev->saved_raid_disk;
 	rdev->saved_raid_disk = -1;
 
-	newconf = linear_conf(mddev, mddev->raid_disks + 1);
-	if (IS_ERR(newconf))
-		return PTR_ERR(newconf);
+	newconf = linear_conf(mddev,mddev->raid_disks+1);
+
+	if (!newconf)
+		return -ENOMEM;
 
 	/* newconf->raid_disks already keeps a copy of * the increased
 	 * value of mddev->raid_disks, WARN_ONCE() is just used to make
@@ -211,6 +192,7 @@ static int linear_add(struct mddev *mddev, struct md_rdev *rdev)
 	 * in linear_congested(), therefore kfree_rcu() is used to free
 	 * oldconf until no one uses it anymore.
 	 */
+	mddev_suspend(mddev);
 	oldconf = rcu_dereference_protected(mddev->private,
 			lockdep_is_held(&mddev->reconfig_mutex));
 	mddev->raid_disks++;
@@ -218,7 +200,9 @@ static int linear_add(struct mddev *mddev, struct md_rdev *rdev)
 		"copied raid_disks doesn't match mddev->raid_disks");
 	rcu_assign_pointer(mddev->private, newconf);
 	md_set_array_sectors(mddev, linear_size(mddev, 0, 0));
-	set_capacity_and_notify(mddev->gendisk, mddev->array_sectors);
+	set_capacity(mddev->gendisk, mddev->array_sectors);
+	mddev_resume(mddev);
+	revalidate_disk_size(mddev->gendisk, true);
 	kfree_rcu(oldconf, rcu);
 	return 0;
 }
@@ -232,6 +216,7 @@ static void linear_free(struct mddev *mddev, void *priv)
 
 static bool linear_make_request(struct mddev *mddev, struct bio *bio)
 {
+	char b[BDEVNAME_SIZE];
 	struct dev_info *tmp_dev;
 	sector_t start_sector, end_sector, data_offset;
 	sector_t bio_sector = bio->bi_iter.bi_sector;
@@ -249,76 +234,64 @@ static bool linear_make_request(struct mddev *mddev, struct bio *bio)
 		     bio_sector < start_sector))
 		goto out_of_bounds;
 
-	if (unlikely(is_rdev_broken(tmp_dev->rdev))) {
-		md_error(mddev, tmp_dev->rdev);
+	if (unlikely(is_mddev_broken(tmp_dev->rdev, "linear"))) {
 		bio_io_error(bio);
 		return true;
 	}
 
 	if (unlikely(bio_end_sector(bio) > end_sector)) {
 		/* This bio crosses a device boundary, so we have to split it */
-		bio = bio_submit_split_bioset(bio, end_sector - bio_sector,
-					      &mddev->bio_set);
-		if (!bio)
-			return true;
+		struct bio *split = bio_split(bio, end_sector - bio_sector,
+					      GFP_NOIO, &mddev->bio_set);
+		bio_chain(split, bio);
+		submit_bio_noacct(bio);
+		bio = split;
 	}
 
-	md_account_bio(mddev, &bio);
 	bio_set_dev(bio, tmp_dev->rdev->bdev);
 	bio->bi_iter.bi_sector = bio->bi_iter.bi_sector -
 		start_sector + data_offset;
 
 	if (unlikely((bio_op(bio) == REQ_OP_DISCARD) &&
-		     !bdev_max_discard_sectors(bio->bi_bdev))) {
+		     !blk_queue_discard(bio->bi_disk->queue))) {
 		/* Just ignore it */
 		bio_endio(bio);
 	} else {
 		if (mddev->gendisk)
-			trace_block_bio_remap(bio, disk_devt(mddev->gendisk),
+			trace_block_bio_remap(bio->bi_disk->queue,
+					      bio, disk_devt(mddev->gendisk),
 					      bio_sector);
+		mddev_check_writesame(mddev, bio);
 		mddev_check_write_zeroes(mddev, bio);
 		submit_bio_noacct(bio);
 	}
 	return true;
 
 out_of_bounds:
-	pr_err("md/linear:%s: make_request: Sector %llu out of bounds on dev %pg: %llu sectors, offset %llu\n",
+	pr_err("md/linear:%s: make_request: Sector %llu out of bounds on dev %s: %llu sectors, offset %llu\n",
 	       mdname(mddev),
 	       (unsigned long long)bio->bi_iter.bi_sector,
-	       tmp_dev->rdev->bdev,
+	       bdevname(tmp_dev->rdev->bdev, b),
 	       (unsigned long long)tmp_dev->rdev->sectors,
 	       (unsigned long long)start_sector);
 	bio_io_error(bio);
 	return true;
 }
 
-static void linear_status(struct seq_file *seq, struct mddev *mddev)
+static void linear_status (struct seq_file *seq, struct mddev *mddev)
 {
 	seq_printf(seq, " %dk rounding", mddev->chunk_sectors / 2);
-}
-
-static void linear_error(struct mddev *mddev, struct md_rdev *rdev)
-{
-	if (!test_and_set_bit(MD_BROKEN, &mddev->flags)) {
-		char *md_name = mdname(mddev);
-
-		pr_crit("md/linear%s: Disk failure on %pg detected, failing array.\n",
-			md_name, rdev->bdev);
-	}
 }
 
 static void linear_quiesce(struct mddev *mddev, int state)
 {
 }
 
-static struct md_personality linear_personality = {
-	.head = {
-		.type	= MD_PERSONALITY,
-		.id	= ID_LINEAR,
-		.name	= "linear",
-		.owner	= THIS_MODULE,
-	},
-
+static struct md_personality linear_personality =
+{
+	.name		= "linear",
+	.level		= LEVEL_LINEAR,
+	.owner		= THIS_MODULE,
 	.make_request	= linear_make_request,
 	.run		= linear_run,
 	.free		= linear_free,
@@ -326,23 +299,22 @@ static struct md_personality linear_personality = {
 	.hot_add_disk	= linear_add,
 	.size		= linear_size,
 	.quiesce	= linear_quiesce,
-	.error_handler	= linear_error,
 };
 
-static int __init linear_init(void)
+static int __init linear_init (void)
 {
-	return register_md_submodule(&linear_personality.head);
+	return register_md_personality (&linear_personality);
 }
 
-static void linear_exit(void)
+static void linear_exit (void)
 {
-	unregister_md_submodule(&linear_personality.head);
+	unregister_md_personality (&linear_personality);
 }
 
 module_init(linear_init);
 module_exit(linear_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Linear device concatenation personality for MD (deprecated)");
+MODULE_DESCRIPTION("Linear device concatenation personality for MD");
 MODULE_ALIAS("md-personality-1"); /* LINEAR - deprecated*/
 MODULE_ALIAS("md-linear");
 MODULE_ALIAS("md-level--1");

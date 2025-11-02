@@ -56,6 +56,9 @@ Other Functions
 .. kernel-doc:: fs/namei.c
    :export:
 
+.. kernel-doc:: fs/buffer.c
+   :export:
+
 .. kernel-doc:: block/bio.c
    :export:
 
@@ -66,6 +69,9 @@ Other Functions
    :export:
 
 .. kernel-doc:: fs/fs-writeback.c
+   :export:
+
+.. kernel-doc:: fs/block_dev.c
    :export:
 
 .. kernel-doc:: fs/anon_inodes.c
@@ -95,9 +101,6 @@ Other Functions
 .. kernel-doc:: fs/xattr.c
    :export:
 
-.. kernel-doc:: fs/namespace.c
-   :export:
-
 The proc filesystem
 ===================
 
@@ -118,12 +121,6 @@ Events based on file descriptors
 
 .. kernel-doc:: fs/eventfd.c
    :export:
-
-eventpoll (epoll) interfaces
-============================
-
-.. kernel-doc:: fs/eventpoll.c
-   :internal:
 
 The Filesystem for Exporting Kernel Objects
 ===========================================

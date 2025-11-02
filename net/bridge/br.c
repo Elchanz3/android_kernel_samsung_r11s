@@ -36,12 +36,7 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 	bool changed_addr;
 	int err;
 
-	if (netif_is_bridge_master(dev)) {
-		struct net_bridge *br = netdev_priv(dev);
-
-		if (event == NETDEV_REGISTER)
-			br_fdb_change_mac_address(br, dev->dev_addr);
-
+	if (dev->priv_flags & IFF_EBRIDGE) {
 		err = br_vlan_bridge_event(dev, event, ptr);
 		if (err)
 			return notifier_from_errno(err);
@@ -54,13 +49,6 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 
 			return NOTIFY_DONE;
 		}
-	}
-
-	if (is_vlan_dev(dev)) {
-		struct net_device *real_dev = vlan_dev_real_dev(dev);
-
-		if (netif_is_bridge_master(real_dev))
-			br_vlan_vlan_upper_event(real_dev, dev, event);
 	}
 
 	/* not a port of a bridge */
@@ -79,9 +67,9 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 		if (br->dev->addr_assign_type == NET_ADDR_SET)
 			break;
 		prechaddr_info = ptr;
-		err = netif_pre_changeaddr_notify(br->dev,
-						  prechaddr_info->dev_addr,
-						  extack);
+		err = dev_pre_changeaddr_notify(br->dev,
+						prechaddr_info->dev_addr,
+						extack);
 		if (err)
 			return notifier_from_errno(err);
 		break;
@@ -134,7 +122,7 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 		break;
 
 	case NETDEV_PRE_TYPE_CHANGE:
-		/* Forbid underlying device to change its type. */
+		/* Forbid underlaying device to change its type. */
 		return NOTIFY_BAD;
 
 	case NETDEV_RESEND_IGMP:
@@ -178,14 +166,13 @@ static int br_switchdev_event(struct notifier_block *unused,
 	case SWITCHDEV_FDB_ADD_TO_BRIDGE:
 		fdb_info = ptr;
 		err = br_fdb_external_learn_add(br, p, fdb_info->addr,
-						fdb_info->vid,
-						fdb_info->locked, false);
+						fdb_info->vid, false);
 		if (err) {
 			err = notifier_from_errno(err);
 			break;
 		}
 		br_fdb_offloaded_set(br, p, fdb_info->addr,
-				     fdb_info->vid, fdb_info->offloaded);
+				     fdb_info->vid, true);
 		break;
 	case SWITCHDEV_FDB_DEL_TO_BRIDGE:
 		fdb_info = ptr;
@@ -214,73 +201,6 @@ static struct notifier_block br_switchdev_notifier = {
 	.notifier_call = br_switchdev_event,
 };
 
-/* called under rtnl_mutex */
-static int br_switchdev_blocking_event(struct notifier_block *nb,
-				       unsigned long event, void *ptr)
-{
-	struct netlink_ext_ack *extack = netdev_notifier_info_to_extack(ptr);
-	struct net_device *dev = switchdev_notifier_info_to_dev(ptr);
-	struct switchdev_notifier_brport_info *brport_info;
-	const struct switchdev_brport *b;
-	struct net_bridge_port *p;
-	int err = NOTIFY_DONE;
-
-	p = br_port_get_rtnl(dev);
-	if (!p)
-		goto out;
-
-	switch (event) {
-	case SWITCHDEV_BRPORT_OFFLOADED:
-		brport_info = ptr;
-		b = &brport_info->brport;
-
-		err = br_switchdev_port_offload(p, b->dev, b->ctx,
-						b->atomic_nb, b->blocking_nb,
-						b->tx_fwd_offload, extack);
-		err = notifier_from_errno(err);
-		break;
-	case SWITCHDEV_BRPORT_UNOFFLOADED:
-		brport_info = ptr;
-		b = &brport_info->brport;
-
-		br_switchdev_port_unoffload(p, b->ctx, b->atomic_nb,
-					    b->blocking_nb);
-		break;
-	case SWITCHDEV_BRPORT_REPLAY:
-		brport_info = ptr;
-		b = &brport_info->brport;
-
-		err = br_switchdev_port_replay(p, b->dev, b->ctx, b->atomic_nb,
-					       b->blocking_nb, extack);
-		err = notifier_from_errno(err);
-		break;
-	}
-
-out:
-	return err;
-}
-
-static struct notifier_block br_switchdev_blocking_notifier = {
-	.notifier_call = br_switchdev_blocking_event,
-};
-
-static int
-br_toggle_fdb_local_vlan_0(struct net_bridge *br, bool on,
-			   struct netlink_ext_ack *extack)
-{
-	int err;
-
-	if (br_opt_get(br, BROPT_FDB_LOCAL_VLAN_0) == on)
-		return 0;
-
-	err = br_fdb_toggle_local_vlan_0(br, on, extack);
-	if (err)
-		return err;
-
-	br_opt_toggle(br, BROPT_FDB_LOCAL_VLAN_0, on);
-	return 0;
-}
-
 /* br_boolopt_toggle - change user-controlled boolean option
  *
  * @br: bridge device
@@ -294,23 +214,9 @@ br_toggle_fdb_local_vlan_0(struct net_bridge *br, bool on,
 int br_boolopt_toggle(struct net_bridge *br, enum br_boolopt_id opt, bool on,
 		      struct netlink_ext_ack *extack)
 {
-	int err = 0;
-
 	switch (opt) {
 	case BR_BOOLOPT_NO_LL_LEARN:
 		br_opt_toggle(br, BROPT_NO_LL_LEARN, on);
-		break;
-	case BR_BOOLOPT_MCAST_VLAN_SNOOPING:
-		err = br_multicast_toggle_vlan_snooping(br, on, extack);
-		break;
-	case BR_BOOLOPT_MST_ENABLE:
-		err = br_mst_set_enabled(br, on, extack);
-		break;
-	case BR_BOOLOPT_MDB_OFFLOAD_FAIL_NOTIFICATION:
-		br_opt_toggle(br, BROPT_MDB_OFFLOAD_FAIL_NOTIFICATION, on);
-		break;
-	case BR_BOOLOPT_FDB_LOCAL_VLAN_0:
-		err = br_toggle_fdb_local_vlan_0(br, on, extack);
 		break;
 	default:
 		/* shouldn't be called with unsupported options */
@@ -318,7 +224,7 @@ int br_boolopt_toggle(struct net_bridge *br, enum br_boolopt_id opt, bool on,
 		break;
 	}
 
-	return err;
+	return 0;
 }
 
 int br_boolopt_get(const struct net_bridge *br, enum br_boolopt_id opt)
@@ -326,14 +232,6 @@ int br_boolopt_get(const struct net_bridge *br, enum br_boolopt_id opt)
 	switch (opt) {
 	case BR_BOOLOPT_NO_LL_LEARN:
 		return br_opt_get(br, BROPT_NO_LL_LEARN);
-	case BR_BOOLOPT_MCAST_VLAN_SNOOPING:
-		return br_opt_get(br, BROPT_MCAST_VLAN_SNOOPING_ENABLED);
-	case BR_BOOLOPT_MST_ENABLE:
-		return br_opt_get(br, BROPT_MST_ENABLED);
-	case BR_BOOLOPT_MDB_OFFLOAD_FAIL_NOTIFICATION:
-		return br_opt_get(br, BROPT_MDB_OFFLOAD_FAIL_NOTIFICATION);
-	case BR_BOOLOPT_FDB_LOCAL_VLAN_0:
-		return br_opt_get(br, BROPT_FDB_LOCAL_VLAN_0);
 	default:
 		/* shouldn't be called with unsupported options */
 		WARN_ON(1);
@@ -350,13 +248,6 @@ int br_boolopt_multi_toggle(struct net_bridge *br,
 	unsigned long bitmap = bm->optmask;
 	int err = 0;
 	int opt_id;
-
-	opt_id = find_next_bit(&bitmap, BITS_PER_LONG, BR_BOOLOPT_MAX);
-	if (opt_id != BITS_PER_LONG) {
-		NL_SET_ERR_MSG_FMT_MOD(extack, "Unknown boolean option %d",
-				       opt_id);
-		return -EINVAL;
-	}
 
 	for_each_set_bit(opt_id, &bitmap, BR_BOOLOPT_MAX) {
 		bool on = !!(bm->optval & BIT(opt_id));
@@ -402,20 +293,23 @@ void br_opt_toggle(struct net_bridge *br, enum net_bridge_opts opt, bool on)
 		clear_bit(opt, &br->options);
 }
 
-static void __net_exit br_net_exit_rtnl(struct net *net,
-					struct list_head *dev_to_kill)
+static void __net_exit br_net_exit(struct net *net)
 {
 	struct net_device *dev;
+	LIST_HEAD(list);
 
-	ASSERT_RTNL_NET(net);
-
+	rtnl_lock();
 	for_each_netdev(net, dev)
-		if (netif_is_bridge_master(dev))
-			br_dev_delete(dev, dev_to_kill);
+		if (dev->priv_flags & IFF_EBRIDGE)
+			br_dev_delete(dev, &list);
+
+	unregister_netdevice_many(&list);
+	rtnl_unlock();
+
 }
 
 static struct pernet_operations br_net_ops = {
-	.exit_rtnl = br_net_exit_rtnl,
+	.exit	= br_net_exit,
 };
 
 static const struct stp_proto br_stp_proto = {
@@ -454,15 +348,11 @@ static int __init br_init(void)
 	if (err)
 		goto err_out4;
 
-	err = register_switchdev_blocking_notifier(&br_switchdev_blocking_notifier);
+	err = br_netlink_init();
 	if (err)
 		goto err_out5;
 
-	err = br_netlink_init();
-	if (err)
-		goto err_out6;
-
-	brioctl_set(br_ioctl_stub);
+	brioctl_set(br_ioctl_deviceless_stub);
 
 #if IS_ENABLED(CONFIG_ATM_LANE)
 	br_fdb_test_addr_hook = br_fdb_test_addr;
@@ -476,8 +366,6 @@ static int __init br_init(void)
 
 	return 0;
 
-err_out6:
-	unregister_switchdev_blocking_notifier(&br_switchdev_blocking_notifier);
 err_out5:
 	unregister_switchdev_notifier(&br_switchdev_notifier);
 err_out4:
@@ -497,7 +385,6 @@ static void __exit br_deinit(void)
 {
 	stp_proto_unregister(&br_stp_proto);
 	br_netlink_fini();
-	unregister_switchdev_blocking_notifier(&br_switchdev_blocking_notifier);
 	unregister_switchdev_notifier(&br_switchdev_notifier);
 	unregister_netdevice_notifier(&br_device_notifier);
 	brioctl_set(NULL);
@@ -517,5 +404,3 @@ module_exit(br_deinit)
 MODULE_LICENSE("GPL");
 MODULE_VERSION(BR_VERSION);
 MODULE_ALIAS_RTNL_LINK("bridge");
-MODULE_DESCRIPTION("Ethernet bridge driver");
-MODULE_IMPORT_NS("NETDEV_INTERNAL");

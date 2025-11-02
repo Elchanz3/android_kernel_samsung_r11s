@@ -54,9 +54,6 @@ struct lwtunnel_encap_ops {
 };
 
 #ifdef CONFIG_LWTUNNEL
-
-DECLARE_STATIC_KEY_FALSE(nf_hooks_lwtunnel_enabled);
-
 void lwtstate_free(struct lwtunnel_state *lws);
 
 static inline struct lwtunnel_state *
@@ -138,12 +135,12 @@ int bpf_lwt_push_ip_encap(struct sk_buff *skb, void *hdr, u32 len,
 static inline void lwtunnel_set_redirect(struct dst_entry *dst)
 {
 	if (lwtunnel_output_redirect(dst->lwtstate)) {
-		dst->lwtstate->orig_output = READ_ONCE(dst->output);
-		WRITE_ONCE(dst->output, lwtunnel_output);
+		dst->lwtstate->orig_output = dst->output;
+		dst->output = lwtunnel_output;
 	}
 	if (lwtunnel_input_redirect(dst->lwtstate)) {
-		dst->lwtstate->orig_input = READ_ONCE(dst->input);
-		WRITE_ONCE(dst->input, lwtunnel_input);
+		dst->lwtstate->orig_input = dst->input;
+		dst->input = lwtunnel_input;
 	}
 }
 #else
@@ -206,7 +203,6 @@ static inline int lwtunnel_valid_encap_type(u16 encap_type,
 	NL_SET_ERR_MSG(extack, "CONFIG_LWTUNNEL is not enabled in this kernel");
 	return -EOPNOTSUPP;
 }
-
 static inline int lwtunnel_valid_encap_type_attr(struct nlattr *attr, int len,
 						 struct netlink_ext_ack *extack)
 {

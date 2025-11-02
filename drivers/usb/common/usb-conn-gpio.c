@@ -19,11 +19,7 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regulator/consumer.h>
-#include <linux/string_choices.h>
 #include <linux/usb/role.h>
-#include <linux/idr.h>
-
-static DEFINE_IDA(usb_conn_ida);
 
 #define USB_GPIO_DEB_MS		20	/* ms */
 #define USB_GPIO_DEB_US		((USB_GPIO_DEB_MS) * 1000)	/* us */
@@ -33,7 +29,6 @@ static DEFINE_IDA(usb_conn_ida);
 
 struct usb_conn_info {
 	struct device *dev;
-	int conn_id; /* store the IDA-allocated ID */
 	struct usb_role_switch *role_sw;
 	enum usb_role last_role;
 	struct regulator *vbus;
@@ -89,11 +84,11 @@ static void usb_conn_detect_cable(struct work_struct *work)
 	else
 		role = USB_ROLE_NONE;
 
-	dev_dbg(info->dev, "role %s -> %s, gpios: id %d, vbus %d\n",
-		usb_role_string(info->last_role), usb_role_string(role), id, vbus);
+	dev_dbg(info->dev, "role %d/%d, gpios: id %d, vbus %d\n",
+		info->last_role, role, id, vbus);
 
 	if (!info->initial_detection && info->last_role == role) {
-		dev_warn(info->dev, "repeated role: %s\n", usb_role_string(role));
+		dev_warn(info->dev, "repeated role: %d\n", role);
 		return;
 	}
 
@@ -116,7 +111,7 @@ static void usb_conn_detect_cable(struct work_struct *work)
 
 	if (info->vbus)
 		dev_dbg(info->dev, "vbus regulator is %s\n",
-			str_enabled_disabled(regulator_is_enabled(info->vbus)));
+			regulator_is_enabled(info->vbus) ? "enabled" : "disabled");
 
 	power_supply_changed(info->charger);
 }
@@ -162,20 +157,10 @@ static int usb_conn_psy_register(struct usb_conn_info *info)
 	struct device *dev = info->dev;
 	struct power_supply_desc *desc = &info->desc;
 	struct power_supply_config cfg = {
-		.fwnode = dev_fwnode(dev),
+		.of_node = dev->of_node,
 	};
 
-	info->conn_id = ida_alloc(&usb_conn_ida, GFP_KERNEL);
-	if (info->conn_id < 0)
-		return info->conn_id;
-
-	desc->name = devm_kasprintf(dev, GFP_KERNEL, "usb-charger-%d",
-				    info->conn_id);
-	if (!desc->name) {
-		ida_free(&usb_conn_ida, info->conn_id);
-		return -ENOMEM;
-	}
-
+	desc->name = "usb-charger";
 	desc->properties = usb_charger_properties;
 	desc->num_properties = ARRAY_SIZE(usb_charger_properties);
 	desc->get_property = usb_charger_get_property;
@@ -183,10 +168,8 @@ static int usb_conn_psy_register(struct usb_conn_info *info)
 	cfg.drv_data = info;
 
 	info->charger = devm_power_supply_register(dev, desc, &cfg);
-	if (IS_ERR(info->charger)) {
-		dev_err(dev, "Unable to register charger %d\n", info->conn_id);
-		ida_free(&usb_conn_ida, info->conn_id);
-	}
+	if (IS_ERR(info->charger))
+		dev_err(dev, "Unable to register charger\n");
 
 	return PTR_ERR_OR_ZERO(info->charger);
 }
@@ -195,6 +178,7 @@ static int usb_conn_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct usb_conn_info *info;
+	bool need_vbus = true;
 	int ret = 0;
 
 	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
@@ -224,17 +208,36 @@ static int usb_conn_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&info->dw_det, usb_conn_detect_cable);
 
-	info->vbus = devm_regulator_get_optional(dev, "vbus");
-	if (PTR_ERR(info->vbus) == -ENODEV)
-		info->vbus = NULL;
+	/*
+	 * If the USB connector is a child of a USB port and that port already provides the VBUS
+	 * supply, there's no need for the USB connector to provide it again.
+	 */
+	if (dev->parent && dev->parent->of_node) {
+		if (of_find_property(dev->parent->of_node, "vbus-supply", NULL))
+			need_vbus = false;
+	}
 
-	if (IS_ERR(info->vbus))
-		return dev_err_probe(dev, PTR_ERR(info->vbus), "failed to get vbus\n");
+	if (!need_vbus) {
+		info->vbus = devm_regulator_get_optional(dev, "vbus");
+		if (PTR_ERR(info->vbus) == -ENODEV)
+			info->vbus = NULL;
+	} else {
+		info->vbus = devm_regulator_get(dev, "vbus");
+	}
+
+	if (IS_ERR(info->vbus)) {
+		if (PTR_ERR(info->vbus) != -EPROBE_DEFER)
+			dev_err(dev, "failed to get vbus: %ld\n", PTR_ERR(info->vbus));
+		return PTR_ERR(info->vbus);
+	}
 
 	info->role_sw = usb_role_switch_get(dev);
-	if (IS_ERR(info->role_sw))
-		return dev_err_probe(dev, PTR_ERR(info->role_sw),
-				     "failed to get role switch\n");
+	if (IS_ERR(info->role_sw)) {
+		if (PTR_ERR(info->role_sw) != -EPROBE_DEFER)
+			dev_err(dev, "failed to get role switch\n");
+
+		return PTR_ERR(info->role_sw);
+	}
 
 	ret = usb_conn_psy_register(info);
 	if (ret)
@@ -288,19 +291,18 @@ put_role_sw:
 	return ret;
 }
 
-static void usb_conn_remove(struct platform_device *pdev)
+static int usb_conn_remove(struct platform_device *pdev)
 {
 	struct usb_conn_info *info = platform_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&info->dw_det);
 
-	if (info->charger)
-		ida_free(&usb_conn_ida, info->conn_id);
-
 	if (info->last_role == USB_ROLE_HOST && info->vbus)
 		regulator_disable(info->vbus);
 
 	usb_role_switch_put(info->role_sw);
+
+	return 0;
 }
 
 static int __maybe_unused usb_conn_suspend(struct device *dev)

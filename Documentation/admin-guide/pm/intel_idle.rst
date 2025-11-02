@@ -20,8 +20,8 @@ Nehalem and later generations of Intel processors, but the level of support for
 a particular processor model in it depends on whether or not it recognizes that
 processor model and may also depend on information coming from the platform
 firmware.  [To understand ``intel_idle`` it is necessary to know how ``CPUIdle``
-works in general, so this is the time to get familiar with
-Documentation/admin-guide/pm/cpuidle.rst if you have not done that yet.]
+works in general, so this is the time to get familiar with :doc:`cpuidle` if you
+have not done that yet.]
 
 ``intel_idle`` uses the ``MWAIT`` instruction to inform the processor that the
 logical CPU executing it is idle and so it may be possible to put some of the
@@ -38,27 +38,6 @@ instruction at all.
 only way to pass early-configuration-time parameters to it is via the kernel
 command line.
 
-Sysfs Interface
-===============
-
-The ``intel_idle`` driver exposes the following ``sysfs`` attributes in
-``/sys/devices/system/cpu/cpuidle/``:
-
-``intel_c1_demotion``
-	Enable or disable C1 demotion for all CPUs in the system. This file is
-	only exposed on platforms that support the C1 demotion feature and where
-	it was tested. Value 0 means that C1 demotion is disabled, value 1 means
-	that it is enabled. Write 0 or 1 to disable or enable C1 demotion for
-	all CPUs.
-
-	The C1 demotion feature involves the platform firmware demoting deep
-	C-state requests from the OS (e.g., C6 requests) to C1. The idea is that
-	firmware monitors CPU wake-up rate, and if it is higher than a
-	platform-specific threshold, the firmware demotes deep C-state requests
-	to C1. For example, Linux requests C6, but firmware noticed too many
-	wake-ups per second, and it keeps the CPU in C1. When the CPU stays in
-	C1 long enough, the platform promotes it back to C6. This may improve
-	some workloads' performance, but it may also increase power consumption.
 
 .. _intel-idle-enumeration-of-states:
 
@@ -74,8 +53,7 @@ processor) corresponding to them depends on the processor model and it may also
 depend on the configuration of the platform.
 
 In order to create a list of available idle states required by the ``CPUIdle``
-subsystem (see :ref:`idle-states-representation` in
-Documentation/admin-guide/pm/cpuidle.rst),
+subsystem (see :ref:`idle-states-representation` in :doc:`cpuidle`),
 ``intel_idle`` can use two sources of information: static tables of idle states
 for different processor models included in the driver itself and the ACPI tables
 of the system.  The former are always used if the processor model at hand is
@@ -120,8 +98,7 @@ states may not be enabled by default if there are no matching entries in the
 preliminary list of idle states coming from the ACPI tables.  In that case user
 space still can enable them later (on a per-CPU basis) with the help of
 the ``disable`` idle state attribute in ``sysfs`` (see
-:ref:`idle-states-representation` in
-Documentation/admin-guide/pm/cpuidle.rst).  This basically means that
+:ref:`idle-states-representation` in :doc:`cpuidle`).  This basically means that
 the idle states "known" to the driver may not be enabled by default if they have
 not been exposed by the platform firmware (through the ACPI tables).
 
@@ -191,7 +168,7 @@ and ``idle=nomwait``.  If any of them is present in the kernel command line, the
 ``MWAIT`` instruction is not allowed to be used, so the initialization of
 ``intel_idle`` will fail.
 
-Apart from that there are five module parameters recognized by ``intel_idle``
+Apart from that there are four module parameters recognized by ``intel_idle``
 itself that can be set via the kernel command line (they cannot be updated via
 sysfs, so that is the only way to change their values).
 
@@ -209,23 +186,14 @@ be desirable.  In practice, it is only really necessary to do that if the idle
 states in question cannot be enabled during system startup, because in the
 working state of the system the CPU power management quality of service (PM
 QoS) feature can be used to prevent ``CPUIdle`` from touching those idle states
-even if they have been enumerated (see :ref:`cpu-pm-qos` in
-Documentation/admin-guide/pm/cpuidle.rst).
+even if they have been enumerated (see :ref:`cpu-pm-qos` in :doc:`cpuidle`).
 Setting ``max_cstate`` to 0 causes the ``intel_idle`` initialization to fail.
 
-The ``no_acpi``, ``use_acpi`` and ``no_native`` module parameters are
-recognized by ``intel_idle`` if the kernel has been configured with ACPI
-support.  In the case that ACPI is not configured these flags have no impact
-on functionality.
-
-``no_acpi`` - Do not use ACPI at all.  Only native mode is available, no
-ACPI mode.
-
-``use_acpi`` - No-op in ACPI mode, the driver will consult ACPI tables for
-C-states on/off status in native mode.
-
-``no_native`` - Work only in ACPI mode, no native mode available (ignore
-all custom tables).
+The ``no_acpi`` and ``use_acpi`` module parameters (recognized by ``intel_idle``
+if the kernel has been configured with ACPI support) can be set to make the
+driver ignore the system's ACPI tables entirely or use them for all of the
+recognized processor models, respectively (they both are unset by default and
+``use_acpi`` has no effect if ``no_acpi`` is set).
 
 The value of the ``states_off`` module parameter (0 by default) represents a
 list of idle states to be disabled by default in the form of a bitmask.
@@ -234,8 +202,7 @@ Namely, the positions of the bits that are set in the ``states_off`` value are
 the indices of idle states to be disabled by default (as reflected by the names
 of the corresponding idle state directories in ``sysfs``, :file:`state0`,
 :file:`state1` ... :file:`state<i>` ..., where ``<i>`` is the index of the given
-idle state; see :ref:`idle-states-representation` in
-Documentation/admin-guide/pm/cpuidle.rst).
+idle state; see :ref:`idle-states-representation` in :doc:`cpuidle`).
 
 For example, if ``states_off`` is equal to 3, the driver will disable idle
 states 0 and 1 by default, and if it is equal to 8, idle state 3 will be
@@ -244,21 +211,6 @@ are ignored).
 
 The idle states disabled this way can be enabled (on a per-CPU basis) from user
 space via ``sysfs``.
-
-The ``ibrs_off`` module parameter is a boolean flag (defaults to
-false). If set, it is used to control if IBRS (Indirect Branch Restricted
-Speculation) should be turned off when the CPU enters an idle state.
-This flag does not affect CPUs that use Enhanced IBRS which can remain
-on with little performance impact.
-
-For some CPUs, IBRS will be selected as mitigation for Spectre v2 and Retbleed
-security vulnerabilities by default.  Leaving the IBRS mode on while idling may
-have a performance impact on its sibling CPU.  The IBRS mode will be turned off
-by default when the CPU enters into a deep idle state, but not in some
-shallower ones.  Setting the ``ibrs_off`` module parameter will force the IBRS
-mode to off when the CPU is in any one of the available idle states.  This may
-help performance of a sibling CPU at the expense of a slightly higher wakeup
-latency for the idle CPU.
 
 
 .. _intel-idle-core-and-package-idle-states:

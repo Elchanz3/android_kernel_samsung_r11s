@@ -11,12 +11,8 @@
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/of.h>
-#include <linux/property.h>
 
 #include "i2c-core.h"
-
-#define CREATE_TRACE_POINTS
-#include <trace/events/i2c_slave.h>
 
 int i2c_slave_register(struct i2c_client *client, i2c_slave_cb_t slave_cb)
 {
@@ -83,18 +79,6 @@ int i2c_slave_unregister(struct i2c_client *client)
 }
 EXPORT_SYMBOL_GPL(i2c_slave_unregister);
 
-int i2c_slave_event(struct i2c_client *client,
-		    enum i2c_slave_event event, u8 *val)
-{
-	int ret = client->slave_cb(client, event, val);
-
-	if (trace_i2c_slave_enabled())
-		trace_i2c_slave(client, event, val, ret);
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(i2c_slave_event);
-
 /**
  * i2c_detect_slave_mode - detect operation mode
  * @dev: The device owning the bus
@@ -109,17 +93,18 @@ EXPORT_SYMBOL_GPL(i2c_slave_event);
  */
 bool i2c_detect_slave_mode(struct device *dev)
 {
-	struct fwnode_handle *fwnode = dev_fwnode(dev);
-
-	if (is_of_node(fwnode)) {
+	if (IS_BUILTIN(CONFIG_OF) && dev->of_node) {
+		struct device_node *child;
 		u32 reg;
 
-		fwnode_for_each_child_node_scoped(fwnode, child) {
-			fwnode_property_read_u32(child, "reg", &reg);
-			if (reg & I2C_OWN_SLAVE_ADDRESS)
+		for_each_child_of_node(dev->of_node, child) {
+			of_property_read_u32(child, "reg", &reg);
+			if (reg & I2C_OWN_SLAVE_ADDRESS) {
+				of_node_put(child);
 				return true;
+			}
 		}
-	} else if (is_acpi_device_node(fwnode)) {
+	} else if (IS_BUILTIN(CONFIG_ACPI) && ACPI_HANDLE(dev)) {
 		dev_dbg(dev, "ACPI slave is not supported yet\n");
 	}
 	return false;

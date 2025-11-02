@@ -49,19 +49,34 @@ static void vgem_fence_release(struct dma_fence *base)
 {
 	struct vgem_fence *fence = container_of(base, typeof(*fence), base);
 
-	timer_delete_sync(&fence->timer);
+	del_timer_sync(&fence->timer);
 	dma_fence_free(&fence->base);
+}
+
+static void vgem_fence_value_str(struct dma_fence *fence, char *str, int size)
+{
+	snprintf(str, size, "%llu", fence->seqno);
+}
+
+static void vgem_fence_timeline_value_str(struct dma_fence *fence, char *str,
+					  int size)
+{
+	snprintf(str, size, "%llu",
+		 dma_fence_is_signaled(fence) ? fence->seqno : 0);
 }
 
 static const struct dma_fence_ops vgem_fence_ops = {
 	.get_driver_name = vgem_fence_get_driver_name,
 	.get_timeline_name = vgem_fence_get_timeline_name,
 	.release = vgem_fence_release,
+
+	.fence_value_str = vgem_fence_value_str,
+	.timeline_value_str = vgem_fence_timeline_value_str,
 };
 
 static void vgem_fence_timeout(struct timer_list *t)
 {
-	struct vgem_fence *fence = timer_container_of(fence, t, timer);
+	struct vgem_fence *fence = from_timer(fence, t, timer);
 
 	dma_fence_signal(&fence->base);
 }
@@ -115,7 +130,6 @@ int vgem_fence_attach_ioctl(struct drm_device *dev,
 	struct vgem_file *vfile = file->driver_priv;
 	struct dma_resv *resv;
 	struct drm_gem_object *obj;
-	enum dma_resv_usage usage;
 	struct dma_fence *fence;
 	int ret;
 
@@ -137,18 +151,19 @@ int vgem_fence_attach_ioctl(struct drm_device *dev,
 
 	/* Check for a conflicting fence */
 	resv = obj->resv;
-	usage = dma_resv_usage_rw(arg->flags & VGEM_FENCE_WRITE);
-	if (!dma_resv_test_signaled(resv, usage)) {
+	if (!dma_resv_test_signaled_rcu(resv,
+						  arg->flags & VGEM_FENCE_WRITE)) {
 		ret = -EBUSY;
 		goto err_fence;
 	}
 
 	/* Expose the fence via the dma-buf */
+	ret = 0;
 	dma_resv_lock(resv, NULL);
-	ret = dma_resv_reserve_fences(resv, 1);
-	if (!ret)
-		dma_resv_add_fence(resv, fence, arg->flags & VGEM_FENCE_WRITE ?
-				   DMA_RESV_USAGE_WRITE : DMA_RESV_USAGE_READ);
+	if (arg->flags & VGEM_FENCE_WRITE)
+		dma_resv_add_excl_fence(resv, fence);
+	else if ((ret = dma_resv_reserve_shared(resv, 1)) == 0)
+		dma_resv_add_shared_fence(resv, fence);
 	dma_resv_unlock(resv);
 
 	/* Record the fence in our idr for later signaling */
@@ -218,7 +233,7 @@ int vgem_fence_signal_ioctl(struct drm_device *dev,
 int vgem_fence_open(struct vgem_file *vfile)
 {
 	mutex_init(&vfile->fence_mutex);
-	idr_init_base(&vfile->fence_idr, 1);
+	idr_init(&vfile->fence_idr);
 
 	return 0;
 }

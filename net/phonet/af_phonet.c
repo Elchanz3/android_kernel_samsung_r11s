@@ -13,7 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include <net/sock.h>
 
 #include <linux/if_phonet.h>
@@ -22,7 +22,7 @@
 #include <net/phonet/pn_dev.h>
 
 /* Transport protocol registration */
-static const struct phonet_protocol __rcu *proto_tab[PHONET_NPROTO] __read_mostly;
+static const struct phonet_protocol *proto_tab[PHONET_NPROTO] __read_mostly;
 
 static const struct phonet_protocol *phonet_proto_get(unsigned int protocol)
 {
@@ -146,7 +146,7 @@ EXPORT_SYMBOL(phonet_header_ops);
  * Prepends an ISI header and sends a datagram.
  */
 static int pn_send(struct sk_buff *skb, struct net_device *dev,
-			u16 dst, u16 src, u8 res)
+			u16 dst, u16 src, u8 res, u8 irq)
 {
 	struct phonethdr *ph;
 	int err;
@@ -182,7 +182,7 @@ static int pn_send(struct sk_buff *skb, struct net_device *dev,
 	if (skb->pkt_type == PACKET_LOOPBACK) {
 		skb_reset_mac_header(skb);
 		skb_orphan(skb);
-		err = netif_rx(skb) ? -ENOBUFS : 0;
+		err = (irq ? netif_rx(skb) : netif_rx_ni(skb)) ? -ENOBUFS : 0;
 	} else {
 		err = dev_hard_header(skb, dev, ntohs(skb->protocol),
 					NULL, NULL, skb->len);
@@ -214,7 +214,7 @@ static int pn_raw_send(const void *data, int len, struct net_device *dev,
 	skb_reserve(skb, MAX_PHONET_HEADER);
 	__skb_put(skb, len);
 	skb_copy_to_linear_data(skb, data, len);
-	return pn_send(skb, dev, dst, src, res);
+	return pn_send(skb, dev, dst, src, res, 1);
 }
 
 /*
@@ -269,13 +269,14 @@ int pn_skb_send(struct sock *sk, struct sk_buff *skb,
 	if (!pn_addr(src))
 		src = pn_object(saddr, pn_obj(src));
 
-	err = pn_send(skb, dev, dst, src, res);
+	err = pn_send(skb, dev, dst, src, res, 0);
 	dev_put(dev);
 	return err;
 
 drop:
 	kfree_skb(skb);
-	dev_put(dev);
+	if (dev)
+		dev_put(dev);
 	return err;
 }
 EXPORT_SYMBOL(pn_skb_send);
@@ -482,7 +483,7 @@ void phonet_proto_unregister(unsigned int protocol,
 			const struct phonet_protocol *pp)
 {
 	mutex_lock(&proto_tab_lock);
-	BUG_ON(rcu_access_pointer(proto_tab[protocol]) != pp);
+	BUG_ON(proto_tab[protocol] != pp);
 	RCU_INIT_POINTER(proto_tab[protocol], NULL);
 	mutex_unlock(&proto_tab_lock);
 	synchronize_rcu();

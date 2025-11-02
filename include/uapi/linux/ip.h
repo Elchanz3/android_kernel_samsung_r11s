@@ -101,10 +101,14 @@ struct iphdr {
 	__u8	ttl;
 	__u8	protocol;
 	__sum16	check;
+#ifndef __GENKSYMS__
 	__struct_group(/* no tag */, addrs, /* no attrs */,
+#endif
 		__be32	saddr;
 		__be32	daddr;
+#ifndef __GENKSYMS__
 	);
+#endif
 	/*The options start here. */
 };
 
@@ -115,13 +119,13 @@ struct ip_auth_hdr {
 	__be16 reserved;
 	__be32 spi;
 	__be32 seq_no;		/* Sequence number */
-	__u8  auth_data[];	/* Variable len but >=4. Mind the 64 bit alignment! */
+	__u8  auth_data[0];	/* Variable len but >=4. Mind the 64 bit alignment! */
 };
 
 struct ip_esp_hdr {
 	__be32 spi;
 	__be32 seq_no;		/* Sequence number */
-	__u8  enc_data[];	/* Variable len but >=8. Mind the 64 bit alignment! */
+	__u8  enc_data[0];	/* Variable len but >=8. Mind the 64 bit alignment! */
 };
 
 struct ip_comp_hdr {
@@ -135,22 +139,6 @@ struct ip_beet_phdr {
 	__u8 hdrlen;
 	__u8 padlen;
 	__u8 reserved;
-};
-
-struct ip_iptfs_hdr {
-	__u8 subtype;		/* 0*: basic, 1: CC */
-	__u8 flags;
-	__be16 block_offset;
-};
-
-struct ip_iptfs_cc_hdr {
-	__u8 subtype;		/* 0: basic, 1*: CC */
-	__u8 flags;
-	__be16 block_offset;
-	__be32 loss_rate;
-	__be64 rtt_adelay_xdelay;
-	__be32 tval;
-	__be32 techo;
 };
 
 /* index values for the variables in ipv4_devconf */
@@ -188,7 +176,6 @@ enum
 	IPV4_DEVCONF_DROP_UNICAST_IN_L2_MULTICAST,
 	IPV4_DEVCONF_DROP_GRATUITOUS_ARP,
 	IPV4_DEVCONF_BC_FORWARDING,
-	IPV4_DEVCONF_ARP_EVICT_NOCARRIER,
 	__IPV4_DEVCONF_MAX
 };
 

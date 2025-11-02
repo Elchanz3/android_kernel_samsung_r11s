@@ -74,6 +74,7 @@ SECTIONS
     _stext = .;
     TEXT_TEXT
     SCHED_TEXT
+    CPUIDLE_TEXT
     LOCK_TEXT
     IRQENTRY_TEXT
     SOFTIRQENTRY_TEXT
@@ -108,14 +109,12 @@ SECTIONS
      be empty, which isn't pretty.  */
   . = ALIGN(32 / 8);
   .preinit_array     : { *(.preinit_array) }
-  .init_array     : {
-    *(.kasan_init)
-    *(.init_array.*)
-    *(.init_array)
-  }
+  .init_array     : { *(.init_array) }
   .fini_array     : { *(.fini_array) }
   .data           : {
     INIT_TASK_DATA(KERNEL_STACK_SIZE)
+    . = ALIGN(KERNEL_STACK_SIZE);
+    *(.data..init_irqstack)
     DATA_DATA
     *(.data.* .gnu.linkonce.d.*)
     SORT(CONSTRUCTORS)
@@ -176,6 +175,3 @@ SECTIONS
 
   DISCARDS
 }
-
-ASSERT(__syscall_stub_end - __syscall_stub_start <= PAGE_SIZE,
-       "STUB code must not be larger than one page");

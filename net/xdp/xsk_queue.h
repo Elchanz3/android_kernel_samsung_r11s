@@ -18,11 +18,9 @@ struct xdp_ring {
 	/* Hinder the adjacent cache prefetcher to prefetch the consumer
 	 * pointer if the producer pointer is touched and vice versa.
 	 */
-	u32 pad1 ____cacheline_aligned_in_smp;
+	u32 pad ____cacheline_aligned_in_smp;
 	u32 consumer ____cacheline_aligned_in_smp;
-	u32 pad2 ____cacheline_aligned_in_smp;
 	u32 flags;
-	u32 pad3 ____cacheline_aligned_in_smp;
 };
 
 /* Used for the RX and TX queues for packets */
@@ -45,26 +43,21 @@ struct xsk_queue {
 	struct xdp_ring *ring;
 	u64 invalid_descs;
 	u64 queue_empty_descs;
-	size_t ring_vmalloc_size;
 };
 
-struct parsed_desc {
-	u32 mb;
-	u32 valid;
-};
-
-/* The structure of the shared state of the rings are a simple
- * circular buffer, as outlined in
- * Documentation/core-api/circular-buffers.rst. For the Rx and
- * completion ring, the kernel is the producer and user space is the
- * consumer. For the Tx and fill rings, the kernel is the consumer and
- * user space is the producer.
+/* The structure of the shared state of the rings are the same as the
+ * ring buffer in kernel/events/ring_buffer.c. For the Rx and completion
+ * ring, the kernel is the producer and user space is the consumer. For
+ * the Tx and fill rings, the kernel is the consumer and user space is
+ * the producer.
  *
  * producer                         consumer
  *
- * if (LOAD ->consumer) {  (A)      LOAD.acq ->producer  (C)
+ * if (LOAD ->consumer) {           LOAD ->producer
+ *                    (A)           smp_rmb()       (C)
  *    STORE $data                   LOAD $data
- *    STORE.rel ->producer (B)      STORE.rel ->consumer (D)
+ *    smp_wmb()       (B)           smp_mb()        (D)
+ *    STORE ->producer              STORE ->consumer
  * }
  *
  * (A) pairs with (D), and (B) pairs with (C).
@@ -83,8 +76,7 @@ struct parsed_desc {
  *
  * (A) is a control dependency that separates the load of ->consumer
  * from the stores of $data. In case ->consumer indicates there is no
- * room in the buffer to store $data we do not. The dependency will
- * order both of the stores after the loads. So no barrier is needed.
+ * room in the buffer to store $data we do not. So no barrier is needed.
  *
  * (D) protects the load of the data to be observed to happen after the
  * store of the consumer pointer. If we did not have this memory
@@ -117,93 +109,58 @@ struct parsed_desc {
 
 /* Functions that read and validate content from consumer rings. */
 
-static inline void __xskq_cons_read_addr_unchecked(struct xsk_queue *q, u32 cached_cons, u64 *addr)
-{
-	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
-	u32 idx = cached_cons & q->ring_mask;
-
-	*addr = ring->desc[idx];
-}
-
 static inline bool xskq_cons_read_addr_unchecked(struct xsk_queue *q, u64 *addr)
 {
+	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
+
 	if (q->cached_cons != q->cached_prod) {
-		__xskq_cons_read_addr_unchecked(q, q->cached_cons, addr);
+		u32 idx = q->cached_cons & q->ring_mask;
+
+		*addr = ring->desc[idx];
 		return true;
 	}
 
 	return false;
 }
 
-static inline bool xp_unused_options_set(u32 options)
-{
-	return options & ~(XDP_PKT_CONTD | XDP_TX_METADATA);
-}
-
 static inline bool xp_aligned_validate_desc(struct xsk_buff_pool *pool,
 					    struct xdp_desc *desc)
 {
-	u64 len = desc->len;
-	u64 addr, offset;
+	u64 chunk, chunk_end;
 
-	if (!len)
+	chunk = xp_aligned_extract_addr(pool, desc->addr);
+	if (likely(desc->len)) {
+		chunk_end = xp_aligned_extract_addr(pool, desc->addr + desc->len - 1);
+		if (chunk != chunk_end)
+			return false;
+	}
+
+	if (chunk >= pool->addrs_cnt)
 		return false;
 
-	/* Can overflow if desc->addr < pool->tx_metadata_len */
-	if (check_sub_overflow(desc->addr, pool->tx_metadata_len, &addr))
+	if (desc->options)
 		return false;
-
-	offset = addr & (pool->chunk_size - 1);
-
-	/*
-	 * Can't overflow: @offset is guaranteed to be < ``U32_MAX``
-	 * (pool->chunk_size is ``u32``), @len is guaranteed
-	 * to be <= ``U32_MAX``.
-	 */
-	if (offset + len + pool->tx_metadata_len > pool->chunk_size)
-		return false;
-
-	if (addr >= pool->addrs_cnt)
-		return false;
-
-	if (xp_unused_options_set(desc->options))
-		return false;
-
 	return true;
 }
 
 static inline bool xp_unaligned_validate_desc(struct xsk_buff_pool *pool,
 					      struct xdp_desc *desc)
 {
-	u64 len = desc->len;
-	u64 addr, end;
+	u64 addr, base_addr;
 
-	if (!len)
+	base_addr = xp_unaligned_extract_addr(desc->addr);
+	addr = xp_unaligned_add_offset_to_addr(desc->addr);
+
+	if (desc->len > pool->chunk_size)
 		return false;
 
-	/* Can't overflow: @len is guaranteed to be <= ``U32_MAX`` */
-	len += pool->tx_metadata_len;
-	if (len > pool->chunk_size)
+	if (base_addr >= pool->addrs_cnt || addr >= pool->addrs_cnt ||
+	    addr + desc->len > pool->addrs_cnt ||
+	    xp_desc_crosses_non_contig_pg(pool, addr, desc->len))
 		return false;
 
-	/* Can overflow if desc->addr is close to 0 */
-	if (check_sub_overflow(xp_unaligned_add_offset_to_addr(desc->addr),
-			       pool->tx_metadata_len, &addr))
+	if (desc->options)
 		return false;
-
-	if (addr >= pool->addrs_cnt)
-		return false;
-
-	/* Can overflow if pool->addrs_cnt is high enough */
-	if (check_add_overflow(addr, len, &end) || end > pool->addrs_cnt)
-		return false;
-
-	if (xp_desc_crosses_non_contig_pg(pool, addr, len))
-		return false;
-
-	if (xp_unused_options_set(desc->options))
-		return false;
-
 	return true;
 }
 
@@ -212,11 +169,6 @@ static inline bool xp_validate_desc(struct xsk_buff_pool *pool,
 {
 	return pool->unaligned ? xp_unaligned_validate_desc(pool, desc) :
 		xp_aligned_validate_desc(pool, desc);
-}
-
-static inline bool xskq_has_descs(struct xsk_queue *q)
-{
-	return q->cached_cons != q->cached_prod;
 }
 
 static inline bool xskq_cons_is_valid_desc(struct xsk_queue *q,
@@ -234,82 +186,33 @@ static inline bool xskq_cons_read_desc(struct xsk_queue *q,
 				       struct xdp_desc *desc,
 				       struct xsk_buff_pool *pool)
 {
-	if (q->cached_cons != q->cached_prod) {
+	while (q->cached_cons != q->cached_prod) {
 		struct xdp_rxtx_ring *ring = (struct xdp_rxtx_ring *)q->ring;
 		u32 idx = q->cached_cons & q->ring_mask;
 
 		*desc = ring->desc[idx];
-		return xskq_cons_is_valid_desc(q, desc, pool);
+		if (xskq_cons_is_valid_desc(q, desc, pool))
+			return true;
+
+		q->cached_cons++;
 	}
 
-	q->queue_empty_descs++;
 	return false;
-}
-
-static inline void xskq_cons_release_n(struct xsk_queue *q, u32 cnt)
-{
-	q->cached_cons += cnt;
-}
-
-static inline void parse_desc(struct xsk_queue *q, struct xsk_buff_pool *pool,
-			      struct xdp_desc *desc, struct parsed_desc *parsed)
-{
-	parsed->valid = xskq_cons_is_valid_desc(q, desc, pool);
-	parsed->mb = xp_mb_desc(desc);
-}
-
-static inline
-u32 xskq_cons_read_desc_batch(struct xsk_queue *q, struct xsk_buff_pool *pool,
-			      u32 max)
-{
-	u32 cached_cons = q->cached_cons, nb_entries = 0;
-	struct xdp_desc *descs = pool->tx_descs;
-	u32 total_descs = 0, nr_frags = 0;
-
-	/* track first entry, if stumble upon *any* invalid descriptor, rewind
-	 * current packet that consists of frags and stop the processing
-	 */
-	while (cached_cons != q->cached_prod && nb_entries < max) {
-		struct xdp_rxtx_ring *ring = (struct xdp_rxtx_ring *)q->ring;
-		u32 idx = cached_cons & q->ring_mask;
-		struct parsed_desc parsed;
-
-		descs[nb_entries] = ring->desc[idx];
-		cached_cons++;
-		parse_desc(q, pool, &descs[nb_entries], &parsed);
-		if (unlikely(!parsed.valid))
-			break;
-
-		if (likely(!parsed.mb)) {
-			total_descs += (nr_frags + 1);
-			nr_frags = 0;
-		} else {
-			nr_frags++;
-			if (nr_frags == pool->xdp_zc_max_segs) {
-				nr_frags = 0;
-				break;
-			}
-		}
-		nb_entries++;
-	}
-
-	cached_cons -= nr_frags;
-	/* Release valid plus any invalid entries */
-	xskq_cons_release_n(q, cached_cons - q->cached_cons);
-	return total_descs;
 }
 
 /* Functions for consumers */
 
 static inline void __xskq_cons_release(struct xsk_queue *q)
 {
-	smp_store_release(&q->ring->consumer, q->cached_cons); /* D, matchees A */
+	smp_mb(); /* D, matches A */
+	WRITE_ONCE(q->ring->consumer, q->cached_cons);
 }
 
 static inline void __xskq_cons_peek(struct xsk_queue *q)
 {
 	/* Refresh the local pointer */
-	q->cached_prod = smp_load_acquire(&q->ring->producer);  /* C, matches B */
+	q->cached_prod = READ_ONCE(q->ring->producer);
+	smp_rmb(); /* C, matches B */
 }
 
 static inline void xskq_cons_get_entries(struct xsk_queue *q)
@@ -318,17 +221,17 @@ static inline void xskq_cons_get_entries(struct xsk_queue *q)
 	__xskq_cons_peek(q);
 }
 
-static inline u32 xskq_cons_nb_entries(struct xsk_queue *q, u32 max)
+static inline bool xskq_cons_has_entries(struct xsk_queue *q, u32 cnt)
 {
 	u32 entries = q->cached_prod - q->cached_cons;
 
-	if (entries >= max)
-		return max;
+	if (entries >= cnt)
+		return true;
 
 	__xskq_cons_peek(q);
 	entries = q->cached_prod - q->cached_cons;
 
-	return entries >= max ? max : entries;
+	return entries >= cnt;
 }
 
 static inline bool xskq_cons_peek_addr_unchecked(struct xsk_queue *q, u64 *addr)
@@ -347,18 +250,21 @@ static inline bool xskq_cons_peek_desc(struct xsk_queue *q,
 	return xskq_cons_read_desc(q, desc, pool);
 }
 
-/* To improve performance in the xskq_cons_release functions, only update local state here.
- * Reflect this to global state when we get new entries from the ring in
- * xskq_cons_get_entries() and whenever Rx or Tx processing are completed in the NAPI loop.
- */
 static inline void xskq_cons_release(struct xsk_queue *q)
 {
+	/* To improve performance, only update local state here.
+	 * Reflect this to global state when we get new entries
+	 * from the ring in xskq_cons_get_entries() and whenever
+	 * Rx or Tx processing are completed in the NAPI loop.
+	 */
 	q->cached_cons++;
 }
 
-static inline void xskq_cons_cancel_n(struct xsk_queue *q, u32 cnt)
+static inline bool xskq_cons_is_full(struct xsk_queue *q)
 {
-	q->cached_cons -= cnt;
+	/* No barriers needed since data is not accessed */
+	return READ_ONCE(q->ring->producer) - READ_ONCE(q->ring->consumer) ==
+		q->nentries;
 }
 
 static inline u32 xskq_cons_present_entries(struct xsk_queue *q)
@@ -369,33 +275,23 @@ static inline u32 xskq_cons_present_entries(struct xsk_queue *q)
 
 /* Functions for producers */
 
-static inline u32 xskq_get_prod(struct xsk_queue *q)
-{
-	return READ_ONCE(q->ring->producer);
-}
-
-static inline u32 xskq_prod_nb_free(struct xsk_queue *q, u32 max)
+static inline bool xskq_prod_is_full(struct xsk_queue *q)
 {
 	u32 free_entries = q->nentries - (q->cached_prod - q->cached_cons);
 
-	if (free_entries >= max)
-		return max;
+	if (free_entries)
+		return false;
 
 	/* Refresh the local tail pointer */
 	q->cached_cons = READ_ONCE(q->ring->consumer);
 	free_entries = q->nentries - (q->cached_prod - q->cached_cons);
 
-	return free_entries >= max ? max : free_entries;
+	return !free_entries;
 }
 
-static inline bool xskq_prod_is_full(struct xsk_queue *q)
+static inline void xskq_prod_cancel(struct xsk_queue *q)
 {
-	return xskq_prod_nb_free(q, 1) ? false : true;
-}
-
-static inline void xskq_prod_cancel_n(struct xsk_queue *q, u32 cnt)
-{
-	q->cached_prod -= cnt;
+	q->cached_prod--;
 }
 
 static inline int xskq_prod_reserve(struct xsk_queue *q)
@@ -420,52 +316,43 @@ static inline int xskq_prod_reserve_addr(struct xsk_queue *q, u64 addr)
 	return 0;
 }
 
-static inline void xskq_prod_write_addr(struct xsk_queue *q, u32 idx, u64 addr)
-{
-	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
-
-	ring->desc[idx & q->ring_mask] = addr;
-}
-
-static inline void xskq_prod_write_addr_batch(struct xsk_queue *q, struct xdp_desc *descs,
-					      u32 nb_entries)
-{
-	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
-	u32 i, cached_prod;
-
-	/* A, matches D */
-	cached_prod = q->cached_prod;
-	for (i = 0; i < nb_entries; i++)
-		ring->desc[cached_prod++ & q->ring_mask] = descs[i].addr;
-	q->cached_prod = cached_prod;
-}
-
 static inline int xskq_prod_reserve_desc(struct xsk_queue *q,
-					 u64 addr, u32 len, u32 flags)
+					 u64 addr, u32 len)
 {
 	struct xdp_rxtx_ring *ring = (struct xdp_rxtx_ring *)q->ring;
 	u32 idx;
 
 	if (xskq_prod_is_full(q))
-		return -ENOBUFS;
+		return -ENOSPC;
 
 	/* A, matches D */
 	idx = q->cached_prod++ & q->ring_mask;
 	ring->desc[idx].addr = addr;
 	ring->desc[idx].len = len;
-	ring->desc[idx].options = flags;
 
 	return 0;
 }
 
 static inline void __xskq_prod_submit(struct xsk_queue *q, u32 idx)
 {
-	smp_store_release(&q->ring->producer, idx); /* B, matches C */
+	smp_wmb(); /* B, matches C */
+
+	WRITE_ONCE(q->ring->producer, idx);
 }
 
 static inline void xskq_prod_submit(struct xsk_queue *q)
 {
 	__xskq_prod_submit(q, q->cached_prod);
+}
+
+static inline void xskq_prod_submit_addr(struct xsk_queue *q, u64 addr)
+{
+	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
+	u32 idx = q->ring->producer;
+
+	ring->desc[idx++ & q->ring_mask] = addr;
+
+	__xskq_prod_submit(q, idx);
 }
 
 static inline void xskq_prod_submit_n(struct xsk_queue *q, u32 nb_entries)

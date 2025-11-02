@@ -13,7 +13,7 @@
 #define THREAD_SIZE		(1 << THREAD_SHIFT)
 #define THREAD_SIZE_ORDER	1
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 # include <linux/types.h>
 # include <asm/processor.h>
 
@@ -56,12 +56,17 @@ struct cpu_context {
 	__u32	fsr;
 };
 
+typedef struct {
+	unsigned long seg;
+} mm_segment_t;
+
 struct thread_info {
 	struct task_struct	*task; /* main task structure */
 	unsigned long		flags; /* low level flags */
 	unsigned long		status; /* thread-synchronous flags */
 	__u32			cpu; /* current CPU */
 	__s32			preempt_count; /* 0 => preemptable,< 0 => BUG*/
+	mm_segment_t		addr_limit; /* thread address space */
 
 	struct cpu_context	cpu_context;
 };
@@ -75,6 +80,7 @@ struct thread_info {
 	.flags		= 0,			\
 	.cpu		= 0,			\
 	.preempt_count	= INIT_PREEMPT_COUNT,	\
+	.addr_limit	= KERNEL_DS,		\
 }
 
 /* how to get the thread information struct from C */
@@ -86,7 +92,7 @@ static inline struct thread_info *current_thread_info(void)
 }
 
 /* thread information allocation */
-#endif /* __ASSEMBLER__ */
+#endif /* __ASSEMBLY__ */
 
 /*
  * thread information flags

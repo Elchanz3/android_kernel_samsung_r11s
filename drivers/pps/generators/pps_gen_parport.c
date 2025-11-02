@@ -20,6 +20,8 @@
 #include <linux/hrtimer.h>
 #include <linux/parport.h>
 
+#define DRVDESC "parallel port PPS signal generator"
+
 #define SIGNAL		0
 #define NO_SIGNAL	PARPORT_CONTROL_STROBE
 
@@ -178,11 +180,6 @@ static void parport_attach(struct parport *port)
 {
 	struct pardev_cb pps_cb;
 
-	if (send_delay > SEND_DELAY_MAX) {
-		pr_err("delay value should be not greater then %d\n", SEND_DELAY_MAX);
-		return;
-	}
-
 	if (attached) {
 		/* we already have a port */
 		return;
@@ -208,7 +205,8 @@ static void parport_attach(struct parport *port)
 
 	calibrate_port(&device);
 
-	hrtimer_setup(&device.timer, hrtimer_event, CLOCK_REALTIME, HRTIMER_MODE_ABS);
+	hrtimer_init(&device.timer, CLOCK_REALTIME, HRTIMER_MODE_ABS);
+	device.timer.function = hrtimer_event;
 	hrtimer_start(&device.timer, next_intr_time(&device), HRTIMER_MODE_ABS);
 
 	return;
@@ -231,9 +229,41 @@ static struct parport_driver pps_gen_parport_driver = {
 	.name = KBUILD_MODNAME,
 	.match_port = parport_attach,
 	.detach = parport_detach,
+	.devmodel = true,
 };
-module_parport_driver(pps_gen_parport_driver);
+
+/* module staff */
+
+static int __init pps_gen_parport_init(void)
+{
+	int ret;
+
+	pr_info(DRVDESC "\n");
+
+	if (send_delay > SEND_DELAY_MAX) {
+		pr_err("delay value should be not greater"
+				" then %d\n", SEND_DELAY_MAX);
+		return -EINVAL;
+	}
+
+	ret = parport_register_driver(&pps_gen_parport_driver);
+	if (ret) {
+		pr_err("unable to register with parport\n");
+		return ret;
+	}
+
+	return  0;
+}
+
+static void __exit pps_gen_parport_exit(void)
+{
+	parport_unregister_driver(&pps_gen_parport_driver);
+	pr_info("hrtimer avg error is %ldns\n", hrtimer_error);
+}
+
+module_init(pps_gen_parport_init);
+module_exit(pps_gen_parport_exit);
 
 MODULE_AUTHOR("Alexander Gordeev <lasaine@lvk.cs.msu.su>");
-MODULE_DESCRIPTION("parallel port PPS signal generator");
+MODULE_DESCRIPTION(DRVDESC);
 MODULE_LICENSE("GPL");

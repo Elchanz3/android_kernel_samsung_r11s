@@ -102,7 +102,7 @@ static int gx_fix;
 #include <linux/bitops.h>
 #include <linux/uaccess.h>
 #include <asm/processor.h>		/* Processor type for cache alignment. */
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include <asm/io.h>
 
 /* These identify the driver base version and may not be removed. */
@@ -191,7 +191,7 @@ IV. Notes
 
 Thanks to Kim Stearns of Packet Engines for providing a pair of G-NIC boards.
 Thanks to Bruce Faust of Digitalscape for providing both their SYM53C885 board
-and an AlphaStation to verify the Alpha port!
+and an AlphaStation to verifty the Alpha port!
 
 IVb. References
 
@@ -362,7 +362,7 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_set_rx_mode	= set_rx_mode,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address 	= eth_mac_addr,
-	.ndo_eth_ioctl		= netdev_ioctl,
+	.ndo_do_ioctl 		= netdev_ioctl,
 	.ndo_tx_timeout 	= yellowfin_tx_timeout,
 };
 
@@ -384,7 +384,6 @@ static int yellowfin_init_one(struct pci_dev *pdev,
 #else
 	int bar = 1;
 #endif
-	u8 addr[ETH_ALEN];
 
 /* when built into the kernel, we only print version if device is found */
 #ifndef MODULE
@@ -417,13 +416,12 @@ static int yellowfin_init_one(struct pci_dev *pdev,
 
 	if (drv_flags & DontUseEeprom)
 		for (i = 0; i < 6; i++)
-			addr[i] = ioread8(ioaddr + StnAddr + i);
+			dev->dev_addr[i] = ioread8(ioaddr + StnAddr + i);
 	else {
 		int ee_offset = (read_eeprom(ioaddr, 6) == 0xff ? 0x100 : 0);
 		for (i = 0; i < 6; i++)
-			addr[i] = read_eeprom(ioaddr, ee_offset + i);
+			dev->dev_addr[i] = read_eeprom(ioaddr, ee_offset + i);
 	}
-	eth_hw_addr_set(dev, addr);
 
 	/* Reset the chip. */
 	iowrite32(0x80000000, ioaddr + DMACtrl);
@@ -652,7 +650,7 @@ err_free_irq:
 
 static void yellowfin_timer(struct timer_list *t)
 {
-	struct yellowfin_private *yp = timer_container_of(yp, t, timer);
+	struct yellowfin_private *yp = from_timer(yp, t, timer);
 	struct net_device *dev = pci_get_drvdata(yp->pci_dev);
 	void __iomem *ioaddr = yp->base;
 	int next_tick = 60*HZ;
@@ -1222,7 +1220,7 @@ static int yellowfin_close(struct net_device *dev)
 	iowrite32(0x80000000, ioaddr + RxCtrl);
 	iowrite32(0x80000000, ioaddr + TxCtrl);
 
-	timer_delete(&yp->timer);
+	del_timer(&yp->timer);
 
 #if defined(__i386__)
 	if (yellowfin_debug > 2) {
@@ -1340,9 +1338,9 @@ static void yellowfin_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo
 {
 	struct yellowfin_private *np = netdev_priv(dev);
 
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
-	strscpy(info->bus_info, pci_name(np->pci_dev), sizeof(info->bus_info));
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+	strlcpy(info->bus_info, pci_name(np->pci_dev), sizeof(info->bus_info));
 }
 
 static const struct ethtool_ops ethtool_ops = {

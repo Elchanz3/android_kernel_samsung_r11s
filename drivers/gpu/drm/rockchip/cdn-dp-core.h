@@ -1,17 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2016 Chris Zhong <zyw@rock-chips.com>
- * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Copyright (C) 2016 ROCKCHIP, Inc.
  */
 
 #ifndef _CDN_DP_CORE_H
 #define _CDN_DP_CORE_H
 
-#include <drm/display/drm_dp_helper.h>
-#include <drm/drm_bridge.h>
+#include <drm/drm_dp_helper.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
-#include <sound/hdmi-codec.h>
 
 #include "rockchip_drm_drv.h"
 
@@ -66,11 +64,12 @@ struct cdn_dp_port {
 struct cdn_dp_device {
 	struct device *dev;
 	struct drm_device *drm_dev;
-	struct drm_bridge bridge;
-	struct rockchip_encoder encoder;
+	struct drm_connector connector;
+	struct drm_encoder encoder;
 	struct drm_display_mode mode;
 	struct platform_device *audio_pdev;
 	struct work_struct event_work;
+	struct edid *edid;
 
 	struct mutex lock;
 	bool connected;
@@ -101,5 +100,6 @@ struct cdn_dp_device {
 	int active_port;
 
 	u8 dpcd[DP_RECEIVER_CAP_SIZE];
+	bool sink_has_audio;
 };
 #endif  /* _CDN_DP_CORE_H */

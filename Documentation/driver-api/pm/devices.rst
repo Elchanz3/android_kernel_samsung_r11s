@@ -217,7 +217,7 @@ system-wide transition to a sleep state even though its :c:member:`runtime_auto`
 flag is clear.
 
 For more information about the runtime power management framework, refer to
-Documentation/power/runtime_pm.rst.
+:file:`Documentation/power/runtime_pm.rst`.
 
 
 Calling Drivers to Enter and Leave System Sleep States
@@ -255,7 +255,7 @@ get registered:  a child can never be registered, probed or resumed before
 its parent; and can't be removed or suspended after that parent.
 
 The policy is that the device hierarchy should match hardware bus topology.
-[Or at least the control bus, for devices which use multiple buses.]
+[Or at least the control bus, for devices which use multiple busses.]
 In particular, this means that a device registration may fail if the parent of
 the device is suspending (i.e. has been chosen by the PM core as the next
 device to suspend) or has already suspended, as well as after all of the other
@@ -358,7 +358,7 @@ the phases are: ``prepare``, ``suspend``, ``suspend_late``, ``suspend_noirq``.
 	is probed against the device in question by passing them to the
 	:c:func:`dev_pm_set_driver_flags` helper function.]  If the first of
 	these flags is set, the PM core will not apply the direct-complete
-	procedure described above to the given device and, consequently, to any
+	procedure described above to the given device and, consequenty, to any
 	of its ancestors.  The second flag, when set, informs the middle layer
 	code (bus types, device types, PM domains, classes) that it should take
 	the return value of the ``->prepare`` callback provided by the driver
@@ -493,7 +493,7 @@ states, like S3).
 
 Drivers must also be prepared to notice that the device has been removed
 while the system was powered down, whenever that's physically possible.
-PCMCIA, MMC, USB, Firewire, SCSI, and even IDE are common examples of buses
+PCMCIA, MMC, USB, Firewire, SCSI, and even IDE are common examples of busses
 where common Linux platforms will see such removal.  Details of how drivers
 will notice and handle such removals are currently bus-specific, and often
 involve a separate thread.
@@ -655,7 +655,7 @@ been thawed.  Generally speaking, the PM notifiers are suitable for performing
 actions that either require user space to be available, or at least won't
 interfere with user space.
 
-For details refer to Documentation/driver-api/pm/notifiers.rst.
+For details refer to :doc:`notifiers`.
 
 
 Device Low-Power (suspend) States
@@ -726,7 +726,7 @@ it into account in any way.
 
 Devices may be defined as IRQ-safe which indicates to the PM core that their
 runtime PM callbacks may be invoked with disabled interrupts (see
-Documentation/power/runtime_pm.rst for more information).  If an
+:file:`Documentation/power/runtime_pm.rst` for more information).  If an
 IRQ-safe device belongs to a PM domain, the runtime PM of the domain will be
 disallowed, unless the domain itself is defined as IRQ-safe. However, it
 makes sense to define a PM domain as IRQ-safe only if all the devices in it
@@ -805,7 +805,7 @@ The ``DPM_FLAG_MAY_SKIP_RESUME`` Driver Flag
 --------------------------------------------
 
 During system-wide resume from a sleep state it's easiest to put devices into
-the full-power state, as explained in Documentation/power/runtime_pm.rst.
+the full-power state, as explained in :file:`Documentation/power/runtime_pm.rst`.
 [Refer to that document for more information regarding this particular issue as
 well as for information on the device runtime power management framework in
 general.]  However, it often is desirable to leave devices in suspend after

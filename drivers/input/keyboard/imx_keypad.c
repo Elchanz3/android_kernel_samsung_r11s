@@ -7,7 +7,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/err.h>
-#include <linux/input.h>
 #include <linux/input/matrix_keypad.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -183,8 +182,7 @@ static void imx_keypad_fire_events(struct imx_keypad *keypad,
  */
 static void imx_keypad_check_for_events(struct timer_list *t)
 {
-	struct imx_keypad *keypad = timer_container_of(keypad, t,
-						       check_matrix_timer);
+	struct imx_keypad *keypad = from_timer(keypad, t, check_matrix_timer);
 	unsigned short matrix_volatile_state[MAX_MATRIX_KEY_COLS];
 	unsigned short reg_val;
 	bool state_changed, is_zero_matrix;
@@ -371,7 +369,7 @@ static void imx_keypad_close(struct input_dev *dev)
 	/* Mark keypad as being inactive */
 	keypad->enabled = false;
 	synchronize_irq(keypad->irq);
-	timer_delete_sync(&keypad->check_matrix_timer);
+	del_timer_sync(&keypad->check_matrix_timer);
 
 	imx_keypad_inhibit(keypad);
 
@@ -410,17 +408,26 @@ open_err:
 	return -EIO;
 }
 
+#ifdef CONFIG_OF
 static const struct of_device_id imx_keypad_of_match[] = {
 	{ .compatible = "fsl,imx21-kpp", },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, imx_keypad_of_match);
+#endif
 
 static int imx_keypad_probe(struct platform_device *pdev)
 {
+	const struct matrix_keymap_data *keymap_data =
+			dev_get_platdata(&pdev->dev);
 	struct imx_keypad *keypad;
 	struct input_dev *input_dev;
 	int irq, error, i, row, col;
+
+	if (!keymap_data && !pdev->dev.of_node) {
+		dev_err(&pdev->dev, "no keymap defined\n");
+		return -EINVAL;
+	}
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -462,7 +469,7 @@ static int imx_keypad_probe(struct platform_device *pdev)
 	input_dev->open = imx_keypad_open;
 	input_dev->close = imx_keypad_close;
 
-	error = matrix_keypad_build_keymap(NULL, NULL,
+	error = matrix_keypad_build_keymap(keymap_data, NULL,
 					   MAX_MATRIX_KEY_ROWS,
 					   MAX_MATRIX_KEY_COLS,
 					   keypad->keycodes, input_dev);
@@ -522,11 +529,13 @@ static int __maybe_unused imx_kbd_noirq_suspend(struct device *dev)
 	struct input_dev *input_dev = kbd->input_dev;
 	unsigned short reg_val = readw(kbd->mmio_base + KPSR);
 
-	scoped_guard(mutex, &input_dev->mutex) {
-		/* imx kbd can wake up system even clock is disabled */
-		if (input_device_enabled(input_dev))
-			clk_disable_unprepare(kbd->clk);
-	}
+	/* imx kbd can wake up system even clock is disabled */
+	mutex_lock(&input_dev->mutex);
+
+	if (input_dev->users)
+		clk_disable_unprepare(kbd->clk);
+
+	mutex_unlock(&input_dev->mutex);
 
 	if (device_may_wakeup(&pdev->dev)) {
 		if (reg_val & KBD_STAT_KPKD)
@@ -546,20 +555,23 @@ static int __maybe_unused imx_kbd_noirq_resume(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct imx_keypad *kbd = platform_get_drvdata(pdev);
 	struct input_dev *input_dev = kbd->input_dev;
-	int error;
+	int ret = 0;
 
 	if (device_may_wakeup(&pdev->dev))
 		disable_irq_wake(kbd->irq);
 
-	guard(mutex)(&input_dev->mutex);
+	mutex_lock(&input_dev->mutex);
 
-	if (input_device_enabled(input_dev)) {
-		error = clk_prepare_enable(kbd->clk);
-		if (error)
-			return error;
+	if (input_dev->users) {
+		ret = clk_prepare_enable(kbd->clk);
+		if (ret)
+			goto err_clk;
 	}
 
-	return 0;
+err_clk:
+	mutex_unlock(&input_dev->mutex);
+
+	return ret;
 }
 
 static const struct dev_pm_ops imx_kbd_pm_ops = {
@@ -570,7 +582,7 @@ static struct platform_driver imx_keypad_driver = {
 	.driver		= {
 		.name	= "imx-keypad",
 		.pm	= &imx_kbd_pm_ops,
-		.of_match_table = imx_keypad_of_match,
+		.of_match_table = of_match_ptr(imx_keypad_of_match),
 	},
 	.probe		= imx_keypad_probe,
 };

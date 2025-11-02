@@ -7,13 +7,12 @@
 
 #ifdef CONFIG_BUG
 
-#ifdef __ASSEMBLER__
+#ifdef __ASSEMBLY__
 #include <asm/asm-offsets.h>
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 .macro EMIT_BUG_ENTRY addr,file,line,flags
 	 .section __bug_table,"aw"
-5001:	 .4byte \addr - .
-	 .4byte 5002f - .
+5001:	 PPC_LONG \addr, 5002f
 	 .short \line, \flags
 	 .org 5001b+BUG_ENTRY_SIZE
 	 .previous
@@ -24,29 +23,28 @@
 #else
 .macro EMIT_BUG_ENTRY addr,file,line,flags
 	 .section __bug_table,"aw"
-5001:	 .4byte \addr - .
+5001:	 PPC_LONG \addr
 	 .short \flags
 	 .org 5001b+BUG_ENTRY_SIZE
 	 .previous
 .endm
 #endif /* verbose */
 
-#else /* !__ASSEMBLER__ */
+#else /* !__ASSEMBLY__ */
 /* _EMIT_BUG_ENTRY expects args %0,%1,%2,%3 to be FILE, LINE, flags and
    sizeof(struct bug_entry), respectively */
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 #define _EMIT_BUG_ENTRY				\
 	".section __bug_table,\"aw\"\n"		\
-	"2:	.4byte 1b - .\n"		\
-	"	.4byte %0 - .\n"		\
-	"	.short %1, %2\n"		\
+	"2:\t" PPC_LONG "1b, %0\n"		\
+	"\t.short %1, %2\n"			\
 	".org 2b+%3\n"				\
 	".previous\n"
 #else
 #define _EMIT_BUG_ENTRY				\
 	".section __bug_table,\"aw\"\n"		\
-	"2:	.4byte 1b - .\n"		\
-	"	.short %2\n"			\
+	"2:\t" PPC_LONG "1b\n"			\
+	"\t.short %2\n"				\
 	".org 2b+%3\n"				\
 	".previous\n"
 #endif
@@ -70,11 +68,7 @@
 	BUG_ENTRY("twi 31, 0, 0", 0);				\
 	unreachable();						\
 } while (0)
-#define HAVE_ARCH_BUG
 
-#define __WARN_FLAGS(flags) BUG_ENTRY("twi 31, 0, 0", BUGFLAG_WARNING | (flags))
-
-#ifdef CONFIG_PPC64
 #define BUG_ON(x) do {						\
 	if (__builtin_constant_p(x)) {				\
 		if (x)						\
@@ -83,6 +77,8 @@
 		BUG_ENTRY(PPC_TLNEI " %4, 0", 0, "r" ((__force long)(x)));	\
 	}							\
 } while (0)
+
+#define __WARN_FLAGS(flags) BUG_ENTRY("twi 31, 0, 0", BUGFLAG_WARNING | (flags))
 
 #define WARN_ON(x) ({						\
 	int __ret_warn_on = !!(x);				\
@@ -97,38 +93,33 @@
 	unlikely(__ret_warn_on);				\
 })
 
+#define HAVE_ARCH_BUG
 #define HAVE_ARCH_BUG_ON
 #define HAVE_ARCH_WARN_ON
-#endif
-
-#endif /* __ASSEMBLER__ */
+#endif /* __ASSEMBLY __ */
 #else
-#ifdef __ASSEMBLER__
+#ifdef __ASSEMBLY__
 .macro EMIT_BUG_ENTRY addr,file,line,flags
 .endm
-#else /* !__ASSEMBLER__ */
+#else /* !__ASSEMBLY__ */
 #define _EMIT_BUG_ENTRY
 #endif
 #endif /* CONFIG_BUG */
 
-#define EMIT_WARN_ENTRY EMIT_BUG_ENTRY
-
 #include <asm-generic/bug.h>
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 struct pt_regs;
-void hash__do_page_fault(struct pt_regs *);
-void bad_page_fault(struct pt_regs *, int);
-void emulate_single_step(struct pt_regs *regs);
+extern int do_page_fault(struct pt_regs *, unsigned long, unsigned long);
+extern void bad_page_fault(struct pt_regs *, unsigned long, int);
 extern void _exception(int, struct pt_regs *, int, unsigned long);
 extern void _exception_pkey(struct pt_regs *, unsigned long, int);
 extern void die(const char *, struct pt_regs *, long);
-void die_mce(const char *str, struct pt_regs *regs, long err);
 extern bool die_will_crash(void);
 extern void panic_flush_kmsg_start(void);
 extern void panic_flush_kmsg_end(void);
-#endif /* !__ASSEMBLER__ */
+#endif /* !__ASSEMBLY__ */
 
 #endif /* __KERNEL__ */
 #endif /* _ASM_POWERPC_BUG_H */

@@ -12,6 +12,7 @@
 #include <linux/leds.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include "leds.h"
 
 #define has_flash_op(fled_cdev, op)				\
 	(fled_cdev && fled_cdev->ops->op)
@@ -91,12 +92,14 @@ static ssize_t flash_strobe_store(struct device *dev,
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
 	struct led_classdev_flash *fled_cdev = lcdev_to_flcdev(led_cdev);
 	unsigned long state;
-	ssize_t ret = -EBUSY;
+	ssize_t ret = -EINVAL;
 
 	mutex_lock(&led_cdev->led_access);
 
-	if (led_sysfs_is_disabled(led_cdev))
+	if (led_sysfs_is_disabled(led_cdev)) {
+		ret = -EBUSY;
 		goto unlock;
+	}
 
 	ret = kstrtoul(buf, 10, &state);
 	if (ret)
@@ -206,7 +209,7 @@ static ssize_t flash_fault_show(struct device *dev,
 		mask <<= 1;
 	}
 
-	return strlen(strcat(buf, "\n"));
+	return sprintf(buf, "%s\n", buf);
 }
 static DEVICE_ATTR_RO(flash_fault);
 
@@ -439,21 +442,6 @@ int led_update_flash_brightness(struct led_classdev_flash *fled_cdev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(led_update_flash_brightness);
-
-int led_set_flash_duration(struct led_classdev_flash *fled_cdev, u32 duration)
-{
-	struct led_classdev *led_cdev = &fled_cdev->led_cdev;
-	struct led_flash_setting *s = &fled_cdev->duration;
-
-	s->val = duration;
-	led_clamp_align(s);
-
-	if (!(led_cdev->flags & LED_SUSPENDED))
-		return call_flash_op(fled_cdev, duration_set, s->val);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(led_set_flash_duration);
 
 MODULE_AUTHOR("Jacek Anaszewski <j.anaszewski@samsung.com>");
 MODULE_DESCRIPTION("LED Flash class interface");

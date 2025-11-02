@@ -75,7 +75,6 @@ static int __op_panel_update_display(void)
 				rc);
 			break;
 		}
-		break;
 	case OPAL_SUCCESS:
 		break;
 	default:
@@ -195,11 +194,12 @@ free_oppanel_data:
 	return rc;
 }
 
-static void oppanel_remove(struct platform_device *pdev)
+static int oppanel_remove(struct platform_device *pdev)
 {
 	misc_deregister(&oppanel_dev);
 	kfree(oppanel_lines);
 	kfree(oppanel_data);
+	return 0;
 }
 
 static const struct of_device_id oppanel_match[] = {

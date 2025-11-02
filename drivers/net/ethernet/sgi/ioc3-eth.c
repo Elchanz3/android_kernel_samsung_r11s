@@ -243,7 +243,7 @@ static int ioc3_set_mac_address(struct net_device *dev, void *addr)
 	struct ioc3_private *ip = netdev_priv(dev);
 	struct sockaddr *sa = addr;
 
-	eth_hw_addr_set(dev, sa->sa_data);
+	memcpy(dev->dev_addr, sa->sa_data, dev->addr_len);
 
 	spin_lock_irq(&ip->ioc3_lock);
 	__ioc3_set_mac_address(dev);
@@ -570,7 +570,7 @@ static inline void ioc3_setup_duplex(struct ioc3_private *ip)
 
 static void ioc3_timer(struct timer_list *t)
 {
-	struct ioc3_private *ip = timer_container_of(ip, t, ioc3_timer);
+	struct ioc3_private *ip = from_timer(ip, t, ioc3_timer);
 
 	/* Print the link status if it has changed */
 	mii_check_media(&ip->mii, 1, 0);
@@ -718,7 +718,7 @@ static void ioc3_init(struct net_device *dev)
 	struct ioc3_private *ip = netdev_priv(dev);
 	struct ioc3_ethregs *regs = ip->regs;
 
-	timer_delete_sync(&ip->ioc3_timer);	/* Kill if running	*/
+	del_timer_sync(&ip->ioc3_timer);	/* Kill if running	*/
 
 	writel(EMCR_RST, &regs->emcr);		/* Reset		*/
 	readl(&regs->emcr);			/* Flush WB		*/
@@ -801,7 +801,7 @@ static int ioc3_close(struct net_device *dev)
 {
 	struct ioc3_private *ip = netdev_priv(dev);
 
-	timer_delete_sync(&ip->ioc3_timer);
+	del_timer_sync(&ip->ioc3_timer);
 
 	netif_stop_queue(dev);
 
@@ -820,7 +820,7 @@ static const struct net_device_ops ioc3_netdev_ops = {
 	.ndo_tx_timeout		= ioc3_timeout,
 	.ndo_get_stats		= ioc3_get_stats,
 	.ndo_set_rx_mode	= ioc3_set_multicast_list,
-	.ndo_eth_ioctl		= ioc3_ioctl,
+	.ndo_do_ioctl		= ioc3_ioctl,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= ioc3_set_mac_address,
 };
@@ -920,7 +920,7 @@ static int ioc3eth_probe(struct platform_device *pdev)
 
 	ioc3_mii_start(ip);
 	ioc3_ssram_disc(ip);
-	eth_hw_addr_set(dev, mac_addr);
+	memcpy(dev->dev_addr, mac_addr, ETH_ALEN);
 
 	/* The IOC3-specific entries in the device structure. */
 	dev->watchdog_timeo	= 5 * HZ;
@@ -950,7 +950,7 @@ static int ioc3eth_probe(struct platform_device *pdev)
 	return 0;
 
 out_stop:
-	timer_delete_sync(&ip->ioc3_timer);
+	del_timer_sync(&ip->ioc3_timer);
 	if (ip->rxr)
 		dma_free_coherent(ip->dma_dev, RX_RING_SIZE, ip->rxr,
 				  ip->rxr_dma);
@@ -962,7 +962,7 @@ out_free:
 	return err;
 }
 
-static void ioc3eth_remove(struct platform_device *pdev)
+static int ioc3eth_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = platform_get_drvdata(pdev);
 	struct ioc3_private *ip = netdev_priv(dev);
@@ -971,8 +971,10 @@ static void ioc3eth_remove(struct platform_device *pdev)
 	dma_free_coherent(ip->dma_dev, TX_RING_SIZE + SZ_16K - 1, ip->tx_ring, ip->txr_dma);
 
 	unregister_netdev(dev);
-	timer_delete_sync(&ip->ioc3_timer);
+	del_timer_sync(&ip->ioc3_timer);
 	free_netdev(dev);
+
+	return 0;
 }
 
 
@@ -1156,9 +1158,9 @@ static inline unsigned int ioc3_hash(const unsigned char *addr)
 static void ioc3_get_drvinfo(struct net_device *dev,
 			     struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, IOC3_NAME, sizeof(info->driver));
-	strscpy(info->version, IOC3_VERSION, sizeof(info->version));
-	strscpy(info->bus_info, pci_name(to_pci_dev(dev->dev.parent)),
+	strlcpy(info->driver, IOC3_NAME, sizeof(info->driver));
+	strlcpy(info->version, IOC3_VERSION, sizeof(info->version));
+	strlcpy(info->bus_info, pci_name(to_pci_dev(dev->dev.parent)),
 		sizeof(info->bus_info));
 }
 

@@ -9,7 +9,6 @@
 
 #include "i915_memcpy.h"
 #include "i915_selftest.h"
-#include "intel_gpu_commands.h"
 #include "selftests/igt_reset.h"
 #include "selftests/igt_atomic.h"
 #include "selftests/igt_spinner.h"
@@ -19,8 +18,8 @@ __igt_reset_stolen(struct intel_gt *gt,
 		   intel_engine_mask_t mask,
 		   const char *msg)
 {
-	struct i915_ggtt *ggtt = gt->ggtt;
-	const struct resource *dsm = &gt->i915->dsm.stolen;
+	struct i915_ggtt *ggtt = &gt->i915->ggtt;
+	const struct resource *dsm = &gt->i915->dsm;
 	resource_size_t num_pages, page;
 	struct intel_engine_cs *engine;
 	intel_wakeref_t wakeref;
@@ -86,9 +85,7 @@ __igt_reset_stolen(struct intel_gt *gt,
 
 		ggtt->vm.insert_page(&ggtt->vm, dma,
 				     ggtt->error_capture.start,
-				     i915_gem_get_pat_index(gt->i915,
-							    I915_CACHE_NONE),
-				     0);
+				     I915_CACHE_NONE, 0);
 		mb();
 
 		s = io_mapping_map_wc(&ggtt->iomap,
@@ -98,10 +95,10 @@ __igt_reset_stolen(struct intel_gt *gt,
 		if (!__drm_mm_interval_first(&gt->i915->mm.stolen,
 					     page << PAGE_SHIFT,
 					     ((page + 1) << PAGE_SHIFT) - 1))
-			memset_io(s, STACK_MAGIC, PAGE_SIZE);
+			memset32(s, STACK_MAGIC, PAGE_SIZE / sizeof(u32));
 
-		in = (void __force *)s;
-		if (i915_memcpy_from_wc(tmp, in, PAGE_SIZE))
+		in = s;
+		if (i915_memcpy_from_wc(tmp, s, PAGE_SIZE))
 			in = tmp;
 		crc[page] = crc32_le(0, in, PAGE_SIZE);
 
@@ -129,17 +126,15 @@ __igt_reset_stolen(struct intel_gt *gt,
 
 		ggtt->vm.insert_page(&ggtt->vm, dma,
 				     ggtt->error_capture.start,
-				     i915_gem_get_pat_index(gt->i915,
-							    I915_CACHE_NONE),
-				     0);
+				     I915_CACHE_NONE, 0);
 		mb();
 
 		s = io_mapping_map_wc(&ggtt->iomap,
 				      ggtt->error_capture.start,
 				      PAGE_SIZE);
 
-		in = (void __force *)s;
-		if (i915_memcpy_from_wc(tmp, in, PAGE_SIZE))
+		in = s;
+		if (i915_memcpy_from_wc(tmp, s, PAGE_SIZE))
 			in = tmp;
 		x = crc32_le(0, in, PAGE_SIZE);
 
@@ -261,12 +256,11 @@ static int igt_atomic_reset(void *arg)
 {
 	struct intel_gt *gt = arg;
 	const typeof(*igt_atomic_phases) *p;
-	intel_wakeref_t wakeref;
 	int err = 0;
 
 	/* Check that the resets are usable from atomic context */
 
-	wakeref = intel_gt_pm_get(gt);
+	intel_gt_pm_get(gt);
 	igt_global_reset_lock(gt);
 
 	/* Flush any requests before we get started and check basics */
@@ -281,7 +275,7 @@ static int igt_atomic_reset(void *arg)
 		awake = reset_prepare(gt);
 		p->critical_section_begin();
 
-		err = intel_gt_reset_all_engines(gt);
+		err = __intel_gt_reset(gt, ALL_ENGINES);
 
 		p->critical_section_end();
 		reset_finish(gt, awake);
@@ -297,7 +291,7 @@ static int igt_atomic_reset(void *arg)
 
 unlock:
 	igt_global_reset_unlock(gt);
-	intel_gt_pm_put(gt, wakeref);
+	intel_gt_pm_put(gt);
 
 	return err;
 }
@@ -308,7 +302,6 @@ static int igt_atomic_engine_reset(void *arg)
 	const typeof(*igt_atomic_phases) *p;
 	struct intel_engine_cs *engine;
 	enum intel_engine_id id;
-	intel_wakeref_t wakeref;
 	int err = 0;
 
 	/* Check that the resets are usable from atomic context */
@@ -319,7 +312,7 @@ static int igt_atomic_engine_reset(void *arg)
 	if (intel_uc_uses_guc_submission(&gt->uc))
 		return 0;
 
-	wakeref = intel_gt_pm_get(gt);
+	intel_gt_pm_get(gt);
 	igt_global_reset_lock(gt);
 
 	/* Flush any requests before we get started and check basics */
@@ -327,24 +320,16 @@ static int igt_atomic_engine_reset(void *arg)
 		goto out_unlock;
 
 	for_each_engine(engine, gt, id) {
-		struct tasklet_struct *t = &engine->sched_engine->tasklet;
-
-		if (t->func)
-			tasklet_disable(t);
+		tasklet_disable(&engine->execlists.tasklet);
 		intel_engine_pm_get(engine);
 
 		for (p = igt_atomic_phases; p->name; p++) {
 			GEM_TRACE("intel_engine_reset(%s) under %s\n",
 				  engine->name, p->name);
-			if (strcmp(p->name, "softirq"))
-				local_bh_disable();
 
 			p->critical_section_begin();
-			err = __intel_engine_reset_bh(engine, NULL);
+			err = intel_engine_reset(engine, NULL);
 			p->critical_section_end();
-
-			if (strcmp(p->name, "softirq"))
-				local_bh_enable();
 
 			if (err) {
 				pr_err("intel_engine_reset(%s) failed under %s\n",
@@ -354,10 +339,7 @@ static int igt_atomic_engine_reset(void *arg)
 		}
 
 		intel_engine_pm_put(engine);
-		if (t->func) {
-			tasklet_enable(t);
-			tasklet_hi_schedule(t);
-		}
+		tasklet_enable(&engine->execlists.tasklet);
 		if (err)
 			break;
 	}
@@ -367,7 +349,7 @@ static int igt_atomic_engine_reset(void *arg)
 
 out_unlock:
 	igt_global_reset_unlock(gt);
-	intel_gt_pm_put(gt, wakeref);
+	intel_gt_pm_put(gt);
 
 	return err;
 }
@@ -382,7 +364,7 @@ int intel_reset_live_selftests(struct drm_i915_private *i915)
 		SUBTEST(igt_atomic_reset),
 		SUBTEST(igt_atomic_engine_reset),
 	};
-	struct intel_gt *gt = to_gt(i915);
+	struct intel_gt *gt = &i915->gt;
 
 	if (!intel_has_gpu_reset(gt))
 		return 0;

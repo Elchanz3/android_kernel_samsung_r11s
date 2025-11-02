@@ -46,7 +46,8 @@
 #include <linux/regulator/consumer.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
-#include <linux/pci.h>
+
+#include <mach/hardware.h>
 
 #include "soc_common.h"
 
@@ -204,8 +205,14 @@ static int soc_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 
 	for (i = 0; i < ARRAY_SIZE(skt->stat); i++) {
 		if (gpio_is_valid(skt->stat[i].gpio)) {
+			unsigned long flags = GPIOF_IN;
+
+			/* CD is active low by default */
+			if (i == SOC_STAT_CD)
+				flags |= GPIOF_ACTIVE_LOW;
+
 			ret = devm_gpio_request_one(skt->socket.dev.parent,
-						    skt->stat[i].gpio, GPIOF_IN,
+						    skt->stat[i].gpio, flags,
 						    skt->stat[i].name);
 			if (ret) {
 				__soc_pcmcia_hw_shutdown(skt, i);
@@ -213,10 +220,6 @@ static int soc_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 			}
 
 			skt->stat[i].desc = gpio_to_desc(skt->stat[i].gpio);
-
-			/* CD is active low by default */
-			if ((i == SOC_STAT_CD) ^ gpiod_is_active_low(skt->stat[i].desc))
-				gpiod_toggle_active_low(skt->stat[i].desc);
 		}
 
 		if (i < SOC_STAT_VS1 && skt->stat[i].desc) {
@@ -460,7 +463,7 @@ static void soc_common_check_status(struct soc_pcmcia_socket *skt)
 /* Let's poll for events in addition to IRQs since IRQ only is unreliable... */
 static void soc_common_pcmcia_poll_event(struct timer_list *t)
 {
-	struct soc_pcmcia_socket *skt = timer_container_of(skt, t, poll_timer);
+	struct soc_pcmcia_socket *skt = from_timer(skt, t, poll_timer);
 	debug(skt, 4, "polling for events\n");
 
 	mod_timer(&skt->poll_timer, jiffies + SOC_PCMCIA_POLL_PERIOD);
@@ -766,7 +769,7 @@ EXPORT_SYMBOL(soc_pcmcia_init_one);
 
 void soc_pcmcia_remove_one(struct soc_pcmcia_socket *skt)
 {
-	timer_delete_sync(&skt->poll_timer);
+	del_timer_sync(&skt->poll_timer);
 
 	pcmcia_unregister_socket(&skt->socket);
 
@@ -781,7 +784,8 @@ void soc_pcmcia_remove_one(struct soc_pcmcia_socket *skt)
 	/* should not be required; violates some lowlevel drivers */
 	soc_common_pcmcia_config_skt(skt, &dead_socket);
 
-	iounmap(PCI_IOBASE + skt->res_io_io.start);
+	iounmap(skt->virt_io);
+	skt->virt_io = NULL;
 	release_resource(&skt->res_attr);
 	release_resource(&skt->res_mem);
 	release_resource(&skt->res_io);
@@ -814,12 +818,11 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
 	if (ret)
 		goto out_err_4;
 
-	skt->res_io_io = (struct resource)
-		 DEFINE_RES_IO_NAMED(skt->nr * 0x1000 + 0x10000, 0x1000,
-				     "PCMCIA I/O");
-	ret = pci_remap_iospace(&skt->res_io_io, skt->res_io.start);
-	if (ret)
+	skt->virt_io = ioremap(skt->res_io.start, 0x10000);
+	if (skt->virt_io == NULL) {
+		ret = -ENOMEM;
 		goto out_err_5;
+	}
 
 	/*
 	 * We initialize default socket timing here, because
@@ -837,7 +840,7 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
 	skt->socket.resource_ops = &pccard_static_ops;
 	skt->socket.irq_mask = 0;
 	skt->socket.map_size = PAGE_SIZE;
-	skt->socket.io_offset = (unsigned long)skt->res_io_io.start;
+	skt->socket.io_offset = (unsigned long)skt->virt_io;
 
 	skt->status = soc_common_pcmcia_skt_state(skt);
 
@@ -865,13 +868,13 @@ int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt)
 	return ret;
 
  out_err_8:
-	timer_delete_sync(&skt->poll_timer);
+	del_timer_sync(&skt->poll_timer);
 	pcmcia_unregister_socket(&skt->socket);
 
  out_err_7:
 	soc_pcmcia_hw_shutdown(skt);
  out_err_6:
-	iounmap(PCI_IOBASE + skt->res_io_io.start);
+	iounmap(skt->virt_io);
  out_err_5:
 	release_resource(&skt->res_attr);
  out_err_4:

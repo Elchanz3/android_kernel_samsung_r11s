@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -248,11 +249,13 @@ static const struct regmap_config stm32_cec_regmap_cfg = {
 	.val_bits = 32,
 	.reg_stride = sizeof(u32),
 	.max_register = 0x14,
+	.fast_io = true,
 };
 
 static int stm32_cec_probe(struct platform_device *pdev)
 {
 	u32 caps = CEC_CAP_DEFAULTS | CEC_CAP_PHYS_ADDR | CEC_MODE_MONITOR_ALL;
+	struct resource *res;
 	struct stm32_cec *cec;
 	void __iomem *mmio;
 	int ret;
@@ -263,7 +266,8 @@ static int stm32_cec_probe(struct platform_device *pdev)
 
 	cec->dev = &pdev->dev;
 
-	mmio = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	mmio = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(mmio))
 		return PTR_ERR(mmio);
 
@@ -286,9 +290,12 @@ static int stm32_cec_probe(struct platform_device *pdev)
 		return ret;
 
 	cec->clk_cec = devm_clk_get(&pdev->dev, "cec");
-	if (IS_ERR(cec->clk_cec))
-		return dev_err_probe(&pdev->dev, PTR_ERR(cec->clk_cec),
-				     "Cannot get cec clock\n");
+	if (IS_ERR(cec->clk_cec)) {
+		if (PTR_ERR(cec->clk_cec) != -EPROBE_DEFER)
+			dev_err(&pdev->dev, "Cannot get cec clock\n");
+
+		return PTR_ERR(cec->clk_cec);
+	}
 
 	ret = clk_prepare(cec->clk_cec);
 	if (ret) {
@@ -342,7 +349,7 @@ err_unprepare_cec_clk:
 	return ret;
 }
 
-static void stm32_cec_remove(struct platform_device *pdev)
+static int stm32_cec_remove(struct platform_device *pdev)
 {
 	struct stm32_cec *cec = platform_get_drvdata(pdev);
 
@@ -350,6 +357,8 @@ static void stm32_cec_remove(struct platform_device *pdev)
 	clk_unprepare(cec->clk_hdmi_cec);
 
 	cec_unregister_adapter(cec->adap);
+
+	return 0;
 }
 
 static const struct of_device_id stm32_cec_of_match[] = {

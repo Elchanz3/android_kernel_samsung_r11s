@@ -9,24 +9,12 @@
 #include <linux/zalloc.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/statfs.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <api/fs/fs.h>
-#include <ftw.h>
-#include <regex.h>
 
 int nr_cgroups;
-bool cgrp_event_expanded;
-
-/* used to match cgroup name with patterns */
-struct cgroup_name {
-	struct list_head list;
-	bool used;
-	char name[];
-};
-static LIST_HEAD(cgroup_list);
 
 static int open_cgroup(const char *name)
 {
@@ -47,57 +35,6 @@ static int open_cgroup(const char *name)
 	return fd;
 }
 
-#ifdef HAVE_FILE_HANDLE
-static u64 __read_cgroup_id(const char *path)
-{
-	struct {
-		struct file_handle fh;
-		uint64_t cgroup_id;
-	} handle;
-	int mount_id;
-
-	handle.fh.handle_bytes = sizeof(handle.cgroup_id);
-	if (name_to_handle_at(AT_FDCWD, path, &handle.fh, &mount_id, 0) < 0)
-		return -1ULL;
-
-	return handle.cgroup_id;
-}
-
-int read_cgroup_id(struct cgroup *cgrp)
-{
-	char path[PATH_MAX + 1];
-	char mnt[PATH_MAX + 1];
-
-	if (cgroupfs_find_mountpoint(mnt, PATH_MAX + 1, "perf_event"))
-		return -1;
-
-	scnprintf(path, PATH_MAX, "%s/%s", mnt, cgrp->name);
-
-	cgrp->id = __read_cgroup_id(path);
-	return 0;
-}
-#else
-static inline u64 __read_cgroup_id(const char *path __maybe_unused) { return -1ULL; }
-#endif  /* HAVE_FILE_HANDLE */
-
-#ifndef CGROUP2_SUPER_MAGIC
-#define CGROUP2_SUPER_MAGIC  0x63677270
-#endif
-
-int cgroup_is_v2(const char *subsys)
-{
-	char mnt[PATH_MAX + 1];
-	struct statfs stbuf;
-
-	if (cgroupfs_find_mountpoint(mnt, PATH_MAX + 1, subsys))
-		return -1;
-
-	if (statfs(mnt, &stbuf) < 0)
-		return -1;
-
-	return (stbuf.f_type == CGROUP2_SUPER_MAGIC);
-}
-
 static struct cgroup *evlist__find_cgroup(struct evlist *evlist, const char *str)
 {
 	struct evsel *counter;
@@ -114,7 +51,7 @@ static struct cgroup *evlist__find_cgroup(struct evlist *evlist, const char *str
 	return NULL;
 }
 
-struct cgroup *cgroup__new(const char *name, bool do_open)
+static struct cgroup *cgroup__new(const char *name, bool do_open)
 {
 	struct cgroup *cgroup = zalloc(sizeof(*cgroup));
 
@@ -212,150 +149,6 @@ void evlist__set_default_cgroup(struct evlist *evlist, struct cgroup *cgroup)
 		evsel__set_default_cgroup(evsel, cgroup);
 }
 
-/* helper function for ftw() in match_cgroups and list_cgroups */
-static int add_cgroup_name(const char *fpath, const struct stat *sb __maybe_unused,
-			   int typeflag, struct FTW *ftwbuf __maybe_unused)
-{
-	struct cgroup_name *cn;
-
-	if (typeflag != FTW_D)
-		return 0;
-
-	cn = malloc(sizeof(*cn) + strlen(fpath) + 1);
-	if (cn == NULL)
-		return -1;
-
-	cn->used = false;
-	strcpy(cn->name, fpath);
-
-	list_add_tail(&cn->list, &cgroup_list);
-	return 0;
-}
-
-static int check_and_add_cgroup_name(const char *fpath)
-{
-	struct cgroup_name *cn;
-
-	list_for_each_entry(cn, &cgroup_list, list) {
-		if (!strcmp(cn->name, fpath))
-			return 0;
-	}
-
-	/* pretend if it's added by ftw() */
-	return add_cgroup_name(fpath, NULL, FTW_D, NULL);
-}
-
-static void release_cgroup_list(void)
-{
-	struct cgroup_name *cn;
-
-	while (!list_empty(&cgroup_list)) {
-		cn = list_first_entry(&cgroup_list, struct cgroup_name, list);
-		list_del(&cn->list);
-		free(cn);
-	}
-}
-
-/* collect given cgroups only */
-static int list_cgroups(const char *str)
-{
-	const char *p, *e, *eos = str + strlen(str);
-	struct cgroup_name *cn;
-	char *s;
-
-	/* use given name as is when no regex is given */
-	for (;;) {
-		p = strchr(str, ',');
-		e = p ? p : eos;
-
-		if (e - str) {
-			int ret;
-
-			s = strndup(str, e - str);
-			if (!s)
-				return -1;
-
-			ret = check_and_add_cgroup_name(s);
-			free(s);
-			if (ret < 0)
-				return -1;
-		} else {
-			if (check_and_add_cgroup_name("/") < 0)
-				return -1;
-		}
-
-		if (!p)
-			break;
-		str = p+1;
-	}
-
-	/* these groups will be used */
-	list_for_each_entry(cn, &cgroup_list, list)
-		cn->used = true;
-
-	return 0;
-}
-
-/* collect all cgroups first and then match with the pattern */
-static int match_cgroups(const char *str)
-{
-	char mnt[PATH_MAX];
-	const char *p, *e, *eos = str + strlen(str);
-	struct cgroup_name *cn;
-	regex_t reg;
-	int prefix_len;
-	char *s;
-
-	if (cgroupfs_find_mountpoint(mnt, sizeof(mnt), "perf_event"))
-		return -1;
-
-	/* cgroup_name will have a full path, skip the root directory */
-	prefix_len = strlen(mnt);
-
-	/* collect all cgroups in the cgroup_list */
-	if (nftw(mnt, add_cgroup_name, 20, 0) < 0)
-		return -1;
-
-	for (;;) {
-		p = strchr(str, ',');
-		e = p ? p : eos;
-
-		/* allow empty cgroups, i.e., skip */
-		if (e - str) {
-			/* termination added */
-			s = strndup(str, e - str);
-			if (!s)
-				return -1;
-			if (regcomp(&reg, s, REG_NOSUB)) {
-				free(s);
-				return -1;
-			}
-
-			/* check cgroup name with the pattern */
-			list_for_each_entry(cn, &cgroup_list, list) {
-				char *name = cn->name + prefix_len;
-
-				if (name[0] == '/' && name[1])
-					name++;
-				if (!regexec(&reg, name, 0, NULL, 0))
-					cn->used = true;
-			}
-			regfree(&reg);
-			free(s);
-		} else {
-			/* first entry to root cgroup */
-			cn = list_first_entry(&cgroup_list, struct cgroup_name,
-					      list);
-			cn->used = true;
-		}
-
-		if (!p)
-			break;
-		str = p+1;
-	}
-	return prefix_len;
-}
-
 int parse_cgroups(const struct option *opt, const char *str,
 		  int unset __maybe_unused)
 {
@@ -408,20 +201,15 @@ int parse_cgroups(const struct option *opt, const char *str,
 	return 0;
 }
 
-static bool has_pattern_string(const char *str)
-{
-	return !!strpbrk(str, "{}[]()|*+?^$");
-}
-
-int evlist__expand_cgroup(struct evlist *evlist, const char *str, bool open_cgroup)
+int evlist__expand_cgroup(struct evlist *evlist, const char *str,
+			  struct rblist *metric_events, bool open_cgroup)
 {
 	struct evlist *orig_list, *tmp_list;
 	struct evsel *pos, *evsel, *leader;
 	struct rblist orig_metric_events;
 	struct cgroup *cgrp = NULL;
-	struct cgroup_name *cn;
+	const char *p, *e, *eos = str + strlen(str);
 	int ret = -1;
-	int prefix_len;
 
 	if (evlist->core.nr_entries == 0) {
 		fprintf(stderr, "must define events before cgroups\n");
@@ -436,39 +224,38 @@ int evlist__expand_cgroup(struct evlist *evlist, const char *str, bool open_cgro
 	}
 
 	/* save original events and init evlist */
-	evlist__splice_list_tail(orig_list, &evlist->core.entries);
+	perf_evlist__splice_list_tail(orig_list, &evlist->core.entries);
 	evlist->core.nr_entries = 0;
 
-	orig_metric_events = evlist->metric_events;
-	metricgroup__rblist_init(&evlist->metric_events);
+	if (metric_events) {
+		orig_metric_events = *metric_events;
+		rblist__init(metric_events);
+	} else {
+		rblist__init(&orig_metric_events);
+	}
 
-	if (has_pattern_string(str))
-		prefix_len = match_cgroups(str);
-	else
-		prefix_len = list_cgroups(str);
+	for (;;) {
+		p = strchr(str, ',');
+		e = p ? p : eos;
 
-	if (prefix_len < 0)
-		goto out_err;
+		/* allow empty cgroups, i.e., skip */
+		if (e - str) {
+			/* termination added */
+			char *name = strndup(str, e - str);
+			if (!name)
+				goto out_err;
 
-	list_for_each_entry(cn, &cgroup_list, list) {
-		char *name;
-
-		if (!cn->used)
-			continue;
-
-		/* cgroup_name might have a full path, skip the prefix */
-		name = cn->name + prefix_len;
-		if (name[0] == '/' && name[1])
-			name++;
-
-		/* the cgroup can go away in the meantime */
-		cgrp = cgroup__new(name, open_cgroup);
-		if (cgrp == NULL)
-			continue;
+			cgrp = cgroup__new(name, open_cgroup);
+			free(name);
+			if (cgrp == NULL)
+				goto out_err;
+		} else {
+			cgrp = NULL;
+		}
 
 		leader = NULL;
 		evlist__for_each_entry(orig_list, pos) {
-			evsel = evsel__clone(/*dest=*/NULL, pos);
+			evsel = evsel__clone(pos);
 			if (evsel == NULL)
 				goto out_err;
 
@@ -477,7 +264,7 @@ int evlist__expand_cgroup(struct evlist *evlist, const char *str, bool open_cgro
 
 			if (evsel__is_group_leader(pos))
 				leader = evsel;
-			evsel__set_leader(evsel, leader);
+			evsel->leader = leader;
 
 			evlist__add(tmp_list, evsel);
 		}
@@ -485,28 +272,28 @@ int evlist__expand_cgroup(struct evlist *evlist, const char *str, bool open_cgro
 		cgroup__put(cgrp);
 		nr_cgroups++;
 
-		if (metricgroup__copy_metric_events(tmp_list, cgrp,
-						    &evlist->metric_events,
-						    &orig_metric_events) < 0)
-			goto out_err;
+		if (metric_events) {
+			perf_stat__collect_metric_expr(tmp_list);
+			if (metricgroup__copy_metric_events(tmp_list, cgrp,
+							    metric_events,
+							    &orig_metric_events) < 0)
+				break;
+		}
 
-		evlist__splice_list_tail(evlist, &tmp_list->core.entries);
+		perf_evlist__splice_list_tail(evlist, &tmp_list->core.entries);
 		tmp_list->core.nr_entries = 0;
-	}
 
-	if (list_empty(&evlist->core.entries)) {
-		fprintf(stderr, "no cgroup matched: %s\n", str);
-		goto out_err;
+		if (!p) {
+			ret = 0;
+			break;
+		}
+		str = p+1;
 	}
-
-	ret = 0;
-	cgrp_event_expanded = true;
 
 out_err:
 	evlist__delete(orig_list);
 	evlist__delete(tmp_list);
-	metricgroup__rblist_exit(&orig_metric_events);
-	release_cgroup_list();
+	rblist__exit(&orig_metric_events);
 
 	return ret;
 }
@@ -565,11 +352,6 @@ struct cgroup *cgroup__findnew(struct perf_env *env, uint64_t id,
 	return cgrp;
 }
 
-struct cgroup *__cgroup__find(struct rb_root *root, uint64_t id)
-{
-	return __cgroup__findnew(root, id, /*create=*/false, /*path=*/NULL);
-}
-
 struct cgroup *cgroup__find(struct perf_env *env, uint64_t id)
 {
 	struct cgroup *cgrp;
@@ -594,36 +376,4 @@ void perf_env__purge_cgroups(struct perf_env *env)
 		cgroup__put(cgrp);
 	}
 	up_write(&env->cgroups.lock);
-}
-
-void read_all_cgroups(struct rb_root *root)
-{
-	char mnt[PATH_MAX];
-	struct cgroup_name *cn;
-	int prefix_len;
-
-	if (cgroupfs_find_mountpoint(mnt, sizeof(mnt), "perf_event"))
-		return;
-
-	/* cgroup_name will have a full path, skip the root directory */
-	prefix_len = strlen(mnt);
-
-	/* collect all cgroups in the cgroup_list */
-	if (nftw(mnt, add_cgroup_name, 20, 0) < 0)
-		return;
-
-	list_for_each_entry(cn, &cgroup_list, list) {
-		const char *name;
-		u64 cgrp_id;
-
-		/* cgroup_name might have a full path, skip the prefix */
-		name = cn->name + prefix_len;
-		if (name[0] == '\0')
-			name = "/";
-
-		cgrp_id = __read_cgroup_id(cn->name);
-		__cgroup__findnew(root, cgrp_id, /*create=*/true, name);
-	}
-
-	release_cgroup_list();
 }

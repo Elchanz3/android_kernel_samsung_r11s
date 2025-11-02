@@ -20,10 +20,12 @@
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/crc32.h>
+#include <linux/crc32poly.h>
 #include <linux/bitrev.h>
 #include <linux/ethtool.h>
 #include <linux/slab.h>
 #include <linux/pgtable.h>
+#include <asm/prom.h>
 #include <asm/dbdma.h>
 #include <asm/io.h>
 #include <asm/page.h>
@@ -306,7 +308,7 @@ bmac_init_registers(struct net_device *dev)
 {
 	struct bmac_data *bp = netdev_priv(dev);
 	volatile unsigned short regValue;
-	const unsigned short *pWord16;
+	unsigned short *pWord16;
 	int i;
 
 	/* XXDEBUG(("bmac: enter init_registers\n")); */
@@ -369,7 +371,7 @@ bmac_init_registers(struct net_device *dev)
 	bmwrite(dev, BHASH1, bp->hash_table_mask[2]); 	/* bits 47 - 32 */
 	bmwrite(dev, BHASH0, bp->hash_table_mask[3]); 	/* bits 63 - 48 */
 
-	pWord16 = (const unsigned short *)dev->dev_addr;
+	pWord16 = (unsigned short *)dev->dev_addr;
 	bmwrite(dev, MADD0, *pWord16++);
 	bmwrite(dev, MADD1, *pWord16++);
 	bmwrite(dev, MADD2, *pWord16);
@@ -460,7 +462,7 @@ static int bmac_suspend(struct macio_dev *mdev, pm_message_t state)
 	/* prolly should wait for dma to finish & turn off the chip */
 	spin_lock_irqsave(&bp->lock, flags);
 	if (bp->timeout_active) {
-		timer_delete(&bp->tx_timeout);
+		del_timer(&bp->tx_timeout);
 		bp->timeout_active = 0;
 	}
 	disable_irq(dev->irq);
@@ -475,26 +477,26 @@ static int bmac_suspend(struct macio_dev *mdev, pm_message_t state)
 		config = bmread(dev, RXCFG);
 		bmwrite(dev, RXCFG, (config & ~RxMACEnable));
 		config = bmread(dev, TXCFG);
-		bmwrite(dev, TXCFG, (config & ~TxMACEnable));
+       		bmwrite(dev, TXCFG, (config & ~TxMACEnable));
 		bmwrite(dev, INTDISABLE, DisableAll); /* disable all intrs */
-		/* disable rx and tx dma */
+       		/* disable rx and tx dma */
 		rd->control = cpu_to_le32(DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
 		td->control = cpu_to_le32(DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
-		/* free some skb's */
-		for (i=0; i<N_RX_RING; i++) {
-			if (bp->rx_bufs[i] != NULL) {
-				dev_kfree_skb(bp->rx_bufs[i]);
-				bp->rx_bufs[i] = NULL;
-			}
-		}
-		for (i = 0; i<N_TX_RING; i++) {
+       		/* free some skb's */
+       		for (i=0; i<N_RX_RING; i++) {
+       			if (bp->rx_bufs[i] != NULL) {
+       				dev_kfree_skb(bp->rx_bufs[i]);
+       				bp->rx_bufs[i] = NULL;
+       			}
+       		}
+       		for (i = 0; i<N_TX_RING; i++) {
 			if (bp->tx_bufs[i] != NULL) {
 		       		dev_kfree_skb(bp->tx_bufs[i]);
 	       			bp->tx_bufs[i] = NULL;
 		       	}
 		}
 	}
-	pmac_call_feature(PMAC_FTR_BMAC_ENABLE, macio_get_of_node(bp->mdev), 0, 0);
+       	pmac_call_feature(PMAC_FTR_BMAC_ENABLE, macio_get_of_node(bp->mdev), 0, 0);
 	return 0;
 }
 
@@ -508,9 +510,9 @@ static int bmac_resume(struct macio_dev *mdev)
 		bmac_reset_and_enable(dev);
 
 	enable_irq(dev->irq);
-	enable_irq(bp->tx_dma_intr);
-	enable_irq(bp->rx_dma_intr);
-	netif_device_attach(dev);
+       	enable_irq(bp->tx_dma_intr);
+       	enable_irq(bp->rx_dma_intr);
+       	netif_device_attach(dev);
 
 	return 0;
 }
@@ -519,16 +521,19 @@ static int bmac_resume(struct macio_dev *mdev)
 static int bmac_set_address(struct net_device *dev, void *addr)
 {
 	struct bmac_data *bp = netdev_priv(dev);
-	const unsigned short *pWord16;
+	unsigned char *p = addr;
+	unsigned short *pWord16;
 	unsigned long flags;
+	int i;
 
 	XXDEBUG(("bmac: enter set_address\n"));
 	spin_lock_irqsave(&bp->lock, flags);
 
-	eth_hw_addr_set(dev, addr);
-
+	for (i = 0; i < 6; ++i) {
+		dev->dev_addr[i] = p[i];
+	}
 	/* load up the hardware address */
-	pWord16  = (const unsigned short *)dev->dev_addr;
+	pWord16  = (unsigned short *)dev->dev_addr;
 	bmwrite(dev, MADD0, *pWord16++);
 	bmwrite(dev, MADD1, *pWord16++);
 	bmwrite(dev, MADD2, *pWord16);
@@ -545,7 +550,7 @@ static inline void bmac_set_timeout(struct net_device *dev)
 
 	spin_lock_irqsave(&bp->lock, flags);
 	if (bp->timeout_active)
-		timer_delete(&bp->tx_timeout);
+		del_timer(&bp->tx_timeout);
 	bp->tx_timeout.expires = jiffies + TX_TIMEOUT;
 	add_timer(&bp->tx_timeout);
 	bp->timeout_active = 1;
@@ -754,7 +759,7 @@ static irqreturn_t bmac_txdma_intr(int irq, void *dev_id)
 		XXDEBUG(("bmac_txdma_intr\n"));
 	}
 
-	/*     timer_delete(&bp->tx_timeout); */
+	/*     del_timer(&bp->tx_timeout); */
 	/*     bp->timeout_active = 0; */
 
 	while (1) {
@@ -795,6 +800,59 @@ static irqreturn_t bmac_txdma_intr(int irq, void *dev_id)
 }
 
 #ifndef SUNHME_MULTICAST
+/* Real fast bit-reversal algorithm, 6-bit values */
+static int reverse6[64] = {
+	0x0,0x20,0x10,0x30,0x8,0x28,0x18,0x38,
+	0x4,0x24,0x14,0x34,0xc,0x2c,0x1c,0x3c,
+	0x2,0x22,0x12,0x32,0xa,0x2a,0x1a,0x3a,
+	0x6,0x26,0x16,0x36,0xe,0x2e,0x1e,0x3e,
+	0x1,0x21,0x11,0x31,0x9,0x29,0x19,0x39,
+	0x5,0x25,0x15,0x35,0xd,0x2d,0x1d,0x3d,
+	0x3,0x23,0x13,0x33,0xb,0x2b,0x1b,0x3b,
+	0x7,0x27,0x17,0x37,0xf,0x2f,0x1f,0x3f
+};
+
+static unsigned int
+crc416(unsigned int curval, unsigned short nxtval)
+{
+	unsigned int counter, cur = curval, next = nxtval;
+	int high_crc_set, low_data_set;
+
+	/* Swap bytes */
+	next = ((next & 0x00FF) << 8) | (next >> 8);
+
+	/* Compute bit-by-bit */
+	for (counter = 0; counter < 16; ++counter) {
+		/* is high CRC bit set? */
+		if ((cur & 0x80000000) == 0) high_crc_set = 0;
+		else high_crc_set = 1;
+
+		cur = cur << 1;
+
+		if ((next & 0x0001) == 0) low_data_set = 0;
+		else low_data_set = 1;
+
+		next = next >> 1;
+
+		/* do the XOR */
+		if (high_crc_set ^ low_data_set) cur = cur ^ CRC32_POLY_BE;
+	}
+	return cur;
+}
+
+static unsigned int
+bmac_crc(unsigned short *address)
+{
+	unsigned int newcrc;
+
+	XXDEBUG(("bmac_crc: addr=%#04x, %#04x, %#04x\n", *address, address[1], address[2]));
+	newcrc = crc416(0xffffffff, *address);	/* address bits 47 - 32 */
+	newcrc = crc416(newcrc, address[1]);	/* address bits 31 - 16 */
+	newcrc = crc416(newcrc, address[2]);	/* address bits 15 - 0  */
+
+	return(newcrc);
+}
+
 /*
  * Add requested mcast addr to BMac's hash table filter.
  *
@@ -807,7 +865,8 @@ bmac_addhash(struct bmac_data *bp, unsigned char *addr)
 	unsigned short	 mask;
 
 	if (!(*addr)) return;
-	crc = crc32(~0, addr, ETH_ALEN) >> 26;
+	crc = bmac_crc((unsigned short *)addr) & 0x3f; /* Big-endian alert! */
+	crc = reverse6[crc];	/* Hyperfast bit-reversing algorithm */
 	if (bp->hash_use_count[crc]++) return; /* This bit is already set */
 	mask = crc % 16;
 	mask = (unsigned char)1 << mask;
@@ -821,7 +880,8 @@ bmac_removehash(struct bmac_data *bp, unsigned char *addr)
 	unsigned char mask;
 
 	/* Now, delete the address from the filter copy, as indicated */
-	crc = crc32(~0, addr, ETH_ALEN) >> 26;
+	crc = bmac_crc((unsigned short *)addr) & 0x3f; /* Big-endian alert! */
+	crc = reverse6[crc];	/* Hyperfast bit-reversing algorithm */
 	if (bp->hash_use_count[crc] == 0) return; /* That bit wasn't in use! */
 	if (--bp->hash_use_count[crc]) return; /* That bit is still in use */
 	mask = crc % 16;
@@ -1180,7 +1240,6 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 	struct bmac_data *bp;
 	const unsigned char *prop_addr;
 	unsigned char addr[6];
-	u8 macaddr[6];
 	struct net_device *dev;
 	int is_bmac_plus = ((int)match->data) != 0;
 
@@ -1228,9 +1287,7 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 
 	rev = addr[0] == 0 && addr[1] == 0xA0;
 	for (j = 0; j < 6; ++j)
-		macaddr[j] = rev ? bitrev8(addr[j]): addr[j];
-
-	eth_hw_addr_set(dev, macaddr);
+		dev->dev_addr[j] = rev ? bitrev8(addr[j]): addr[j];
 
 	/* Enable chip without interrupts for now */
 	bmac_enable_and_reset_chip(dev);
@@ -1261,7 +1318,7 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 
 	timer_setup(&bp->tx_timeout, bmac_tx_timeout, 0);
 
-	ret = request_irq(dev->irq, bmac_misc_intr, IRQF_NO_AUTOEN, "BMAC-misc", dev);
+	ret = request_irq(dev->irq, bmac_misc_intr, 0, "BMAC-misc", dev);
 	if (ret) {
 		printk(KERN_ERR "BMAC: can't get irq %d\n", dev->irq);
 		goto err_out_iounmap_rx;
@@ -1280,6 +1337,7 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 	/* Mask chip interrupts and disable chip, will be
 	 * re-enabled on open()
 	 */
+	disable_irq(dev->irq);
 	pmac_call_feature(PMAC_FTR_BMAC_ENABLE, macio_get_of_node(bp->mdev), 0, 0);
 
 	if (register_netdev(dev) != 0) {
@@ -1410,7 +1468,7 @@ bmac_output(struct sk_buff *skb, struct net_device *dev)
 
 static void bmac_tx_timeout(struct timer_list *t)
 {
-	struct bmac_data *bp = timer_container_of(bp, t, tx_timeout);
+	struct bmac_data *bp = from_timer(bp, t, tx_timeout);
 	struct net_device *dev = macio_get_drvdata(bp->mdev);
 	volatile struct dbdma_regs __iomem *td = bp->tx_dma;
 	volatile struct dbdma_regs __iomem *rd = bp->rx_dma;
@@ -1534,14 +1592,14 @@ bmac_proc_info(char *buffer, char **start, off_t offset, int length)
 }
 #endif
 
-static void bmac_remove(struct macio_dev *mdev)
+static int bmac_remove(struct macio_dev *mdev)
 {
 	struct net_device *dev = macio_get_drvdata(mdev);
 	struct bmac_data *bp = netdev_priv(dev);
 
 	unregister_netdev(dev);
 
-	free_irq(dev->irq, dev);
+       	free_irq(dev->irq, dev);
 	free_irq(bp->tx_dma_intr, dev);
 	free_irq(bp->rx_dma_intr, dev);
 
@@ -1552,6 +1610,8 @@ static void bmac_remove(struct macio_dev *mdev)
 	macio_release_resources(mdev);
 
 	free_netdev(dev);
+
+	return 0;
 }
 
 static const struct of_device_id bmac_match[] =

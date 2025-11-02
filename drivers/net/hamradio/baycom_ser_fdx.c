@@ -373,7 +373,6 @@ static enum uart ser12_check_uart(unsigned int iobase)
 
 static int ser12_open(struct net_device *dev)
 {
-	const unsigned int nr_irqs = irq_get_nr_irqs();
 	struct baycom_state *bc = netdev_priv(dev);
 	enum uart u;
 
@@ -463,7 +462,7 @@ static int ser12_close(struct net_device *dev)
 
 /* --------------------------------------------------------------------- */
 
-static int baycom_ioctl(struct net_device *dev, void __user *data,
+static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 			struct hdlcdrv_ioctl *hi, int cmd);
 
 /* --------------------------------------------------------------------- */
@@ -498,7 +497,7 @@ static int baycom_setmode(struct baycom_state *bc, const char *modestr)
 
 /* --------------------------------------------------------------------- */
 
-static int baycom_ioctl(struct net_device *dev, void __user *data,
+static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 			struct hdlcdrv_ioctl *hi, int cmd)
 {
 	struct baycom_state *bc;
@@ -520,7 +519,7 @@ static int baycom_ioctl(struct net_device *dev, void __user *data,
 		sprintf(hi->data.modename, "ser%u", bc->baud / 100);
 		if (bc->opt_dcd <= 0)
 			strcat(hi->data.modename, (!bc->opt_dcd) ? "*" : "+");
-		if (copy_to_user(data, hi, sizeof(struct hdlcdrv_ioctl)))
+		if (copy_to_user(ifr->ifr_data, hi, sizeof(struct hdlcdrv_ioctl)))
 			return -EFAULT;
 		return 0;
 
@@ -531,8 +530,8 @@ static int baycom_ioctl(struct net_device *dev, void __user *data,
 		return baycom_setmode(bc, hi->data.modename);
 
 	case HDLCDRVCTL_MODELIST:
-		strscpy(hi->data.modename, "ser12,ser3,ser24");
-		if (copy_to_user(data, hi, sizeof(struct hdlcdrv_ioctl)))
+		strcpy(hi->data.modename, "ser12,ser3,ser24");
+		if (copy_to_user(ifr->ifr_data, hi, sizeof(struct hdlcdrv_ioctl)))
 			return -EFAULT;
 		return 0;
 
@@ -541,7 +540,7 @@ static int baycom_ioctl(struct net_device *dev, void __user *data,
 
 	}
 
-	if (copy_from_user(&bi, data, sizeof(bi)))
+	if (copy_from_user(&bi, ifr->ifr_data, sizeof(bi)))
 		return -EFAULT;
 	switch (bi.cmd) {
 	default:
@@ -556,7 +555,7 @@ static int baycom_ioctl(struct net_device *dev, void __user *data,
 #endif /* BAYCOM_DEBUG */
 
 	}
-	if (copy_to_user(data, &bi, sizeof(bi)))
+	if (copy_to_user(ifr->ifr_data, &bi, sizeof(bi)))
 		return -EFAULT;
 	return 0;
 

@@ -227,7 +227,7 @@ hns_dsaf_reg_cnt_clr_ce(struct dsaf_device *dsaf_dev, u32 reg_cnt_clr_ce)
 }
 
 /**
- * hns_dsaf_ppe_qid_cfg - config ppe qid
+ * hns_ppe_qid_cfg - config ppe qid
  * @dsaf_dev: dsa fabric id
  * @qid_cfg: value array
  */
@@ -613,7 +613,7 @@ static void hns_dsaf_tbl_tcam_data_cfg(
 }
 
 /**
- * hns_dsaf_tbl_tcam_mcast_cfg - tbl
+ * dsaf_tbl_tcam_mcast_cfg - tbl
  * @dsaf_dev: dsa fabric id
  * @mcast: addr
  */
@@ -1213,7 +1213,7 @@ void hns_dsaf_get_rx_mac_pause_en(struct dsaf_device *dsaf_dev, int mac_id,
 }
 
 /**
- * hns_dsaf_comm_init - INT
+ * hns_dsaf_tbl_tcam_init - INT
  * @dsaf_dev: dsa fabric id
  */
 static void hns_dsaf_comm_init(struct dsaf_device *dsaf_dev)
@@ -1613,7 +1613,7 @@ int hns_dsaf_set_mac_uc_entry(
 	struct dsaf_device *dsaf_dev,
 	struct dsaf_drv_mac_single_dest_entry *mac_entry)
 {
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 	struct dsaf_tbl_tcam_ucast_cfg mac_data;
 	struct dsaf_drv_priv *priv =
@@ -1679,7 +1679,7 @@ int hns_dsaf_rm_mac_addr(
 	struct dsaf_device *dsaf_dev,
 	struct dsaf_drv_mac_single_dest_entry *mac_entry)
 {
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_tbl_tcam_ucast_cfg mac_data;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 
@@ -1751,7 +1751,7 @@ static void hns_dsaf_mc_mask_bit_clear(char *dst, const char *src)
 int hns_dsaf_add_mac_mc_port(struct dsaf_device *dsaf_dev,
 			     struct dsaf_drv_mac_single_dest_entry *mac_entry)
 {
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 	struct dsaf_drv_tbl_tcam_key mask_key;
 	struct dsaf_tbl_tcam_data *pmask_key = NULL;
@@ -1861,7 +1861,7 @@ int hns_dsaf_add_mac_mc_port(struct dsaf_device *dsaf_dev,
 int hns_dsaf_del_mac_entry(struct dsaf_device *dsaf_dev, u16 vlan_id,
 			   u8 in_port_num, u8 *addr)
 {
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 	struct dsaf_drv_priv *priv =
 	    (struct dsaf_drv_priv *)hns_dsaf_dev_priv(dsaf_dev);
@@ -1910,7 +1910,7 @@ int hns_dsaf_del_mac_entry(struct dsaf_device *dsaf_dev, u16 vlan_id,
 int hns_dsaf_del_mac_mc_port(struct dsaf_device *dsaf_dev,
 			     struct dsaf_drv_mac_single_dest_entry *mac_entry)
 {
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 	struct dsaf_drv_priv *priv = hns_dsaf_dev_priv(dsaf_dev);
 	struct dsaf_drv_soft_mac_tbl *soft_mac_entry = priv->soft_mac_tbl;
@@ -2111,7 +2111,7 @@ static void hns_dsaf_free_dev(struct dsaf_device *dsaf_dev)
 }
 
 /**
- * hns_dsaf_pfc_unit_cnt - set pfc unit count
+ * dsaf_pfc_unit_cnt - set pfc unit count
  * @dsaf_dev: dsa fabric id
  * @mac_id: id in use
  * @rate:  value array
@@ -2142,7 +2142,7 @@ static void hns_dsaf_pfc_unit_cnt(struct dsaf_device *dsaf_dev, int  mac_id,
 }
 
 /**
- * hns_dsaf_port_work_rate_cfg - fifo
+ * dsaf_port_work_rate_cfg - fifo
  * @dsaf_dev: dsa fabric id
  * @mac_id: mac contrl block
  * @rate_mode: value array
@@ -2264,7 +2264,7 @@ void hns_dsaf_update_stats(struct dsaf_device *dsaf_dev, u32 node_num)
  */
 void hns_dsaf_get_regs(struct dsaf_device *ddev, u32 port, void *data)
 {
-	u32 i;
+	u32 i = 0;
 	u32 j;
 	u32 *p = data;
 	u32 reg_tmp;
@@ -2590,34 +2590,55 @@ void hns_dsaf_get_regs(struct dsaf_device *ddev, u32 port, void *data)
 		p[i] = 0xdddddddd;
 }
 
-static void hns_dsaf_get_node_stats_strings(u8 **data, int node,
-					    struct dsaf_device *dsaf_dev)
+static char *hns_dsaf_get_node_stats_strings(char *data, int node,
+					     struct dsaf_device *dsaf_dev)
 {
-	bool is_ver1 = AE_IS_VER1(dsaf_dev->dsaf_ver);
+	char *buff = data;
 	int i;
+	bool is_ver1 = AE_IS_VER1(dsaf_dev->dsaf_ver);
 
-	ethtool_sprintf(data, "innod%d_pad_drop_pkts", node);
-	ethtool_sprintf(data, "innod%d_manage_pkts", node);
-	ethtool_sprintf(data, "innod%d_rx_pkts", node);
-	ethtool_sprintf(data, "innod%d_rx_pkt_id", node);
-	ethtool_sprintf(data, "innod%d_rx_pause_frame", node);
-	ethtool_sprintf(data, "innod%d_release_buf_num", node);
-	ethtool_sprintf(data, "innod%d_sbm_drop_pkts", node);
-	ethtool_sprintf(data, "innod%d_crc_false_pkts", node);
-	ethtool_sprintf(data, "innod%d_bp_drop_pkts", node);
-	ethtool_sprintf(data, "innod%d_lookup_rslt_drop_pkts", node);
-	ethtool_sprintf(data, "innod%d_local_rslt_fail_pkts", node);
-	ethtool_sprintf(data, "innod%d_vlan_drop_pkts", node);
-	ethtool_sprintf(data, "innod%d_stp_drop_pkts", node);
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_pad_drop_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_manage_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_rx_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_rx_pkt_id", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_rx_pause_frame", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_release_buf_num", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_sbm_drop_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_crc_false_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_bp_drop_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_lookup_rslt_drop_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_local_rslt_fail_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_vlan_drop_pkts", node);
+	buff += ETH_GSTRING_LEN;
+	snprintf(buff, ETH_GSTRING_LEN, "innod%d_stp_drop_pkts", node);
+	buff += ETH_GSTRING_LEN;
 	if (node < DSAF_SERVICE_NW_NUM && !is_ver1) {
 		for (i = 0; i < DSAF_PRIO_NR; i++) {
-			ethtool_sprintf(data, "inod%d_pfc_prio%d_pkts", node,
-					i);
-			ethtool_sprintf(data, "onod%d_pfc_prio%d_pkts", node,
-					i);
+			snprintf(buff + 0 * ETH_GSTRING_LEN * DSAF_PRIO_NR,
+				 ETH_GSTRING_LEN, "inod%d_pfc_prio%d_pkts",
+				 node, i);
+			snprintf(buff + 1 * ETH_GSTRING_LEN * DSAF_PRIO_NR,
+				 ETH_GSTRING_LEN, "onod%d_pfc_prio%d_pkts",
+				 node, i);
+			buff += ETH_GSTRING_LEN;
 		}
+		buff += 1 * DSAF_PRIO_NR * ETH_GSTRING_LEN;
 	}
-	ethtool_sprintf(data, "onnod%d_tx_pkts", node);
+	snprintf(buff, ETH_GSTRING_LEN, "onnod%d_tx_pkts", node);
+	buff += ETH_GSTRING_LEN;
+
+	return buff;
 }
 
 static u64 *hns_dsaf_get_node_stats(struct dsaf_device *ddev, u64 *data,
@@ -2699,24 +2720,25 @@ int hns_dsaf_get_sset_count(struct dsaf_device *dsaf_dev, int stringset)
  *@port:port index
  *@dsaf_dev: dsaf device
  */
-void hns_dsaf_get_strings(int stringset, u8 **data, int port,
+void hns_dsaf_get_strings(int stringset, u8 *data, int port,
 			  struct dsaf_device *dsaf_dev)
 {
+	char *buff = (char *)data;
 	int node = port;
 
 	if (stringset != ETH_SS_STATS)
 		return;
 
 	/* for ge/xge node info */
-	hns_dsaf_get_node_stats_strings(data, node, dsaf_dev);
+	buff = hns_dsaf_get_node_stats_strings(buff, node, dsaf_dev);
 
 	/* for ppe node info */
 	node = port + DSAF_PPE_INODE_BASE;
-	hns_dsaf_get_node_stats_strings(data, node, dsaf_dev);
+	(void)hns_dsaf_get_node_stats_strings(buff, node, dsaf_dev);
 }
 
 /**
- *hns_dsaf_get_regs_count - get dsaf regs count
+ *hns_dsaf_get_sset_count - get dsaf regs count
  *return dsaf regs count
  */
 int hns_dsaf_get_regs_count(void)
@@ -2746,7 +2768,7 @@ static void set_promisc_tcam_enable(struct dsaf_device *dsaf_dev, u32 port)
 	struct dsaf_drv_mac_single_dest_entry mask_entry;
 	struct dsaf_drv_tbl_tcam_key temp_key, mask_key;
 	struct dsaf_drv_soft_mac_tbl *soft_mac_entry;
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 	struct hns_mac_cb *mac_cb;
 	u8 addr[ETH_ALEN] = {0};
@@ -2848,7 +2870,7 @@ static void set_promisc_tcam_disable(struct dsaf_device *dsaf_dev, u32 port)
 	struct dsaf_tbl_tcam_data tbl_tcam_data_uc = {0, 0};
 	struct dsaf_tbl_tcam_data tbl_tcam_mask = {0, 0};
 	struct dsaf_drv_soft_mac_tbl *soft_mac_entry;
-	u16 entry_index;
+	u16 entry_index = DSAF_INVALID_ENTRY_IDX;
 	struct dsaf_drv_tbl_tcam_key mac_key;
 	u8 addr[ETH_ALEN] = {0};
 
@@ -2927,7 +2949,7 @@ int hns_dsaf_wait_pkt_clean(struct dsaf_device *dsaf_dev, int port)
 }
 
 /**
- * hns_dsaf_probe - probo dsaf dev
+ * dsaf_probe - probo dsaf dev
  * @pdev: dasf platform device
  * return 0 - success , negative --fail
  */
@@ -2982,10 +3004,10 @@ free_dev:
 }
 
 /**
- * hns_dsaf_remove - remove dsaf dev
+ * dsaf_remove - remove dsaf dev
  * @pdev: dasf platform device
  */
-static void hns_dsaf_remove(struct platform_device *pdev)
+static int hns_dsaf_remove(struct platform_device *pdev)
 {
 	struct dsaf_device *dsaf_dev = dev_get_drvdata(&pdev->dev);
 
@@ -2998,6 +3020,8 @@ static void hns_dsaf_remove(struct platform_device *pdev)
 	hns_dsaf_free(dsaf_dev);
 
 	hns_dsaf_free_dev(dsaf_dev);
+
+	return 0;
 }
 
 static const struct of_device_id g_dsaf_match[] = {
@@ -3018,6 +3042,115 @@ static struct platform_driver g_dsaf_driver = {
 };
 
 module_platform_driver(g_dsaf_driver);
+
+/**
+ * hns_dsaf_roce_reset - reset dsaf and roce
+ * @dsaf_fwnode: Pointer to framework node for the dasf
+ * @dereset: false - request reset , true - drop reset
+ * return 0 - success , negative -fail
+ */
+int hns_dsaf_roce_reset(struct fwnode_handle *dsaf_fwnode, bool dereset)
+{
+	struct dsaf_device *dsaf_dev;
+	struct platform_device *pdev;
+	u32 mp;
+	u32 sl;
+	u32 credit;
+	int i;
+	static const u32 port_map[DSAF_ROCE_CREDIT_CHN][DSAF_ROCE_CHAN_MODE_NUM] = {
+		{DSAF_ROCE_PORT_0, DSAF_ROCE_PORT_0, DSAF_ROCE_PORT_0},
+		{DSAF_ROCE_PORT_1, DSAF_ROCE_PORT_0, DSAF_ROCE_PORT_0},
+		{DSAF_ROCE_PORT_2, DSAF_ROCE_PORT_1, DSAF_ROCE_PORT_0},
+		{DSAF_ROCE_PORT_3, DSAF_ROCE_PORT_1, DSAF_ROCE_PORT_0},
+		{DSAF_ROCE_PORT_4, DSAF_ROCE_PORT_2, DSAF_ROCE_PORT_1},
+		{DSAF_ROCE_PORT_4, DSAF_ROCE_PORT_2, DSAF_ROCE_PORT_1},
+		{DSAF_ROCE_PORT_5, DSAF_ROCE_PORT_3, DSAF_ROCE_PORT_1},
+		{DSAF_ROCE_PORT_5, DSAF_ROCE_PORT_3, DSAF_ROCE_PORT_1},
+	};
+	static const u32 sl_map[DSAF_ROCE_CREDIT_CHN][DSAF_ROCE_CHAN_MODE_NUM] = {
+		{DSAF_ROCE_SL_0, DSAF_ROCE_SL_0, DSAF_ROCE_SL_0},
+		{DSAF_ROCE_SL_0, DSAF_ROCE_SL_1, DSAF_ROCE_SL_1},
+		{DSAF_ROCE_SL_0, DSAF_ROCE_SL_0, DSAF_ROCE_SL_2},
+		{DSAF_ROCE_SL_0, DSAF_ROCE_SL_1, DSAF_ROCE_SL_3},
+		{DSAF_ROCE_SL_0, DSAF_ROCE_SL_0, DSAF_ROCE_SL_0},
+		{DSAF_ROCE_SL_1, DSAF_ROCE_SL_1, DSAF_ROCE_SL_1},
+		{DSAF_ROCE_SL_0, DSAF_ROCE_SL_0, DSAF_ROCE_SL_2},
+		{DSAF_ROCE_SL_1, DSAF_ROCE_SL_1, DSAF_ROCE_SL_3},
+	};
+
+	/* find the platform device corresponding to fwnode */
+	if (is_of_node(dsaf_fwnode)) {
+		pdev = of_find_device_by_node(to_of_node(dsaf_fwnode));
+	} else if (is_acpi_device_node(dsaf_fwnode)) {
+		pdev = hns_dsaf_find_platform_device(dsaf_fwnode);
+	} else {
+		pr_err("fwnode is neither OF or ACPI type\n");
+		return -EINVAL;
+	}
+
+	/* check if we were a success in fetching pdev */
+	if (!pdev) {
+		pr_err("couldn't find platform device for node\n");
+		return -ENODEV;
+	}
+
+	/* retrieve the dsaf_device from the driver data */
+	dsaf_dev = dev_get_drvdata(&pdev->dev);
+	if (!dsaf_dev) {
+		dev_err(&pdev->dev, "dsaf_dev is NULL\n");
+		put_device(&pdev->dev);
+		return -ENODEV;
+	}
+
+	/* now, make sure we are running on compatible SoC */
+	if (AE_IS_VER1(dsaf_dev->dsaf_ver)) {
+		dev_err(dsaf_dev->dev, "%s v1 chip doesn't support RoCE!\n",
+			dsaf_dev->ae_dev.name);
+		put_device(&pdev->dev);
+		return -ENODEV;
+	}
+
+	/* do reset or de-reset according to the flag */
+	if (!dereset) {
+		/* reset rocee-channels in dsaf and rocee */
+		dsaf_dev->misc_op->hns_dsaf_srst_chns(dsaf_dev, DSAF_CHNS_MASK,
+						      false);
+		dsaf_dev->misc_op->hns_dsaf_roce_srst(dsaf_dev, false);
+	} else {
+		/* configure dsaf tx roce correspond to port map and sl map */
+		mp = dsaf_read_dev(dsaf_dev, DSAF_ROCE_PORT_MAP_REG);
+		for (i = 0; i < DSAF_ROCE_CREDIT_CHN; i++)
+			dsaf_set_field(mp, 7 << i * 3, i * 3,
+				       port_map[i][DSAF_ROCE_6PORT_MODE]);
+		dsaf_set_field(mp, 3 << i * 3, i * 3, 0);
+		dsaf_write_dev(dsaf_dev, DSAF_ROCE_PORT_MAP_REG, mp);
+
+		sl = dsaf_read_dev(dsaf_dev, DSAF_ROCE_SL_MAP_REG);
+		for (i = 0; i < DSAF_ROCE_CREDIT_CHN; i++)
+			dsaf_set_field(sl, 3 << i * 2, i * 2,
+				       sl_map[i][DSAF_ROCE_6PORT_MODE]);
+		dsaf_write_dev(dsaf_dev, DSAF_ROCE_SL_MAP_REG, sl);
+
+		/* de-reset rocee-channels in dsaf and rocee */
+		dsaf_dev->misc_op->hns_dsaf_srst_chns(dsaf_dev, DSAF_CHNS_MASK,
+						      true);
+		msleep(SRST_TIME_INTERVAL);
+		dsaf_dev->misc_op->hns_dsaf_roce_srst(dsaf_dev, true);
+
+		/* enable dsaf channel rocee credit */
+		credit = dsaf_read_dev(dsaf_dev, DSAF_SBM_ROCEE_CFG_REG_REG);
+		dsaf_set_bit(credit, DSAF_SBM_ROCEE_CFG_CRD_EN_B, 0);
+		dsaf_write_dev(dsaf_dev, DSAF_SBM_ROCEE_CFG_REG_REG, credit);
+
+		dsaf_set_bit(credit, DSAF_SBM_ROCEE_CFG_CRD_EN_B, 1);
+		dsaf_write_dev(dsaf_dev, DSAF_SBM_ROCEE_CFG_REG_REG, credit);
+	}
+
+	put_device(&pdev->dev);
+
+	return 0;
+}
+EXPORT_SYMBOL(hns_dsaf_roce_reset);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Huawei Tech. Co., Ltd.");

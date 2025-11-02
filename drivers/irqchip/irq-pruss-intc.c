@@ -17,7 +17,7 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 
 /*
@@ -488,7 +488,8 @@ static void pruss_intc_irq_handler(struct irq_desc *desc)
 
 	while (true) {
 		u32 hipir;
-		int hwirq, err;
+		unsigned int virq;
+		int hwirq;
 
 		/* get highest priority pending PRUSS system event */
 		hipir = pruss_intc_read_reg(intc, PRU_INTC_HIPIR(host_irq));
@@ -496,14 +497,16 @@ static void pruss_intc_irq_handler(struct irq_desc *desc)
 			break;
 
 		hwirq = hipir & GENMASK(9, 0);
-		err = generic_handle_domain_irq(intc->domain, hwirq);
+		virq = irq_find_mapping(intc->domain, hwirq);
 
 		/*
 		 * NOTE: manually ACK any system events that do not have a
 		 * handler mapped yet
 		 */
-		if (WARN_ON_ONCE(err))
+		if (WARN_ON_ONCE(!virq))
 			pruss_intc_write_reg(intc, PRU_INTC_SICR, hwirq);
+		else
+			generic_handle_irq(virq);
 	}
 
 	chained_irq_exit(chip, desc);
@@ -555,8 +558,8 @@ static int pruss_intc_probe(struct platform_device *pdev)
 
 	mutex_init(&intc->lock);
 
-	intc->domain = irq_domain_create_linear(dev_fwnode(dev), max_system_events,
-						&pruss_intc_irq_domain_ops, intc);
+	intc->domain = irq_domain_add_linear(dev->of_node, max_system_events,
+					     &pruss_intc_irq_domain_ops, intc);
 	if (!intc->domain)
 		return -ENOMEM;
 
@@ -565,8 +568,8 @@ static int pruss_intc_probe(struct platform_device *pdev)
 			continue;
 
 		irq = platform_get_irq_byname(pdev, irq_names[i]);
-		if (irq < 0) {
-			ret = irq;
+		if (irq <= 0) {
+			ret = (irq == 0) ? -EINVAL : irq;
 			goto fail_irq;
 		}
 
@@ -581,7 +584,8 @@ static int pruss_intc_probe(struct platform_device *pdev)
 		host_data->intc = intc;
 		host_data->host_irq = i;
 
-		irq_set_chained_handler_and_data(irq, pruss_intc_irq_handler, host_data);
+		irq_set_handler_data(irq, host_data);
+		irq_set_chained_handler(irq, pruss_intc_irq_handler);
 	}
 
 	return 0;
@@ -598,7 +602,7 @@ fail_irq:
 	return ret;
 }
 
-static void pruss_intc_remove(struct platform_device *pdev)
+static int pruss_intc_remove(struct platform_device *pdev)
 {
 	struct pruss_intc *intc = platform_get_drvdata(pdev);
 	u8 max_system_events = intc->soc_config->num_system_events;
@@ -615,6 +619,8 @@ static void pruss_intc_remove(struct platform_device *pdev)
 		irq_dispose_mapping(irq_find_mapping(intc->domain, hwirq));
 
 	irq_domain_remove(intc->domain);
+
+	return 0;
 }
 
 static const struct pruss_intc_match_data pruss_intc_data = {
@@ -642,12 +648,12 @@ MODULE_DEVICE_TABLE(of, pruss_intc_of_match);
 
 static struct platform_driver pruss_intc_driver = {
 	.driver = {
-		.name			= "pruss-intc",
-		.of_match_table		= pruss_intc_of_match,
-		.suppress_bind_attrs	= true,
+		.name = "pruss-intc",
+		.of_match_table = pruss_intc_of_match,
+		.suppress_bind_attrs = true,
 	},
-	.probe		= pruss_intc_probe,
-	.remove		= pruss_intc_remove,
+	.probe  = pruss_intc_probe,
+	.remove = pruss_intc_remove,
 };
 module_platform_driver(pruss_intc_driver);
 

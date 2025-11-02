@@ -154,13 +154,10 @@ static bool dce60_setup_scaling_configuration(
 	REG_SET(SCL_BYPASS_CONTROL, 0, SCL_BYPASS_MODE, 0);
 
 	if (data->taps.h_taps + data->taps.v_taps <= 2) {
-		/* Disable scaler functionality */
-		REG_WRITE(SCL_SCALER_ENABLE, 0);
+		/* Set bypass */
 
-		/* Clear registers that can cause glitches even when the scaler is off */
-		REG_WRITE(SCL_TAP_CONTROL, 0);
-		REG_WRITE(SCL_AUTOMATIC_MODE_CONTROL, 0);
-		REG_WRITE(SCL_F_SHARP_CONTROL, 0);
+		/* DCE6 has no SCL_MODE register, skip scale mode programming */
+
 		return false;
 	}
 
@@ -168,7 +165,7 @@ static bool dce60_setup_scaling_configuration(
 			SCL_H_NUM_OF_TAPS, data->taps.h_taps - 1,
 			SCL_V_NUM_OF_TAPS, data->taps.v_taps - 1);
 
-	REG_WRITE(SCL_SCALER_ENABLE, 1);
+	/* DCE6 has no SCL_MODE register, skip scale mode programming */
 
 	/* DCE6 has no SCL_BOUNDARY_MODE bit, skip replace out of bound pixels */
 
@@ -496,6 +493,7 @@ static void dce60_transform_set_scaler(
 {
 	struct dce_transform *xfm_dce = TO_DCE_TRANSFORM(xfm);
 	bool is_scaling_required;
+	bool filter_updated = false;
 	const uint16_t *coeffs_v, *coeffs_h;
 
 	/*Use whole line buffer memory always*/
@@ -504,8 +502,6 @@ static void dce60_transform_set_scaler(
 
 	REG_SET(DC_LB_MEM_SIZE, 0,
 		DC_LB_MEM_SIZE, xfm_dce->lb_memory_size);
-
-	REG_WRITE(SCL_UPDATE, 0x00010000);
 
 	/* Clear SCL_F_SHARP_CONTROL value to 0 */
 	REG_WRITE(SCL_F_SHARP_CONTROL, 0);
@@ -532,7 +528,8 @@ static void dce60_transform_set_scaler(
 		if (coeffs_v != xfm_dce->filter_v || coeffs_h != xfm_dce->filter_h) {
 			/* 4. Program vertical filters */
 			if (xfm_dce->filter_v == NULL)
-				REG_WRITE(SCL_VERT_FILTER_CONTROL, 0);
+				REG_SET(SCL_VERT_FILTER_CONTROL, 0,
+						SCL_V_2TAP_HARDCODE_COEF_EN, 0);
 			program_multi_taps_filter(
 					xfm_dce,
 					data->taps.v_taps,
@@ -546,7 +543,8 @@ static void dce60_transform_set_scaler(
 
 			/* 5. Program horizontal filters */
 			if (xfm_dce->filter_h == NULL)
-				REG_WRITE(SCL_HORZ_FILTER_CONTROL, 0);
+				REG_SET(SCL_HORZ_FILTER_CONTROL, 0,
+						SCL_H_2TAP_HARDCODE_COEF_EN, 0);
 			program_multi_taps_filter(
 					xfm_dce,
 					data->taps.h_taps,
@@ -560,6 +558,7 @@ static void dce60_transform_set_scaler(
 
 			xfm_dce->filter_v = coeffs_v;
 			xfm_dce->filter_h = coeffs_h;
+			filter_updated = true;
 		}
 	}
 
@@ -569,8 +568,6 @@ static void dce60_transform_set_scaler(
 	/* DCE6 has no SCL_COEF_UPDATE_COMPLETE bit to flip to new coefficient memory */
 
 	/* DCE6 DATA_FORMAT register does not support ALPHA_EN */
-
-	REG_WRITE(SCL_UPDATE, 0);
 }
 #endif
 
@@ -799,7 +796,7 @@ static void program_bit_depth_reduction(
 	enum dcp_out_trunc_round_mode trunc_mode;
 	bool spatial_dither_enable;
 
-	ASSERT(depth <= COLOR_DEPTH_121212); /* Invalid clamp bit depth */
+	ASSERT(depth < COLOR_DEPTH_121212); /* Invalid clamp bit depth */
 
 	spatial_dither_enable = bit_depth_params->flags.SPATIAL_DITHER_ENABLED;
 	/* Default to 12 bit truncation without rounding */
@@ -859,7 +856,7 @@ static void dce60_program_bit_depth_reduction(
 	enum dcp_out_trunc_round_mode trunc_mode;
 	bool spatial_dither_enable;
 
-	ASSERT(depth <= COLOR_DEPTH_121212); /* Invalid clamp bit depth */
+	ASSERT(depth < COLOR_DEPTH_121212); /* Invalid clamp bit depth */
 
 	spatial_dither_enable = bit_depth_params->flags.SPATIAL_DITHER_ENABLED;
 	/* Default to 12 bit truncation without rounding */
@@ -1039,23 +1036,34 @@ static void dce60_transform_set_pixel_storage_depth(
 	const struct bit_depth_reduction_params *bit_depth_params)
 {
 	struct dce_transform *xfm_dce = TO_DCE_TRANSFORM(xfm);
+	int pixel_depth, expan_mode;
 	enum dc_color_depth color_depth;
 
 	switch (depth) {
 	case LB_PIXEL_DEPTH_18BPP:
 		color_depth = COLOR_DEPTH_666;
+		pixel_depth = 2;
+		expan_mode  = 1;
 		break;
 	case LB_PIXEL_DEPTH_24BPP:
 		color_depth = COLOR_DEPTH_888;
+		pixel_depth = 1;
+		expan_mode  = 1;
 		break;
 	case LB_PIXEL_DEPTH_30BPP:
 		color_depth = COLOR_DEPTH_101010;
+		pixel_depth = 0;
+		expan_mode  = 1;
 		break;
 	case LB_PIXEL_DEPTH_36BPP:
 		color_depth = COLOR_DEPTH_121212;
+		pixel_depth = 3;
+		expan_mode  = 0;
 		break;
 	default:
 		color_depth = COLOR_DEPTH_101010;
+		pixel_depth = 0;
+		expan_mode  = 1;
 		BREAK_TO_DEBUGGER();
 		break;
 	}
@@ -1104,7 +1112,7 @@ static void program_gamut_remap(
 
 }
 
-/*
+/**
  *****************************************************************************
  *  Function: dal_transform_wide_gamut_set_gamut_remap
  *
@@ -1321,6 +1329,7 @@ static bool configure_graphics_mode(
 			REG_SET(OUTPUT_CSC_CONTROL, 0,
 				OUTPUT_CSC_GRPH_MODE, 0);
 			break;
+			break;
 		case COLOR_SPACE_SRGB_LIMITED:
 			/* TV RGB */
 			REG_SET(OUTPUT_CSC_CONTROL, 0,
@@ -1413,7 +1422,7 @@ void dce110_opp_set_csc_default(
 static void program_pwl(struct dce_transform *xfm_dce,
 			const struct pwl_params *params)
 {
-	uint32_t retval;
+	int retval;
 	uint8_t max_tries = 10;
 	uint8_t counter = 0;
 	uint32_t i = 0;
@@ -1651,8 +1660,7 @@ void dce_transform_construct(
 	xfm_dce->lb_pixel_depth_supported =
 			LB_PIXEL_DEPTH_18BPP |
 			LB_PIXEL_DEPTH_24BPP |
-			LB_PIXEL_DEPTH_30BPP |
-			LB_PIXEL_DEPTH_36BPP;
+			LB_PIXEL_DEPTH_30BPP;
 
 	xfm_dce->lb_bits_per_entry = LB_BITS_PER_ENTRY;
 	xfm_dce->lb_memory_size = LB_TOTAL_NUMBER_OF_ENTRIES; /*0x6B0*/
@@ -1680,8 +1688,7 @@ void dce60_transform_construct(
 	xfm_dce->lb_pixel_depth_supported =
 			LB_PIXEL_DEPTH_18BPP |
 			LB_PIXEL_DEPTH_24BPP |
-			LB_PIXEL_DEPTH_30BPP |
-			LB_PIXEL_DEPTH_36BPP;
+			LB_PIXEL_DEPTH_30BPP;
 
 	xfm_dce->lb_bits_per_entry = LB_BITS_PER_ENTRY;
 	xfm_dce->lb_memory_size = LB_TOTAL_NUMBER_OF_ENTRIES; /*0x6B0*/

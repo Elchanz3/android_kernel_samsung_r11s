@@ -1,10 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP APLL clock support
  *
  * Copyright (C) 2013 Texas Instruments, Inc.
  *
  * J Keerthy <j-keerthy@ti.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -376,9 +384,14 @@ static void __init of_omap2_apll_setup(struct device_node *node)
 	}
 	clk_hw->fixed_rate = val;
 
-	clk_hw->enable_bit = ti_clk_get_legacy_bit_shift(node);
-	ad->enable_mask = 0x3 << clk_hw->enable_bit;
-	ad->autoidle_mask = 0x3 << clk_hw->enable_bit;
+	if (of_property_read_u32(node, "ti,bit-shift", &val)) {
+		pr_err("%pOFn missing bit-shift\n", node);
+		goto cleanup;
+	}
+
+	clk_hw->enable_bit = val;
+	ad->enable_mask = 0x3 << val;
+	ad->autoidle_mask = 0x3 << val;
 
 	if (of_property_read_u32(node, "ti,idlest-shift", &val)) {
 		pr_err("%pOFn missing idlest-shift\n", node);

@@ -152,14 +152,14 @@ static void jsm_tty_send_xchar(struct uart_port *port, char ch)
 		container_of(port, struct jsm_channel, uart_port);
 	struct ktermios *termios;
 
-	uart_port_lock_irqsave(port, &lock_flags);
+	spin_lock_irqsave(&port->lock, lock_flags);
 	termios = &port->state->port.tty->termios;
 	if (ch == termios->c_cc[VSTART])
 		channel->ch_bd->bd_ops->send_start_character(channel);
 
 	if (ch == termios->c_cc[VSTOP])
 		channel->ch_bd->bd_ops->send_stop_character(channel);
-	uart_port_unlock_irqrestore(port, lock_flags);
+	spin_unlock_irqrestore(&port->lock, lock_flags);
 }
 
 static void jsm_tty_stop_rx(struct uart_port *port)
@@ -176,13 +176,13 @@ static void jsm_tty_break(struct uart_port *port, int break_state)
 	struct jsm_channel *channel =
 		container_of(port, struct jsm_channel, uart_port);
 
-	uart_port_lock_irqsave(port, &lock_flags);
+	spin_lock_irqsave(&port->lock, lock_flags);
 	if (break_state == -1)
 		channel->ch_bd->bd_ops->send_break(channel);
 	else
 		channel->ch_bd->bd_ops->clear_break(channel);
 
-	uart_port_unlock_irqrestore(port, lock_flags);
+	spin_unlock_irqrestore(&port->lock, lock_flags);
 }
 
 static int jsm_tty_open(struct uart_port *port)
@@ -241,7 +241,7 @@ static int jsm_tty_open(struct uart_port *port)
 	channel->ch_cached_lsr = 0;
 	channel->ch_stops_sent = 0;
 
-	uart_port_lock_irqsave(port, &lock_flags);
+	spin_lock_irqsave(&port->lock, lock_flags);
 	termios = &port->state->port.tty->termios;
 	channel->ch_c_cflag	= termios->c_cflag;
 	channel->ch_c_iflag	= termios->c_iflag;
@@ -261,7 +261,7 @@ static int jsm_tty_open(struct uart_port *port)
 	jsm_carrier(channel);
 
 	channel->ch_open_count++;
-	uart_port_unlock_irqrestore(port, lock_flags);
+	spin_unlock_irqrestore(&port->lock, lock_flags);
 
 	jsm_dbg(OPEN, &channel->ch_bd->pci_dev, "finish\n");
 	return 0;
@@ -300,14 +300,14 @@ static void jsm_tty_close(struct uart_port *port)
 }
 
 static void jsm_tty_set_termios(struct uart_port *port,
-				struct ktermios *termios,
-				const struct ktermios *old_termios)
+				 struct ktermios *termios,
+				 struct ktermios *old_termios)
 {
 	unsigned long lock_flags;
 	struct jsm_channel *channel =
 		container_of(port, struct jsm_channel, uart_port);
 
-	uart_port_lock_irqsave(port, &lock_flags);
+	spin_lock_irqsave(&port->lock, lock_flags);
 	channel->ch_c_cflag	= termios->c_cflag;
 	channel->ch_c_iflag	= termios->c_iflag;
 	channel->ch_c_oflag	= termios->c_oflag;
@@ -317,7 +317,7 @@ static void jsm_tty_set_termios(struct uart_port *port,
 
 	channel->ch_bd->bd_ops->param(channel);
 	jsm_carrier(channel);
-	uart_port_unlock_irqrestore(port, lock_flags);
+	spin_unlock_irqrestore(&port->lock, lock_flags);
 }
 
 static const char *jsm_tty_type(struct uart_port *port)
@@ -451,7 +451,6 @@ int jsm_uart_port_init(struct jsm_board *brd)
 		if (!brd->channels[i])
 			continue;
 
-		brd->channels[i]->uart_port.dev = &brd->pci_dev->dev;
 		brd->channels[i]->uart_port.irq = brd->irq;
 		brd->channels[i]->uart_port.uartclk = 14745600;
 		brd->channels[i]->uart_port.type = PORT_JSM;
@@ -607,22 +606,18 @@ void jsm_input(struct jsm_channel *ch)
 
 		if (I_PARMRK(tp) || I_BRKINT(tp) || I_INPCK(tp)) {
 			for (i = 0; i < s; i++) {
-				u8 chr   = ch->ch_rqueue[tail + i];
-				u8 error = ch->ch_equeue[tail + i];
-				char flag = TTY_NORMAL;
-
 				/*
-				 * Give the Linux ld the flags in the format it
-				 * likes.
+				 * Give the Linux ld the flags in the
+				 * format it likes.
 				 */
-				if (error & UART_LSR_BI)
-					flag = TTY_BREAK;
-				else if (error & UART_LSR_PE)
-					flag = TTY_PARITY;
-				else if (error & UART_LSR_FE)
-					flag = TTY_FRAME;
-
-				tty_insert_flip_char(port, chr, flag);
+				if (*(ch->ch_equeue +tail +i) & UART_LSR_BI)
+					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i),  TTY_BREAK);
+				else if (*(ch->ch_equeue +tail +i) & UART_LSR_PE)
+					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i), TTY_PARITY);
+				else if (*(ch->ch_equeue +tail +i) & UART_LSR_FE)
+					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i), TTY_FRAME);
+				else
+					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i), TTY_NORMAL);
 			}
 		} else {
 			tty_insert_flip_string(port, ch->ch_rqueue + tail, s);
@@ -750,8 +745,7 @@ void jsm_check_queue_flow_control(struct jsm_channel *ch)
 	int qleft;
 
 	/* Store how much space we have left in the queue */
-	qleft = ch->ch_r_tail - ch->ch_r_head - 1;
-	if (qleft < 0)
+	if ((qleft = ch->ch_r_tail - ch->ch_r_head - 1) < 0)
 		qleft += RQUEUEMASK + 1;
 
 	/*

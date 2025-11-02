@@ -26,9 +26,12 @@
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_address.h>
 #include <linux/interrupt.h>
 #include <linux/clk.h>
-#include <linux/io.h>
+
+#include <asm/io.h>
 
 #define RNG_REG_STATUS_RDY			(1 << 0)
 
@@ -375,13 +378,16 @@ MODULE_DEVICE_TABLE(of, omap_rng_of_match);
 static int of_get_omap_rng_device_details(struct omap_rng_dev *priv,
 					  struct platform_device *pdev)
 {
+	const struct of_device_id *match;
 	struct device *dev = &pdev->dev;
 	int irq, err;
 
-	priv->pdata = of_device_get_match_data(dev);
-	if (!priv->pdata)
-		return -ENODEV;
-
+	match = of_match_device(of_match_ptr(omap_rng_of_match), dev);
+	if (!match) {
+		dev_err(dev, "no compatible OF match\n");
+		return -EINVAL;
+	}
+	priv->pdata = match->data;
 
 	if (of_device_is_compatible(dev->of_node, "ti,omap4-rng") ||
 	    of_device_is_compatible(dev->of_node, "inside-secure,safexcel-eip76")) {
@@ -452,9 +458,10 @@ static int omap_rng_probe(struct platform_device *pdev)
 	}
 
 	pm_runtime_enable(&pdev->dev);
-	ret = pm_runtime_resume_and_get(&pdev->dev);
+	ret = pm_runtime_get_sync(&pdev->dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to runtime_get device: %d\n", ret);
+		pm_runtime_put_noidle(&pdev->dev);
 		goto err_ioremap;
 	}
 
@@ -509,7 +516,7 @@ err_ioremap:
 	return ret;
 }
 
-static void omap_rng_remove(struct platform_device *pdev)
+static int omap_rng_remove(struct platform_device *pdev)
 {
 	struct omap_rng_dev *priv = platform_get_drvdata(pdev);
 
@@ -521,6 +528,8 @@ static void omap_rng_remove(struct platform_device *pdev)
 
 	clk_disable_unprepare(priv->clk);
 	clk_disable_unprepare(priv->clk_reg);
+
+	return 0;
 }
 
 static int __maybe_unused omap_rng_suspend(struct device *dev)
@@ -538,9 +547,10 @@ static int __maybe_unused omap_rng_resume(struct device *dev)
 	struct omap_rng_dev *priv = dev_get_drvdata(dev);
 	int ret;
 
-	ret = pm_runtime_resume_and_get(dev);
+	ret = pm_runtime_get_sync(dev);
 	if (ret < 0) {
 		dev_err(dev, "Failed to runtime_get device: %d\n", ret);
+		pm_runtime_put_noidle(dev);
 		return ret;
 	}
 
@@ -564,5 +574,4 @@ static struct platform_driver omap_rng_driver = {
 module_platform_driver(omap_rng_driver);
 MODULE_ALIAS("platform:omap_rng");
 MODULE_AUTHOR("Deepak Saxena (and others)");
-MODULE_DESCRIPTION("RNG driver for TI OMAP CPU family");
 MODULE_LICENSE("GPL");

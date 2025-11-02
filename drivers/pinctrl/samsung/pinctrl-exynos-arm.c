@@ -14,6 +14,7 @@
 // external gpio and wakeup interrupt support.
 
 #include <linux/device.h>
+#include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/slab.h>
 #include <linux/err.h>
@@ -39,19 +40,6 @@ static const struct samsung_pin_bank_type bank_type_alive = {
 #define S5P_OTHERS_RET_CF		(1 << 30)
 #define S5P_OTHERS_RET_MMC		(1 << 29)
 #define S5P_OTHERS_RET_UART		(1 << 28)
-
-#define S5P_PIN_PULL_DISABLE		0
-#define S5P_PIN_PULL_DOWN		1
-#define S5P_PIN_PULL_UP			2
-
-static void s5pv210_pud_value_init(struct samsung_pinctrl_drv_data *drvdata)
-{
-	unsigned int  *pud_val = drvdata->pud_val;
-
-	pud_val[PUD_PULL_DISABLE] = S5P_PIN_PULL_DISABLE;
-	pud_val[PUD_PULL_DOWN] = S5P_PIN_PULL_DOWN;
-	pud_val[PUD_PULL_UP] = S5P_PIN_PULL_UP;
-}
 
 static void s5pv210_retention_disable(struct samsung_pinctrl_drv_data *drvdata)
 {
@@ -146,7 +134,6 @@ static const struct samsung_pin_ctrl s5pv210_pin_ctrl[] __initconst = {
 		.nr_banks	= ARRAY_SIZE(s5pv210_pin_bank),
 		.eint_gpio_init = exynos_eint_gpio_init,
 		.eint_wkup_init = exynos_eint_wkup_init,
-		.pud_value_init	= s5pv210_pud_value_init,
 		.suspend	= exynos_pinctrl_suspend,
 		.resume		= exynos_pinctrl_resume,
 		.retention_data	= &s5pv210_retention_data,
@@ -905,3 +892,4 @@ const struct samsung_pinctrl_of_match_data exynos5420_of_data __initconst = {
 	.ctrl		= exynos5420_pin_ctrl,
 	.num_ctrl	= ARRAY_SIZE(exynos5420_pin_ctrl),
 };
+MODULE_LICENSE("GPL");

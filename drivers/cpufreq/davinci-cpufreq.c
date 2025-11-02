@@ -95,12 +95,13 @@ static int davinci_cpu_init(struct cpufreq_policy *policy)
 }
 
 static struct cpufreq_driver davinci_driver = {
-	.flags		= CPUFREQ_NEED_INITIAL_FREQ_CHECK,
+	.flags		= CPUFREQ_STICKY | CPUFREQ_NEED_INITIAL_FREQ_CHECK,
 	.verify		= cpufreq_generic_frequency_table_verify,
 	.target_index	= davinci_target,
 	.get		= cpufreq_generic_get,
 	.init		= davinci_cpu_init,
 	.name		= "davinci",
+	.attr		= cpufreq_generic_attr,
 };
 
 static int __init davinci_cpufreq_probe(struct platform_device *pdev)
@@ -130,14 +131,14 @@ static int __init davinci_cpufreq_probe(struct platform_device *pdev)
 	return cpufreq_register_driver(&davinci_driver);
 }
 
-static void __exit davinci_cpufreq_remove(struct platform_device *pdev)
+static int __exit davinci_cpufreq_remove(struct platform_device *pdev)
 {
-	cpufreq_unregister_driver(&davinci_driver);
-
 	clk_put(cpufreq.armclk);
 
 	if (cpufreq.asyncclk)
 		clk_put(cpufreq.asyncclk);
+
+	return cpufreq_unregister_driver(&davinci_driver);
 }
 
 static struct platform_driver davinci_cpufreq_driver = {

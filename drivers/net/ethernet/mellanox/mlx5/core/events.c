@@ -5,8 +5,7 @@
 
 #include "mlx5_core.h"
 #include "lib/eq.h"
-#include "lib/events.h"
-#include "hwmon.h"
+#include "lib/mlx5.h"
 
 struct mlx5_event_nb {
 	struct mlx5_nb  nb;
@@ -24,11 +23,11 @@ static int temp_warn(struct notifier_block *, unsigned long, void *);
 static int port_module(struct notifier_block *, unsigned long, void *);
 static int pcie_core(struct notifier_block *, unsigned long, void *);
 
-/* handler which forwards the event to events->fw_nh, driver notifiers */
+/* handler which forwards the event to events->nh, driver notifiers */
 static int forward_event(struct notifier_block *, unsigned long, void *);
 
 static struct mlx5_nb events_nbs_ref[] = {
-	/* Events to be processed by mlx5_core */
+	/* Events to be proccessed by mlx5_core */
 	{.nb.notifier_call = any_notifier,  .event_type = MLX5_EVENT_TYPE_NOTIFY_ANY },
 	{.nb.notifier_call = temp_warn,     .event_type = MLX5_EVENT_TYPE_TEMP_WARN_EVENT },
 	{.nb.notifier_call = port_module,   .event_type = MLX5_EVENT_TYPE_PORT_MODULE_EVENT },
@@ -37,7 +36,6 @@ static struct mlx5_nb events_nbs_ref[] = {
 	/* Events to be forwarded (as is) to mlx5 core interfaces (mlx5e/mlx5_ib) */
 	{.nb.notifier_call = forward_event,   .event_type = MLX5_EVENT_TYPE_PORT_CHANGE },
 	{.nb.notifier_call = forward_event,   .event_type = MLX5_EVENT_TYPE_GENERAL_EVENT },
-	{.nb.notifier_call = forward_event,   .event_type = MLX5_EVENT_TYPE_OBJECT_CHANGE },
 	/* QP/WQ resource events to forward */
 	{.nb.notifier_call = forward_event,   .event_type = MLX5_EVENT_TYPE_DCT_DRAINED },
 	{.nb.notifier_call = forward_event,   .event_type = MLX5_EVENT_TYPE_PATH_MIG },
@@ -57,14 +55,12 @@ struct mlx5_events {
 	struct mlx5_core_dev *dev;
 	struct workqueue_struct *wq;
 	struct mlx5_event_nb  notifiers[ARRAY_SIZE(events_nbs_ref)];
-	/* driver notifier chain for fw events */
-	struct atomic_notifier_head fw_nh;
+	/* driver notifier chain */
+	struct atomic_notifier_head nh;
 	/* port module events stats */
 	struct mlx5_pme_stats pme_stats;
 	/*pcie_core*/
 	struct work_struct pcie_core_work;
-	/* driver notifier chain for sw events */
-	struct blocking_notifier_head sw_nh;
 };
 
 static const char *eqe_type_str(u8 type)
@@ -114,8 +110,6 @@ static const char *eqe_type_str(u8 type)
 		return "MLX5_EVENT_TYPE_CMD";
 	case MLX5_EVENT_TYPE_ESW_FUNCTIONS_CHANGED:
 		return "MLX5_EVENT_TYPE_ESW_FUNCTIONS_CHANGED";
-	case MLX5_EVENT_TYPE_VHCA_STATE_CHANGE:
-		return "MLX5_EVENT_TYPE_VHCA_STATE_CHANGE";
 	case MLX5_EVENT_TYPE_PAGE_REQUEST:
 		return "MLX5_EVENT_TYPE_PAGE_REQUEST";
 	case MLX5_EVENT_TYPE_PAGE_FAULT:
@@ -134,8 +128,6 @@ static const char *eqe_type_str(u8 type)
 		return "MLX5_EVENT_TYPE_MONITOR_COUNTER";
 	case MLX5_EVENT_TYPE_DEVICE_TRACER:
 		return "MLX5_EVENT_TYPE_DEVICE_TRACER";
-	case MLX5_EVENT_TYPE_OBJECT_CHANGE:
-		return "MLX5_EVENT_TYPE_OBJECT_CHANGE";
 	default:
 		return "Unrecognized event";
 	}
@@ -154,50 +146,21 @@ static int any_notifier(struct notifier_block *nb,
 	return NOTIFY_OK;
 }
 
-#if IS_ENABLED(CONFIG_HWMON)
-static void print_sensor_names_in_bit_set(struct mlx5_core_dev *dev, struct mlx5_hwmon *hwmon,
-					  u64 bit_set, int bit_set_offset)
-{
-	unsigned long *bit_set_ptr = (unsigned long *)&bit_set;
-	int num_bits = sizeof(bit_set) * BITS_PER_BYTE;
-	int i;
-
-	for_each_set_bit(i, bit_set_ptr, num_bits) {
-		const char *sensor_name = hwmon_get_sensor_name(hwmon, i + bit_set_offset);
-
-		mlx5_core_warn(dev, "Sensor name[%d]: %s\n", i + bit_set_offset, sensor_name);
-	}
-}
-#endif /* CONFIG_HWMON */
-
 /* type == MLX5_EVENT_TYPE_TEMP_WARN_EVENT */
 static int temp_warn(struct notifier_block *nb, unsigned long type, void *data)
 {
 	struct mlx5_event_nb *event_nb = mlx5_nb_cof(nb, struct mlx5_event_nb, nb);
 	struct mlx5_events   *events   = event_nb->ctx;
-	struct mlx5_core_dev *dev      = events->dev;
 	struct mlx5_eqe      *eqe      = data;
 	u64 value_lsb;
 	u64 value_msb;
 
 	value_lsb = be64_to_cpu(eqe->data.temp_warning.sensor_warning_lsb);
-	/* bit 1-63 are not supported for NICs,
-	 * hence read only bit 0 (asic) from lsb.
-	 */
-	value_lsb &= 0x1;
 	value_msb = be64_to_cpu(eqe->data.temp_warning.sensor_warning_msb);
 
-	if (net_ratelimit()) {
-		mlx5_core_warn(dev, "High temperature on sensors with bit set %#llx %#llx.\n",
-			       value_msb, value_lsb);
-#if IS_ENABLED(CONFIG_HWMON)
-		if (dev->hwmon) {
-			print_sensor_names_in_bit_set(dev, dev->hwmon, value_lsb, 0);
-			print_sensor_names_in_bit_set(dev, dev->hwmon, value_msb,
-						      sizeof(value_lsb) * BITS_PER_BYTE);
-		}
-#endif
-	}
+	mlx5_core_warn(events->dev,
+		       "High temperature on sensors with bit set %llx %llx",
+		       value_msb, value_lsb);
 
 	return NOTIFY_OK;
 }
@@ -368,7 +331,7 @@ static int forward_event(struct notifier_block *nb, unsigned long event, void *d
 
 	mlx5_core_dbg(events->dev, "Async eqe type %s, subtype (%d) forward to interfaces\n",
 		      eqe_type_str(eqe->type), eqe->sub_type);
-	atomic_notifier_call_chain(&events->fw_nh, event, data);
+	atomic_notifier_call_chain(&events->nh, event, data);
 	return NOTIFY_OK;
 }
 
@@ -379,7 +342,7 @@ int mlx5_events_init(struct mlx5_core_dev *dev)
 	if (!events)
 		return -ENOMEM;
 
-	ATOMIC_INIT_NOTIFIER_HEAD(&events->fw_nh);
+	ATOMIC_INIT_NOTIFIER_HEAD(&events->nh);
 	events->dev = dev;
 	dev->priv.events = events;
 	events->wq = create_singlethread_workqueue("mlx5_events");
@@ -388,7 +351,6 @@ int mlx5_events_init(struct mlx5_core_dev *dev)
 		return -ENOMEM;
 	}
 	INIT_WORK(&events->pcie_core_work, mlx5_pcie_event);
-	BLOCKING_INIT_NOTIFIER_HEAD(&events->sw_nh);
 
 	return 0;
 }
@@ -421,14 +383,11 @@ void mlx5_events_stop(struct mlx5_core_dev *dev)
 	flush_workqueue(events->wq);
 }
 
-/* This API is used only for processing and forwarding firmware
- * events to mlx5 consumer.
- */
 int mlx5_notifier_register(struct mlx5_core_dev *dev, struct notifier_block *nb)
 {
 	struct mlx5_events *events = dev->priv.events;
 
-	return atomic_notifier_chain_register(&events->fw_nh, nb);
+	return atomic_notifier_chain_register(&events->nh, nb);
 }
 EXPORT_SYMBOL(mlx5_notifier_register);
 
@@ -436,38 +395,11 @@ int mlx5_notifier_unregister(struct mlx5_core_dev *dev, struct notifier_block *n
 {
 	struct mlx5_events *events = dev->priv.events;
 
-	return atomic_notifier_chain_unregister(&events->fw_nh, nb);
+	return atomic_notifier_chain_unregister(&events->nh, nb);
 }
 EXPORT_SYMBOL(mlx5_notifier_unregister);
 
 int mlx5_notifier_call_chain(struct mlx5_events *events, unsigned int event, void *data)
 {
-	return atomic_notifier_call_chain(&events->fw_nh, event, data);
-}
-
-/* This API is used only for processing and forwarding driver-specific
- * events to mlx5 consumers.
- */
-int mlx5_blocking_notifier_register(struct mlx5_core_dev *dev, struct notifier_block *nb)
-{
-	struct mlx5_events *events = dev->priv.events;
-
-	return blocking_notifier_chain_register(&events->sw_nh, nb);
-}
-EXPORT_SYMBOL(mlx5_blocking_notifier_register);
-
-int mlx5_blocking_notifier_unregister(struct mlx5_core_dev *dev, struct notifier_block *nb)
-{
-	struct mlx5_events *events = dev->priv.events;
-
-	return blocking_notifier_chain_unregister(&events->sw_nh, nb);
-}
-EXPORT_SYMBOL(mlx5_blocking_notifier_unregister);
-
-int mlx5_blocking_notifier_call_chain(struct mlx5_core_dev *dev, unsigned int event,
-				      void *data)
-{
-	struct mlx5_events *events = dev->priv.events;
-
-	return blocking_notifier_call_chain(&events->sw_nh, event, data);
+	return atomic_notifier_call_chain(&events->nh, event, data);
 }

@@ -23,7 +23,6 @@
  */
 #include <linux/module.h>
 #include <linux/errno.h>
-#include <linux/kasan.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
@@ -37,7 +36,6 @@
 #include <asm/mmu_context.h>
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
-#include <asm/set_memory.h>
 #include <asm/system_info.h>
 
 #include <asm/mach/map.h>
@@ -111,52 +109,23 @@ void __init add_static_vm_early(struct static_vm *svm)
 int ioremap_page(unsigned long virt, unsigned long phys,
 		 const struct mem_type *mtype)
 {
-	return vmap_page_range(virt, virt + PAGE_SIZE, phys,
-			       __pgprot(mtype->prot_pte));
+	return ioremap_page_range(virt, virt + PAGE_SIZE, phys,
+				  __pgprot(mtype->prot_pte));
 }
 EXPORT_SYMBOL(ioremap_page);
 
-#ifdef CONFIG_KASAN
-static unsigned long arm_kasan_mem_to_shadow(unsigned long addr)
-{
-	return (unsigned long)kasan_mem_to_shadow((void *)addr);
-}
-#else
-static unsigned long arm_kasan_mem_to_shadow(unsigned long addr)
-{
-	return 0;
-}
-#endif
-
-static void memcpy_pgd(struct mm_struct *mm, unsigned long start,
-		       unsigned long end)
-{
-	end = ALIGN(end, PGDIR_SIZE);
-	memcpy(pgd_offset(mm, start), pgd_offset_k(start),
-	       sizeof(pgd_t) * (pgd_index(end) - pgd_index(start)));
-}
-
 void __check_vmalloc_seq(struct mm_struct *mm)
 {
-	int seq;
+	unsigned int seq;
 
 	do {
-		seq = atomic_read_acquire(&init_mm.context.vmalloc_seq);
-		memcpy_pgd(mm, VMALLOC_START, VMALLOC_END);
-		if (IS_ENABLED(CONFIG_KASAN_VMALLOC)) {
-			unsigned long start =
-				arm_kasan_mem_to_shadow(VMALLOC_START);
-			unsigned long end =
-				arm_kasan_mem_to_shadow(VMALLOC_END);
-			memcpy_pgd(mm, start, end);
-		}
-		/*
-		 * Use a store-release so that other CPUs that observe the
-		 * counter's new value are guaranteed to see the results of the
-		 * memcpy as well.
-		 */
-		atomic_set_release(&mm->context.vmalloc_seq, seq);
-	} while (seq != atomic_read(&init_mm.context.vmalloc_seq));
+		seq = init_mm.context.vmalloc_seq;
+		memcpy(pgd_offset(mm, VMALLOC_START),
+		       pgd_offset_k(VMALLOC_START),
+		       sizeof(pgd_t) * (pgd_index(VMALLOC_END) -
+					pgd_index(VMALLOC_START)));
+		mm->context.vmalloc_seq = seq;
+	} while (seq != init_mm.context.vmalloc_seq);
 }
 
 #if !defined(CONFIG_SMP) && !defined(CONFIG_ARM_LPAE)
@@ -187,7 +156,7 @@ static void unmap_area_sections(unsigned long virt, unsigned long size)
 			 * Note: this is still racy on SMP machines.
 			 */
 			pmd_clear(pmdp);
-			atomic_inc_return_release(&init_mm.context.vmalloc_seq);
+			init_mm.context.vmalloc_seq++;
 
 			/*
 			 * Free the page table, if there was one.
@@ -204,7 +173,8 @@ static void unmap_area_sections(unsigned long virt, unsigned long size)
 	 * Ensure that the active_mm is up to date - we want to
 	 * catch any use-after-iounmap cases.
 	 */
-	check_vmalloc_seq(current->active_mm);
+	if (current->active_mm->context.vmalloc_seq != init_mm.context.vmalloc_seq)
+		__check_vmalloc_seq(current->active_mm);
 
 	flush_tlb_kernel_range(virt, end);
 }
@@ -431,19 +401,14 @@ __arm_ioremap_exec(phys_addr_t phys_addr, size_t size, bool cached)
 			__builtin_return_address(0));
 }
 
-void __arm_iomem_set_ro(void __iomem *ptr, size_t size)
-{
-	set_memory_ro((unsigned long)ptr, PAGE_ALIGN(size) / PAGE_SIZE);
-}
-
-void *arch_memremap_wb(phys_addr_t phys_addr, size_t size, unsigned long flags)
+void *arch_memremap_wb(phys_addr_t phys_addr, size_t size)
 {
 	return (__force void *)arch_ioremap_caller(phys_addr, size,
 						   MT_MEMORY_RW,
 						   __builtin_return_address(0));
 }
 
-void iounmap(volatile void __iomem *io_addr)
+void __iounmap(volatile void __iomem *io_addr)
 {
 	void *addr = (void *)(PAGE_MASK & (unsigned long)io_addr);
 	struct static_vm *svm;
@@ -471,9 +436,16 @@ void iounmap(volatile void __iomem *io_addr)
 
 	vunmap(addr);
 }
+
+void (*arch_iounmap)(volatile void __iomem *) = __iounmap;
+
+void iounmap(volatile void __iomem *cookie)
+{
+	arch_iounmap(cookie);
+}
 EXPORT_SYMBOL(iounmap);
 
-#if defined(CONFIG_PCI) || IS_ENABLED(CONFIG_PCMCIA)
+#ifdef CONFIG_PCI
 static int pci_ioremap_mem_type = MT_DEVICE;
 
 void pci_ioremap_set_mem_type(int mem_type)
@@ -481,20 +453,16 @@ void pci_ioremap_set_mem_type(int mem_type)
 	pci_ioremap_mem_type = mem_type;
 }
 
-int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr)
+int pci_ioremap_io(unsigned int offset, phys_addr_t phys_addr)
 {
-	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start;
+	BUG_ON(offset + SZ_64K - 1 > IO_SPACE_LIMIT);
 
-	if (!(res->flags & IORESOURCE_IO))
-		return -EINVAL;
-
-	if (res->end > IO_SPACE_LIMIT)
-		return -EINVAL;
-
-	return vmap_page_range(vaddr, vaddr + resource_size(res), phys_addr,
-			       __pgprot(get_mem_type(pci_ioremap_mem_type)->prot_pte));
+	return ioremap_page_range(PCI_IO_VIRT_BASE + offset,
+				  PCI_IO_VIRT_BASE + offset + SZ_64K,
+				  phys_addr,
+				  __pgprot(get_mem_type(pci_ioremap_mem_type)->prot_pte));
 }
-EXPORT_SYMBOL(pci_remap_iospace);
+EXPORT_SYMBOL_GPL(pci_ioremap_io);
 
 void __iomem *pci_remap_cfgspace(resource_size_t res_cookie, size_t size)
 {
@@ -515,5 +483,7 @@ void __init early_ioremap_init(void)
 bool arch_memremap_can_ram_remap(resource_size_t offset, size_t size,
 				 unsigned long flags)
 {
-	return memblock_is_map_memory(offset);
+	unsigned long pfn = PHYS_PFN(offset);
+
+	return memblock_is_map_memory(pfn);
 }

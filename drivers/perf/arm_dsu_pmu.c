@@ -20,7 +20,7 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/perf_event.h>
 #include <linux/platform_device.h>
 #include <linux/spinlock.h>
@@ -30,6 +30,8 @@
 
 #include <asm/arm_dsu_pmu.h>
 #include <asm/local64.h>
+
+#include <soc/samsung/dsu_theodul_errata.h>
 
 /* PMU event codes */
 #define DSU_PMU_EVT_CYCLES		0x11
@@ -85,7 +87,7 @@
 	DSU_EXT_ATTR(_name, dsu_pmu_sysfs_event_show, (unsigned long)_config)
 
 #define DSU_FORMAT_ATTR(_name, _config)		\
-	DSU_EXT_ATTR(_name, device_show_string, _config)
+	DSU_EXT_ATTR(_name, dsu_pmu_sysfs_format_show, (char *)_config)
 
 #define DSU_CPUMASK_ATTR(_name, _config)	\
 	DSU_EXT_ATTR(_name, dsu_pmu_cpumask_show, (unsigned long)_config)
@@ -136,7 +138,17 @@ static ssize_t dsu_pmu_sysfs_event_show(struct device *dev,
 {
 	struct dev_ext_attribute *eattr = container_of(attr,
 					struct dev_ext_attribute, attr);
-	return sysfs_emit(buf, "event=0x%lx\n", (unsigned long)eattr->var);
+	return snprintf(buf, PAGE_SIZE, "event=0x%lx\n",
+					 (unsigned long)eattr->var);
+}
+
+static ssize_t dsu_pmu_sysfs_format_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct dev_ext_attribute *eattr = container_of(attr,
+					struct dev_ext_attribute, attr);
+	return snprintf(buf, PAGE_SIZE, "%s\n", (char *)eattr->var);
 }
 
 static ssize_t dsu_pmu_cpumask_show(struct device *dev,
@@ -220,6 +232,15 @@ static const struct attribute_group *dsu_pmu_attr_groups[] = {
 	&dsu_pmu_format_attr_group,
 	NULL,
 };
+
+static int dsu_pmu_get_online_cpu_any_but(struct dsu_pmu *dsu_pmu, int cpu)
+{
+	struct cpumask online_supported;
+
+	cpumask_and(&online_supported,
+			 &dsu_pmu->associated_cpus, cpu_online_mask);
+	return cpumask_any_but(&online_supported, cpu);
+}
 
 static inline bool dsu_pmu_counter_valid(struct dsu_pmu *dsu_pmu, u32 idx)
 {
@@ -345,7 +366,9 @@ static void dsu_pmu_event_update(struct perf_event *event)
 
 static void dsu_pmu_read(struct perf_event *event)
 {
+	arm_smcc_disable_clock_gating();
 	dsu_pmu_event_update(event);
+	arm_smcc_enable_clock_gating();
 }
 
 static inline u32 dsu_pmu_get_reset_overflow(void)
@@ -353,7 +376,7 @@ static inline u32 dsu_pmu_get_reset_overflow(void)
 	return __dsu_pmu_get_reset_overflow();
 }
 
-/*
+/**
  * dsu_pmu_set_event_period: Set the period for the counter.
  *
  * All DSU PMU event counters, except the cycle counter are 32bit
@@ -377,9 +400,12 @@ static irqreturn_t dsu_pmu_handle_irq(int irq_num, void *dev)
 	struct dsu_hw_events *hw_events = &dsu_pmu->hw_events;
 	unsigned long overflow;
 
+	arm_smcc_disable_clock_gating();
 	overflow = dsu_pmu_get_reset_overflow();
-	if (!overflow)
+	if (!overflow) {
+		arm_smcc_enable_clock_gating();
 		return IRQ_NONE;
+	}
 
 	for_each_set_bit(i, &overflow, DSU_PMU_MAX_HW_CNTRS) {
 		struct perf_event *event = hw_events->events[i];
@@ -390,6 +416,7 @@ static irqreturn_t dsu_pmu_handle_irq(int irq_num, void *dev)
 		dsu_pmu_set_event_period(event);
 		handled = true;
 	}
+	arm_smcc_enable_clock_gating();
 
 	return IRQ_RETVAL(handled);
 }
@@ -398,6 +425,7 @@ static void dsu_pmu_start(struct perf_event *event, int pmu_flags)
 {
 	struct dsu_pmu *dsu_pmu = to_dsu_pmu(event->pmu);
 
+	arm_smcc_disable_clock_gating();
 	/* We always reprogram the counter */
 	if (pmu_flags & PERF_EF_RELOAD)
 		WARN_ON(!(event->hw.state & PERF_HES_UPTODATE));
@@ -406,6 +434,7 @@ static void dsu_pmu_start(struct perf_event *event, int pmu_flags)
 		dsu_pmu_set_event(dsu_pmu, event);
 	event->hw.state = 0;
 	dsu_pmu_enable_counter(dsu_pmu, event->hw.idx);
+	arm_smcc_enable_clock_gating();
 }
 
 static void dsu_pmu_stop(struct perf_event *event, int pmu_flags)
@@ -452,7 +481,9 @@ static void dsu_pmu_del(struct perf_event *event, int flags)
 	struct hw_perf_event *hwc = &event->hw;
 	int idx = hwc->idx;
 
+	arm_smcc_disable_clock_gating();
 	dsu_pmu_stop(event, PERF_EF_UPDATE);
+	arm_smcc_enable_clock_gating();
 	hw_events->events[idx] = NULL;
 	clear_bit(idx, hw_events->used_mask);
 	perf_event_update_userpage(event);
@@ -468,11 +499,13 @@ static void dsu_pmu_enable(struct pmu *pmu)
 	if (bitmap_empty(dsu_pmu->hw_events.used_mask, DSU_PMU_MAX_HW_CNTRS))
 		return;
 
+	arm_smcc_disable_clock_gating();
 	raw_spin_lock_irqsave(&dsu_pmu->pmu_lock, flags);
 	pmcr = __dsu_pmu_read_pmcr();
 	pmcr |= CLUSTERPMCR_E;
 	__dsu_pmu_write_pmcr(pmcr);
 	raw_spin_unlock_irqrestore(&dsu_pmu->pmu_lock, flags);
+	arm_smcc_enable_clock_gating();
 }
 
 static void dsu_pmu_disable(struct pmu *pmu)
@@ -481,11 +514,13 @@ static void dsu_pmu_disable(struct pmu *pmu)
 	unsigned long flags;
 	struct dsu_pmu *dsu_pmu = to_dsu_pmu(pmu);
 
+	arm_smcc_disable_clock_gating();
 	raw_spin_lock_irqsave(&dsu_pmu->pmu_lock, flags);
 	pmcr = __dsu_pmu_read_pmcr();
 	pmcr &= ~CLUSTERPMCR_E;
 	__dsu_pmu_write_pmcr(pmcr);
 	raw_spin_unlock_irqrestore(&dsu_pmu->pmu_lock, flags);
+	arm_smcc_enable_clock_gating();
 }
 
 static bool dsu_pmu_validate_event(struct pmu *pmu,
@@ -584,7 +619,7 @@ static struct dsu_pmu *dsu_pmu_alloc(struct platform_device *pdev)
 	return dsu_pmu;
 }
 
-/*
+/**
  * dsu_pmu_dt_get_cpus: Get the list of CPUs in the cluster
  * from device tree.
  */
@@ -614,14 +649,13 @@ static int dsu_pmu_dt_get_cpus(struct device *dev, cpumask_t *mask)
 	return 0;
 }
 
-/*
+/**
  * dsu_pmu_acpi_get_cpus: Get the list of CPUs in the cluster
  * from ACPI.
  */
 static int dsu_pmu_acpi_get_cpus(struct device *dev, cpumask_t *mask)
 {
 #ifdef CONFIG_ACPI
-	struct acpi_device *parent_adev = acpi_dev_parent(ACPI_COMPANION(dev));
 	int cpu;
 
 	/*
@@ -636,7 +670,8 @@ static int dsu_pmu_acpi_get_cpus(struct device *dev, cpumask_t *mask)
 			continue;
 
 		acpi_dev = ACPI_COMPANION(cpu_dev);
-		if (acpi_dev && acpi_dev_parent(acpi_dev) == parent_adev)
+		if (acpi_dev &&
+			acpi_dev->parent == ACPI_COMPANION(dev)->parent)
 			cpumask_set_cpu(cpu, mask);
 	}
 #endif
@@ -669,7 +704,7 @@ static void dsu_pmu_probe_pmu(struct dsu_pmu *dsu_pmu)
 static void dsu_pmu_set_active_cpu(int cpu, struct dsu_pmu *dsu_pmu)
 {
 	cpumask_set_cpu(cpu, &dsu_pmu->active_cpu);
-	if (irq_set_affinity(dsu_pmu->irq, &dsu_pmu->active_cpu))
+	if (irq_set_affinity_hint(dsu_pmu->irq, &dsu_pmu->active_cpu))
 		pr_warn("Failed to set irq affinity to %d\n", cpu);
 }
 
@@ -679,10 +714,12 @@ static void dsu_pmu_set_active_cpu(int cpu, struct dsu_pmu *dsu_pmu)
  */
 static void dsu_pmu_init_pmu(struct dsu_pmu *dsu_pmu)
 {
+	arm_smcc_disable_clock_gating();
 	if (dsu_pmu->num_counters == -1)
 		dsu_pmu_probe_pmu(dsu_pmu);
 	/* Reset the interrupt overflow mask */
 	dsu_pmu_get_reset_overflow();
+	arm_smcc_enable_clock_gating();
 }
 
 static int dsu_pmu_device_probe(struct platform_device *pdev)
@@ -696,6 +733,9 @@ static int dsu_pmu_device_probe(struct platform_device *pdev)
 	dsu_pmu = dsu_pmu_alloc(pdev);
 	if (IS_ERR(dsu_pmu))
 		return PTR_ERR(dsu_pmu);
+
+	if (IS_ERR_OR_NULL(fwnode))
+		return -ENOENT;
 
 	if (is_of_node(fwnode))
 		rc = dsu_pmu_dt_get_cpus(&pdev->dev, &dsu_pmu->associated_cpus);
@@ -733,7 +773,6 @@ static int dsu_pmu_device_probe(struct platform_device *pdev)
 
 	dsu_pmu->pmu = (struct pmu) {
 		.task_ctx_nr	= perf_invalid_context,
-		.parent		= &pdev->dev,
 		.module		= THIS_MODULE,
 		.pmu_enable	= dsu_pmu_enable,
 		.pmu_disable	= dsu_pmu_disable,
@@ -752,17 +791,21 @@ static int dsu_pmu_device_probe(struct platform_device *pdev)
 	if (rc) {
 		cpuhp_state_remove_instance(dsu_pmu_cpuhp_state,
 						 &dsu_pmu->cpuhp_node);
+		irq_set_affinity_hint(dsu_pmu->irq, NULL);
 	}
 
 	return rc;
 }
 
-static void dsu_pmu_device_remove(struct platform_device *pdev)
+static int dsu_pmu_device_remove(struct platform_device *pdev)
 {
 	struct dsu_pmu *dsu_pmu = platform_get_drvdata(pdev);
 
 	perf_pmu_unregister(&dsu_pmu->pmu);
 	cpuhp_state_remove_instance(dsu_pmu_cpuhp_state, &dsu_pmu->cpuhp_node);
+	irq_set_affinity_hint(dsu_pmu->irq, NULL);
+
+	return 0;
 }
 
 static const struct of_device_id dsu_pmu_of_match[] = {
@@ -810,19 +853,19 @@ static int dsu_pmu_cpu_online(unsigned int cpu, struct hlist_node *node)
 
 static int dsu_pmu_cpu_teardown(unsigned int cpu, struct hlist_node *node)
 {
-	struct dsu_pmu *dsu_pmu;
-	unsigned int dst;
-
-	dsu_pmu = hlist_entry_safe(node, struct dsu_pmu, cpuhp_node);
+	int dst;
+	struct dsu_pmu *dsu_pmu = hlist_entry_safe(node, struct dsu_pmu,
+						   cpuhp_node);
 
 	if (!cpumask_test_and_clear_cpu(cpu, &dsu_pmu->active_cpu))
 		return 0;
 
-	dst = cpumask_any_and_but(&dsu_pmu->associated_cpus,
-				  cpu_online_mask, cpu);
+	dst = dsu_pmu_get_online_cpu_any_but(dsu_pmu, cpu);
 	/* If there are no active CPUs in the DSU, leave IRQ disabled */
-	if (dst >= nr_cpu_ids)
+	if (dst >= nr_cpu_ids) {
+		irq_set_affinity_hint(dsu_pmu->irq, NULL);
 		return 0;
+	}
 
 	perf_pmu_migrate_context(&dsu_pmu->pmu, cpu, dst);
 	dsu_pmu_set_active_cpu(dst, dsu_pmu);

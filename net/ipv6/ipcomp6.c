@@ -71,7 +71,6 @@ static int ipcomp6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	return 0;
 }
 
-static struct lock_class_key xfrm_state_lock_key;
 static struct xfrm_state *ipcomp6_tunnel_create(struct xfrm_state *x)
 {
 	struct net *net = xs_net(x);
@@ -80,7 +79,6 @@ static struct xfrm_state *ipcomp6_tunnel_create(struct xfrm_state *x)
 	t = xfrm_state_alloc(net);
 	if (!t)
 		goto out;
-	lockdep_set_class(&t->lock, &xfrm_state_lock_key);
 
 	t->id.proto = IPPROTO_IPV6;
 	t->id.spi = xfrm6_tunnel_alloc_spi(net, (xfrm_address_t *)&x->props.saddr);
@@ -138,8 +136,7 @@ out:
 	return err;
 }
 
-static int ipcomp6_init_state(struct xfrm_state *x,
-			      struct netlink_ext_ack *extack)
+static int ipcomp6_init_state(struct xfrm_state *x)
 {
 	int err = -EINVAL;
 
@@ -151,20 +148,17 @@ static int ipcomp6_init_state(struct xfrm_state *x,
 		x->props.header_len += sizeof(struct ipv6hdr);
 		break;
 	default:
-		NL_SET_ERR_MSG(extack, "Unsupported XFRM mode for IPcomp");
 		goto out;
 	}
 
-	err = ipcomp_init_state(x, extack);
+	err = ipcomp_init_state(x);
 	if (err)
 		goto out;
 
 	if (x->props.mode == XFRM_MODE_TUNNEL) {
 		err = ipcomp6_tunnel_attach(x);
-		if (err) {
-			NL_SET_ERR_MSG(extack, "Kernel error: failed to initialize the associated state");
+		if (err)
 			goto out;
-		}
 	}
 
 	err = 0;
@@ -178,12 +172,14 @@ static int ipcomp6_rcv_cb(struct sk_buff *skb, int err)
 }
 
 static const struct xfrm_type ipcomp6_type = {
+	.description	= "IPCOMP6",
 	.owner		= THIS_MODULE,
 	.proto		= IPPROTO_COMP,
 	.init_state	= ipcomp6_init_state,
 	.destructor	= ipcomp_destroy,
 	.input		= ipcomp_input,
 	.output		= ipcomp_output,
+	.hdr_offset	= xfrm6_find_1stfragopt,
 };
 
 static struct xfrm6_protocol ipcomp6_protocol = {

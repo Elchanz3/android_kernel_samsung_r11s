@@ -4,7 +4,6 @@
  * Copyright (c) 2020 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
  */
 
-#include <linux/bitfield.h>
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
@@ -35,6 +34,8 @@
 /* bits within the OSTCCR register */
 #define OSTCCR_PRESCALE1_MASK	0x3
 #define OSTCCR_PRESCALE2_MASK	0xc
+#define OSTCCR_PRESCALE1_LSB	0
+#define OSTCCR_PRESCALE2_LSB	2
 
 /* bits within the OSTCR register */
 #define OSTCR_OST1CLR			BIT(0)
@@ -97,7 +98,7 @@ static unsigned long ingenic_ost_percpu_timer_recalc_rate(struct clk_hw *hw,
 
 	prescale = readl(ost_clk->ost->base + info->ostccr_reg);
 
-	prescale = FIELD_GET(OSTCCR_PRESCALE1_MASK, prescale);
+	prescale = (prescale & OSTCCR_PRESCALE1_MASK) >> OSTCCR_PRESCALE1_LSB;
 
 	return parent_rate >> (prescale * 2);
 }
@@ -111,7 +112,7 @@ static unsigned long ingenic_ost_global_timer_recalc_rate(struct clk_hw *hw,
 
 	prescale = readl(ost_clk->ost->base + info->ostccr_reg);
 
-	prescale = FIELD_GET(OSTCCR_PRESCALE2_MASK, prescale);
+	prescale = (prescale & OSTCCR_PRESCALE2_MASK) >> OSTCCR_PRESCALE2_LSB;
 
 	return parent_rate >> (prescale * 2);
 }
@@ -127,23 +128,18 @@ static u8 ingenic_ost_get_prescale(unsigned long rate, unsigned long req_rate)
 	return 2; /* /16 divider */
 }
 
-static int ingenic_ost_determine_rate(struct clk_hw *hw,
-				      struct clk_rate_request *req)
+static long ingenic_ost_round_rate(struct clk_hw *hw, unsigned long req_rate,
+		unsigned long *parent_rate)
 {
-	unsigned long rate = req->best_parent_rate;
+	unsigned long rate = *parent_rate;
 	u8 prescale;
 
-	if (req->rate > rate) {
-		req->rate = rate;
+	if (req_rate > rate)
+		return rate;
 
-		return 0;
-	}
+	prescale = ingenic_ost_get_prescale(rate, req_rate);
 
-	prescale = ingenic_ost_get_prescale(rate, req->rate);
-
-	req->rate = rate >> (prescale * 2);
-
-	return 0;
+	return rate >> (prescale * 2);
 }
 
 static int ingenic_ost_percpu_timer_set_rate(struct clk_hw *hw, unsigned long req_rate,
@@ -155,8 +151,7 @@ static int ingenic_ost_percpu_timer_set_rate(struct clk_hw *hw, unsigned long re
 	int val;
 
 	val = readl(ost_clk->ost->base + info->ostccr_reg);
-	val &= ~OSTCCR_PRESCALE1_MASK;
-	val |= FIELD_PREP(OSTCCR_PRESCALE1_MASK, prescale);
+	val = (val & ~OSTCCR_PRESCALE1_MASK) | (prescale << OSTCCR_PRESCALE1_LSB);
 	writel(val, ost_clk->ost->base + info->ostccr_reg);
 
 	return 0;
@@ -171,8 +166,7 @@ static int ingenic_ost_global_timer_set_rate(struct clk_hw *hw, unsigned long re
 	int val;
 
 	val = readl(ost_clk->ost->base + info->ostccr_reg);
-	val &= ~OSTCCR_PRESCALE2_MASK;
-	val |= FIELD_PREP(OSTCCR_PRESCALE2_MASK, prescale);
+	val = (val & ~OSTCCR_PRESCALE2_MASK) | (prescale << OSTCCR_PRESCALE2_LSB);
 	writel(val, ost_clk->ost->base + info->ostccr_reg);
 
 	return 0;
@@ -180,19 +174,19 @@ static int ingenic_ost_global_timer_set_rate(struct clk_hw *hw, unsigned long re
 
 static const struct clk_ops ingenic_ost_percpu_timer_ops = {
 	.recalc_rate	= ingenic_ost_percpu_timer_recalc_rate,
-	.determine_rate = ingenic_ost_determine_rate,
-	.set_rate	= ingenic_ost_percpu_timer_set_rate,
+	.round_rate		= ingenic_ost_round_rate,
+	.set_rate		= ingenic_ost_percpu_timer_set_rate,
 };
 
 static const struct clk_ops ingenic_ost_global_timer_ops = {
 	.recalc_rate	= ingenic_ost_global_timer_recalc_rate,
-	.determine_rate = ingenic_ost_determine_rate,
-	.set_rate	= ingenic_ost_global_timer_set_rate,
+	.round_rate		= ingenic_ost_round_rate,
+	.set_rate		= ingenic_ost_global_timer_set_rate,
 };
 
 static const char * const ingenic_ost_clk_parents[] = { "ext" };
 
-static const struct ingenic_ost_clk_info x1000_ost_clk_info[] = {
+static const struct ingenic_ost_clk_info ingenic_ost_clk_info[] = {
 	[OST_CLK_PERCPU_TIMER] = {
 		.init_data = {
 			.name = "percpu timer",
@@ -420,14 +414,14 @@ static const struct ingenic_soc_info x1000_soc_info = {
 	.num_channels = 2,
 };
 
-static const struct of_device_id __maybe_unused ingenic_ost_of_matches[] __initconst = {
-	{ .compatible = "ingenic,x1000-ost", .data = &x1000_soc_info },
+static const struct of_device_id __maybe_unused ingenic_ost_of_match[] __initconst = {
+	{ .compatible = "ingenic,x1000-ost", .data = &x1000_soc_info, },
 	{ /* sentinel */ }
 };
 
 static int __init ingenic_ost_probe(struct device_node *np)
 {
-	const struct of_device_id *id = of_match_node(ingenic_ost_of_matches, np);
+	const struct of_device_id *id = of_match_node(ingenic_ost_of_match, np);
 	struct ingenic_ost *ost;
 	unsigned int i;
 	int ret;
@@ -468,7 +462,7 @@ static int __init ingenic_ost_probe(struct device_node *np)
 	ost->clocks->num = ost->soc_info->num_channels;
 
 	for (i = 0; i < ost->clocks->num; i++) {
-		ret = ingenic_ost_register_clock(ost, i, &x1000_ost_clk_info[i], ost->clocks);
+		ret = ingenic_ost_register_clock(ost, i, &ingenic_ost_clk_info[i], ost->clocks);
 		if (ret) {
 			pr_crit("%s: Cannot register clock %d\n", __func__, i);
 			goto err_unregister_ost_clocks;

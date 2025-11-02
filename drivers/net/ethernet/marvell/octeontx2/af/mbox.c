@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Marvell RVU Admin Function driver
+/* Marvell OcteonTx2 RVU Admin Function driver
  *
- * Copyright (C) 2018 Marvell.
+ * Copyright (C) 2018 Marvell International Ltd.
  *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -10,19 +13,16 @@
 #include <linux/pci.h>
 
 #include "rvu_reg.h"
-#include "cn20k/reg.h"
-#include "cn20k/api.h"
 #include "mbox.h"
 #include "rvu_trace.h"
-#include "rvu.h"
 
 static const u16 msgs_offset = ALIGN(sizeof(struct mbox_hdr), MBOX_MSG_ALIGN);
 
 void __otx2_mbox_reset(struct otx2_mbox *mbox, int devid)
 {
+	void *hw_mbase = mbox->hwbase + (devid * MBOX_SIZE);
 	struct otx2_mbox_dev *mdev = &mbox->dev[devid];
 	struct mbox_hdr *tx_hdr, *rx_hdr;
-	void *hw_mbase = mdev->hwbase;
 
 	tx_hdr = hw_mbase + mbox->tx_start;
 	rx_hdr = hw_mbase + mbox->rx_start;
@@ -31,10 +31,8 @@ void __otx2_mbox_reset(struct otx2_mbox *mbox, int devid)
 	mdev->rsp_size = 0;
 	tx_hdr->num_msgs = 0;
 	tx_hdr->msg_size = 0;
-	tx_hdr->sig = 0;
 	rx_hdr->num_msgs = 0;
 	rx_hdr->msg_size = 0;
-	rx_hdr->sig = 0;
 }
 EXPORT_SYMBOL(__otx2_mbox_reset);
 
@@ -58,97 +56,11 @@ void otx2_mbox_destroy(struct otx2_mbox *mbox)
 }
 EXPORT_SYMBOL(otx2_mbox_destroy);
 
-int cn20k_mbox_setup(struct otx2_mbox *mbox, struct pci_dev *pdev,
-		     void *reg_base, int direction, int ndevs)
+int otx2_mbox_init(struct otx2_mbox *mbox, void *hwbase, struct pci_dev *pdev,
+		   void *reg_base, int direction, int ndevs)
 {
-	switch (direction) {
-	case MBOX_DIR_AFPF:
-	case MBOX_DIR_PFVF:
-		mbox->tx_start = MBOX_DOWN_TX_START;
-		mbox->rx_start = MBOX_DOWN_RX_START;
-		mbox->tx_size  = MBOX_DOWN_TX_SIZE;
-		mbox->rx_size  = MBOX_DOWN_RX_SIZE;
-		break;
-	case MBOX_DIR_PFAF:
-	case MBOX_DIR_VFPF:
-		mbox->tx_start = MBOX_DOWN_RX_START;
-		mbox->rx_start = MBOX_DOWN_TX_START;
-		mbox->tx_size  = MBOX_DOWN_RX_SIZE;
-		mbox->rx_size  = MBOX_DOWN_TX_SIZE;
-		break;
-	case MBOX_DIR_AFPF_UP:
-	case MBOX_DIR_PFVF_UP:
-		mbox->tx_start = MBOX_UP_TX_START;
-		mbox->rx_start = MBOX_UP_RX_START;
-		mbox->tx_size  = MBOX_UP_TX_SIZE;
-		mbox->rx_size  = MBOX_UP_RX_SIZE;
-		break;
-	case MBOX_DIR_PFAF_UP:
-	case MBOX_DIR_VFPF_UP:
-		mbox->tx_start = MBOX_UP_RX_START;
-		mbox->rx_start = MBOX_UP_TX_START;
-		mbox->tx_size  = MBOX_UP_RX_SIZE;
-		mbox->rx_size  = MBOX_UP_TX_SIZE;
-		break;
-	default:
-		return -ENODEV;
-	}
-
-	switch (direction) {
-	case MBOX_DIR_AFPF:
-		mbox->trigger = RVU_MBOX_AF_AFPFX_TRIGX(1);
-		mbox->tr_shift = 4;
-		break;
-	case MBOX_DIR_AFPF_UP:
-		mbox->trigger = RVU_MBOX_AF_AFPFX_TRIGX(0);
-		mbox->tr_shift = 4;
-		break;
-	case MBOX_DIR_PFAF:
-		mbox->trigger = RVU_MBOX_PF_PFAF_TRIGX(0);
-		mbox->tr_shift = 0;
-		break;
-	case MBOX_DIR_PFAF_UP:
-		mbox->trigger = RVU_MBOX_PF_PFAF_TRIGX(1);
-		mbox->tr_shift = 0;
-		break;
-	case MBOX_DIR_PFVF:
-		mbox->trigger = RVU_MBOX_PF_VFX_PFVF_TRIGX(1);
-		mbox->tr_shift = 4;
-		break;
-	case MBOX_DIR_PFVF_UP:
-		mbox->trigger = RVU_MBOX_PF_VFX_PFVF_TRIGX(0);
-		mbox->tr_shift = 4;
-		break;
-	case MBOX_DIR_VFPF:
-		mbox->trigger = RVU_MBOX_VF_VFPF_TRIGX(0);
-		mbox->tr_shift = 0;
-		break;
-	case MBOX_DIR_VFPF_UP:
-		mbox->trigger = RVU_MBOX_VF_VFPF_TRIGX(1);
-		mbox->tr_shift = 0;
-		break;
-	default:
-		return -ENODEV;
-	}
-	mbox->reg_base = reg_base;
-	mbox->pdev = pdev;
-
-	mbox->dev = kcalloc(ndevs, sizeof(struct otx2_mbox_dev), GFP_KERNEL);
-	if (!mbox->dev) {
-		otx2_mbox_destroy(mbox);
-		return -ENOMEM;
-	}
-	mbox->ndevs = ndevs;
-
-	return 0;
-}
-
-static int otx2_mbox_setup(struct otx2_mbox *mbox, struct pci_dev *pdev,
-			   void *reg_base, int direction, int ndevs)
-{
-	if (is_cn20k(pdev))
-		return cn20k_mbox_setup(mbox, pdev, reg_base,
-							direction, ndevs);
+	struct otx2_mbox_dev *mdev;
+	int devid;
 
 	switch (direction) {
 	case MBOX_DIR_AFPF:
@@ -209,6 +121,7 @@ static int otx2_mbox_setup(struct otx2_mbox *mbox, struct pci_dev *pdev,
 	}
 
 	mbox->reg_base = reg_base;
+	mbox->hwbase = hwbase;
 	mbox->pdev = pdev;
 
 	mbox->dev = kcalloc(ndevs, sizeof(struct otx2_mbox_dev), GFP_KERNEL);
@@ -216,27 +129,11 @@ static int otx2_mbox_setup(struct otx2_mbox *mbox, struct pci_dev *pdev,
 		otx2_mbox_destroy(mbox);
 		return -ENOMEM;
 	}
+
 	mbox->ndevs = ndevs;
-
-	return 0;
-}
-
-int otx2_mbox_init(struct otx2_mbox *mbox, void *hwbase, struct pci_dev *pdev,
-		   void *reg_base, int direction, int ndevs)
-{
-	struct otx2_mbox_dev *mdev;
-	int devid, err;
-
-	err = otx2_mbox_setup(mbox, pdev, reg_base, direction, ndevs);
-	if (err)
-		return err;
-
-	mbox->hwbase = hwbase;
-
 	for (devid = 0; devid < ndevs; devid++) {
 		mdev = &mbox->dev[devid];
 		mdev->mbase = mbox->hwbase + (devid * MBOX_SIZE);
-		mdev->hwbase = mdev->mbase;
 		spin_lock_init(&mdev->mbox_lock);
 		/* Init header to reset value */
 		otx2_mbox_reset(mbox, devid);
@@ -246,49 +143,18 @@ int otx2_mbox_init(struct otx2_mbox *mbox, void *hwbase, struct pci_dev *pdev,
 }
 EXPORT_SYMBOL(otx2_mbox_init);
 
-/* Initialize mailbox with the set of mailbox region addresses
- * in the array hwbase.
- */
-int otx2_mbox_regions_init(struct otx2_mbox *mbox, void **hwbase,
-			   struct pci_dev *pdev, void *reg_base,
-			   int direction, int ndevs, unsigned long *pf_bmap)
-{
-	struct otx2_mbox_dev *mdev;
-	int devid, err;
-
-	err = otx2_mbox_setup(mbox, pdev, reg_base, direction, ndevs);
-	if (err)
-		return err;
-
-	mbox->hwbase = hwbase[0];
-
-	for (devid = 0; devid < ndevs; devid++) {
-		if (!test_bit(devid, pf_bmap))
-			continue;
-
-		mdev = &mbox->dev[devid];
-		mdev->mbase = hwbase[devid];
-		mdev->hwbase = hwbase[devid];
-		spin_lock_init(&mdev->mbox_lock);
-		/* Init header to reset value */
-		otx2_mbox_reset(mbox, devid);
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL(otx2_mbox_regions_init);
-
 int otx2_mbox_wait_for_rsp(struct otx2_mbox *mbox, int devid)
 {
 	unsigned long timeout = jiffies + msecs_to_jiffies(MBOX_RSP_TIMEOUT);
 	struct otx2_mbox_dev *mdev = &mbox->dev[devid];
+	struct device *sender = &mbox->pdev->dev;
 
 	while (!time_after(jiffies, timeout)) {
 		if (mdev->num_msgs == mdev->msgs_acked)
 			return 0;
 		usleep_range(800, 1000);
 	}
-	trace_otx2_msg_wait_rsp(mbox->pdev);
+	dev_dbg(sender, "timed out while waiting for rsp\n");
 	return -EIO;
 }
 EXPORT_SYMBOL(otx2_mbox_wait_for_rsp);
@@ -307,13 +173,11 @@ int otx2_mbox_busy_poll_for_rsp(struct otx2_mbox *mbox, int devid)
 }
 EXPORT_SYMBOL(otx2_mbox_busy_poll_for_rsp);
 
-static void otx2_mbox_msg_send_data(struct otx2_mbox *mbox, int devid, u64 data)
+void otx2_mbox_msg_send(struct otx2_mbox *mbox, int devid)
 {
+	void *hw_mbase = mbox->hwbase + (devid * MBOX_SIZE);
 	struct otx2_mbox_dev *mdev = &mbox->dev[devid];
 	struct mbox_hdr *tx_hdr, *rx_hdr;
-	void *hw_mbase = mdev->hwbase;
-	struct mbox_msghdr *msg;
-	u64 intr_val;
 
 	tx_hdr = hw_mbase + mbox->tx_start;
 	rx_hdr = hw_mbase + mbox->rx_start;
@@ -328,10 +192,7 @@ static void otx2_mbox_msg_send_data(struct otx2_mbox *mbox, int devid, u64 data)
 
 	spin_lock(&mdev->mbox_lock);
 
-	if (!tx_hdr->sig) {
-		tx_hdr->msg_size = mdev->msg_size;
-		tx_hdr->num_msgs = mdev->num_msgs;
-	}
+	tx_hdr->msg_size = mdev->msg_size;
 
 	/* Reset header for next messages */
 	mdev->msg_size = 0;
@@ -345,67 +206,26 @@ static void otx2_mbox_msg_send_data(struct otx2_mbox *mbox, int devid, u64 data)
 	 * messages.  So this should be written after writing all the messages
 	 * to the shared memory.
 	 */
+	tx_hdr->num_msgs = mdev->num_msgs;
 	rx_hdr->num_msgs = 0;
 
-	msg = (struct mbox_msghdr *)(hw_mbase + mbox->tx_start + msgs_offset);
-
-	trace_otx2_msg_send(mbox->pdev, tx_hdr->num_msgs, tx_hdr->msg_size,
-			    msg->id, msg->pcifunc);
+	trace_otx2_msg_send(mbox->pdev, tx_hdr->num_msgs, tx_hdr->msg_size);
 
 	spin_unlock(&mdev->mbox_lock);
 
-	/* Check if interrupt pending */
-	intr_val = readq((void __iomem *)mbox->reg_base +
-		     (mbox->trigger | (devid << mbox->tr_shift)));
-
-	intr_val |= data;
 	/* The interrupt should be fired after num_msgs is written
 	 * to the shared memory
 	 */
-	writeq(intr_val, (void __iomem *)mbox->reg_base +
+	writeq(1, (void __iomem *)mbox->reg_base +
 	       (mbox->trigger | (devid << mbox->tr_shift)));
 }
-
-void otx2_mbox_msg_send(struct otx2_mbox *mbox, int devid)
-{
-	otx2_mbox_msg_send_data(mbox, devid, MBOX_DOWN_MSG);
-}
 EXPORT_SYMBOL(otx2_mbox_msg_send);
-
-void otx2_mbox_msg_send_up(struct otx2_mbox *mbox, int devid)
-{
-	otx2_mbox_msg_send_data(mbox, devid, MBOX_UP_MSG);
-}
-EXPORT_SYMBOL(otx2_mbox_msg_send_up);
-
-bool otx2_mbox_wait_for_zero(struct otx2_mbox *mbox, int devid)
-{
-	u64 data;
-
-	data = readq((void __iomem *)mbox->reg_base +
-		     (mbox->trigger | (devid << mbox->tr_shift)));
-
-	/* If data is non-zero wait for ~1ms and return to caller
-	 * whether data has changed to zero or not after the wait.
-	 */
-	if (!data)
-		return true;
-
-	usleep_range(950, 1000);
-
-	data = readq((void __iomem *)mbox->reg_base +
-		     (mbox->trigger | (devid << mbox->tr_shift)));
-
-	return data == 0;
-}
-EXPORT_SYMBOL(otx2_mbox_wait_for_zero);
 
 struct mbox_msghdr *otx2_mbox_alloc_msg_rsp(struct otx2_mbox *mbox, int devid,
 					    int size, int size_rsp)
 {
 	struct otx2_mbox_dev *mdev = &mbox->dev[devid];
 	struct mbox_msghdr *msghdr = NULL;
-	struct mbox_hdr *mboxhdr = NULL;
 
 	spin_lock(&mdev->mbox_lock);
 	size = ALIGN(size, MBOX_MSG_ALIGN);
@@ -429,11 +249,6 @@ struct mbox_msghdr *otx2_mbox_alloc_msg_rsp(struct otx2_mbox *mbox, int devid,
 	mdev->msg_size += size;
 	mdev->rsp_size += size_rsp;
 	msghdr->next_msgoff = mdev->msg_size + msgs_offset;
-
-	mboxhdr = mdev->mbase + mbox->tx_start;
-	/* Clear the msg header region */
-	memset(mboxhdr, 0, msgs_offset);
-
 exit:
 	spin_unlock(&mdev->mbox_lock);
 
@@ -550,20 +365,11 @@ const char *otx2_mbox_id2name(u16 id)
 #define M(_name, _id, _1, _2, _3) case _id: return # _name;
 	MBOX_MESSAGES
 #undef M
-
-#define M(_name, _id, _1, _2, _3) case _id: return # _name;
-	MBOX_UP_CGX_MESSAGES
-#undef M
-
-#define M(_name, _id, _1, _2, _3) case _id: return # _name;
-	MBOX_UP_CPT_MESSAGES
-#undef M
 	default:
 		return "INVALID ID";
 	}
 }
 EXPORT_SYMBOL(otx2_mbox_id2name);
 
-MODULE_AUTHOR("Marvell.");
-MODULE_DESCRIPTION("Marvell RVU NIC Mbox helpers");
+MODULE_AUTHOR("Marvell International Ltd.");
 MODULE_LICENSE("GPL v2");

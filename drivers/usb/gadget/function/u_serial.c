@@ -21,15 +21,12 @@
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/console.h>
-#include <linux/kstrtox.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
 #include <linux/kfifo.h>
-#include <linux/serial.h>
 
 #include "u_serial.h"
 
@@ -128,7 +125,6 @@ struct gs_port {
 	wait_queue_head_t	close_wait;
 	bool			suspended;	/* port suspended */
 	bool			start_delayed;	/* delay start when suspended */
-	struct async_icount	icount;
 
 	/* REVISIT this state ... */
 	struct usb_cdc_line_coding port_line_coding;	/* 8-N-1 etc */
@@ -260,7 +256,6 @@ __acquires(&port->port_lock)
 			break;
 		}
 		do_tty_wake = true;
-		port->icount.tx += len;
 
 		req->length = len;
 		list_del(&req->list);
@@ -295,8 +290,8 @@ __acquires(&port->port_lock)
 			break;
 	}
 
-	if (do_tty_wake)
-		tty_port_tty_wakeup(&port->port);
+	if (do_tty_wake && port->port.tty)
+		tty_wakeup(port->port.tty);
 	return status;
 }
 
@@ -412,7 +407,6 @@ static void gs_rx_push(struct work_struct *work)
 				size -= n;
 			}
 
-			port->icount.rx += size;
 			count = tty_insert_flip_string(&port->port, packet,
 					size);
 			if (count)
@@ -459,6 +453,15 @@ static void gs_read_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct gs_port	*port = ep->driver_data;
 
+	/*
+	 * Port became NULL when 'dwc3_gadget_pullup' returns ETIMEDOUT.
+	 * Return here to avoid panic.
+	 */
+	if (!port) {
+		pr_err("%s, failed to get port\n", __func__);
+		return;
+	}
+
 	/* Queue all received data until the tty layer is ready for it. */
 	spin_lock(&port->port_lock);
 	list_add_tail(&req->list, &port->read_queue);
@@ -469,6 +472,15 @@ static void gs_read_complete(struct usb_ep *ep, struct usb_request *req)
 static void gs_write_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct gs_port	*port = ep->driver_data;
+
+	/*
+	 * port became NULL when 'dwc3_gadget_pullup' returns ETIMEDOUT.
+	 * Return here to avoid panic.
+	 */
+	if (!port) {
+		pr_err("%s, failed to get port\n", __func__);
+		return;
+	}
 
 	spin_lock(&port->port_lock);
 	list_add(&req->list, &port->write_pool);
@@ -554,6 +566,12 @@ static int gs_start_io(struct gs_port *port)
 	 * configurations may use different endpoints with a given port;
 	 * and high speed vs full speed changes packet sizes too.
 	 */
+	 
+	if (!ep->enabled || !port->port_usb->in->enabled) {
+		pr_err("%s: ep is disabled.\n", __func__);
+		return -ENODEV;
+	}
+	
 	status = gs_alloc_requests(ep, head, gs_read_complete,
 		&port->read_allocated);
 	if (status)
@@ -574,29 +592,16 @@ static int gs_start_io(struct gs_port *port)
 		gs_start_tx(port);
 		/* Unblock any pending writes into our circular buffer, in case
 		 * we didn't in gs_start_tx() */
-		tty_port_tty_wakeup(&port->port);
+		if (port->port.tty)
+			tty_wakeup(port->port.tty);
 	} else {
-		/* Free reqs only if we are still connected */
-		if (port->port_usb) {
-			gs_free_requests(ep, head, &port->read_allocated);
-			gs_free_requests(port->port_usb->in, &port->write_pool,
-				&port->write_allocated);
-		}
+		gs_free_requests(ep, head, &port->read_allocated);
+		gs_free_requests(port->port_usb->in, &port->write_pool,
+			&port->write_allocated);
 		status = -EIO;
 	}
 
 	return status;
-}
-
-static int gserial_wakeup_host(struct gserial *gser)
-{
-	struct usb_function	*func = &gser->func;
-	struct usb_gadget	*gadget = func->config->cdev->gadget;
-
-	if (func->func_suspended)
-		return usb_func_wakeup(func);
-	else
-		return usb_gadget_wakeup(gadget);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -749,30 +754,17 @@ exit:
 	spin_unlock_irq(&port->port_lock);
 }
 
-static ssize_t gs_write(struct tty_struct *tty, const u8 *buf, size_t count)
+static int gs_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
-	int ret = 0;
-	struct gserial  *gser = port->port_usb;
 
-	pr_vdebug("gs_write: ttyGS%d (%p) writing %zu bytes\n",
+	pr_vdebug("gs_write: ttyGS%d (%p) writing %d bytes\n",
 			port->port_num, tty, count);
 
 	spin_lock_irqsave(&port->port_lock, flags);
 	if (count)
 		count = kfifo_in(&port->port_write_buf, buf, count);
-
-	if (port->suspended) {
-		spin_unlock_irqrestore(&port->port_lock, flags);
-		ret = gserial_wakeup_host(gser);
-		if (ret) {
-			pr_debug("ttyGS%d: Remote wakeup failed:%d\n", port->port_num, ret);
-			return count;
-		}
-		spin_lock_irqsave(&port->port_lock, flags);
-	}
-
 	/* treat count == 0 as flush_chars() */
 	if (port->port_usb)
 		gs_start_tx(port);
@@ -781,7 +773,7 @@ static ssize_t gs_write(struct tty_struct *tty, const u8 *buf, size_t count)
 	return count;
 }
 
-static int gs_put_char(struct tty_struct *tty, u8 ch)
+static int gs_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
@@ -801,55 +793,43 @@ static void gs_flush_chars(struct tty_struct *tty)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
-	int ret = 0;
-	struct gserial  *gser = port->port_usb;
 
 	pr_vdebug("gs_flush_chars: (%d,%p)\n", port->port_num, tty);
 
 	spin_lock_irqsave(&port->port_lock, flags);
-	if (port->suspended) {
-		spin_unlock_irqrestore(&port->port_lock, flags);
-		ret = gserial_wakeup_host(gser);
-		if (ret) {
-			pr_debug("ttyGS%d: Remote wakeup failed:%d\n", port->port_num, ret);
-			return;
-		}
-		spin_lock_irqsave(&port->port_lock, flags);
-	}
-
 	if (port->port_usb)
 		gs_start_tx(port);
 	spin_unlock_irqrestore(&port->port_lock, flags);
 }
 
-static unsigned int gs_write_room(struct tty_struct *tty)
+static int gs_write_room(struct tty_struct *tty)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
-	unsigned int room = 0;
+	int		room = 0;
 
 	spin_lock_irqsave(&port->port_lock, flags);
 	if (port->port_usb)
 		room = kfifo_avail(&port->port_write_buf);
 	spin_unlock_irqrestore(&port->port_lock, flags);
 
-	pr_vdebug("gs_write_room: (%d,%p) room=%u\n",
+	pr_vdebug("gs_write_room: (%d,%p) room=%d\n",
 		port->port_num, tty, room);
 
 	return room;
 }
 
-static unsigned int gs_chars_in_buffer(struct tty_struct *tty)
+static int gs_chars_in_buffer(struct tty_struct *tty)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
-	unsigned int	chars;
+	int		chars = 0;
 
 	spin_lock_irqsave(&port->port_lock, flags);
 	chars = kfifo_len(&port->port_write_buf);
 	spin_unlock_irqrestore(&port->port_lock, flags);
 
-	pr_vdebug("gs_chars_in_buffer: (%d,%p) chars=%u\n",
+	pr_vdebug("gs_chars_in_buffer: (%d,%p) chars=%d\n",
 		port->port_num, tty, chars);
 
 	return chars;
@@ -891,23 +871,6 @@ static int gs_break_ctl(struct tty_struct *tty, int duration)
 	return status;
 }
 
-static int gs_get_icount(struct tty_struct *tty,
-			 struct serial_icounter_struct *icount)
-{
-	struct gs_port *port = tty->driver_data;
-	struct async_icount cnow;
-	unsigned long flags;
-
-	spin_lock_irqsave(&port->port_lock, flags);
-	cnow = port->icount;
-	spin_unlock_irqrestore(&port->port_lock, flags);
-
-	icount->rx = cnow.rx;
-	icount->tx = cnow.tx;
-
-	return 0;
-}
-
 static const struct tty_operations gs_tty_ops = {
 	.open =			gs_open,
 	.close =		gs_close,
@@ -918,7 +881,6 @@ static const struct tty_operations gs_tty_ops = {
 	.chars_in_buffer =	gs_chars_in_buffer,
 	.unthrottle =		gs_unthrottle,
 	.break_ctl =		gs_break_ctl,
-	.get_icount =		gs_get_icount,
 };
 
 /*-------------------------------------------------------------------------*/
@@ -1139,7 +1101,7 @@ ssize_t gserial_set_console(unsigned char port_num, const char *page, size_t cou
 	bool enable;
 	int ret;
 
-	ret = kstrtobool(page, &enable);
+	ret = strtobool(page, &enable);
 	if (ret)
 		return ret;
 
@@ -1267,7 +1229,7 @@ void gserial_free_line(unsigned char port_num)
 	struct gs_port	*port;
 
 	mutex_lock(&ports[port_num].lock);
-	if (!ports[port_num].port) {
+	if (WARN_ON(!ports[port_num].port)) {
 		mutex_unlock(&ports[port_num].lock);
 		return;
 	}
@@ -1496,18 +1458,9 @@ void gserial_suspend(struct gserial *gser)
 		return;
 	}
 
-	if (port->write_busy || port->write_started) {
-		/* Wakeup to host if there are ongoing transfers */
-		spin_unlock_irqrestore(&serial_port_lock, flags);
-		if (!gserial_wakeup_host(gser))
-			return;
-		spin_lock_irqsave(&serial_port_lock, flags);
-	}
-
 	spin_lock(&port->port_lock);
 	spin_unlock(&serial_port_lock);
 	port->suspended = true;
-	port->start_delayed = true;
 	spin_unlock_irqrestore(&port->port_lock, flags);
 }
 EXPORT_SYMBOL_GPL(gserial_suspend);
@@ -1542,66 +1495,63 @@ void gserial_resume(struct gserial *gser)
 }
 EXPORT_SYMBOL_GPL(gserial_resume);
 
-static int __init userial_init(void)
+static int userial_init(void)
 {
-	struct tty_driver *driver;
 	unsigned			i;
 	int				status;
 
-	driver = tty_alloc_driver(MAX_U_SERIAL_PORTS, TTY_DRIVER_REAL_RAW |
-			TTY_DRIVER_DYNAMIC_DEV);
-	if (IS_ERR(driver))
-		return PTR_ERR(driver);
+	gs_tty_driver = alloc_tty_driver(MAX_U_SERIAL_PORTS);
+	if (!gs_tty_driver)
+		return -ENOMEM;
 
-	driver->driver_name = "g_serial";
-	driver->name = "ttyGS";
+	gs_tty_driver->driver_name = "g_serial";
+	gs_tty_driver->name = "ttyGS";
 	/* uses dynamically assigned dev_t values */
 
-	driver->type = TTY_DRIVER_TYPE_SERIAL;
-	driver->subtype = SERIAL_TYPE_NORMAL;
-	driver->init_termios = tty_std_termios;
+	gs_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	gs_tty_driver->subtype = SERIAL_TYPE_NORMAL;
+	gs_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
+	gs_tty_driver->init_termios = tty_std_termios;
 
 	/* 9600-8-N-1 ... matches defaults expected by "usbser.sys" on
 	 * MS-Windows.  Otherwise, most of these flags shouldn't affect
 	 * anything unless we were to actually hook up to a serial line.
 	 */
-	driver->init_termios.c_cflag =
+	gs_tty_driver->init_termios.c_cflag =
 			B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	driver->init_termios.c_ispeed = 9600;
-	driver->init_termios.c_ospeed = 9600;
+	gs_tty_driver->init_termios.c_ispeed = 9600;
+	gs_tty_driver->init_termios.c_ospeed = 9600;
 
-	tty_set_operations(driver, &gs_tty_ops);
+	tty_set_operations(gs_tty_driver, &gs_tty_ops);
 	for (i = 0; i < MAX_U_SERIAL_PORTS; i++)
 		mutex_init(&ports[i].lock);
 
 	/* export the driver ... */
-	status = tty_register_driver(driver);
+	status = tty_register_driver(gs_tty_driver);
 	if (status) {
 		pr_err("%s: cannot register, err %d\n",
 				__func__, status);
 		goto fail;
 	}
 
-	gs_tty_driver = driver;
-
 	pr_debug("%s: registered %d ttyGS* device%s\n", __func__,
 			MAX_U_SERIAL_PORTS,
-			str_plural(MAX_U_SERIAL_PORTS));
+			(MAX_U_SERIAL_PORTS == 1) ? "" : "s");
 
 	return status;
 fail:
-	tty_driver_kref_put(driver);
+	put_tty_driver(gs_tty_driver);
+	gs_tty_driver = NULL;
 	return status;
 }
 module_init(userial_init);
 
-static void __exit userial_cleanup(void)
+static void userial_cleanup(void)
 {
 	tty_unregister_driver(gs_tty_driver);
-	tty_driver_kref_put(gs_tty_driver);
+	put_tty_driver(gs_tty_driver);
 	gs_tty_driver = NULL;
 }
 module_exit(userial_cleanup);
 
-MODULE_DESCRIPTION("utilities for USB gadget \"serial port\"/TTY support");
 MODULE_LICENSE("GPL");

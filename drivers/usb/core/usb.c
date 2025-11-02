@@ -25,10 +25,10 @@
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/of.h>
 #include <linux/string.h>
 #include <linux/bitops.h>
 #include <linux/slab.h>
+#include <linux/interrupt.h>  /* for in_interrupt() */
 #include <linux/kmod.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
@@ -431,7 +431,7 @@ struct usb_interface *usb_find_interface(struct usb_driver *drv, int minor)
 	struct device *dev;
 
 	argb.minor = minor;
-	argb.drv = &drv->driver;
+	argb.drv = &drv->drvwrap.driver;
 
 	dev = bus_find_device(&usb_bus_type, NULL, &argb, __find_interface);
 
@@ -500,9 +500,9 @@ static void usb_release_dev(struct device *dev)
 	kfree(udev);
 }
 
-static int usb_dev_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int usb_dev_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct usb_device *usb_dev;
+	struct usb_device *usb_dev;
 
 	usb_dev = to_usb_device(dev);
 
@@ -582,17 +582,17 @@ static const struct dev_pm_ops usb_device_pm_ops = {
 #endif	/* CONFIG_PM */
 
 
-static char *usb_devnode(const struct device *dev,
+static char *usb_devnode(struct device *dev,
 			 umode_t *mode, kuid_t *uid, kgid_t *gid)
 {
-	const struct usb_device *usb_dev;
+	struct usb_device *usb_dev;
 
 	usb_dev = to_usb_device(dev);
 	return kasprintf(GFP_KERNEL, "bus/usb/%03d/%03d",
 			 usb_dev->bus->busnum, usb_dev->devnum);
 }
 
-const struct device_type usb_device_type = {
+struct device_type usb_device_type = {
 	.name =		"usb_device",
 	.release =	usb_release_dev,
 	.uevent =	usb_dev_uevent,
@@ -601,6 +601,14 @@ const struct device_type usb_device_type = {
 	.pm =		&usb_device_pm_ops,
 #endif
 };
+
+
+/* Returns 1 if @usb_bus is WUSB, 0 otherwise */
+static unsigned usb_bus_is_wusb(struct usb_bus *bus)
+{
+	struct usb_hcd *hcd = bus_to_hcd(bus);
+	return hcd->wireless;
+}
 
 static bool usb_dev_authorized(struct usb_device *dev, struct usb_hcd *hcd)
 {
@@ -629,8 +637,7 @@ static bool usb_dev_authorized(struct usb_device *dev, struct usb_hcd *hcd)
  * @parent: hub to which device is connected; null to allocate a root hub
  * @bus: bus used to access the device
  * @port1: one-based index of port; ignored for root hubs
- *
- * Context: task context, might sleep.
+ * Context: !in_interrupt()
  *
  * Only hub drivers (including virtual root hub drivers for host
  * controllers) should ever call this.
@@ -645,6 +652,7 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 {
 	struct usb_device *dev;
 	struct usb_hcd *usb_hcd = bus_to_hcd(bus);
+	unsigned root_hub = 0;
 	unsigned raw_port = port1;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -670,7 +678,6 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 	set_dev_node(&dev->dev, dev_to_node(bus->sysdev));
 	dev->state = USB_STATE_ATTACHED;
 	dev->lpm_disable_count = 1;
-	dev->offload_usage = 0;
 	atomic_set(&dev->urbnum, 0);
 
 	INIT_LIST_HEAD(&dev->ep0.urb_list);
@@ -695,17 +702,17 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 		dev->dev.parent = bus->controller;
 		device_set_of_node_from_dev(&dev->dev, bus->sysdev);
 		dev_set_name(&dev->dev, "usb%d", bus->busnum);
+		root_hub = 1;
 	} else {
-		int n;
-
 		/* match any labeling on the hubs; it's one-based */
 		if (parent->devpath[0] == '0') {
-			n = snprintf(dev->devpath, sizeof(dev->devpath), "%d", port1);
+			snprintf(dev->devpath, sizeof dev->devpath,
+				"%d", port1);
 			/* Root ports are not counted in route string */
 			dev->route = 0;
 		} else {
-			n = snprintf(dev->devpath, sizeof(dev->devpath), "%s.%d",
-				     parent->devpath, port1);
+			snprintf(dev->devpath, sizeof dev->devpath,
+				"%s.%d", parent->devpath, port1);
 			/* Route string assumes hubs have less than 16 ports */
 			if (port1 < 15)
 				dev->route = parent->route +
@@ -713,11 +720,6 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 			else
 				dev->route = parent->route +
 					(15 << ((parent->level - 1)*4));
-		}
-		if (n >= sizeof(dev->devpath)) {
-			usb_put_hcd(bus_to_hcd(bus));
-			usb_put_dev(dev);
-			return NULL;
 		}
 
 		dev->dev.parent = &parent->dev;
@@ -746,6 +748,9 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 #endif
 
 	dev->authorized = usb_dev_authorized(dev, usb_hcd);
+	if (!root_hub)
+		dev->wusb = usb_bus_is_wusb(bus) ? 1 : 0;
+
 	return dev;
 }
 EXPORT_SYMBOL_GPL(usb_alloc_dev);
@@ -759,10 +764,6 @@ EXPORT_SYMBOL_GPL(usb_alloc_dev);
  * Drivers for USB interfaces should normally record such references in
  * their probe() methods, when they bind to an interface, and release
  * them by calling usb_put_dev(), in their disconnect() methods.
- * However, if a driver does not access the usb_device structure after
- * its disconnect() method returns then refcounting is not necessary,
- * because the USB core guarantees that a usb_device will not be
- * deallocated until after all of its interface drivers have been unbound.
  *
  * Return: A pointer to the device with the incremented reference counter.
  */
@@ -797,10 +798,6 @@ EXPORT_SYMBOL_GPL(usb_put_dev);
  * Drivers for USB interfaces should normally record such references in
  * their probe() methods, when they bind to an interface, and release
  * them by calling usb_put_intf(), in their disconnect() methods.
- * However, if a driver does not access the usb_interface structure after
- * its disconnect() method returns then refcounting is not necessary,
- * because the USB core guarantees that a usb_interface will not be
- * deallocated until after its driver has been unbound.
  *
  * Return: A pointer to the interface with the incremented reference counter.
  */
@@ -872,7 +869,7 @@ EXPORT_SYMBOL_GPL(usb_intf_get_dma_device);
  * is simple:
  *
  *	When locking both a device and its parent, always lock the
- *	parent first.
+ *	the parent first.
  */
 
 /**
@@ -1031,136 +1028,6 @@ void usb_free_coherent(struct usb_device *dev, size_t size, void *addr,
 }
 EXPORT_SYMBOL_GPL(usb_free_coherent);
 
-/**
- * usb_alloc_noncoherent - allocate dma-noncoherent buffer for URB_NO_xxx_DMA_MAP
- * @dev: device the buffer will be used with
- * @size: requested buffer size
- * @mem_flags: affect whether allocation may block
- * @dma: used to return DMA address of buffer
- * @dir: DMA transfer direction
- * @table: used to return sg_table of allocated memory
- *
- * To explicit manage the memory ownership for the kernel vs the device by
- * USB core, the user needs save sg_table to urb->sgt. Then USB core will
- * do DMA sync for CPU and device properly.
- *
- * When the buffer is no longer used, free it with usb_free_noncoherent().
- *
- * Return: Either null (indicating no buffer could be allocated), or the
- * cpu-space pointer to a buffer that may be used to perform DMA to the
- * specified device.  Such cpu-space buffers are returned along with the DMA
- * address (through the pointer provided).
- */
-void *usb_alloc_noncoherent(struct usb_device *dev, size_t size,
-			    gfp_t mem_flags, dma_addr_t *dma,
-			    enum dma_data_direction dir,
-			    struct sg_table **table)
-{
-	struct device *dmadev;
-	struct sg_table *sgt;
-	void *buffer;
-
-	if (!dev || !dev->bus)
-		return NULL;
-
-	dmadev = bus_to_hcd(dev->bus)->self.sysdev;
-
-	sgt = dma_alloc_noncontiguous(dmadev, size, dir, mem_flags, 0);
-	if (!sgt)
-		return NULL;
-
-	buffer = dma_vmap_noncontiguous(dmadev, size, sgt);
-	if (!buffer) {
-		dma_free_noncontiguous(dmadev, size, sgt, dir);
-		return NULL;
-	}
-
-	*table = sgt;
-	*dma = sg_dma_address(sgt->sgl);
-
-	return buffer;
-}
-EXPORT_SYMBOL_GPL(usb_alloc_noncoherent);
-
-/**
- * usb_free_noncoherent - free memory allocated with usb_alloc_noncoherent()
- * @dev: device the buffer was used with
- * @size: requested buffer size
- * @addr: CPU address of buffer
- * @dir: DMA transfer direction
- * @table: describe the allocated and DMA mapped memory,
- *
- * This reclaims an I/O buffer, letting it be reused.  The memory must have
- * been allocated using usb_alloc_noncoherent(), and the parameters must match
- * those provided in that allocation request.
- */
-void usb_free_noncoherent(struct usb_device *dev, size_t size,
-			  void *addr, enum dma_data_direction dir,
-			  struct sg_table *table)
-{
-	struct device *dmadev;
-
-	if (!dev || !dev->bus)
-		return;
-	if (!addr)
-		return;
-
-	dmadev = bus_to_hcd(dev->bus)->self.sysdev;
-	dma_vunmap_noncontiguous(dmadev, addr);
-	dma_free_noncontiguous(dmadev, size, table, dir);
-}
-EXPORT_SYMBOL_GPL(usb_free_noncoherent);
-
-/**
- * usb_endpoint_max_periodic_payload - Get maximum payload bytes per service
- *				       interval
- * @udev: The USB device
- * @ep: The endpoint
- *
- * Returns: the maximum number of bytes isochronous or interrupt endpoint @ep
- * can transfer during a service interval, or 0 for other endpoints.
- */
-u32 usb_endpoint_max_periodic_payload(struct usb_device *udev,
-				      const struct usb_host_endpoint *ep)
-{
-	if (!usb_endpoint_xfer_isoc(&ep->desc) &&
-	    !usb_endpoint_xfer_int(&ep->desc))
-		return 0;
-
-	switch (udev->speed) {
-	case USB_SPEED_SUPER_PLUS:
-		if (USB_SS_SSP_ISOC_COMP(ep->ss_ep_comp.bmAttributes))
-			return le32_to_cpu(ep->ssp_isoc_ep_comp.dwBytesPerInterval);
-		fallthrough;
-	case USB_SPEED_SUPER:
-		return le16_to_cpu(ep->ss_ep_comp.wBytesPerInterval);
-	default:
-		if (usb_endpoint_is_hs_isoc_double(udev, ep))
-			return le32_to_cpu(ep->eusb2_isoc_ep_comp.dwBytesPerInterval);
-		return usb_endpoint_maxp(&ep->desc) * usb_endpoint_maxp_mult(&ep->desc);
-	}
-}
-EXPORT_SYMBOL_GPL(usb_endpoint_max_periodic_payload);
-
-/**
- * usb_endpoint_is_hs_isoc_double - Tell whether an endpoint uses USB 2
- *                                  Isochronous Double IN Bandwidth
- * @udev: The USB device
- * @ep: The endpoint
- *
- * Returns: true if an endpoint @ep conforms to USB 2 Isochronous Double IN
- * Bandwidth ECN, false otherwise.
- */
-bool usb_endpoint_is_hs_isoc_double(struct usb_device *udev,
-				    const struct usb_host_endpoint *ep)
-{
-	return ep->eusb2_isoc_ep_comp.bDescriptorType &&
-		le16_to_cpu(udev->descriptor.bcdUSB) == 0x220 &&
-		usb_endpoint_is_isoc_in(&ep->desc) &&
-		!le16_to_cpu(ep->desc.wMaxPacketSize);
-}
-EXPORT_SYMBOL_GPL(usb_endpoint_is_hs_isoc_double);
-
 /*
  * Notifications of device and interface registration
  */
@@ -1191,15 +1058,17 @@ static struct notifier_block usb_bus_nb = {
 	.notifier_call = usb_bus_notify,
 };
 
+static struct dentry *usb_devices_root;
+
 static void usb_debugfs_init(void)
 {
-	debugfs_create_file("devices", 0444, usb_debug_root, NULL,
-			    &usbfs_devices_fops);
+	usb_devices_root = debugfs_create_file("devices", 0444, usb_debug_root,
+					       NULL, &usbfs_devices_fops);
 }
 
 static void usb_debugfs_cleanup(void)
 {
-	debugfs_lookup_and_remove("devices", usb_debug_root);
+	debugfs_remove(usb_devices_root);
 }
 
 /*
@@ -1226,9 +1095,6 @@ static int __init usb_init(void)
 	retval = usb_major_init();
 	if (retval)
 		goto major_init_failed;
-	retval = class_register(&usbmisc_class);
-	if (retval)
-		goto class_register_failed;
 	retval = usb_register(&usbfs_driver);
 	if (retval)
 		goto driver_register_failed;
@@ -1248,8 +1114,6 @@ hub_init_failed:
 usb_devio_init_failed:
 	usb_deregister(&usbfs_driver);
 driver_register_failed:
-	class_unregister(&usbmisc_class);
-class_register_failed:
 	usb_major_cleanup();
 major_init_failed:
 	bus_unregister_notifier(&usb_bus_type, &usb_bus_nb);
@@ -1277,7 +1141,6 @@ static void __exit usb_exit(void)
 	usb_deregister(&usbfs_driver);
 	usb_devio_cleanup();
 	usb_hub_cleanup();
-	class_unregister(&usbmisc_class);
 	bus_unregister_notifier(&usb_bus_type, &usb_bus_nb);
 	bus_unregister(&usb_bus_type);
 	usb_acpi_unregister();
@@ -1287,5 +1150,4 @@ static void __exit usb_exit(void)
 
 subsys_initcall(usb_init);
 module_exit(usb_exit);
-MODULE_DESCRIPTION("USB core host-side support");
 MODULE_LICENSE("GPL");

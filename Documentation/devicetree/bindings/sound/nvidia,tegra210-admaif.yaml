@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/sound/nvidia,tegra210-admaif.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Tegra210 ADMAIF
+title: Tegra210 ADMAIF Device Tree Bindings
 
 description: |
   ADMAIF is the interface between ADMA and AHUB. Each ADMA channel
@@ -26,11 +26,8 @@ properties:
       - enum:
           - nvidia,tegra210-admaif
           - nvidia,tegra186-admaif
-          - nvidia,tegra264-admaif
       - items:
-          - enum:
-              - nvidia,tegra234-admaif
-              - nvidia,tegra194-admaif
+          - const: nvidia,tegra194-admaif
           - const: nvidia,tegra186-admaif
 
   reg:
@@ -39,33 +36,6 @@ properties:
   dmas: true
 
   dma-names: true
-
-  interconnects:
-    items:
-      - description: APE read memory client
-      - description: APE write memory client
-
-  interconnect-names:
-    items:
-      - const: dma-mem # read
-      - const: write
-
-  iommus:
-    maxItems: 1
-
-  ports:
-    $ref: /schemas/graph.yaml#/properties/ports
-    description: |
-      Contains list of ACIF (Audio CIF) port nodes for ADMAIF channels.
-      The number of port nodes depends on the number of ADMAIF channels
-      that SoC may have. These are interfaced with respective ACIF ports
-      in AHUB (Audio Hub). Each port is capable of data transfers in
-      both directions.
-
-    patternProperties:
-      '^port@[0-9]':
-        $ref: audio-graph-port.yaml#
-        unevaluatedProperties: false
 
 if:
   properties:
@@ -88,9 +58,6 @@ then:
         Should be "tx1", "tx2" ... "tx10" for DMA Tx channel
       minItems: 1
       maxItems: 20
-    interconnects: false
-    interconnect-names: false
-    iommus: false
 
 else:
   properties:

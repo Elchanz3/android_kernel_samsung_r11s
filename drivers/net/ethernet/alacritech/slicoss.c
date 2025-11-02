@@ -1008,7 +1008,7 @@ static void slic_set_link_autoneg(struct slic_device *sdev)
 
 static void slic_set_mac_address(struct slic_device *sdev)
 {
-	const u8 *addr = sdev->netdev->dev_addr;
+	u8 *addr = sdev->netdev->dev_addr;
 	u32 val;
 
 	val = addr[5] | addr[4] << 8 | addr[3] << 16 | addr[2] << 24;
@@ -1520,8 +1520,10 @@ static void slic_get_ethtool_stats(struct net_device *dev,
 
 static void slic_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 {
-	if (stringset == ETH_SS_STATS)
+	if (stringset == ETH_SS_STATS) {
 		memcpy(data, slic_stats_strings, sizeof(slic_stats_strings));
+		data += sizeof(slic_stats_strings);
+	}
 }
 
 static void slic_get_drvinfo(struct net_device *dev,
@@ -1529,8 +1531,8 @@ static void slic_get_drvinfo(struct net_device *dev,
 {
 	struct slic_device *sdev = netdev_priv(dev);
 
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->bus_info, pci_name(sdev->pdev), sizeof(info->bus_info));
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->bus_info, pci_name(sdev->pdev), sizeof(info->bus_info));
 }
 
 static const struct ethtool_ops slic_ethtool_ops = {
@@ -1658,7 +1660,7 @@ static int slic_read_eeprom(struct slic_device *sdev)
 		goto free_eeprom;
 	}
 	/* set mac address */
-	eth_hw_addr_set(sdev->netdev, mac[devfn]);
+	ether_addr_copy(sdev->netdev->dev_addr, mac[devfn]);
 free_eeprom:
 	dma_free_coherent(&sdev->pdev->dev, SLIC_EEPROM_SIZE, eeprom, paddr);
 
@@ -1678,15 +1680,17 @@ static int slic_init(struct slic_device *sdev)
 	slic_card_reset(sdev);
 
 	err = slic_load_firmware(sdev);
-	if (err)
-		return dev_err_probe(&sdev->pdev->dev, err,
-			"failed to load firmware\n");
+	if (err) {
+		dev_err(&sdev->pdev->dev, "failed to load firmware\n");
+		return err;
+	}
 
 	/* we need the shared memory to read EEPROM so set it up temporarily */
 	err = slic_init_shmem(sdev);
-	if (err)
-		return dev_err_probe(&sdev->pdev->dev, err,
-			"failed to init shared memory\n");
+	if (err) {
+		dev_err(&sdev->pdev->dev, "failed to init shared memory\n");
+		return err;
+	}
 
 	err = slic_read_eeprom(sdev);
 	if (err) {
@@ -1739,9 +1743,10 @@ static int slic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	int err;
 
 	err = pci_enable_device(pdev);
-	if (err)
-		return dev_err_probe(&pdev->dev, err,
-			"failed to enable PCI device\n");
+	if (err) {
+		dev_err(&pdev->dev, "failed to enable PCI device\n");
+		return err;
+	}
 
 	pci_set_master(pdev);
 	pci_try_set_mwi(pdev);
@@ -1798,7 +1803,7 @@ static int slic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto unmap;
 	}
 
-	netif_napi_add(dev, &sdev->napi, slic_poll);
+	netif_napi_add(dev, &sdev->napi, slic_poll, SLIC_NAPI_WEIGHT);
 	netif_carrier_off(dev);
 
 	err = register_netdev(dev);

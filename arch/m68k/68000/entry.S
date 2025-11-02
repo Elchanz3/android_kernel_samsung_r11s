@@ -1,8 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
- *
+/*
  *  entry.S -- non-mmu 68000 interrupt and exception entry points
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file README.legal in the main directory of this archive
+ * for more details.
  *
  * Linux/m68k support by Hamish Macdonald
  */
@@ -12,6 +15,7 @@
 #include <asm/unistd.h>
 #include <asm/errno.h>
 #include <asm/setup.h>
+#include <asm/segment.h>
 #include <asm/traps.h>
 #include <asm/asm-offsets.h>
 #include <asm/entry.h>
@@ -21,6 +25,7 @@
 .globl system_call
 .globl resume
 .globl ret_from_exception
+.globl ret_from_signal
 .globl sys_call_table
 .globl bad_interrupt
 .globl inthandler1
@@ -56,6 +61,8 @@ do_trace:
 	subql	#4,%sp			/* dummy return address */
 	SAVE_SWITCH_STACK
 	jbsr	syscall_trace_leave
+
+ret_from_signal:
 	RESTORE_SWITCH_STACK
 	addql	#4,%sp
 	jra	ret_from_exception

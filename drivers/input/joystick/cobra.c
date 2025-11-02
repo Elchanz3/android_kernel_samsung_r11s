@@ -7,6 +7,9 @@
  * Creative Labs Blaster GamePad Cobra driver for Linux
  */
 
+/*
+ */
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -141,7 +144,7 @@ static int cobra_connect(struct gameport *gameport, struct gameport_driver *drv)
 	int i, j;
 	int err;
 
-	cobra = kzalloc(sizeof(*cobra), GFP_KERNEL);
+	cobra = kzalloc(sizeof(struct cobra), GFP_KERNEL);
 	if (!cobra)
 		return -ENOMEM;
 

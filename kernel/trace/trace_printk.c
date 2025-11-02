@@ -19,6 +19,28 @@
 
 #include "trace.h"
 
+static noinline void tracing_mark_write(int type, const char *str)
+{
+	if (!tracing_is_on())
+		return;
+
+	switch (type) {
+	case TRACING_MARK_TYPE_BEGIN:
+		trace_printk("B|%d|%s\n", current->tgid, str);
+		break;
+	case TRACING_MARK_TYPE_END:
+		trace_printk("E|%d|%s\n", current->tgid, str);
+		break;
+	default:
+		break;
+	}
+}
+
+void tracing_mark_write_helper(int type, const char *str)
+{
+	tracing_mark_write(type, str);
+}
+
 #ifdef CONFIG_MODULES
 
 /*
@@ -251,17 +273,6 @@ int __ftrace_vprintk(unsigned long ip, const char *fmt, va_list ap)
 }
 EXPORT_SYMBOL_GPL(__ftrace_vprintk);
 
-bool trace_is_tracepoint_string(const char *str)
-{
-	const char **ptr = __start___tracepoint_str;
-
-	for (ptr = __start___tracepoint_str; ptr < __stop___tracepoint_str; ptr++) {
-		if (str == *ptr)
-			return true;
-	}
-	return false;
-}
-
 static const char **find_next(void *v, loff_t *pos)
 {
 	const char **fmt = v;
@@ -384,7 +395,7 @@ static __init int init_trace_printk_function_export(void)
 	if (ret)
 		return 0;
 
-	trace_create_file("printk_formats", TRACE_MODE_READ, NULL,
+	trace_create_file("printk_formats", 0444, NULL,
 				    NULL, &ftrace_formats_fops);
 
 	return 0;

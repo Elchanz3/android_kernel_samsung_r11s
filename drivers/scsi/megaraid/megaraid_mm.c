@@ -494,7 +494,7 @@ mimd_to_kioc(mimd_t __user *umimd, mraid_mmadp_t *adp, uioc_t *kioc)
 }
 
 /**
- * mraid_mm_attach_buf - Attach a free dma buffer for required size
+ * mraid_mm_attch_buf - Attach a free dma buffer for required size
  * @adp		: Adapter softstate
  * @kioc	: kioc that the buffer needs to be attached to
  * @xferlen	: required length for buffer
@@ -703,8 +703,8 @@ lld_ioctl(mraid_mmadp_t *adp, uioc_t *kioc)
 	 */
 	wait_event(wait_q, (kioc->status != -ENODATA));
 	if (timeout.timer.function) {
-		timer_delete_sync(&timeout.timer);
-		timer_destroy_on_stack(&timeout.timer);
+		del_timer_sync(&timeout.timer);
+		destroy_timer_on_stack(&timeout.timer);
 	}
 
 	/*
@@ -783,7 +783,7 @@ ioctl_done(uioc_t *kioc)
 static void
 lld_timedout(struct timer_list *t)
 {
-	struct uioc_timeout *timeout = timer_container_of(timeout, t, timer);
+	struct uioc_timeout *timeout = from_timer(timeout, t, timer);
 	uioc_t *kioc	= timeout->uioc;
 
 	kioc->status 	= -ETIME;

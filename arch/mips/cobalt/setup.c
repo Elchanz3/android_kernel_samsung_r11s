@@ -23,6 +23,9 @@
 
 #include <cobalt.h>
 
+extern void cobalt_machine_restart(char *command);
+extern void cobalt_machine_halt(void);
+
 const char *get_system_type(void)
 {
 	switch (cobalt_board_id) {
@@ -113,4 +116,9 @@ void __init prom_init(void)
 	memblock_add(0, memsz);
 
 	setup_8250_early_printk_port(CKSEG1ADDR(0x1c800000), 0, 0);
+}
+
+void __init prom_free_prom_memory(void)
+{
+	/* Nothing to do! */
 }

@@ -27,8 +27,7 @@ static void *xattr_alloc(struct f2fs_sb_info *sbi, int size, bool *is_inline)
 {
 	if (likely(size == sbi->inline_xattr_slab_size)) {
 		*is_inline = true;
-		return f2fs_kmem_cache_alloc(sbi->inline_xattr_slab,
-					GFP_F2FS_ZERO, false, sbi);
+		return kmem_cache_zalloc(sbi->inline_xattr_slab, GFP_NOFS);
 	}
 	*is_inline = false;
 	return f2fs_kzalloc(sbi, size, GFP_NOFS);
@@ -45,7 +44,7 @@ static void xattr_free(struct f2fs_sb_info *sbi, void *xattr_addr,
 
 static int f2fs_xattr_generic_get(const struct xattr_handler *handler,
 		struct dentry *unused, struct inode *inode,
-		const char *name, void *buffer, size_t size)
+		const char *name, void *buffer, size_t size, int flags)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(inode->i_sb);
 
@@ -65,7 +64,6 @@ static int f2fs_xattr_generic_get(const struct xattr_handler *handler,
 }
 
 static int f2fs_xattr_generic_set(const struct xattr_handler *handler,
-		struct mnt_idmap *idmap,
 		struct dentry *unused, struct inode *inode,
 		const char *name, const void *value,
 		size_t size, int flags)
@@ -101,7 +99,7 @@ static bool f2fs_xattr_trusted_list(struct dentry *dentry)
 
 static int f2fs_xattr_advise_get(const struct xattr_handler *handler,
 		struct dentry *unused, struct inode *inode,
-		const char *name, void *buffer, size_t size)
+		const char *name, void *buffer, size_t size, int flags)
 {
 	if (buffer)
 		*((char *)buffer) = F2FS_I(inode)->i_advise;
@@ -109,7 +107,6 @@ static int f2fs_xattr_advise_get(const struct xattr_handler *handler,
 }
 
 static int f2fs_xattr_advise_set(const struct xattr_handler *handler,
-		struct mnt_idmap *idmap,
 		struct dentry *unused, struct inode *inode,
 		const char *name, const void *value,
 		size_t size, int flags)
@@ -117,7 +114,7 @@ static int f2fs_xattr_advise_set(const struct xattr_handler *handler,
 	unsigned char old_advise = F2FS_I(inode)->i_advise;
 	unsigned char new_advise;
 
-	if (!inode_owner_or_capable(&nop_mnt_idmap, inode))
+	if (!inode_owner_or_capable(inode))
 		return -EPERM;
 	if (value == NULL)
 		return -EINVAL;
@@ -136,7 +133,7 @@ static int f2fs_xattr_advise_set(const struct xattr_handler *handler,
 
 #ifdef CONFIG_F2FS_FS_SECURITY
 static int f2fs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
-		void *folio)
+		void *page)
 {
 	const struct xattr *xattr;
 	int err = 0;
@@ -144,7 +141,7 @@ static int f2fs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
 	for (xattr = xattr_array; xattr->name != NULL; xattr++) {
 		err = f2fs_setxattr(inode, F2FS_XATTR_INDEX_SECURITY,
 				xattr->name, xattr->value,
-				xattr->value_len, folio, 0);
+				xattr->value_len, (struct page *)page, 0);
 		if (err < 0)
 			break;
 	}
@@ -152,10 +149,10 @@ static int f2fs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
 }
 
 int f2fs_init_security(struct inode *inode, struct inode *dir,
-				const struct qstr *qstr, struct folio *ifolio)
+				const struct qstr *qstr, struct page *ipage)
 {
 	return security_inode_init_security(inode, dir, qstr,
-				f2fs_initxattrs, ifolio);
+				&f2fs_initxattrs, ipage);
 }
 #endif
 
@@ -189,11 +186,11 @@ const struct xattr_handler f2fs_xattr_security_handler = {
 	.set	= f2fs_xattr_generic_set,
 };
 
-static const struct xattr_handler * const f2fs_xattr_handler_map[] = {
+static const struct xattr_handler *f2fs_xattr_handler_map[] = {
 	[F2FS_XATTR_INDEX_USER] = &f2fs_xattr_user_handler,
 #ifdef CONFIG_F2FS_FS_POSIX_ACL
-	[F2FS_XATTR_INDEX_POSIX_ACL_ACCESS] = &nop_posix_acl_access,
-	[F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT] = &nop_posix_acl_default,
+	[F2FS_XATTR_INDEX_POSIX_ACL_ACCESS] = &posix_acl_access_xattr_handler,
+	[F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT] = &posix_acl_default_xattr_handler,
 #endif
 	[F2FS_XATTR_INDEX_TRUSTED] = &f2fs_xattr_trusted_handler,
 #ifdef CONFIG_F2FS_FS_SECURITY
@@ -202,8 +199,12 @@ static const struct xattr_handler * const f2fs_xattr_handler_map[] = {
 	[F2FS_XATTR_INDEX_ADVISE] = &f2fs_xattr_advise_handler,
 };
 
-const struct xattr_handler * const f2fs_xattr_handlers[] = {
+const struct xattr_handler *f2fs_xattr_handlers[] = {
 	&f2fs_xattr_user_handler,
+#ifdef CONFIG_F2FS_FS_POSIX_ACL
+	&posix_acl_access_xattr_handler,
+	&posix_acl_default_xattr_handler,
+#endif
 	&f2fs_xattr_trusted_handler,
 #ifdef CONFIG_F2FS_FS_SECURITY
 	&f2fs_xattr_security_handler,
@@ -212,33 +213,25 @@ const struct xattr_handler * const f2fs_xattr_handlers[] = {
 	NULL,
 };
 
-static inline const char *f2fs_xattr_prefix(int index,
-					    struct dentry *dentry)
+static inline const struct xattr_handler *f2fs_xattr_handler(int index)
 {
 	const struct xattr_handler *handler = NULL;
 
 	if (index > 0 && index < ARRAY_SIZE(f2fs_xattr_handler_map))
 		handler = f2fs_xattr_handler_map[index];
-
-	if (!xattr_handler_can_list(handler, dentry))
-		return NULL;
-
-	return xattr_prefix(handler);
+	return handler;
 }
 
 static struct f2fs_xattr_entry *__find_xattr(void *base_addr,
-				void *last_base_addr, void **last_addr,
-				int index, size_t len, const char *name)
+				void *last_base_addr, int index,
+				size_t len, const char *name)
 {
 	struct f2fs_xattr_entry *entry;
 
 	list_for_each_xattr(entry, base_addr) {
 		if ((void *)(entry) + sizeof(__u32) > last_base_addr ||
-			(void *)XATTR_NEXT_ENTRY(entry) > last_base_addr) {
-			if (last_addr)
-				*last_addr = entry;
+			(void *)XATTR_NEXT_ENTRY(entry) > last_base_addr)
 			return NULL;
-		}
 
 		if (entry->e_name_index != index)
 			continue;
@@ -258,9 +251,19 @@ static struct f2fs_xattr_entry *__find_inline_xattr(struct inode *inode,
 	unsigned int inline_size = inline_xattr_size(inode);
 	void *max_addr = base_addr + inline_size;
 
-	entry = __find_xattr(base_addr, max_addr, last_addr, index, len, name);
-	if (!entry)
-		return NULL;
+	list_for_each_xattr(entry, base_addr) {
+		if ((void *)entry + sizeof(__u32) > max_addr ||
+			(void *)XATTR_NEXT_ENTRY(entry) > max_addr) {
+			*last_addr = entry;
+			return NULL;
+		}
+		if (entry->e_name_index != index)
+			continue;
+		if (entry->e_name_len != len)
+			continue;
+		if (!memcmp(entry->e_name, name, len))
+			break;
+	}
 
 	/* inline xattr header or entry across max inline xattr size */
 	if (IS_XATTR_LAST_ENTRY(entry) &&
@@ -271,25 +274,25 @@ static struct f2fs_xattr_entry *__find_inline_xattr(struct inode *inode,
 	return entry;
 }
 
-static int read_inline_xattr(struct inode *inode, struct folio *ifolio,
+static int read_inline_xattr(struct inode *inode, struct page *ipage,
 							void *txattr_addr)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	unsigned int inline_size = inline_xattr_size(inode);
-	struct folio *folio = NULL;
+	struct page *page = NULL;
 	void *inline_addr;
 
-	if (ifolio) {
-		inline_addr = inline_xattr_addr(inode, ifolio);
+	if (ipage) {
+		inline_addr = inline_xattr_addr(inode, ipage);
 	} else {
-		folio = f2fs_get_inode_folio(sbi, inode->i_ino);
-		if (IS_ERR(folio))
-			return PTR_ERR(folio);
+		page = f2fs_get_node_page(sbi, inode->i_ino);
+		if (IS_ERR(page))
+			return PTR_ERR(page);
 
-		inline_addr = inline_xattr_addr(inode, folio);
+		inline_addr = inline_xattr_addr(inode, page);
 	}
 	memcpy(txattr_addr, inline_addr, inline_size);
-	f2fs_folio_put(folio, true);
+	f2fs_put_page(page, 1);
 
 	return 0;
 }
@@ -299,22 +302,22 @@ static int read_xattr_block(struct inode *inode, void *txattr_addr)
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	nid_t xnid = F2FS_I(inode)->i_xattr_nid;
 	unsigned int inline_size = inline_xattr_size(inode);
-	struct folio *xfolio;
+	struct page *xpage;
 	void *xattr_addr;
 
 	/* The inode already has an extended attribute block. */
-	xfolio = f2fs_get_xnode_folio(sbi, xnid);
-	if (IS_ERR(xfolio))
-		return PTR_ERR(xfolio);
+	xpage = f2fs_get_node_page(sbi, xnid);
+	if (IS_ERR(xpage))
+		return PTR_ERR(xpage);
 
-	xattr_addr = folio_address(xfolio);
+	xattr_addr = page_address(xpage);
 	memcpy(txattr_addr + inline_size, xattr_addr, VALID_XATTR_BLOCK_SIZE);
-	f2fs_folio_put(xfolio, true);
+	f2fs_put_page(xpage, 1);
 
 	return 0;
 }
 
-static int lookup_all_xattrs(struct inode *inode, struct folio *ifolio,
+static int lookup_all_xattrs(struct inode *inode, struct page *ipage,
 				unsigned int index, unsigned int len,
 				const char *name, struct f2fs_xattr_entry **xe,
 				void **base_addr, int *base_size,
@@ -338,7 +341,7 @@ static int lookup_all_xattrs(struct inode *inode, struct folio *ifolio,
 
 	/* read from inline xattr */
 	if (inline_size) {
-		err = read_inline_xattr(inode, ifolio, txattr_addr);
+		err = read_inline_xattr(inode, ipage, txattr_addr);
 		if (err)
 			goto out;
 
@@ -362,14 +365,12 @@ static int lookup_all_xattrs(struct inode *inode, struct folio *ifolio,
 	else
 		cur_addr = txattr_addr;
 
-	*xe = __find_xattr(cur_addr, last_txattr_addr, NULL, index, len, name);
+	*xe = __find_xattr(cur_addr, last_txattr_addr, index, len, name);
 	if (!*xe) {
-		f2fs_err(F2FS_I_SB(inode), "lookup inode (%lu) has corrupted xattr",
+		f2fs_err(F2FS_I_SB(inode), "inode (%lu) has corrupted xattr",
 								inode->i_ino);
 		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
-		err = -ENODATA;
-		f2fs_handle_error(F2FS_I_SB(inode),
-					ERROR_CORRUPTED_XATTR);
+		err = -EFSCORRUPTED;
 		goto out;
 	}
 check:
@@ -385,7 +386,7 @@ out:
 	return err;
 }
 
-static int read_all_xattrs(struct inode *inode, struct folio *ifolio,
+static int read_all_xattrs(struct inode *inode, struct page *ipage,
 							void **base_addr)
 {
 	struct f2fs_xattr_header *header;
@@ -402,7 +403,7 @@ static int read_all_xattrs(struct inode *inode, struct folio *ifolio,
 
 	/* read from inline xattr */
 	if (inline_size) {
-		err = read_inline_xattr(inode, ifolio, txattr_addr);
+		err = read_inline_xattr(inode, ipage, txattr_addr);
 		if (err)
 			goto fail;
 	}
@@ -429,14 +430,14 @@ fail:
 }
 
 static inline int write_all_xattrs(struct inode *inode, __u32 hsize,
-				void *txattr_addr, struct folio *ifolio)
+				void *txattr_addr, struct page *ipage)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	size_t inline_size = inline_xattr_size(inode);
-	struct folio *in_folio = NULL;
+	struct page *in_page = NULL;
 	void *xattr_addr;
 	void *inline_addr = NULL;
-	struct folio *xfolio;
+	struct page *xpage;
 	nid_t new_nid = 0;
 	int err = 0;
 
@@ -446,73 +447,73 @@ static inline int write_all_xattrs(struct inode *inode, __u32 hsize,
 
 	/* write to inline xattr */
 	if (inline_size) {
-		if (ifolio) {
-			inline_addr = inline_xattr_addr(inode, ifolio);
+		if (ipage) {
+			inline_addr = inline_xattr_addr(inode, ipage);
 		} else {
-			in_folio = f2fs_get_inode_folio(sbi, inode->i_ino);
-			if (IS_ERR(in_folio)) {
+			in_page = f2fs_get_node_page(sbi, inode->i_ino);
+			if (IS_ERR(in_page)) {
 				f2fs_alloc_nid_failed(sbi, new_nid);
-				return PTR_ERR(in_folio);
+				return PTR_ERR(in_page);
 			}
-			inline_addr = inline_xattr_addr(inode, in_folio);
+			inline_addr = inline_xattr_addr(inode, in_page);
 		}
 
-		f2fs_folio_wait_writeback(ifolio ? ifolio : in_folio,
+		f2fs_wait_on_page_writeback(ipage ? ipage : in_page,
 							NODE, true, true);
 		/* no need to use xattr node block */
 		if (hsize <= inline_size) {
 			err = f2fs_truncate_xattr_node(inode);
 			f2fs_alloc_nid_failed(sbi, new_nid);
 			if (err) {
-				f2fs_folio_put(in_folio, true);
+				f2fs_put_page(in_page, 1);
 				return err;
 			}
 			memcpy(inline_addr, txattr_addr, inline_size);
-			folio_mark_dirty(ifolio ? ifolio : in_folio);
+			set_page_dirty(ipage ? ipage : in_page);
 			goto in_page_out;
 		}
 	}
 
 	/* write to xattr node block */
 	if (F2FS_I(inode)->i_xattr_nid) {
-		xfolio = f2fs_get_xnode_folio(sbi, F2FS_I(inode)->i_xattr_nid);
-		if (IS_ERR(xfolio)) {
-			err = PTR_ERR(xfolio);
+		xpage = f2fs_get_node_page(sbi, F2FS_I(inode)->i_xattr_nid);
+		if (IS_ERR(xpage)) {
+			err = PTR_ERR(xpage);
 			f2fs_alloc_nid_failed(sbi, new_nid);
 			goto in_page_out;
 		}
 		f2fs_bug_on(sbi, new_nid);
-		f2fs_folio_wait_writeback(xfolio, NODE, true, true);
+		f2fs_wait_on_page_writeback(xpage, NODE, true, true);
 	} else {
 		struct dnode_of_data dn;
 
 		set_new_dnode(&dn, inode, NULL, NULL, new_nid);
-		xfolio = f2fs_new_node_folio(&dn, XATTR_NODE_OFFSET);
-		if (IS_ERR(xfolio)) {
-			err = PTR_ERR(xfolio);
+		xpage = f2fs_new_node_page(&dn, XATTR_NODE_OFFSET);
+		if (IS_ERR(xpage)) {
+			err = PTR_ERR(xpage);
 			f2fs_alloc_nid_failed(sbi, new_nid);
 			goto in_page_out;
 		}
 		f2fs_alloc_nid_done(sbi, new_nid);
 	}
-	xattr_addr = folio_address(xfolio);
+	xattr_addr = page_address(xpage);
 
 	if (inline_size)
 		memcpy(inline_addr, txattr_addr, inline_size);
 	memcpy(xattr_addr, txattr_addr + inline_size, VALID_XATTR_BLOCK_SIZE);
 
 	if (inline_size)
-		folio_mark_dirty(ifolio ? ifolio : in_folio);
-	folio_mark_dirty(xfolio);
+		set_page_dirty(ipage ? ipage : in_page);
+	set_page_dirty(xpage);
 
-	f2fs_folio_put(xfolio, true);
+	f2fs_put_page(xpage, 1);
 in_page_out:
-	f2fs_folio_put(in_folio, true);
+	f2fs_put_page(in_page, 1);
 	return err;
 }
 
 int f2fs_getxattr(struct inode *inode, int index, const char *name,
-		void *buffer, size_t buffer_size, struct folio *ifolio)
+		void *buffer, size_t buffer_size, struct page *ipage)
 {
 	struct f2fs_xattr_entry *entry = NULL;
 	int error;
@@ -528,11 +529,11 @@ int f2fs_getxattr(struct inode *inode, int index, const char *name,
 	if (len > F2FS_NAME_LEN)
 		return -ERANGE;
 
-	if (!ifolio)
+	if (!ipage)
 		f2fs_down_read(&F2FS_I(inode)->i_xattr_sem);
-	error = lookup_all_xattrs(inode, ifolio, index, len, name,
+	error = lookup_all_xattrs(inode, ipage, index, len, name,
 				&entry, &base_addr, &base_size, &is_inline);
-	if (!ifolio)
+	if (!ipage)
 		f2fs_up_read(&F2FS_I(inode)->i_xattr_sem);
 	if (error)
 		return error;
@@ -576,25 +577,25 @@ ssize_t f2fs_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
 	last_base_addr = (void *)base_addr + XATTR_SIZE(inode);
 
 	list_for_each_xattr(entry, base_addr) {
+		const struct xattr_handler *handler =
+			f2fs_xattr_handler(entry->e_name_index);
 		const char *prefix;
 		size_t prefix_len;
 		size_t size;
 
-		prefix = f2fs_xattr_prefix(entry->e_name_index, dentry);
-
 		if ((void *)(entry) + sizeof(__u32) > last_base_addr ||
 			(void *)XATTR_NEXT_ENTRY(entry) > last_base_addr) {
-			f2fs_err(F2FS_I_SB(inode), "list inode (%lu) has corrupted xattr",
+			f2fs_err(F2FS_I_SB(inode), "inode (%lu) has corrupted xattr",
 						inode->i_ino);
 			set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
-			f2fs_handle_error(F2FS_I_SB(inode),
-						ERROR_CORRUPTED_XATTR);
-			break;
+			error = -EFSCORRUPTED;
+			goto cleanup;
 		}
 
-		if (!prefix)
+		if (!handler || (handler->list && !handler->list(dentry)))
 			continue;
 
+		prefix = xattr_prefix(handler);
 		prefix_len = strlen(prefix);
 		size = prefix_len + entry->e_name_len + 1;
 		if (buffer) {
@@ -627,9 +628,8 @@ static bool f2fs_xattr_value_same(struct f2fs_xattr_entry *entry,
 
 static int __f2fs_setxattr(struct inode *inode, int index,
 			const char *name, const void *value, size_t size,
-			struct folio *ifolio, int flags)
+			struct page *ipage, int flags)
 {
-	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_xattr_entry *here, *last;
 	void *base_addr, *last_base_addr;
 	int found, newsize;
@@ -650,32 +650,20 @@ static int __f2fs_setxattr(struct inode *inode, int index,
 
 	if (size > MAX_VALUE_LEN(inode))
 		return -E2BIG;
-retry:
-	error = read_all_xattrs(inode, ifolio, &base_addr);
+
+	error = read_all_xattrs(inode, ipage, &base_addr);
 	if (error)
 		return error;
 
 	last_base_addr = (void *)base_addr + XATTR_SIZE(inode);
 
 	/* find entry with wanted name. */
-	here = __find_xattr(base_addr, last_base_addr, NULL, index, len, name);
+	here = __find_xattr(base_addr, last_base_addr, index, len, name);
 	if (!here) {
-		if (!F2FS_I(inode)->i_xattr_nid) {
-			error = f2fs_recover_xattr_data(inode, NULL);
-			f2fs_notice(F2FS_I_SB(inode),
-				"recover xattr in inode (%lu), error(%d)",
-					inode->i_ino, error);
-			if (!error) {
-				kfree(base_addr);
-				goto retry;
-			}
-		}
-		f2fs_err(F2FS_I_SB(inode), "set inode (%lu) has corrupted xattr",
+		f2fs_err(F2FS_I_SB(inode), "inode (%lu) has corrupted xattr",
 								inode->i_ino);
 		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
 		error = -EFSCORRUPTED;
-		f2fs_handle_error(F2FS_I_SB(inode),
-					ERROR_CORRUPTED_XATTR);
 		goto exit;
 	}
 
@@ -702,8 +690,6 @@ retry:
 					inode->i_ino, ENTRY_SIZE(last));
 			set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
 			error = -EFSCORRUPTED;
-			f2fs_handle_error(F2FS_I_SB(inode),
-						ERROR_CORRUPTED_XATTR);
 			goto exit;
 		}
 		last = XATTR_NEXT_ENTRY(last);
@@ -766,33 +752,24 @@ retry:
 		*(u32 *)((u8 *)last + newsize) = 0;
 	}
 
-	error = write_all_xattrs(inode, new_hsize, base_addr, ifolio);
+	error = write_all_xattrs(inode, new_hsize, base_addr, ipage);
 	if (error)
 		goto exit;
 
 	if (index == F2FS_XATTR_INDEX_ENCRYPTION &&
 			!strcmp(name, F2FS_XATTR_NAME_ENCRYPTION_CONTEXT))
 		f2fs_set_encrypted_inode(inode);
+	f2fs_mark_inode_dirty_sync(inode, true);
+	if (!error && S_ISDIR(inode->i_mode))
+		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_CP);
 
-	if (!S_ISDIR(inode->i_mode))
-		goto same;
-	/*
-	 * In restrict mode, fsync() always try to trigger checkpoint for all
-	 * metadata consistency, in other mode, it triggers checkpoint when
-	 * parent's xattr metadata was updated.
-	 */
-	if (F2FS_OPTION(sbi).fsync_mode == FSYNC_MODE_STRICT)
-		set_sbi_flag(sbi, SBI_NEED_CP);
-	else
-		f2fs_add_ino_entry(sbi, inode->i_ino, XATTR_DIR_INO);
 same:
 	if (is_inode_flag_set(inode, FI_ACL_MODE)) {
 		inode->i_mode = F2FS_I(inode)->i_acl_mode;
+		inode->i_ctime = current_time(inode);
 		clear_inode_flag(inode, FI_ACL_MODE);
 	}
 
-	inode_set_ctime_current(inode);
-	f2fs_mark_inode_dirty_sync(inode, true);
 exit:
 	kfree(base_addr);
 	return error;
@@ -800,7 +777,7 @@ exit:
 
 int f2fs_setxattr(struct inode *inode, int index, const char *name,
 				const void *value, size_t size,
-				struct folio *ifolio, int flags)
+				struct page *ipage, int flags)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	int err;
@@ -810,19 +787,19 @@ int f2fs_setxattr(struct inode *inode, int index, const char *name,
 	if (!f2fs_is_checkpoint_ready(sbi))
 		return -ENOSPC;
 
-	err = f2fs_dquot_initialize(inode);
+	err = dquot_initialize(inode);
 	if (err)
 		return err;
 
 	/* this case is only from f2fs_init_inode_metadata */
-	if (ifolio)
+	if (ipage)
 		return __f2fs_setxattr(inode, index, name, value,
-						size, ifolio, flags);
+						size, ipage, flags);
 	f2fs_balance_fs(sbi, true);
 
 	f2fs_lock_op(sbi);
 	f2fs_down_write(&F2FS_I(inode)->i_xattr_sem);
-	err = __f2fs_setxattr(inode, index, name, value, size, NULL, flags);
+	err = __f2fs_setxattr(inode, index, name, value, size, ipage, flags);
 	f2fs_up_write(&F2FS_I(inode)->i_xattr_sem);
 	f2fs_unlock_op(sbi);
 

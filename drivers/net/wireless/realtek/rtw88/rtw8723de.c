@@ -4,8 +4,7 @@
 
 #include <linux/module.h>
 #include <linux/pci.h>
-#include "pci.h"
-#include "rtw8723d.h"
+#include "rtw8723de.h"
 
 static const struct pci_device_id rtw_8723de_id_table[] = {
 	{
@@ -17,13 +16,12 @@ static const struct pci_device_id rtw_8723de_id_table[] = {
 MODULE_DEVICE_TABLE(pci, rtw_8723de_id_table);
 
 static struct pci_driver rtw_8723de_driver = {
-	.name = KBUILD_MODNAME,
+	.name = "rtw_8723de",
 	.id_table = rtw_8723de_id_table,
 	.probe = rtw_pci_probe,
 	.remove = rtw_pci_remove,
 	.driver.pm = &rtw_pm_ops,
 	.shutdown = rtw_pci_shutdown,
-	.err_handler  = &rtw_pci_err_handler,
 };
 module_pci_driver(rtw_8723de_driver);
 

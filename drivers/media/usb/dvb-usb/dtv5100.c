@@ -97,7 +97,7 @@ static u32 dtv5100_i2c_func(struct i2c_adapter *adapter)
 	return I2C_FUNC_I2C;
 }
 
-static const struct i2c_algorithm dtv5100_i2c_algo = {
+static struct i2c_algorithm dtv5100_i2c_algo = {
 	.master_xfer   = dtv5100_i2c_xfer,
 	.functionality = dtv5100_i2c_func,
 };
@@ -162,15 +162,10 @@ static int dtv5100_probe(struct usb_interface *intf,
 	return 0;
 }
 
-enum {
-	AME_DTV5100,
+static struct usb_device_id dtv5100_table[] = {
+	{ USB_DEVICE(0x06be, 0xa232) },
+	{ }		/* Terminating entry */
 };
-
-static const struct usb_device_id dtv5100_table[] = {
-	DVB_USB_DEV(AME, AME_DTV5100),
-	{ }
-};
-
 MODULE_DEVICE_TABLE(usb, dtv5100_table);
 
 static struct dvb_usb_device_properties dtv5100_properties = {
@@ -206,7 +201,7 @@ static struct dvb_usb_device_properties dtv5100_properties = {
 		{
 			.name = "AME DTV-5100 USB2.0 DVB-T",
 			.cold_ids = { NULL },
-			.warm_ids = { &dtv5100_table[AME_DTV5100], NULL },
+			.warm_ids = { &dtv5100_table[0], NULL },
 		},
 	}
 };

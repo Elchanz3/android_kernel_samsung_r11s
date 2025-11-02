@@ -2,7 +2,7 @@
 /*
  * OMAP5 HDMI CORE IP driver library
  *
- * Copyright (C) 2014 Texas Instruments Incorporated - https://www.ti.com/
+ * Copyright (C) 2014 Texas Instruments Incorporated - http://www.ti.com/
  * Authors:
  *	Yong Zhi
  *	Mythri pk
@@ -545,6 +545,23 @@ static void hdmi_core_enable_interrupts(struct hdmi_core_data *core)
 	REG_FLD_MOD(core->base, HDMI_CORE_IH_MUTE, 0x0, 1, 0);
 }
 
+int hdmi5_core_handle_irqs(struct hdmi_core_data *core)
+{
+	void __iomem *base = core->base;
+
+	REG_FLD_MOD(base, HDMI_CORE_IH_FC_STAT0, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_FC_STAT1, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_FC_STAT2, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_AS_STAT0, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_PHY_STAT0, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_I2CM_STAT0, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_CEC_STAT0, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_VP_STAT0, 0xff, 7, 0);
+	REG_FLD_MOD(base, HDMI_CORE_IH_I2CMPHY_STAT0, 0xff, 7, 0);
+
+	return 0;
+}
+
 void hdmi5_configure(struct hdmi_core_data *core, struct hdmi_wp_data *wp,
 		struct hdmi_config *cfg)
 {
@@ -855,7 +872,10 @@ int hdmi5_audio_config(struct hdmi_core_data *core, struct hdmi_wp_data *wp,
 
 int hdmi5_core_init(struct platform_device *pdev, struct hdmi_core_data *core)
 {
-	core->base = devm_platform_ioremap_resource_byname(pdev, "core");
+	struct resource *res;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "core");
+	core->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(core->base))
 		return PTR_ERR(core->base);
 

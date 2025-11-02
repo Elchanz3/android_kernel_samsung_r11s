@@ -94,10 +94,12 @@ nf_tproxy_get_sock_v4(struct net *net, struct sk_buff *skb,
 
 		switch (lookup_type) {
 		case NF_TPROXY_LOOKUP_LISTENER:
-			sk = inet_lookup_listener(net, skb,
-						  ip_hdrlen(skb) + __tcp_hdrlen(hp),
-						  saddr, sport, daddr, dport,
-						  in->ifindex, 0);
+			sk = inet_lookup_listener(net, &tcp_hashinfo, skb,
+						    ip_hdrlen(skb) +
+						      __tcp_hdrlen(hp),
+						    saddr, sport,
+						    daddr, dport,
+						    in->ifindex, 0);
 
 			if (sk && !refcount_inc_not_zero(&sk->sk_refcnt))
 				sk = NULL;
@@ -108,8 +110,9 @@ nf_tproxy_get_sock_v4(struct net *net, struct sk_buff *skb,
 			 */
 			break;
 		case NF_TPROXY_LOOKUP_ESTABLISHED:
-			sk = inet_lookup_established(net, saddr, sport,
-						     daddr, dport, in->ifindex);
+			sk = inet_lookup_established(net, &tcp_hashinfo,
+						    saddr, sport, daddr, dport,
+						    in->ifindex);
 			break;
 		default:
 			BUG();

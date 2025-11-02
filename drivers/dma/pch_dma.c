@@ -155,6 +155,11 @@ static inline struct device *chan2dev(struct dma_chan *chan)
 	return &chan->dev->device;
 }
 
+static inline struct device *chan2parent(struct dma_chan *chan)
+{
+	return chan->dev->device.parent;
+}
+
 static inline
 struct pch_dma_desc *pdc_first_active(struct pch_dma_chan *pd_chan)
 {
@@ -830,7 +835,7 @@ static int pch_dma_probe(struct pci_dev *pdev,
 		goto err_disable_pdev;
 	}
 
-	err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (err) {
 		dev_err(&pdev->dev, "Cannot set proper DMA config\n");
 		goto err_free_res;

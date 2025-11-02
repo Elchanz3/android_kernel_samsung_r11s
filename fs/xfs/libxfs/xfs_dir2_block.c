@@ -20,7 +20,6 @@
 #include "xfs_error.h"
 #include "xfs_trace.h"
 #include "xfs_log.h"
-#include "xfs_health.h"
 
 /*
  * Local function prototypes.
@@ -54,10 +53,10 @@ xfs_dir3_block_verify(
 	if (!xfs_verify_magic(bp, hdr3->magic))
 		return __this_address;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		if (!uuid_equal(&hdr3->uuid, &mp->m_sb.sb_meta_uuid))
 			return __this_address;
-		if (be64_to_cpu(hdr3->blkno) != xfs_buf_daddr(bp))
+		if (be64_to_cpu(hdr3->blkno) != bp->b_bn)
 			return __this_address;
 		if (!xfs_log_check_lsn(mp, be64_to_cpu(hdr3->lsn)))
 			return __this_address;
@@ -72,7 +71,7 @@ xfs_dir3_block_read_verify(
 	struct xfs_mount	*mp = bp->b_mount;
 	xfs_failaddr_t		fa;
 
-	if (xfs_has_crc(mp) &&
+	if (xfs_sb_version_hascrc(&mp->m_sb) &&
 	     !xfs_buf_verify_cksum(bp, XFS_DIR3_DATA_CRC_OFF))
 		xfs_verifier_error(bp, -EFSBADCRC, __this_address);
 	else {
@@ -97,7 +96,7 @@ xfs_dir3_block_write_verify(
 		return;
 	}
 
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	if (bip)
@@ -115,20 +114,17 @@ const struct xfs_buf_ops xfs_dir3_block_buf_ops = {
 	.verify_struct = xfs_dir3_block_verify,
 };
 
-xfs_failaddr_t
+static xfs_failaddr_t
 xfs_dir3_block_header_check(
-	struct xfs_buf		*bp,
-	xfs_ino_t		owner)
+	struct xfs_inode	*dp,
+	struct xfs_buf		*bp)
 {
-	struct xfs_mount	*mp = bp->b_mount;
+	struct xfs_mount	*mp = dp->i_mount;
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		struct xfs_dir3_blk_hdr *hdr3 = bp->b_addr;
 
-		if (hdr3->magic != cpu_to_be32(XFS_DIR3_BLOCK_MAGIC))
-			return __this_address;
-
-		if (be64_to_cpu(hdr3->owner) != owner)
+		if (be64_to_cpu(hdr3->owner) != dp->i_ino)
 			return __this_address;
 	}
 
@@ -139,7 +135,6 @@ int
 xfs_dir3_block_read(
 	struct xfs_trans	*tp,
 	struct xfs_inode	*dp,
-	xfs_ino_t		owner,
 	struct xfs_buf		**bpp)
 {
 	struct xfs_mount	*mp = dp->i_mount;
@@ -152,12 +147,11 @@ xfs_dir3_block_read(
 		return err;
 
 	/* Check things that we can't do in the verifier. */
-	fa = xfs_dir3_block_header_check(*bpp, owner);
+	fa = xfs_dir3_block_header_check(dp, *bpp);
 	if (fa) {
 		__xfs_buf_mark_corrupt(*bpp, fa);
 		xfs_trans_brelse(tp, *bpp);
 		*bpp = NULL;
-		xfs_dirattr_mark_sick(dp, XFS_DATA_FORK);
 		return -EFSCORRUPTED;
 	}
 
@@ -167,22 +161,21 @@ xfs_dir3_block_read(
 
 static void
 xfs_dir3_block_init(
-	struct xfs_da_args	*args,
-	struct xfs_buf		*bp)
+	struct xfs_mount	*mp,
+	struct xfs_trans	*tp,
+	struct xfs_buf		*bp,
+	struct xfs_inode	*dp)
 {
-	struct xfs_trans	*tp = args->trans;
-	struct xfs_inode	*dp = args->dp;
-	struct xfs_mount	*mp = dp->i_mount;
-	struct xfs_dir3_blk_hdr	*hdr3 = bp->b_addr;
+	struct xfs_dir3_blk_hdr *hdr3 = bp->b_addr;
 
 	bp->b_ops = &xfs_dir3_block_buf_ops;
 	xfs_trans_buf_set_type(tp, bp, XFS_BLFT_DIR_BLOCK_BUF);
 
-	if (xfs_has_crc(mp)) {
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		memset(hdr3, 0, sizeof(*hdr3));
 		hdr3->magic = cpu_to_be32(XFS_DIR3_BLOCK_MAGIC);
-		hdr3->blkno = cpu_to_be64(xfs_buf_daddr(bp));
-		hdr3->owner = cpu_to_be64(args->owner);
+		hdr3->blkno = cpu_to_be64(bp->b_bn);
+		hdr3->owner = cpu_to_be64(dp->i_ino);
 		uuid_copy(&hdr3->uuid, &mp->m_sb.sb_meta_uuid);
 		return;
 
@@ -387,7 +380,7 @@ xfs_dir2_block_addname(
 	tp = args->trans;
 
 	/* Read the (one and only) directory block into bp. */
-	error = xfs_dir3_block_read(tp, dp, args->owner, &bp);
+	error = xfs_dir3_block_read(tp, dp, &bp);
 	if (error)
 		return error;
 
@@ -702,7 +695,7 @@ xfs_dir2_block_lookup_int(
 	dp = args->dp;
 	tp = args->trans;
 
-	error = xfs_dir3_block_read(tp, dp, args->owner, &bp);
+	error = xfs_dir3_block_read(tp, dp, &bp);
 	if (error)
 		return error;
 
@@ -849,7 +842,7 @@ xfs_dir2_block_removename(
 	 * See if the size as a shortform is good enough.
 	 */
 	size = xfs_dir2_block_sfsize(dp, hdr, &sfh);
-	if (size > xfs_inode_data_fork_size(dp))
+	if (size > XFS_IFORK_DSIZE(dp))
 		return 0;
 
 	/*
@@ -968,7 +961,7 @@ xfs_dir2_leaf_to_block(
 	 * been left behind during no-space-reservation operations.
 	 * These will show up in the leaf bests table.
 	 */
-	while (dp->i_disk_size > args->geo->blksize) {
+	while (dp->i_d.di_size > args->geo->blksize) {
 		int hdrsz;
 
 		hdrsz = args->geo->data_entry_offset;
@@ -986,8 +979,7 @@ xfs_dir2_leaf_to_block(
 	 * Read the data block if we don't already have it, give up if it fails.
 	 */
 	if (!dbp) {
-		error = xfs_dir3_data_read(tp, dp, args->owner,
-				args->geo->datablk, 0, &dbp);
+		error = xfs_dir3_data_read(tp, dp, args->geo->datablk, 0, &dbp);
 		if (error)
 			return error;
 	}
@@ -1015,7 +1007,7 @@ xfs_dir2_leaf_to_block(
 	/*
 	 * Start converting it to block form.
 	 */
-	xfs_dir3_block_init(args, dbp);
+	xfs_dir3_block_init(mp, tp, dbp, dp);
 
 	needlog = 1;
 	needscan = 0;
@@ -1063,7 +1055,7 @@ xfs_dir2_leaf_to_block(
 	 * Now see if the resulting block can be shrunken to shortform.
 	 */
 	size = xfs_dir2_block_sfsize(dp, hdr, &sfh);
-	if (size > xfs_inode_data_fork_size(dp))
+	if (size > XFS_IFORK_DSIZE(dp))
 		return 0;
 
 	return xfs_dir2_block_to_sf(args, dbp, size, &sfh);
@@ -1079,7 +1071,7 @@ xfs_dir2_sf_to_block(
 	struct xfs_trans	*tp = args->trans;
 	struct xfs_inode	*dp = args->dp;
 	struct xfs_mount	*mp = dp->i_mount;
-	struct xfs_ifork	*ifp = xfs_ifork_ptr(dp, XFS_DATA_FORK);
+	struct xfs_ifork	*ifp = XFS_IFORK_PTR(dp, XFS_DATA_FORK);
 	struct xfs_da_geometry	*geo = args->geo;
 	xfs_dir2_db_t		blkno;		/* dir-relative block # (0) */
 	xfs_dir2_data_hdr_t	*hdr;		/* block header */
@@ -1097,31 +1089,33 @@ xfs_dir2_sf_to_block(
 	int			newoffset;	/* offset from current entry */
 	unsigned int		offset = geo->data_entry_offset;
 	xfs_dir2_sf_entry_t	*sfep;		/* sf entry pointer */
-	struct xfs_dir2_sf_hdr	*oldsfp = ifp->if_data;
+	xfs_dir2_sf_hdr_t	*oldsfp;	/* old shortform header  */
 	xfs_dir2_sf_hdr_t	*sfp;		/* shortform header  */
 	__be16			*tagp;		/* end of data entry */
 	struct xfs_name		name;
 
 	trace_xfs_dir2_sf_to_block(args);
 
-	ASSERT(ifp->if_format == XFS_DINODE_FMT_LOCAL);
-	ASSERT(dp->i_disk_size >= offsetof(struct xfs_dir2_sf_hdr, parent));
+	ASSERT(ifp->if_flags & XFS_IFINLINE);
+	ASSERT(dp->i_d.di_size >= offsetof(struct xfs_dir2_sf_hdr, parent));
 
-	ASSERT(ifp->if_bytes == dp->i_disk_size);
-	ASSERT(oldsfp != NULL);
-	ASSERT(dp->i_disk_size >= xfs_dir2_sf_hdr_size(oldsfp->i8count));
+	oldsfp = (xfs_dir2_sf_hdr_t *)ifp->if_u1.if_data;
+
+	ASSERT(ifp->if_bytes == dp->i_d.di_size);
+	ASSERT(ifp->if_u1.if_data != NULL);
+	ASSERT(dp->i_d.di_size >= xfs_dir2_sf_hdr_size(oldsfp->i8count));
 	ASSERT(dp->i_df.if_nextents == 0);
 
 	/*
 	 * Copy the directory into a temporary buffer.
 	 * Then pitch the incore inode data so we can make extents.
 	 */
-	sfp = kmalloc(ifp->if_bytes, GFP_KERNEL | __GFP_NOFAIL);
+	sfp = kmem_alloc(ifp->if_bytes, 0);
 	memcpy(sfp, oldsfp, ifp->if_bytes);
 
 	xfs_idata_realloc(dp, -ifp->if_bytes, XFS_DATA_FORK);
 	xfs_bmap_local_to_extents_empty(tp, dp, XFS_DATA_FORK);
-	dp->i_disk_size = 0;
+	dp->i_d.di_size = 0;
 
 	/*
 	 * Add block 0 to the inode.
@@ -1135,7 +1129,7 @@ xfs_dir2_sf_to_block(
 	error = xfs_dir3_data_init(args, blkno, &bp);
 	if (error)
 		goto out_free;
-	xfs_dir3_block_init(args, bp);
+	xfs_dir3_block_init(mp, tp, bp, dp);
 	hdr = bp->b_addr;
 
 	/*
@@ -1175,7 +1169,7 @@ xfs_dir2_sf_to_block(
 	 * Create entry for .
 	 */
 	dep = bp->b_addr + offset;
-	dep->inumber = cpu_to_be64(args->owner);
+	dep->inumber = cpu_to_be64(dp->i_ino);
 	dep->namelen = 1;
 	dep->name[0] = '.';
 	xfs_dir2_data_put_ftype(mp, dep, XFS_DIR3_FT_DIR);
@@ -1261,7 +1255,7 @@ xfs_dir2_sf_to_block(
 			sfep = xfs_dir2_sf_nextentry(mp, sfp, sfep);
 	}
 	/* Done with the temporary buffer */
-	kfree(sfp);
+	kmem_free(sfp);
 	/*
 	 * Sort the leaf entries by hash value.
 	 */
@@ -1276,6 +1270,6 @@ xfs_dir2_sf_to_block(
 	xfs_dir3_data_check(dp, bp);
 	return 0;
 out_free:
-	kfree(sfp);
+	kmem_free(sfp);
 	return error;
 }

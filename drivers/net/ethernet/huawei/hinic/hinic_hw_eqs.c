@@ -254,8 +254,8 @@ static void aeq_irq_handler(struct hinic_eq *eq)
 					    HINIC_EQE_ENABLED,
 					    HINIC_EQE_ENABLED |
 					    HINIC_EQE_RUNNING);
-			if (eqe_state == HINIC_EQE_ENABLED &&
-			    hwe_cb->hwe_handler)
+			if ((eqe_state == HINIC_EQE_ENABLED) &&
+			    (hwe_cb->hwe_handler))
 				hwe_cb->hwe_handler(hwe_cb->handle,
 						    aeqe_curr->data, size);
 			else
@@ -299,7 +299,7 @@ static void ceq_event_handler(struct hinic_ceqs *ceqs, u32 ceqe)
 			    HINIC_EQE_ENABLED,
 			    HINIC_EQE_ENABLED | HINIC_EQE_RUNNING);
 
-	if (eqe_state == HINIC_EQE_ENABLED && ceq_cb->handler)
+	if ((eqe_state == HINIC_EQE_ENABLED) && (ceq_cb->handler))
 		ceq_cb->handler(ceq_cb->handle, CEQE_DATA(ceqe));
 	else
 		dev_err(&pdev->dev, "Unhandled CEQ Event %d\n", event);
@@ -605,7 +605,7 @@ static void aeq_elements_init(struct hinic_eq *eq, u32 init_val)
 /**
  * ceq_elements_init - Initialize all the elements in the ceq
  * @eq: the event queue
- * @init_val: value to init the elements with
+ * @init_val: value to init with it the elements
  **/
 static void ceq_elements_init(struct hinic_eq *eq, u32 init_val)
 {

@@ -170,7 +170,7 @@ ether3_setbuffer(struct net_device *dev, buffer_rw_t read, int start)
  */
 static void ether3_ledoff(struct timer_list *t)
 {
-	struct dev_priv *private = timer_container_of(private, t, timer);
+	struct dev_priv *private = from_timer(private, t, timer);
 	struct net_device *dev = private->dev;
 
 	ether3_outw(priv(dev)->regs.config2 |= CFG2_CTRLO, REG_CONFIG2);
@@ -181,7 +181,7 @@ static void ether3_ledoff(struct timer_list *t)
  */
 static inline void ether3_ledon(struct net_device *dev)
 {
-	timer_delete(&priv(dev)->timer);
+	del_timer(&priv(dev)->timer);
 	priv(dev)->timer.expires = jiffies + HZ / 50; /* leave on for 1/50th second */
 	add_timer(&priv(dev)->timer);
 	if (priv(dev)->regs.config2 & CFG2_CTRLO)
@@ -454,7 +454,7 @@ static void ether3_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	unsigned long flags;
 
-	timer_delete(&priv(dev)->timer);
+	del_timer(&priv(dev)->timer);
 
 	local_irq_save(flags);
 	printk(KERN_ERR "%s: transmit timed out, network cable problem?\n", dev->name);
@@ -617,7 +617,7 @@ if (next_ptr < RX_START || next_ptr >= RX_END) {
  break;
 }
 		/*
-		 * ignore our own packets...
+ 		 * ignore our own packets...
 	 	 */
 		if (!(*(unsigned long *)&dev->dev_addr[0] ^ *(unsigned long *)&addrs[2+6]) &&
 		    !(*(unsigned short *)&dev->dev_addr[4] ^ *(unsigned short *)&addrs[2+10])) {
@@ -672,7 +672,7 @@ done:
 	 */
 	if (!(ether3_inw(REG_STATUS) & STAT_RXON)) {
 		dev->stats.rx_dropped++;
-		ether3_outw(next_ptr, REG_RECVPTR);
+    		ether3_outw(next_ptr, REG_RECVPTR);
 		ether3_outw(priv(dev)->regs.command | CMD_RXON, REG_COMMAND);
 	}
 
@@ -690,11 +690,11 @@ static void ether3_tx(struct net_device *dev)
 	do {
 	    	unsigned long status;
 
-		/*
+    		/*
 	    	 * Read the packet header
-		 */
+    		 */
 	    	ether3_setbuffer(dev, buffer_read, tx_tail * 0x600);
-		status = ether3_readlong(dev);
+    		status = ether3_readlong(dev);
 
 		/*
 		 * Check to see if this packet has been transmitted
@@ -749,7 +749,6 @@ ether3_probe(struct expansion_card *ec, const struct ecard_id *id)
 	const struct ether3_data *data = id->data;
 	struct net_device *dev;
 	int bus_type, ret;
-	u8 addr[ETH_ALEN];
 
 	ether3_banner();
 
@@ -777,8 +776,7 @@ ether3_probe(struct expansion_card *ec, const struct ecard_id *id)
 	priv(dev)->seeq = priv(dev)->base + data->base_offset;
 	dev->irq = ec->irq;
 
-	ether3_addr(addr, ec);
-	eth_hw_addr_set(dev, addr);
+	ether3_addr(dev->dev_addr, ec);
 
 	priv(dev)->dev = dev;
 	timer_setup(&priv(dev)->timer, ether3_ledoff, 0);
@@ -847,11 +845,9 @@ static void ether3_remove(struct expansion_card *ec)
 {
 	struct net_device *dev = ecard_get_drvdata(ec);
 
-	ether3_outw(priv(dev)->regs.config2 |= CFG2_CTRLO, REG_CONFIG2);
 	ecard_set_drvdata(ec, NULL);
 
 	unregister_netdev(dev);
-	timer_delete_sync(&priv(dev)->timer);
 	free_netdev(dev);
 	ecard_release_resources(ec);
 }

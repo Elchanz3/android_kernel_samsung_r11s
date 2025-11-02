@@ -5,14 +5,16 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/libnvdimm.h>
 #include <linux/sched/mm.h>
-#include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/uaccess.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
 #include <linux/fcntl.h>
 #include <linux/async.h>
+#include <linux/genhd.h>
 #include <linux/ndctl.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/cpu.h>
 #include <linux/fs.h>
 #include <linux/io.h>
@@ -24,18 +26,17 @@
 
 int nvdimm_major;
 static int nvdimm_bus_major;
+struct class *nd_class;
 static DEFINE_IDA(nd_ida);
 
-static const struct class nd_class = {
-	.name = "nd",
-};
-
-static int to_nd_device_type(const struct device *dev)
+static int to_nd_device_type(struct device *dev)
 {
 	if (is_nvdimm(dev))
 		return ND_DEVICE_DIMM;
 	else if (is_memory(dev))
 		return ND_DEVICE_REGION_PMEM;
+	else if (is_nd_blk(dev))
+		return ND_DEVICE_REGION_BLK;
 	else if (is_nd_dax(dev))
 		return ND_DEVICE_DAX_PMEM;
 	else if (is_nd_region(dev->parent))
@@ -44,7 +45,7 @@ static int to_nd_device_type(const struct device *dev)
 	return 0;
 }
 
-static int nvdimm_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int nvdimm_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	return add_uevent_var(env, "MODALIAS=" ND_DEVICE_MODALIAS_FMT,
 			to_nd_device_type(dev));
@@ -63,15 +64,17 @@ static struct module *to_bus_provider(struct device *dev)
 
 static void nvdimm_bus_probe_start(struct nvdimm_bus *nvdimm_bus)
 {
-	guard(nvdimm_bus)(&nvdimm_bus->dev);
+	nvdimm_bus_lock(&nvdimm_bus->dev);
 	nvdimm_bus->probe_active++;
+	nvdimm_bus_unlock(&nvdimm_bus->dev);
 }
 
 static void nvdimm_bus_probe_end(struct nvdimm_bus *nvdimm_bus)
 {
-	guard(nvdimm_bus)(&nvdimm_bus->dev);
+	nvdimm_bus_lock(&nvdimm_bus->dev);
 	if (--nvdimm_bus->probe_active == 0)
 		wake_up(&nvdimm_bus->wait);
+	nvdimm_bus_unlock(&nvdimm_bus->dev);
 }
 
 static int nvdimm_bus_probe(struct device *dev)
@@ -88,7 +91,10 @@ static int nvdimm_bus_probe(struct device *dev)
 			dev->driver->name, dev_name(dev));
 
 	nvdimm_bus_probe_start(nvdimm_bus);
+	debug_nvdimm_lock(dev);
 	rc = nd_drv->probe(dev);
+	debug_nvdimm_unlock(dev);
+
 	if ((rc == 0 || rc == -EOPNOTSUPP) &&
 			dev->parent && is_nd_region(dev->parent))
 		nd_region_advance_seeds(to_nd_region(dev->parent), dev);
@@ -102,18 +108,23 @@ static int nvdimm_bus_probe(struct device *dev)
 	return rc;
 }
 
-static void nvdimm_bus_remove(struct device *dev)
+static int nvdimm_bus_remove(struct device *dev)
 {
 	struct nd_device_driver *nd_drv = to_nd_device_driver(dev->driver);
 	struct module *provider = to_bus_provider(dev);
 	struct nvdimm_bus *nvdimm_bus = walk_to_nvdimm_bus(dev);
+	int rc = 0;
 
-	if (nd_drv->remove)
-		nd_drv->remove(dev);
+	if (nd_drv->remove) {
+		debug_nvdimm_lock(dev);
+		rc = nd_drv->remove(dev);
+		debug_nvdimm_unlock(dev);
+	}
 
-	dev_dbg(&nvdimm_bus->dev, "%s.remove(%s)\n", dev->driver->name,
-			dev_name(dev));
+	dev_dbg(&nvdimm_bus->dev, "%s.remove(%s) = %d\n", dev->driver->name,
+			dev_name(dev), rc);
 	module_put(provider);
+	return rc;
 }
 
 static void nvdimm_bus_shutdown(struct device *dev)
@@ -133,7 +144,7 @@ static void nvdimm_bus_shutdown(struct device *dev)
 
 void nd_device_notify(struct device *dev, enum nvdimm_event event)
 {
-	device_lock(dev);
+	nd_device_lock(dev);
 	if (dev->driver) {
 		struct nd_device_driver *nd_drv;
 
@@ -141,7 +152,7 @@ void nd_device_notify(struct device *dev, enum nvdimm_event event)
 		if (nd_drv->notify)
 			nd_drv->notify(dev, event);
 	}
-	device_unlock(dev);
+	nd_device_unlock(dev);
 }
 EXPORT_SYMBOL(nd_device_notify);
 
@@ -269,9 +280,9 @@ long nvdimm_clear_poison(struct device *dev, phys_addr_t phys,
 }
 EXPORT_SYMBOL_GPL(nvdimm_clear_poison);
 
-static int nvdimm_bus_match(struct device *dev, const struct device_driver *drv);
+static int nvdimm_bus_match(struct device *dev, struct device_driver *drv);
 
-static const struct bus_type nvdimm_bus_type = {
+static struct bus_type nvdimm_bus_type = {
 	.name = "nd",
 	.uevent = nvdimm_bus_uevent,
 	.match = nvdimm_bus_match,
@@ -285,7 +296,7 @@ static void nvdimm_bus_release(struct device *dev)
 	struct nvdimm_bus *nvdimm_bus;
 
 	nvdimm_bus = container_of(dev, struct nvdimm_bus, dev);
-	ida_free(&nd_ida, nvdimm_bus->id);
+	ida_simple_remove(&nd_ida, nvdimm_bus->id);
 	kfree(nvdimm_bus);
 }
 
@@ -328,8 +339,6 @@ struct nvdimm_bus *nvdimm_to_bus(struct nvdimm *nvdimm)
 }
 EXPORT_SYMBOL_GPL(nvdimm_to_bus);
 
-static struct lock_class_key nvdimm_bus_key;
-
 struct nvdimm_bus *nvdimm_bus_register(struct device *parent,
 		struct nvdimm_bus_descriptor *nd_desc)
 {
@@ -342,7 +351,7 @@ struct nvdimm_bus *nvdimm_bus_register(struct device *parent,
 	INIT_LIST_HEAD(&nvdimm_bus->list);
 	INIT_LIST_HEAD(&nvdimm_bus->mapping_list);
 	init_waitqueue_head(&nvdimm_bus->wait);
-	nvdimm_bus->id = ida_alloc(&nd_ida, GFP_KERNEL);
+	nvdimm_bus->id = ida_simple_get(&nd_ida, 0, 0, GFP_KERNEL);
 	if (nvdimm_bus->id < 0) {
 		kfree(nvdimm_bus);
 		return NULL;
@@ -355,14 +364,8 @@ struct nvdimm_bus *nvdimm_bus_register(struct device *parent,
 	nvdimm_bus->dev.groups = nd_desc->attr_groups;
 	nvdimm_bus->dev.bus = &nvdimm_bus_type;
 	nvdimm_bus->dev.of_node = nd_desc->of_node;
-	device_initialize(&nvdimm_bus->dev);
-	lockdep_set_class(&nvdimm_bus->dev.mutex, &nvdimm_bus_key);
-	device_set_pm_not_required(&nvdimm_bus->dev);
-	rc = dev_set_name(&nvdimm_bus->dev, "ndbus%d", nvdimm_bus->id);
-	if (rc)
-		goto err;
-
-	rc = device_add(&nvdimm_bus->dev);
+	dev_set_name(&nvdimm_bus->dev, "ndbus%d", nvdimm_bus->id);
+	rc = device_register(&nvdimm_bus->dev);
 	if (rc) {
 		dev_dbg(&nvdimm_bus->dev, "registration failed: %d\n", rc);
 		goto err;
@@ -394,10 +397,21 @@ static int child_unregister(struct device *dev, void *data)
 	if (dev->class)
 		return 0;
 
-	if (is_nvdimm(dev))
-		nvdimm_delete(to_nvdimm(dev));
-	else
-		nd_device_unregister(dev, ND_SYNC);
+	if (is_nvdimm(dev)) {
+		struct nvdimm *nvdimm = to_nvdimm(dev);
+		bool dev_put = false;
+
+		/* We are shutting down. Make state frozen artificially. */
+		nvdimm_bus_lock(dev);
+		set_bit(NVDIMM_SECURITY_FROZEN, &nvdimm->sec.flags);
+		if (test_and_clear_bit(NDD_WORK_PENDING, &nvdimm->flags))
+			dev_put = true;
+		nvdimm_bus_unlock(dev);
+		cancel_delayed_work_sync(&nvdimm->dwork);
+		if (dev_put)
+			put_device(dev);
+	}
+	nd_device_unregister(dev, ND_SYNC);
 
 	return 0;
 }
@@ -413,7 +427,7 @@ static void free_badrange_list(struct list_head *badrange_list)
 	list_del_init(badrange_list);
 }
 
-static void nd_bus_remove(struct device *dev)
+static int nd_bus_remove(struct device *dev)
 {
 	struct nvdimm_bus *nvdimm_bus = to_nvdimm_bus(dev);
 
@@ -432,6 +446,8 @@ static void nd_bus_remove(struct device *dev)
 	spin_unlock(&nvdimm_bus->badrange.lock);
 
 	nvdimm_bus_destroy_ndctl(nvdimm_bus);
+
+	return 0;
 }
 
 static int nd_bus_probe(struct device *dev)
@@ -465,9 +481,9 @@ static struct nd_device_driver nd_bus_driver = {
 	},
 };
 
-static int nvdimm_bus_match(struct device *dev, const struct device_driver *drv)
+static int nvdimm_bus_match(struct device *dev, struct device_driver *drv)
 {
-	const struct nd_device_driver *nd_drv = to_nd_device_driver(drv);
+	struct nd_device_driver *nd_drv = to_nd_device_driver(drv);
 
 	if (is_nvdimm_bus(dev) && nd_drv == &nd_bus_driver)
 		return true;
@@ -508,7 +524,7 @@ static void nd_async_device_unregister(void *d, async_cookie_t cookie)
 	put_device(dev);
 }
 
-static void __nd_device_register(struct device *dev, bool sync)
+void __nd_device_register(struct device *dev)
 {
 	if (!dev)
 		return;
@@ -523,7 +539,6 @@ static void __nd_device_register(struct device *dev, bool sync)
 		set_dev_node(dev, to_nd_region(dev)->numa_node);
 
 	dev->bus = &nvdimm_bus_type;
-	device_set_pm_not_required(dev);
 	if (dev->parent) {
 		get_device(dev->parent);
 		if (dev_to_node(dev) == NUMA_NO_NODE)
@@ -531,23 +546,16 @@ static void __nd_device_register(struct device *dev, bool sync)
 	}
 	get_device(dev);
 
-	if (sync)
-		nd_async_device_register(dev, 0);
-	else
-		async_schedule_dev_domain(nd_async_device_register, dev,
-					  &nd_async_domain);
+	async_schedule_dev_domain(nd_async_device_register, dev,
+				  &nd_async_domain);
 }
 
 void nd_device_register(struct device *dev)
 {
-	__nd_device_register(dev, false);
+	device_initialize(dev);
+	__nd_device_register(dev);
 }
 EXPORT_SYMBOL(nd_device_register);
-
-void nd_device_register_sync(struct device *dev)
-{
-	__nd_device_register(dev, true);
-}
 
 void nd_device_unregister(struct device *dev, enum nd_async_mode mode)
 {
@@ -576,9 +584,9 @@ void nd_device_unregister(struct device *dev, enum nd_async_mode mode)
 		 * or otherwise let the async path handle it if the
 		 * unregistration was already queued.
 		 */
-		device_lock(dev);
+		nd_device_lock(dev);
 		killed = kill_device(dev);
-		device_unlock(dev);
+		nd_device_unlock(dev);
 
 		if (!killed)
 			return;
@@ -626,14 +634,16 @@ void nvdimm_check_and_set_ro(struct gendisk *disk)
 	struct nd_region *nd_region = to_nd_region(dev->parent);
 	int disk_ro = get_disk_ro(disk);
 
-	/* catch the disk up with the region ro state */
-	if (disk_ro == nd_region->ro)
+	/*
+	 * Upgrade to read-only if the region is read-only preserve as
+	 * read-only if the disk is already read-only.
+	 */
+	if (disk_ro || nd_region->ro == disk_ro)
 		return;
 
-	dev_info(dev, "%s read-%s, marking %s read-%s\n",
-		 dev_name(&nd_region->dev), nd_region->ro ? "only" : "write",
-		 disk->disk_name, nd_region->ro ? "only" : "write");
-	set_disk_ro(disk, nd_region->ro);
+	dev_info(dev, "%s read-only, marking %s read-only\n",
+			dev_name(&nd_region->dev), disk->disk_name);
+	set_disk_ro(disk, 1);
 }
 EXPORT_SYMBOL(nvdimm_check_and_set_ro);
 
@@ -723,49 +733,23 @@ const struct attribute_group nd_numa_attribute_group = {
 	.is_visible = nd_numa_attr_visible,
 };
 
-static void ndctl_release(struct device *dev)
-{
-	kfree(dev);
-}
-
-static struct lock_class_key nvdimm_ndctl_key;
-
 int nvdimm_bus_create_ndctl(struct nvdimm_bus *nvdimm_bus)
 {
 	dev_t devt = MKDEV(nvdimm_bus_major, nvdimm_bus->id);
 	struct device *dev;
-	int rc;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev)
-		return -ENOMEM;
-	device_initialize(dev);
-	lockdep_set_class(&dev->mutex, &nvdimm_ndctl_key);
-	device_set_pm_not_required(dev);
-	dev->class = &nd_class;
-	dev->parent = &nvdimm_bus->dev;
-	dev->devt = devt;
-	dev->release = ndctl_release;
-	rc = dev_set_name(dev, "ndctl%d", nvdimm_bus->id);
-	if (rc)
-		goto err;
+	dev = device_create(nd_class, &nvdimm_bus->dev, devt, nvdimm_bus,
+			"ndctl%d", nvdimm_bus->id);
 
-	rc = device_add(dev);
-	if (rc) {
-		dev_dbg(&nvdimm_bus->dev, "failed to register ndctl%d: %d\n",
-				nvdimm_bus->id, rc);
-		goto err;
-	}
-	return 0;
-
-err:
-	put_device(dev);
-	return rc;
+	if (IS_ERR(dev))
+		dev_dbg(&nvdimm_bus->dev, "failed to register ndctl%d: %ld\n",
+				nvdimm_bus->id, PTR_ERR(dev));
+	return PTR_ERR_OR_ZERO(dev);
 }
 
 void nvdimm_bus_destroy_ndctl(struct nvdimm_bus *nvdimm_bus)
 {
-	device_destroy(&nd_class, MKDEV(nvdimm_bus_major, nvdimm_bus->id));
+	device_destroy(nd_class, MKDEV(nvdimm_bus_major, nvdimm_bus->id));
 }
 
 static const struct nd_cmd_desc __nd_cmd_dimm_descs[] = {
@@ -937,10 +921,10 @@ void wait_nvdimm_bus_probe_idle(struct device *dev)
 		if (nvdimm_bus->probe_active == 0)
 			break;
 		nvdimm_bus_unlock(dev);
-		device_unlock(dev);
+		nd_device_unlock(dev);
 		wait_event(nvdimm_bus->wait,
 				nvdimm_bus->probe_active == 0);
-		device_lock(dev);
+		nd_device_lock(dev);
 		nvdimm_bus_lock(dev);
 	} while (true);
 }
@@ -1028,12 +1012,14 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 	unsigned int cmd = _IOC_NR(ioctl_cmd);
 	struct device *dev = &nvdimm_bus->dev;
 	void __user *p = (void __user *) arg;
+	char *out_env = NULL, *in_env = NULL;
 	const char *cmd_name, *dimm_name;
 	u32 in_len = 0, out_len = 0;
 	unsigned int func = cmd;
 	unsigned long cmd_mask;
 	struct nd_cmd_pkg pkg;
 	int rc, i, cmd_rc;
+	void *buf = NULL;
 	u64 buf_len = 0;
 
 	if (nvdimm) {
@@ -1092,7 +1078,7 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 		}
 
 	/* process an input envelope */
-	char *in_env __free(kfree) = kzalloc(ND_CMD_MAX_ENVELOPE, GFP_KERNEL);
+	in_env = kzalloc(ND_CMD_MAX_ENVELOPE, GFP_KERNEL);
 	if (!in_env)
 		return -ENOMEM;
 	for (i = 0; i < desc->in_num; i++) {
@@ -1102,14 +1088,17 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 		if (in_size == UINT_MAX) {
 			dev_err(dev, "%s:%s unknown input size cmd: %s field: %d\n",
 					__func__, dimm_name, cmd_name, i);
-			return -ENXIO;
+			rc = -ENXIO;
+			goto out;
 		}
 		if (in_len < ND_CMD_MAX_ENVELOPE)
 			copy = min_t(u32, ND_CMD_MAX_ENVELOPE - in_len, in_size);
 		else
 			copy = 0;
-		if (copy && copy_from_user(&in_env[in_len], p + in_len, copy))
-			return -EFAULT;
+		if (copy && copy_from_user(&in_env[in_len], p + in_len, copy)) {
+			rc = -EFAULT;
+			goto out;
+		}
 		in_len += in_size;
 	}
 
@@ -1121,9 +1110,11 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 	}
 
 	/* process an output envelope */
-	char *out_env __free(kfree) = kzalloc(ND_CMD_MAX_ENVELOPE, GFP_KERNEL);
-	if (!out_env)
-		return -ENOMEM;
+	out_env = kzalloc(ND_CMD_MAX_ENVELOPE, GFP_KERNEL);
+	if (!out_env) {
+		rc = -ENOMEM;
+		goto out;
+	}
 
 	for (i = 0; i < desc->out_num; i++) {
 		u32 out_size = nd_cmd_out_size(nvdimm, cmd, desc, i,
@@ -1133,7 +1124,8 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 		if (out_size == UINT_MAX) {
 			dev_dbg(dev, "%s unknown output size cmd: %s field: %d\n",
 					dimm_name, cmd_name, i);
-			return -EFAULT;
+			rc = -EFAULT;
+			goto out;
 		}
 		if (out_len < ND_CMD_MAX_ENVELOPE)
 			copy = min_t(u32, ND_CMD_MAX_ENVELOPE - out_len, out_size);
@@ -1141,7 +1133,8 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 			copy = 0;
 		if (copy && copy_from_user(&out_env[out_len],
 					p + in_len + out_len, copy)) {
-			return -EFAULT;
+			rc = -EFAULT;
+			goto out;
 		}
 		out_len += out_size;
 	}
@@ -1150,25 +1143,30 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 	if (buf_len > ND_IOCTL_MAX_BUFLEN) {
 		dev_dbg(dev, "%s cmd: %s buf_len: %llu > %d\n", dimm_name,
 				cmd_name, buf_len, ND_IOCTL_MAX_BUFLEN);
-		return -EINVAL;
+		rc = -EINVAL;
+		goto out;
 	}
 
-	void *buf __free(kvfree) = kvzalloc(buf_len, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
+	buf = vmalloc(buf_len);
+	if (!buf) {
+		rc = -ENOMEM;
+		goto out;
+	}
 
-	if (copy_from_user(buf, p, buf_len))
-		return -EFAULT;
+	if (copy_from_user(buf, p, buf_len)) {
+		rc = -EFAULT;
+		goto out;
+	}
 
-	guard(device)(dev);
-	guard(nvdimm_bus)(dev);
+	nd_device_lock(dev);
+	nvdimm_bus_lock(dev);
 	rc = nd_cmd_clear_to_send(nvdimm_bus, nvdimm, func, buf);
 	if (rc)
-		return rc;
+		goto out_unlock;
 
 	rc = nd_desc->ndctl(nd_desc, nvdimm, cmd, buf, buf_len, &cmd_rc);
 	if (rc < 0)
-		return rc;
+		goto out_unlock;
 
 	if (!nvdimm && cmd == ND_CMD_CLEAR_ERROR && cmd_rc >= 0) {
 		struct nd_cmd_clear_error *clear_err = buf;
@@ -1178,9 +1176,16 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 	}
 
 	if (copy_to_user(p, buf, buf_len))
-		return -EFAULT;
+		rc = -EFAULT;
 
-	return 0;
+out_unlock:
+	nvdimm_bus_unlock(dev);
+	nd_device_unlock(dev);
+out:
+	kfree(in_env);
+	kfree(out_env);
+	vfree(buf);
+	return rc;
 }
 
 enum nd_ioctl_mode {
@@ -1188,7 +1193,7 @@ enum nd_ioctl_mode {
 	DIMM_IOCTL,
 };
 
-static int match_dimm(struct device *dev, const void *data)
+static int match_dimm(struct device *dev, void *data)
 {
 	long id = (long) data;
 
@@ -1299,9 +1304,11 @@ int __init nvdimm_bus_init(void)
 		goto err_dimm_chrdev;
 	nvdimm_major = rc;
 
-	rc = class_register(&nd_class);
-	if (rc)
+	nd_class = class_create(THIS_MODULE, "nd");
+	if (IS_ERR(nd_class)) {
+		rc = PTR_ERR(nd_class);
 		goto err_class;
+	}
 
 	rc = driver_register(&nd_bus_driver.drv);
 	if (rc)
@@ -1310,7 +1317,7 @@ int __init nvdimm_bus_init(void)
 	return 0;
 
  err_nd_bus:
-	class_unregister(&nd_class);
+	class_destroy(nd_class);
  err_class:
 	unregister_chrdev(nvdimm_major, "dimmctl");
  err_dimm_chrdev:
@@ -1324,7 +1331,7 @@ int __init nvdimm_bus_init(void)
 void nvdimm_bus_exit(void)
 {
 	driver_unregister(&nd_bus_driver.drv);
-	class_unregister(&nd_class);
+	class_destroy(nd_class);
 	unregister_chrdev(nvdimm_bus_major, "ndctl");
 	unregister_chrdev(nvdimm_major, "dimmctl");
 	bus_unregister(&nvdimm_bus_type);

@@ -1,7 +1,20 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2008-2010 Cisco Systems, Inc.  All rights reserved.
  * Copyright 2007 Nuova Systems, Inc.  All rights reserved.
+ *
+ * This program is free software; you may redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; version 2 of the License.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
  */
 
 #include <linux/kernel.h>
@@ -146,19 +159,23 @@ EXPORT_SYMBOL(vnic_dev_get_res);
 static unsigned int vnic_dev_desc_ring_size(struct vnic_dev_ring *ring,
 	unsigned int desc_count, unsigned int desc_size)
 {
+	/* The base address of the desc rings must be 512 byte aligned.
+	 * Descriptor count is aligned to groups of 32 descriptors.  A
+	 * count of 0 means the maximum 4096 descriptors.  Descriptor
+	 * size is aligned to 16 bytes.
+	 */
 
-	/* Descriptor ring base address alignment in bytes*/
-	ring->base_align = VNIC_DESC_BASE_ALIGN;
+	unsigned int count_align = 32;
+	unsigned int desc_align = 16;
 
-	/* A count of 0 means the maximum descriptors */
+	ring->base_align = 512;
+
 	if (desc_count == 0)
-		desc_count = VNIC_DESC_MAX_COUNT;
+		desc_count = 4096;
 
-	/* Descriptor count aligned in groups of VNIC_DESC_COUNT_ALIGN descriptors */
-	ring->desc_count = ALIGN(desc_count, VNIC_DESC_COUNT_ALIGN);
+	ring->desc_count = ALIGN(desc_count, count_align);
 
-	/* Descriptor size alignment in bytes */
-	ring->desc_size = ALIGN(desc_size, VNIC_DESC_SIZE_ALIGN);
+	ring->desc_size = ALIGN(desc_size, desc_align);
 
 	ring->size = ring->desc_count * ring->desc_size;
 	ring->size_unaligned = ring->size + ring->base_align;

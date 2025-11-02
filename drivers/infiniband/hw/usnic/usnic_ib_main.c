@@ -151,6 +151,34 @@ static void usnic_ib_handle_usdev_event(struct usnic_ib_dev *us_ibdev,
 		ib_event.element.port_num = 1;
 		ib_dispatch_event(&ib_event);
 		break;
+	case NETDEV_UP:
+	case NETDEV_DOWN:
+	case NETDEV_CHANGE:
+		if (!us_ibdev->ufdev->link_up &&
+				netif_carrier_ok(netdev)) {
+			usnic_fwd_carrier_up(us_ibdev->ufdev);
+			usnic_info("Link UP on %s\n",
+				   dev_name(&us_ibdev->ib_dev.dev));
+			ib_event.event = IB_EVENT_PORT_ACTIVE;
+			ib_event.device = &us_ibdev->ib_dev;
+			ib_event.element.port_num = 1;
+			ib_dispatch_event(&ib_event);
+		} else if (us_ibdev->ufdev->link_up &&
+				!netif_carrier_ok(netdev)) {
+			usnic_fwd_carrier_down(us_ibdev->ufdev);
+			usnic_info("Link DOWN on %s\n",
+				   dev_name(&us_ibdev->ib_dev.dev));
+			usnic_ib_qp_grp_modify_active_to_err(us_ibdev);
+			ib_event.event = IB_EVENT_PORT_ERR;
+			ib_event.device = &us_ibdev->ib_dev;
+			ib_event.element.port_num = 1;
+			ib_dispatch_event(&ib_event);
+		} else {
+			usnic_dbg("Ignoring %s on %s\n",
+					netdev_cmd_to_name(event),
+					dev_name(&us_ibdev->ib_dev.dev));
+		}
+		break;
 	case NETDEV_CHANGEADDR:
 		if (!memcmp(us_ibdev->ufdev->mac, netdev->dev_addr,
 				sizeof(us_ibdev->ufdev->mac))) {
@@ -186,50 +214,6 @@ static void usnic_ib_handle_usdev_event(struct usnic_ib_dev *us_ibdev,
 		usnic_dbg("Ignoring event %s on %s",
 				netdev_cmd_to_name(event),
 				dev_name(&us_ibdev->ib_dev.dev));
-	}
-	mutex_unlock(&us_ibdev->usdev_lock);
-}
-
-static void usnic_ib_handle_port_event(struct ib_device *ibdev,
-				       struct net_device *netdev,
-				       unsigned long event)
-{
-	struct usnic_ib_dev *us_ibdev =
-			container_of(ibdev, struct usnic_ib_dev, ib_dev);
-	struct ib_event ib_event;
-
-	mutex_lock(&us_ibdev->usdev_lock);
-	switch (event) {
-	case NETDEV_UP:
-	case NETDEV_DOWN:
-	case NETDEV_CHANGE:
-		if (!us_ibdev->ufdev->link_up &&
-		    netif_carrier_ok(netdev)) {
-			usnic_fwd_carrier_up(us_ibdev->ufdev);
-			usnic_info("Link UP on %s\n",
-				   dev_name(&us_ibdev->ib_dev.dev));
-			ib_event.event = IB_EVENT_PORT_ACTIVE;
-			ib_event.device = &us_ibdev->ib_dev;
-			ib_event.element.port_num = 1;
-			ib_dispatch_event(&ib_event);
-		} else if (us_ibdev->ufdev->link_up &&
-			   !netif_carrier_ok(netdev)) {
-			usnic_fwd_carrier_down(us_ibdev->ufdev);
-			usnic_info("Link DOWN on %s\n",
-				   dev_name(&us_ibdev->ib_dev.dev));
-			usnic_ib_qp_grp_modify_active_to_err(us_ibdev);
-			ib_event.event = IB_EVENT_PORT_ERR;
-			ib_event.device = &us_ibdev->ib_dev;
-			ib_event.element.port_num = 1;
-			ib_dispatch_event(&ib_event);
-		} else {
-			usnic_dbg("Ignoring %s on %s\n",
-				  netdev_cmd_to_name(event),
-				  dev_name(&us_ibdev->ib_dev.dev));
-		}
-		break;
-	default:
-		break;
 	}
 	mutex_unlock(&us_ibdev->usdev_lock);
 }
@@ -319,7 +303,7 @@ static struct notifier_block usnic_ib_inetaddr_notifier = {
 };
 /* End of inet section*/
 
-static int usnic_port_immutable(struct ib_device *ibdev, u32 port_num,
+static int usnic_port_immutable(struct ib_device *ibdev, u8 port_num,
 			        struct ib_port_immutable *immutable)
 {
 	struct ib_port_attr attr;
@@ -363,7 +347,6 @@ static const struct ib_device_ops usnic_dev_ops = {
 	.dereg_mr = usnic_ib_dereg_mr,
 	.destroy_cq = usnic_ib_destroy_cq,
 	.destroy_qp = usnic_ib_destroy_qp,
-	.device_group = &usnic_attr_group,
 	.get_dev_fw_str = usnic_get_dev_fw_str,
 	.get_link_layer = usnic_ib_port_link_layer,
 	.get_port_immutable = usnic_port_immutable,
@@ -374,10 +357,8 @@ static const struct ib_device_ops usnic_dev_ops = {
 	.query_port = usnic_ib_query_port,
 	.query_qp = usnic_ib_query_qp,
 	.reg_user_mr = usnic_ib_reg_mr,
-	.report_port_event = usnic_ib_handle_port_event,
 	INIT_RDMA_OBJ_SIZE(ib_pd, usnic_ib_pd, ibpd),
 	INIT_RDMA_OBJ_SIZE(ib_cq, usnic_ib_cq, ibcq),
-	INIT_RDMA_OBJ_SIZE(ib_qp, usnic_ib_qp_grp, ibqp),
 	INIT_RDMA_OBJ_SIZE(ib_ucontext, usnic_ib_ucontext, ibucontext),
 };
 
@@ -397,7 +378,7 @@ static void *usnic_ib_device_add(struct pci_dev *dev)
 	if (!us_ibdev) {
 		usnic_err("Device %s context alloc failed\n",
 				netdev_name(pci_get_drvdata(dev)));
-		return NULL;
+		return ERR_PTR(-EFAULT);
 	}
 
 	us_ibdev->ufdev = usnic_fwd_dev_alloc(dev);
@@ -417,7 +398,28 @@ static void *usnic_ib_device_add(struct pci_dev *dev)
 	us_ibdev->ib_dev.num_comp_vectors = USNIC_IB_NUM_COMP_VECTORS;
 	us_ibdev->ib_dev.dev.parent = &dev->dev;
 
+	us_ibdev->ib_dev.uverbs_cmd_mask =
+		(1ull << IB_USER_VERBS_CMD_GET_CONTEXT) |
+		(1ull << IB_USER_VERBS_CMD_QUERY_DEVICE) |
+		(1ull << IB_USER_VERBS_CMD_QUERY_PORT) |
+		(1ull << IB_USER_VERBS_CMD_ALLOC_PD) |
+		(1ull << IB_USER_VERBS_CMD_DEALLOC_PD) |
+		(1ull << IB_USER_VERBS_CMD_REG_MR) |
+		(1ull << IB_USER_VERBS_CMD_DEREG_MR) |
+		(1ull << IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL) |
+		(1ull << IB_USER_VERBS_CMD_CREATE_CQ) |
+		(1ull << IB_USER_VERBS_CMD_DESTROY_CQ) |
+		(1ull << IB_USER_VERBS_CMD_CREATE_QP) |
+		(1ull << IB_USER_VERBS_CMD_MODIFY_QP) |
+		(1ull << IB_USER_VERBS_CMD_QUERY_QP) |
+		(1ull << IB_USER_VERBS_CMD_DESTROY_QP) |
+		(1ull << IB_USER_VERBS_CMD_ATTACH_MCAST) |
+		(1ull << IB_USER_VERBS_CMD_DETACH_MCAST) |
+		(1ull << IB_USER_VERBS_CMD_OPEN_QP);
+
 	ib_set_device_ops(&us_ibdev->ib_dev, &usnic_dev_ops);
+
+	rdma_set_device_sysfs_group(&us_ibdev->ib_dev, &usnic_attr_group);
 
 	ret = ib_device_set_netdev(&us_ibdev->ib_dev, us_ibdev->netdev, 1);
 	if (ret)
@@ -517,8 +519,8 @@ static struct usnic_ib_dev *usnic_ib_discover_pf(struct usnic_vnic *vnic)
 	}
 
 	us_ibdev = usnic_ib_device_add(parent_pci);
-	if (!us_ibdev) {
-		us_ibdev = ERR_PTR(-EFAULT);
+	if (IS_ERR_OR_NULL(us_ibdev)) {
+		us_ibdev = us_ibdev ? us_ibdev : ERR_PTR(-EFAULT);
 		goto out;
 	}
 
@@ -551,11 +553,6 @@ static int usnic_ib_pci_probe(struct pci_dev *pdev,
 	struct usnic_ib_vf *vf;
 	enum usnic_vnic_res_type res_type;
 
-	if (!device_iommu_mapped(&pdev->dev)) {
-		usnic_err("IOMMU required but not present or enabled.  USNIC QPs will not function w/o enabling IOMMU\n");
-		return -EPERM;
-	}
-
 	vf = kzalloc(sizeof(*vf), GFP_KERNEL);
 	if (!vf)
 		return -ENOMEM;
@@ -586,15 +583,15 @@ static int usnic_ib_pci_probe(struct pci_dev *pdev,
 	}
 
 	pf = usnic_ib_discover_pf(vf->vnic);
-	if (IS_ERR(pf)) {
-		err = PTR_ERR(pf);
-		usnic_err("Failed to discover pf of vnic %s with err%d\n",
-				pci_name(pdev), err);
+	if (IS_ERR_OR_NULL(pf)) {
+		usnic_err("Failed to discover pf of vnic %s with err%ld\n",
+				pci_name(pdev), PTR_ERR(pf));
+		err = pf ? PTR_ERR(pf) : -EFAULT;
 		goto out_clean_vnic;
 	}
 
 	vf->pf = pf;
-	mutex_init(&vf->lock);
+	spin_lock_init(&vf->lock);
 	mutex_lock(&pf->usdev_lock);
 	list_add_tail(&vf->link, &pf->vf_dev_list);
 	/*
@@ -619,6 +616,7 @@ out_clean_vnic:
 	usnic_vnic_free(vf->vnic);
 out_release_regions:
 	pci_set_drvdata(pdev, NULL);
+	pci_clear_master(pdev);
 	pci_release_regions(pdev);
 out_disable_device:
 	pci_disable_device(pdev);
@@ -639,6 +637,7 @@ static void usnic_ib_pci_remove(struct pci_dev *pdev)
 	kref_put(&pf->vf_cnt, usnic_ib_undiscover_pf);
 	usnic_vnic_free(vf->vnic);
 	pci_set_drvdata(pdev, NULL);
+	pci_clear_master(pdev);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 	kfree(vf);
@@ -661,6 +660,12 @@ static int __init usnic_ib_init(void)
 	int err;
 
 	printk_once(KERN_INFO "%s", usnic_version);
+
+	err = usnic_uiom_init(DRV_NAME);
+	if (err) {
+		usnic_err("Unable to initialize umem with err %d\n", err);
+		return err;
+	}
 
 	err = pci_register_driver(&usnic_ib_pci_driver);
 	if (err) {

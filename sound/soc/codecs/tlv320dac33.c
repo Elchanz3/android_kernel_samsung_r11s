@@ -14,7 +14,7 @@
 #include <linux/pm.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <sound/core.h>
@@ -24,6 +24,7 @@
 #include <sound/initval.h>
 #include <sound/tlv.h>
 
+#include <sound/tlv320dac33-plat.h>
 #include "tlv320dac33.h"
 
 /*
@@ -79,7 +80,7 @@ struct tlv320dac33_priv {
 	struct snd_soc_component *component;
 	struct regulator_bulk_data supplies[DAC33_NUM_SUPPLIES];
 	struct snd_pcm_substream *substream;
-	struct gpio_desc *reset_gpiod;
+	int power_gpio;
 	int chip_power;
 	int irq;
 	unsigned int refclk;
@@ -382,26 +383,14 @@ static int dac33_hard_power(struct snd_soc_component *component, int power)
 			goto exit;
 		}
 
-		if (dac33->reset_gpiod) {
-			ret = gpiod_set_value(dac33->reset_gpiod, 1);
-			if (ret < 0) {
-				dev_err(&dac33->i2c->dev,
-					"Failed to set reset GPIO: %d\n", ret);
-				goto exit;
-			}
-		}
+		if (dac33->power_gpio >= 0)
+			gpio_set_value(dac33->power_gpio, 1);
 
 		dac33->chip_power = 1;
 	} else {
 		dac33_soft_power(component, 0);
-		if (dac33->reset_gpiod) {
-			ret = gpiod_set_value(dac33->reset_gpiod, 0);
-			if (ret < 0) {
-				dev_err(&dac33->i2c->dev,
-					"Failed to set reset GPIO: %d\n", ret);
-				goto exit;
-			}
-		}
+		if (dac33->power_gpio >= 0)
+			gpio_set_value(dac33->power_gpio, 0);
 
 		ret = regulator_bulk_disable(ARRAY_SIZE(dac33->supplies),
 					     dac33->supplies);
@@ -1082,7 +1071,7 @@ static void dac33_calculate_times(struct snd_pcm_substream *substream,
 			 */
 			dac33->nsample = period_size *
 				((dac33->alarm_threshold / period_size) +
-				 ((dac33->alarm_threshold % period_size) ?
+				(dac33->alarm_threshold % period_size ?
 				1 : 0));
 		else if (period_size > nsample_limit)
 			dac33->nsample = nsample_limit;
@@ -1328,14 +1317,16 @@ static int dac33_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	aictrl_a = dac33_read_reg_cache(component, DAC33_SER_AUDIOIF_CTRL_A);
 	aictrl_b = dac33_read_reg_cache(component, DAC33_SER_AUDIOIF_CTRL_B);
-
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	/* set master/slave audio interface */
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBM_CFM:
+		/* Codec Master */
 		aictrl_a |= (DAC33_MSBCLK | DAC33_MSWCLK);
 		break;
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
+		/* Codec Slave */
 		if (dac33->fifo_mode) {
-			dev_err(component->dev, "FIFO mode requires provider mode\n");
+			dev_err(component->dev, "FIFO mode requires master mode\n");
 			return -EINVAL;
 		} else
 			aictrl_a &= ~(DAC33_MSBCLK | DAC33_MSWCLK);
@@ -1442,6 +1433,7 @@ static const struct snd_soc_component_driver soc_component_dev_tlv320dac33 = {
 	.num_dapm_routes	= ARRAY_SIZE(audio_map),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 #define DAC33_RATES	(SNDRV_PCM_RATE_44100 | \
@@ -1471,18 +1463,28 @@ static struct snd_soc_dai_driver dac33_dai = {
 	.ops = &dac33_dai_ops,
 };
 
-static int dac33_i2c_probe(struct i2c_client *client)
+static int dac33_i2c_probe(struct i2c_client *client,
+			   const struct i2c_device_id *id)
 {
+	struct tlv320dac33_platform_data *pdata;
 	struct tlv320dac33_priv *dac33;
 	int ret, i;
+
+	if (client->dev.platform_data == NULL) {
+		dev_err(&client->dev, "Platform data not set\n");
+		return -ENODEV;
+	}
+	pdata = client->dev.platform_data;
 
 	dac33 = devm_kzalloc(&client->dev, sizeof(struct tlv320dac33_priv),
 			     GFP_KERNEL);
 	if (dac33 == NULL)
 		return -ENOMEM;
 
-	dac33->reg_cache = devm_kmemdup_array(&client->dev, dac33_reg, ARRAY_SIZE(dac33_reg),
-					      sizeof(dac33_reg[0]), GFP_KERNEL);
+	dac33->reg_cache = devm_kmemdup(&client->dev,
+					dac33_reg,
+					ARRAY_SIZE(dac33_reg) * sizeof(u8),
+					GFP_KERNEL);
 	if (!dac33->reg_cache)
 		return -ENOMEM;
 
@@ -1492,22 +1494,26 @@ static int dac33_i2c_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, dac33);
 
-	if (!dac33->burst_bclkdiv)
-		dac33->burst_bclkdiv = 8;
+	dac33->power_gpio = pdata->power_gpio;
+	dac33->burst_bclkdiv = pdata->burst_bclkdiv;
+	dac33->keep_bclk = pdata->keep_bclk;
+	dac33->mode1_latency = pdata->mode1_latency;
 	if (!dac33->mode1_latency)
 		dac33->mode1_latency = 10000; /* 10ms */
 	dac33->irq = client->irq;
 	/* Disable FIFO use by default */
 	dac33->fifo_mode = DAC33_FIFO_BYPASS;
 
-	/* request optional reset GPIO */
-	dac33->reset_gpiod =
-		devm_gpiod_get_optional(&client->dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(dac33->reset_gpiod)) {
-		ret = PTR_ERR(dac33->reset_gpiod);
-		dev_err_probe(&client->dev, ret,
-			      "Failed to get reset GPIO\n");
-		goto err;
+	/* Check if the reset GPIO number is valid and request it */
+	if (dac33->power_gpio >= 0) {
+		ret = gpio_request(dac33->power_gpio, "tlv320dac33 reset");
+		if (ret < 0) {
+			dev_err(&client->dev,
+				"Failed to request reset GPIO (%d)\n",
+				dac33->power_gpio);
+			goto err_gpio;
+		}
+		gpio_direction_output(dac33->power_gpio, 0);
 	}
 
 	for (i = 0; i < ARRAY_SIZE(dac33->supplies); i++)
@@ -1518,26 +1524,33 @@ static int dac33_i2c_probe(struct i2c_client *client)
 
 	if (ret != 0) {
 		dev_err(&client->dev, "Failed to request supplies: %d\n", ret);
-		goto err;
+		goto err_get;
 	}
 
 	ret = devm_snd_soc_register_component(&client->dev,
 			&soc_component_dev_tlv320dac33, &dac33_dai, 1);
 	if (ret < 0)
-		goto err;
+		goto err_get;
 
 	return ret;
-
-err:
+err_get:
+	if (dac33->power_gpio >= 0)
+		gpio_free(dac33->power_gpio);
+err_gpio:
 	return ret;
 }
 
-static void dac33_i2c_remove(struct i2c_client *client)
+static int dac33_i2c_remove(struct i2c_client *client)
 {
 	struct tlv320dac33_priv *dac33 = i2c_get_clientdata(client);
 
 	if (unlikely(dac33->chip_power))
 		dac33_hard_power(dac33->component, 0);
+
+	if (dac33->power_gpio >= 0)
+		gpio_free(dac33->power_gpio);
+
+	return 0;
 }
 
 static const struct i2c_device_id tlv320dac33_i2c_id[] = {

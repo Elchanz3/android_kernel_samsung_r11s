@@ -233,7 +233,7 @@
 			};
 		};
 
-		usb@60000 {
+		ohci@60000 {
 			compatible = "snps,hsdk-v1.0-ohci", "generic-ohci";
 			reg = <0x60000 0x100>;
 			interrupts = <15>;
@@ -241,7 +241,7 @@
 			dma-coherent;
 		};
 
-		usb@40000 {
+		ehci@40000 {
 			compatible = "snps,hsdk-v1.0-ehci", "generic-ehci";
 			reg = <0x40000 0x100>;
 			interrupts = <15>;
@@ -274,7 +274,7 @@
 			cs-gpios = <&creg_gpio 0 GPIO_ACTIVE_LOW>,
 				   <&creg_gpio 1 GPIO_ACTIVE_LOW>;
 
-			flash@0 {
+			spi-flash@0 {
 				compatible = "sst26wf016b", "jedec,spi-nor";
 				reg = <0>;
 				#address-cells = <1>;
@@ -308,7 +308,7 @@
 				compatible = "snps,dw-apb-gpio-port";
 				gpio-controller;
 				#gpio-cells = <2>;
-				ngpios = <24>;
+				snps,nr-gpios = <24>;
 				reg = <0>;
 			};
 		};

@@ -14,7 +14,7 @@
  *
  *  Refactored and updated to the latest v4l core frameworks:
  *
- *  Copyright (C) 2014 Hans Verkuil <hverkuil@kernel.org>
+ *  Copyright (C) 2014 Hans Verkuil <hverkuil@xs4all.nl>
  */
 
 #include "tw68.h"
@@ -151,8 +151,7 @@ int tw68_risc_buffer(struct pci_dev *pci,
 	instructions  = fields * (1 + (((bpl + padding) * lines) /
 			 PAGE_SIZE) + lines) + 4;
 	buf->size = instructions * 8;
-	buf->cpu = dma_alloc_coherent(&pci->dev, buf->size, &buf->dma,
-				      GFP_KERNEL);
+	buf->cpu = pci_alloc_consistent(pci, buf->size, &buf->dma);
 	if (buf->cpu == NULL)
 		return -ENOMEM;
 

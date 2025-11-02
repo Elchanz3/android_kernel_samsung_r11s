@@ -36,7 +36,7 @@ experience, the following books are good for, if anything, reference:
  - "C:  A Reference Manual" by Harbison and Steele [Prentice Hall]
 
 The kernel is written using GNU C and the GNU toolchain.  While it
-adheres to the ISO C11 standard, it uses a number of extensions that are
+adheres to the ISO C89 standard, it uses a number of extensions that are
 not featured in the standard.  The kernel is a freestanding C
 environment, with no reliance on the standard C library, so some
 portions of the C standard are not supported.  Arbitrary long long
@@ -82,7 +82,8 @@ documentation files are also added which explain how to use the feature.
 When a kernel change causes the interface that the kernel exposes to
 userspace to change, it is recommended that you send the information or
 a patch to the manual pages explaining the change to the manual pages
-maintainer at alx@kernel.org, and CC the list linux-api@vger.kernel.org.
+maintainer at mtk.manpages@gmail.com, and CC the list
+linux-api@vger.kernel.org.
 
 Here is a list of files that are in the kernel source tree that are
 required reading:
@@ -104,8 +105,8 @@ required reading:
     patches if these rules are followed, and many people will only
     review code if it is in the proper style.
 
-  :ref:`Documentation/process/submitting-patches.rst <submittingpatches>`
-    This file describes in explicit detail how to successfully create
+  :ref:`Documentation/process/submitting-patches.rst <submittingpatches>` and :ref:`Documentation/process/submitting-drivers.rst <submittingdrivers>`
+    These files describe in explicit detail how to successfully create
     and send a patch, including (but not limited to):
 
        - Email contents
@@ -137,7 +138,7 @@ required reading:
     philosophy and is very important for people moving to Linux from
     development on other Operating Systems.
 
-  :ref:`Documentation/process/security-bugs.rst <securitybugs>`
+  :ref:`Documentation/admin-guide/security-bugs.rst <securitybugs>`
     If you feel you have found a security problem in the Linux kernel,
     please follow the steps in this document to help notify the kernel
     developers, and help solve the issue.
@@ -331,7 +332,7 @@ they need to be integration-tested.  For this purpose, a special
 testing repository exists into which virtually all subsystem trees are
 pulled on an almost daily basis:
 
-	https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git
+	https://git.kernel.org/?p=linux/kernel/git/next/linux-next.git
 
 This way, the linux-next gives a summary outlook onto what will be
 expected to go into the mainline kernel at the next merge period.
@@ -341,29 +342,30 @@ Adventurous testers are very welcome to runtime-test the linux-next.
 Bug Reporting
 -------------
 
-The file 'Documentation/admin-guide/reporting-issues.rst' in the main kernel
-source directory describes how to report a possible kernel bug, and details
-what kind of information is needed by the kernel developers to help track
-down the problem.
+https://bugzilla.kernel.org is where the Linux kernel developers track kernel
+bugs.  Users are encouraged to report all bugs that they find in this
+tool.  For details on how to use the kernel bugzilla, please see:
+
+	https://bugzilla.kernel.org/page.cgi?id=faq.html
+
+The file :ref:`admin-guide/reporting-bugs.rst <reportingbugs>`
+in the main kernel source directory has a good
+template for how to report a possible kernel bug, and details what kind
+of information is needed by the kernel developers to help track down the
+problem.
 
 
 Managing bug reports
 --------------------
 
 One of the best ways to put into practice your hacking skills is by fixing
-bugs reported by other people. Not only will you help to make the kernel
-more stable, but you'll also learn to fix real-world problems and you will
+bugs reported by other people. Not only you will help to make the kernel
+more stable, but you'll also learn to fix real world problems and you will
 improve your skills, and other developers will be aware of your presence.
 Fixing bugs is one of the best ways to get merits among other developers,
 because not many people like wasting time fixing other people's bugs.
 
-To work on already reported bug reports, find a subsystem you are interested in.
-Check the MAINTAINERS file where bugs for that subsystem get reported to; often
-it will be a mailing list, rarely a bugtracker. Search the archives of said
-place for recent reports and help where you see fit. You may also want to check
-https://bugzilla.kernel.org for bug reports; only a handful of kernel subsystems
-use it actively for reporting or tracking, nevertheless bugs for the whole
-kernel get filed there.
+To work in the already reported bug reports, go to https://bugzilla.kernel.org.
 
 
 Mailing lists
@@ -373,12 +375,12 @@ As some of the above documents describe, the majority of the core kernel
 developers participate on the Linux Kernel Mailing list.  Details on how
 to subscribe and unsubscribe from the list can be found at:
 
-	https://subspace.kernel.org/subscribing.html
+	http://vger.kernel.org/vger-lists.html#linux-kernel
 
 There are archives of the mailing list on the web in many different
 places.  Use a search engine to find these archives.  For example:
 
-	https://lore.kernel.org/linux-kernel/
+	http://dir.gmane.org/gmane.linux.kernel
 
 It is highly recommended that you search the archives about the topic
 you want to bring up, before you post it to the list. A lot of things
@@ -393,13 +395,13 @@ groups.
 Many of the lists are hosted on kernel.org. Information on them can be
 found at:
 
-	https://subspace.kernel.org
+	http://vger.kernel.org/vger-lists.html
 
 Please remember to follow good behavioral habits when using the lists.
 Though a bit cheesy, the following URL has some simple guidelines for
 interacting with the list (or any list):
 
-	https://subspace.kernel.org/etiquette.html
+	http://www.albion.com/netiquette/
 
 If multiple people respond to your mail, the CC: list of recipients may
 get pretty large. Don't remove anybody from the CC: list without a good

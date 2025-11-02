@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ *
+ * vim: noexpandtab sw=8 ts=8 sts=0:
  *
  * Copyright (C) 2004 Oracle.  All rights reserved.
  *
  * ----
  *
- * Callers for this were originally written against a very simple synchronous
+ * Callers for this were originally written against a very simple synchronus
  * API.  This implementation reflects those simple callers.  Some day I'm sure
  * we'll need to move to a more robust posting/callback mechanism.
  *
  * Transmit calls pass in kernel virtual addresses and block copying this into
  * the socket's tx buffers via a usual blocking sendmsg.  They'll block waiting
- * for a failed socket to timeout.  TX callers can also pass in a pointer to an
+ * for a failed socket to timeout.  TX callers can also pass in a poniter to an
  * 'int' which gets filled with an errno off the wire in response to the
  * message they send.
  *
@@ -46,7 +48,6 @@
 #include <linux/net.h>
 #include <linux/export.h>
 #include <net/tcp.h>
-#include <trace/events/sock.h>
 
 #include <linux/uaccess.h>
 
@@ -101,7 +102,7 @@ static struct socket *o2net_listen_sock;
  * o2net_wq.  teardown detaches the callbacks before destroying the workqueue.
  * quorum work is queued as sock containers are shutdown.. stop_listening
  * tears down all the node's sock containers, preventing future shutdowns
- * and queued quorum work, before canceling delayed quorum work and
+ * and queued quroum work, before canceling delayed quorum work and
  * destroying the work queue.
  */
 static struct workqueue_struct *o2net_wq;
@@ -586,8 +587,6 @@ static void o2net_data_ready(struct sock *sk)
 	void (*ready)(struct sock *sk);
 	struct o2net_sock_container *sc;
 
-	trace_sk_data_ready(sk);
-
 	read_lock_bh(&sk->sk_callback_lock);
 	sc = sk->sk_user_data;
 	if (sc) {
@@ -724,7 +723,7 @@ static void o2net_shutdown_sc(struct work_struct *work)
 	if (o2net_unregister_callbacks(sc->sc_sock->sk, sc)) {
 		/* we shouldn't flush as we're in the thread, the
 		 * races with pending sc work structs are harmless */
-		timer_delete_sync(&sc->sc_idle_timeout);
+		del_timer_sync(&sc->sc_idle_timeout);
 		o2net_sc_cancel_delayed_work(sc, &sc->sc_keepalive_work);
 		sc_put(sc);
 		kernel_sock_shutdown(sc->sc_sock, SHUT_RDWR);
@@ -903,7 +902,7 @@ static int o2net_recv_tcp_msg(struct socket *sock, void *data, size_t len)
 {
 	struct kvec vec = { .iov_len = len, .iov_base = data, };
 	struct msghdr msg = { .msg_flags = MSG_DONTWAIT, };
-	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &vec, 1, len);
+	iov_iter_kvec(&msg.msg_iter, READ, &vec, 1, len);
 	return sock_recvmsg(sock, &msg, MSG_DONTWAIT);
 }
 
@@ -930,22 +929,19 @@ out:
 }
 
 static void o2net_sendpage(struct o2net_sock_container *sc,
-			   void *virt, size_t size)
+			   void *kmalloced_virt,
+			   size_t size)
 {
 	struct o2net_node *nn = o2net_nn_from_num(sc->sc_node->nd_num);
-	struct msghdr msg = {};
-	struct bio_vec bv;
 	ssize_t ret;
 
-	bvec_set_virt(&bv, virt, size);
-	iov_iter_bvec(&msg.msg_iter, ITER_SOURCE, &bv, 1, size);
-
 	while (1) {
-		msg.msg_flags = MSG_DONTWAIT | MSG_SPLICE_PAGES;
 		mutex_lock(&sc->sc_send_lock);
-		ret = sock_sendmsg(sc->sc_sock, &msg);
+		ret = sc->sc_sock->ops->sendpage(sc->sc_sock,
+						 virt_to_page(kmalloced_virt),
+						 offset_in_page(kmalloced_virt),
+						 size, MSG_DONTWAIT);
 		mutex_unlock(&sc->sc_send_lock);
-
 		if (ret == size)
 			break;
 		if (ret == (ssize_t)-EAGAIN) {
@@ -996,12 +992,14 @@ static int o2net_tx_can_proceed(struct o2net_node *nn,
 }
 
 /* Get a map of all nodes to which this node is currently connected to */
-void o2net_fill_node_map(unsigned long *map, unsigned int bits)
+void o2net_fill_node_map(unsigned long *map, unsigned bytes)
 {
 	struct o2net_sock_container *sc;
 	int node, ret;
 
-	bitmap_zero(map, bits);
+	BUG_ON(bytes < (BITS_TO_LONGS(O2NM_MAX_NODES) * sizeof(unsigned long)));
+
+	memset(map, 0, bytes);
 	for (node = 0; node < O2NM_MAX_NODES; ++node) {
 		if (!o2net_tx_can_proceed(o2net_nn_from_num(node), &sc, &ret))
 			continue;
@@ -1200,6 +1198,7 @@ static int o2net_process_message(struct o2net_sock_container *sc,
 			msglog(hdr, "bad magic\n");
 			ret = -EINVAL;
 			goto out;
+			break;
 	}
 
 	/* find a handler for it */
@@ -1419,7 +1418,7 @@ out:
 	return ret;
 }
 
-/* this work func is triggered by data ready.  it reads until it can read no
+/* this work func is triggerd by data ready.  it reads until it can read no
  * more.  it interprets 0, eof, as fatal.  if data_ready hits while we're doing
  * our work the work struct will be marked and we'll be called again. */
 static void o2net_rx_until_empty(struct work_struct *work)
@@ -1483,13 +1482,12 @@ static void o2net_sc_send_keep_req(struct work_struct *work)
 	sc_put(sc);
 }
 
-/* socket shutdown does a timer_delete_sync against this as it tears down.
+/* socket shutdown does a del_timer_sync against this as it tears down.
  * we can't start this timer until we've got to the point in sc buildup
  * where shutdown is going to be involved */
 static void o2net_idle_timer(struct timer_list *t)
 {
-	struct o2net_sock_container *sc = timer_container_of(sc, t,
-							     sc_idle_timeout);
+	struct o2net_sock_container *sc = from_timer(sc, t, sc_idle_timeout);
 	struct o2net_node *nn = o2net_nn_from_num(sc->sc_node->nd_num);
 #ifdef CONFIG_DEBUG_FS
 	unsigned long msecs = ktime_to_ms(ktime_get()) -
@@ -1609,7 +1607,6 @@ static void o2net_start_connect(struct work_struct *work)
 	sc->sc_sock = sock; /* freed by sc_kref_release */
 
 	sock->sk->sk_allocation = GFP_ATOMIC;
-	sock->sk->sk_use_task_frag = false;
 
 	myaddr.sin_family = AF_INET;
 	myaddr.sin_addr.s_addr = mynode->nd_ipv4_address;
@@ -1785,9 +1782,6 @@ static int o2net_accept_one(struct socket *sock, int *more)
 	struct o2nm_node *node = NULL;
 	struct o2nm_node *local_node = NULL;
 	struct o2net_sock_container *sc = NULL;
-	struct proto_accept_arg arg = {
-		.flags = O_NONBLOCK,
-	};
 	struct o2net_node *nn;
 	unsigned int nofs_flag;
 
@@ -1806,7 +1800,7 @@ static int o2net_accept_one(struct socket *sock, int *more)
 
 	new_sock->type = sock->type;
 	new_sock->ops = sock->ops;
-	ret = sock->ops->accept(sock, new_sock, &arg);
+	ret = sock->ops->accept(sock, new_sock, O_NONBLOCK, false);
 	if (ret < 0)
 		goto out;
 
@@ -1940,8 +1934,6 @@ static void o2net_accept_many(struct work_struct *work)
 static void o2net_listen_data_ready(struct sock *sk)
 {
 	void (*ready)(struct sock *sk);
-
-	trace_sk_data_ready(sk);
 
 	read_lock_bh(&sk->sk_callback_lock);
 	ready = sk->sk_user_data;
@@ -2094,23 +2086,17 @@ void o2net_stop_listening(struct o2nm_node *node)
 
 int o2net_init(void)
 {
-	struct folio *folio;
-	void *p;
 	unsigned long i;
 
 	o2quo_init();
+
 	o2net_debugfs_init();
 
-	folio = folio_alloc(GFP_KERNEL | __GFP_ZERO, 0);
-	if (!folio)
+	o2net_hand = kzalloc(sizeof(struct o2net_handshake), GFP_KERNEL);
+	o2net_keep_req = kzalloc(sizeof(struct o2net_msg), GFP_KERNEL);
+	o2net_keep_resp = kzalloc(sizeof(struct o2net_msg), GFP_KERNEL);
+	if (!o2net_hand || !o2net_keep_req || !o2net_keep_resp)
 		goto out;
-
-	p = folio_address(folio);
-	o2net_hand = p;
-	p += sizeof(struct o2net_handshake);
-	o2net_keep_req = p;
-	p += sizeof(struct o2net_msg);
-	o2net_keep_resp = p;
 
 	o2net_hand->protocol_version = cpu_to_be64(O2NET_PROTOCOL_VERSION);
 	o2net_hand->connector_id = cpu_to_be64(1);
@@ -2137,6 +2123,9 @@ int o2net_init(void)
 	return 0;
 
 out:
+	kfree(o2net_hand);
+	kfree(o2net_keep_req);
+	kfree(o2net_keep_resp);
 	o2net_debugfs_exit();
 	o2quo_exit();
 	return -ENOMEM;
@@ -2145,6 +2134,8 @@ out:
 void o2net_exit(void)
 {
 	o2quo_exit();
+	kfree(o2net_hand);
+	kfree(o2net_keep_req);
+	kfree(o2net_keep_resp);
 	o2net_debugfs_exit();
-	folio_put(virt_to_folio(o2net_hand));
 }

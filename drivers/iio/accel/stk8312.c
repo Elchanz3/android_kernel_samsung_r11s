@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
+/**
  * Sensortek STK8312 3-Axis Accelerometer
  *
  * Copyright (c) 2015, Intel Corporation.
@@ -7,12 +7,12 @@
  * IIO driver for STK8312; 7-bit I2C address: 0x3D.
  */
 
+#include <linux/acpi.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/types.h>
 #include <linux/iio/buffer.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -46,6 +46,7 @@
 #define STK8312_ALL_CHANNEL_SIZE	3
 
 #define STK8312_DRIVER_NAME		"stk8312"
+#define STK8312_IRQ_NAME		"stk8312_event"
 
 /*
  * The accelerometer has two measurement ranges:
@@ -105,7 +106,7 @@ struct stk8312_data {
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		s8 chans[3];
-		aligned_s64 timestamp;
+		s64 timestamp __aligned(8);
 	} scan;
 };
 
@@ -355,7 +356,7 @@ static int stk8312_read_raw(struct iio_dev *indio_dev,
 			mutex_unlock(&data->lock);
 			return ret;
 		}
-		*val = sign_extend32(ret, chan->scan_type.realbits - 1);
+		*val = sign_extend32(ret, 7);
 		ret = stk8312_set_mode(data,
 				       data->mode & (~STK8312_MODE_ACTIVE));
 		mutex_unlock(&data->lock);
@@ -448,7 +449,8 @@ static irqreturn_t stk8312_trigger_handler(int irq, void *p)
 			goto err;
 		}
 	} else {
-		iio_for_each_active_channel(indio_dev, bit) {
+		for_each_set_bit(bit, indio_dev->active_scan_mask,
+				 indio_dev->masklength) {
 			ret = stk8312_read_accel(data, bit);
 			if (ret < 0) {
 				mutex_unlock(&data->lock);
@@ -459,8 +461,8 @@ static irqreturn_t stk8312_trigger_handler(int irq, void *p)
 	}
 	mutex_unlock(&data->lock);
 
-	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
-				    pf->timestamp);
+	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
+					   pf->timestamp);
 err:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -497,15 +499,18 @@ static const struct iio_buffer_setup_ops stk8312_buffer_setup_ops = {
 	.postdisable = stk8312_buffer_postdisable,
 };
 
-static int stk8312_probe(struct i2c_client *client)
+static int stk8312_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	int ret;
 	struct iio_dev *indio_dev;
 	struct stk8312_data *data;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
-	if (!indio_dev)
+	if (!indio_dev) {
+		dev_err(&client->dev, "iio allocation failed!\n");
 		return -ENOMEM;
+	}
 
 	data = iio_priv(indio_dev);
 	data->client = client;
@@ -540,7 +545,7 @@ static int stk8312_probe(struct i2c_client *client)
 						NULL,
 						IRQF_TRIGGER_RISING |
 						IRQF_ONESHOT,
-						"stk8312_event",
+						STK8312_IRQ_NAME,
 						indio_dev);
 		if (ret < 0) {
 			dev_err(&client->dev, "request irq %d failed\n",
@@ -551,12 +556,13 @@ static int stk8312_probe(struct i2c_client *client)
 		data->dready_trig = devm_iio_trigger_alloc(&client->dev,
 							   "%s-dev%d",
 							   indio_dev->name,
-							   iio_device_id(indio_dev));
+							   indio_dev->id);
 		if (!data->dready_trig) {
 			ret = -ENOMEM;
 			goto err_power_off;
 		}
 
+		data->dready_trig->dev.parent = &client->dev;
 		data->dready_trig->ops = &stk8312_trigger_ops;
 		iio_trigger_set_drvdata(data->dready_trig, indio_dev);
 		ret = iio_trigger_register(data->dready_trig);
@@ -593,7 +599,7 @@ err_power_off:
 	return ret;
 }
 
-static void stk8312_remove(struct i2c_client *client)
+static int stk8312_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct stk8312_data *data = iio_priv(indio_dev);
@@ -604,9 +610,10 @@ static void stk8312_remove(struct i2c_client *client)
 	if (data->dready_trig)
 		iio_trigger_unregister(data->dready_trig);
 
-	stk8312_set_mode(data, STK8312_MODE_STANDBY);
+	return stk8312_set_mode(data, STK8312_MODE_STANDBY);
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int stk8312_suspend(struct device *dev)
 {
 	struct stk8312_data *data;
@@ -625,23 +632,33 @@ static int stk8312_resume(struct device *dev)
 	return stk8312_set_mode(data, data->mode | STK8312_MODE_ACTIVE);
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(stk8312_pm_ops, stk8312_suspend,
-				stk8312_resume);
+static SIMPLE_DEV_PM_OPS(stk8312_pm_ops, stk8312_suspend, stk8312_resume);
+
+#define STK8312_PM_OPS (&stk8312_pm_ops)
+#else
+#define STK8312_PM_OPS NULL
+#endif
 
 static const struct i2c_device_id stk8312_i2c_id[] = {
-	/* Deprecated in favour of lowercase form */
-	{ "STK8312" },
-	{ "stk8312" },
-	{ }
+	{"STK8312", 0},
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, stk8312_i2c_id);
+
+static const struct acpi_device_id stk8312_acpi_id[] = {
+	{"STK8312", 0},
+	{}
+};
+
+MODULE_DEVICE_TABLE(acpi, stk8312_acpi_id);
 
 static struct i2c_driver stk8312_driver = {
 	.driver = {
 		.name = STK8312_DRIVER_NAME,
-		.pm = pm_sleep_ptr(&stk8312_pm_ops),
+		.pm = STK8312_PM_OPS,
+		.acpi_match_table = ACPI_PTR(stk8312_acpi_id),
 	},
-	.probe =        stk8312_probe,
+	.probe =            stk8312_probe,
 	.remove =           stk8312_remove,
 	.id_table =         stk8312_i2c_id,
 };

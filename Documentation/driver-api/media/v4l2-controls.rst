@@ -110,7 +110,6 @@ For sub-device drivers:
 
 	v4l2_ctrl_handler_free(&foo->ctrl_handler);
 
-:c:func:`v4l2_ctrl_handler_free` does not touch the handler's ``error`` field.
 
 2) Add controls:
 
@@ -192,8 +191,12 @@ These functions are typically called right after the
 			V4L2_CID_TEST_PATTERN, ARRAY_SIZE(test_pattern) - 1, 0,
 			0, test_pattern);
 	...
-	if (foo->ctrl_handler.error)
-		return v4l2_ctrl_handler_free(&foo->ctrl_handler);
+	if (foo->ctrl_handler.error) {
+		int err = foo->ctrl_handler.error;
+
+		v4l2_ctrl_handler_free(&foo->ctrl_handler);
+		return err;
+	}
 
 The :c:func:`v4l2_ctrl_new_std` function returns the v4l2_ctrl pointer to
 the new control, but if you do not need to access the pointer outside the
@@ -332,7 +335,7 @@ current and new values:
 	union v4l2_ctrl_ptr p_new;
 	union v4l2_ctrl_ptr p_cur;
 
-If the control has a simple s32 type, then:
+If the control has a simple s32 type type, then:
 
 .. code-block:: c
 
@@ -346,7 +349,7 @@ Within the control ops you can freely use these. The val and cur.val speak for
 themselves. The p_char pointers point to character buffers of length
 ctrl->maximum + 1, and are always 0-terminated.
 
-Unless the control is marked volatile the p_cur field points to the
+Unless the control is marked volatile the p_cur field points to the the
 current cached control value. When you create a new control this value is made
 identical to the default value. After calling v4l2_ctrl_handler_setup() this
 value is passed to the hardware. It is generally a good idea to call this

@@ -59,12 +59,14 @@ static int da9055_gpio_get(struct gpio_chip *gc, unsigned offset)
 
 }
 
-static int da9055_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+static void da9055_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
 {
 	struct da9055_gpio *gpio = gpiochip_get_data(gc);
 
-	return da9055_reg_update(gpio->da9055, DA9055_REG_GPIO_MODE0_2,
-				 1 << offset, value << offset);
+	da9055_reg_update(gpio->da9055,
+			DA9055_REG_GPIO_MODE0_2,
+			1 << offset,
+			value << offset);
 }
 
 static int da9055_gpio_direction_input(struct gpio_chip *gc, unsigned offset)
@@ -100,7 +102,9 @@ static int da9055_gpio_direction_output(struct gpio_chip *gc,
 	if (ret < 0)
 		return ret;
 
-	return da9055_gpio_set(gc, offset, value);
+	da9055_gpio_set(gc, offset, value);
+
+	return 0;
 }
 
 static int da9055_gpio_to_irq(struct gpio_chip *gc, u32 offset)
@@ -129,6 +133,7 @@ static int da9055_gpio_probe(struct platform_device *pdev)
 {
 	struct da9055_gpio *gpio;
 	struct da9055_pdata *pdata;
+	int ret;
 
 	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
 	if (!gpio)
@@ -141,7 +146,15 @@ static int da9055_gpio_probe(struct platform_device *pdev)
 	if (pdata && pdata->gpio_base)
 		gpio->gp.base = pdata->gpio_base;
 
-	return devm_gpiochip_add_data(&pdev->dev, &gpio->gp, gpio);
+	ret = devm_gpiochip_add_data(&pdev->dev, &gpio->gp, gpio);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Could not register gpiochip, %d\n", ret);
+		return ret;
+	}
+
+	platform_set_drvdata(pdev, gpio);
+
+	return 0;
 }
 
 static struct platform_driver da9055_gpio_driver = {

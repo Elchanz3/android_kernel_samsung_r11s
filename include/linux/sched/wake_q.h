@@ -38,20 +38,19 @@
 struct wake_q_head {
 	struct wake_q_node *first;
 	struct wake_q_node **lastp;
+	int count;
 };
 
 #define WAKE_Q_TAIL ((struct wake_q_node *) 0x01)
 
-#define WAKE_Q_HEAD_INITIALIZER(name)				\
-	{ WAKE_Q_TAIL, &name.first }
-
-#define DEFINE_WAKE_Q(name)					\
-	struct wake_q_head name = WAKE_Q_HEAD_INITIALIZER(name)
+#define DEFINE_WAKE_Q(name)				\
+	struct wake_q_head name = { WAKE_Q_TAIL, &name.first }
 
 static inline void wake_q_init(struct wake_q_head *head)
 {
 	head->first = WAKE_Q_TAIL;
 	head->lastp = &head->first;
+	head->count = 0;
 }
 
 static inline bool wake_q_empty(struct wake_q_head *head)
@@ -63,38 +62,4 @@ extern void wake_q_add(struct wake_q_head *head, struct task_struct *task);
 extern void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task);
 extern void wake_up_q(struct wake_q_head *head);
 
-/* Spin unlock helpers to unlock and call wake_up_q with preempt disabled */
-static inline
-void raw_spin_unlock_wake(raw_spinlock_t *lock, struct wake_q_head *wake_q)
-{
-	guard(preempt)();
-	raw_spin_unlock(lock);
-	if (wake_q) {
-		wake_up_q(wake_q);
-		wake_q_init(wake_q);
-	}
-}
-
-static inline
-void raw_spin_unlock_irq_wake(raw_spinlock_t *lock, struct wake_q_head *wake_q)
-{
-	guard(preempt)();
-	raw_spin_unlock_irq(lock);
-	if (wake_q) {
-		wake_up_q(wake_q);
-		wake_q_init(wake_q);
-	}
-}
-
-static inline
-void raw_spin_unlock_irqrestore_wake(raw_spinlock_t *lock, unsigned long flags,
-				     struct wake_q_head *wake_q)
-{
-	guard(preempt)();
-	raw_spin_unlock_irqrestore(lock, flags);
-	if (wake_q) {
-		wake_up_q(wake_q);
-		wake_q_init(wake_q);
-	}
-}
 #endif /* _LINUX_SCHED_WAKE_Q_H */

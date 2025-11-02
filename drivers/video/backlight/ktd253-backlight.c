@@ -7,6 +7,7 @@
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/fb.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -171,13 +172,22 @@ static int ktd253_backlight_probe(struct platform_device *pdev)
 		brightness = max_brightness;
 	}
 
-	ktd253->gpiod = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
-	if (IS_ERR(ktd253->gpiod))
-		return dev_err_probe(dev, PTR_ERR(ktd253->gpiod),
-				     "gpio line missing or invalid.\n");
+	if (brightness)
+		/* This will be the default ratio when the KTD253 is enabled */
+		ktd253->ratio = KTD253_MAX_RATIO;
+	else
+		ktd253->ratio = 0;
+
+	ktd253->gpiod = devm_gpiod_get(dev, "enable",
+				       brightness ? GPIOD_OUT_HIGH :
+				       GPIOD_OUT_LOW);
+	if (IS_ERR(ktd253->gpiod)) {
+		ret = PTR_ERR(ktd253->gpiod);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "gpio line missing or invalid.\n");
+		return ret;
+	}
 	gpiod_set_consumer_name(ktd253->gpiod, dev_name(dev));
-	/* Bring backlight to a known off state */
-	msleep(KTD253_T_OFF_MS);
 
 	bl = devm_backlight_device_register(dev, dev_name(dev), dev, ktd253,
 					    &ktd253_backlight_ops, NULL);
@@ -189,10 +199,10 @@ static int ktd253_backlight_probe(struct platform_device *pdev)
 	/* When we just enable the GPIO line we set max brightness */
 	if (brightness) {
 		bl->props.brightness = brightness;
-		bl->props.power = BACKLIGHT_POWER_ON;
+		bl->props.power = FB_BLANK_UNBLANK;
 	} else {
 		bl->props.brightness = 0;
-		bl->props.power = BACKLIGHT_POWER_OFF;
+		bl->props.power = FB_BLANK_POWERDOWN;
 	}
 
 	ktd253->bl = bl;
@@ -204,7 +214,6 @@ static int ktd253_backlight_probe(struct platform_device *pdev)
 
 static const struct of_device_id ktd253_backlight_of_match[] = {
 	{ .compatible = "kinetic,ktd253" },
-	{ .compatible = "kinetic,ktd259" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, ktd253_backlight_of_match);

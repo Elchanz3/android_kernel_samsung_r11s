@@ -203,7 +203,7 @@ struct w83781d_data {
 	int isa_addr;
 
 	struct mutex update_lock;
-	bool valid;		/* true if following fields are valid */
+	char valid;		/* !=0 if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 
 	struct i2c_client *lm75[2];	/* for secondary I2C addresses */
@@ -1171,7 +1171,7 @@ w83781d_detect(struct i2c_client *client, struct i2c_board_info *info)
 	if (isa)
 		mutex_unlock(&isa->update_lock);
 
-	strscpy(info->type, client_name, I2C_NAME_SIZE);
+	strlcpy(info->type, client_name, I2C_NAME_SIZE);
 
 	return 0;
 
@@ -1192,6 +1192,8 @@ static void w83781d_remove_files(struct device *dev)
 	sysfs_remove_group(&dev->kobj, &w83781d_group_other);
 }
 
+static const struct i2c_device_id w83781d_ids[];
+
 static int w83781d_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -1206,7 +1208,7 @@ static int w83781d_probe(struct i2c_client *client)
 	mutex_init(&data->lock);
 	mutex_init(&data->update_lock);
 
-	data->type = (uintptr_t)i2c_get_match_data(client);
+	data->type = i2c_match_id(w83781d_ids, client)->driver_data;
 	data->client = client;
 
 	/* attach secondary i2c lm75-like clients */
@@ -1237,7 +1239,7 @@ static int w83781d_probe(struct i2c_client *client)
 	return err;
 }
 
-static void
+static int
 w83781d_remove(struct i2c_client *client)
 {
 	struct w83781d_data *data = i2c_get_clientdata(client);
@@ -1248,6 +1250,8 @@ w83781d_remove(struct i2c_client *client)
 
 	i2c_unregister_device(data->lm75[0]);
 	i2c_unregister_device(data->lm75[1]);
+
+	return 0;
 }
 
 static int
@@ -1550,7 +1554,7 @@ static struct w83781d_data *w83781d_update_device(struct device *dev)
 					       W83781D_REG_BEEP_INTS3) << 16;
 		}
 		data->last_updated = jiffies;
-		data->valid = true;
+		data->valid = 1;
 	}
 
 	mutex_unlock(&data->update_lock);
@@ -1567,23 +1571,12 @@ static const struct i2c_device_id w83781d_ids[] = {
 };
 MODULE_DEVICE_TABLE(i2c, w83781d_ids);
 
-static const struct of_device_id w83781d_of_match[] = {
-	{ .compatible = "winbond,w83781d" },
-	{ .compatible = "winbond,w83781g" },
-	{ .compatible = "winbond,w83782d" },
-	{ .compatible = "winbond,w83783s" },
-	{ .compatible = "asus,as99127f" },
-	{ },
-};
-MODULE_DEVICE_TABLE(of, w83781d_of_match);
-
 static struct i2c_driver w83781d_driver = {
 	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name = "w83781d",
-		.of_match_table = w83781d_of_match,
 	},
-	.probe		= w83781d_probe,
+	.probe_new	= w83781d_probe,
 	.remove		= w83781d_remove,
 	.id_table	= w83781d_ids,
 	.detect		= w83781d_detect,
@@ -1814,13 +1807,16 @@ w83781d_isa_probe(struct platform_device *pdev)
 	return err;
 }
 
-static void w83781d_isa_remove(struct platform_device *pdev)
+static int
+w83781d_isa_remove(struct platform_device *pdev)
 {
 	struct w83781d_data *data = platform_get_drvdata(pdev);
 
 	hwmon_device_unregister(data->hwmon_dev);
 	w83781d_remove_files(&pdev->dev);
 	device_remove_file(&pdev->dev, &dev_attr_name);
+
+	return 0;
 }
 
 static struct platform_driver w83781d_isa_driver = {

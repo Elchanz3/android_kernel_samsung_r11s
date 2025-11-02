@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
+/**
  * Aosong AM2315 relative humidity and temperature
  *
  * Copyright (c) 2016, Intel Corporation.
@@ -7,6 +7,7 @@
  * 7-bit I2C address: 0x5C.
  */
 
+#include <linux/acpi.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
@@ -35,7 +36,7 @@ struct am2315_data {
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		s16 chans[2];
-		aligned_s64 timestamp;
+		s64 timestamp __aligned(8);
 	} scan;
 };
 
@@ -174,7 +175,8 @@ static irqreturn_t am2315_trigger_handler(int irq, void *p)
 		data->scan.chans[1] = sensor_data.temp_data;
 	} else {
 		i = 0;
-		iio_for_each_active_channel(indio_dev, bit) {
+		for_each_set_bit(bit, indio_dev->active_scan_mask,
+				 indio_dev->masklength) {
 			data->scan.chans[i] = (bit ? sensor_data.temp_data :
 					       sensor_data.hum_data);
 			i++;
@@ -217,15 +219,18 @@ static const struct iio_info am2315_info = {
 	.read_raw		= am2315_read_raw,
 };
 
-static int am2315_probe(struct i2c_client *client)
+static int am2315_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	int ret;
 	struct iio_dev *indio_dev;
 	struct am2315_data *data;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
-	if (!indio_dev)
+	if (!indio_dev) {
+		dev_err(&client->dev, "iio allocation failed!\n");
 		return -ENOMEM;
+	}
 
 	data = iio_priv(indio_dev);
 	data->client = client;
@@ -250,16 +255,24 @@ static int am2315_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id am2315_i2c_id[] = {
-	{ "am2315" },
-	{ }
+	{"am2315", 0},
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, am2315_i2c_id);
+
+static const struct acpi_device_id am2315_acpi_id[] = {
+	{"AOS2315", 0},
+	{}
+};
+
+MODULE_DEVICE_TABLE(acpi, am2315_acpi_id);
 
 static struct i2c_driver am2315_driver = {
 	.driver = {
 		.name = "am2315",
+		.acpi_match_table = ACPI_PTR(am2315_acpi_id),
 	},
-	.probe =        am2315_probe,
+	.probe =            am2315_probe,
 	.id_table =         am2315_i2c_id,
 };
 

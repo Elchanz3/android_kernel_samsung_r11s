@@ -105,7 +105,7 @@
 #define __old_sigaction32	sigaction32
 #endif
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 typedef unsigned long __old_sigset_t;            /* at least 32 bits */
 
@@ -151,7 +151,6 @@ struct sigstack {
 
 
 #include <asm-generic/signal-defs.h>
-#include <asm/posix_types.h>
 
 #ifndef __KERNEL__
 struct __new_sigaction {
@@ -172,10 +171,10 @@ struct __old_sigaction {
 typedef struct sigaltstack {
 	void			__user *ss_sp;
 	int			ss_flags;
-	__kernel_size_t		ss_size;
+	size_t			ss_size;
 } stack_t;
 
 
-#endif /* !(__ASSEMBLER__) */
+#endif /* !(__ASSEMBLY__) */
 
 #endif /* _UAPI__SPARC_SIGNAL_H */

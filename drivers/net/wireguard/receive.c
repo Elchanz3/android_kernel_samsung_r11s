@@ -19,8 +19,15 @@
 /* Must be called with bh disabled. */
 static void update_rx_stats(struct wg_peer *peer, size_t len)
 {
-	dev_sw_netstats_rx_add(peer->device->dev, len);
+	struct pcpu_sw_netstats *tstats =
+		get_cpu_ptr(peer->device->dev->tstats);
+
+	u64_stats_update_begin(&tstats->syncp);
+	++tstats->rx_packets;
+	tstats->rx_bytes += len;
 	peer->rx_bytes += len;
+	u64_stats_update_end(&tstats->syncp);
+	put_cpu_ptr(tstats);
 }
 
 #define SKB_TYPE_LE32(skb) (((struct message_header *)(skb)->data)->type)
@@ -263,7 +270,7 @@ static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	 * call skb_cow_data, so that there's no chance that data is removed
 	 * from the skb, so that later we can extract the original endpoint.
 	 */
-	offset = -skb_network_offset(skb);
+	offset = skb->data - skb_network_header(skb);
 	skb_push(skb, offset);
 	num_frags = skb_cow_data(skb, 0, &trailer);
 	offset += sizeof(struct message_data);
@@ -416,20 +423,20 @@ dishonest_packet_peer:
 	net_dbg_skb_ratelimited("%s: Packet has unallowed src IP (%pISc) from peer %llu (%pISpfsc)\n",
 				dev->name, skb, peer->internal_id,
 				&peer->endpoint.addr);
-	DEV_STATS_INC(dev, rx_errors);
-	DEV_STATS_INC(dev, rx_frame_errors);
+	++dev->stats.rx_errors;
+	++dev->stats.rx_frame_errors;
 	goto packet_processed;
 dishonest_packet_type:
 	net_dbg_ratelimited("%s: Packet is neither ipv4 nor ipv6 from peer %llu (%pISpfsc)\n",
 			    dev->name, peer->internal_id, &peer->endpoint.addr);
-	DEV_STATS_INC(dev, rx_errors);
-	DEV_STATS_INC(dev, rx_frame_errors);
+	++dev->stats.rx_errors;
+	++dev->stats.rx_frame_errors;
 	goto packet_processed;
 dishonest_packet_size:
 	net_dbg_ratelimited("%s: Packet has incorrect size from peer %llu (%pISpfsc)\n",
 			    dev->name, peer->internal_id, &peer->endpoint.addr);
-	DEV_STATS_INC(dev, rx_errors);
-	DEV_STATS_INC(dev, rx_length_errors);
+	++dev->stats.rx_errors;
+	++dev->stats.rx_length_errors;
 	goto packet_processed;
 packet_processed:
 	dev_kfree_skb(skb);

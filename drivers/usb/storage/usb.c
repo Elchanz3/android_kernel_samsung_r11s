@@ -47,7 +47,6 @@
 #include <scsi/scsi_device.h>
 
 #include "usb.h"
-#include <linux/usb/hcd.h>
 #include "scsiglue.h"
 #include "transport.h"
 #include "protocol.h"
@@ -68,102 +67,9 @@ MODULE_AUTHOR("Matthew Dharm <mdharm-usb@one-eyed-alien.net>");
 MODULE_DESCRIPTION("USB Mass Storage driver for Linux");
 MODULE_LICENSE("GPL");
 
-static unsigned int delay_use = 1 * MSEC_PER_SEC;
-
-/**
- * parse_delay_str - parse an unsigned decimal integer delay
- * @str: String to parse.
- * @ndecimals: Number of decimal to scale up.
- * @suffix: Suffix string to parse.
- * @val: Where to store the parsed value.
- *
- * Parse an unsigned decimal value in @str, optionally end with @suffix.
- * Stores the parsed value in @val just as it is if @str ends with @suffix.
- * Otherwise store the value scale up by 10^(@ndecimal).
- *
- * Returns 0 on success, a negative error code otherwise.
- */
-static int parse_delay_str(const char *str, int ndecimals, const char *suffix,
-			unsigned int *val)
-{
-	int n, n2, l;
-	char buf[16];
-
-	l = strlen(suffix);
-	n = strlen(str);
-	if (n > 0 && str[n - 1] == '\n')
-		--n;
-	if (n >= l && !strncmp(&str[n - l], suffix, l)) {
-		n -= l;
-		n2 = 0;
-	} else
-		n2 = ndecimals;
-
-	if (n + n2 > sizeof(buf) - 1)
-		return -EINVAL;
-
-	memcpy(buf, str, n);
-	while (n2-- > 0)
-		buf[n++] = '0';
-	buf[n] = 0;
-
-	return kstrtouint(buf, 10, val);
-}
-
-/**
- * format_delay_ms - format an integer value into a delay string
- * @val: The integer value to format, scaled by 10^(@ndecimals).
- * @ndecimals: Number of decimal to scale down.
- * @suffix: Suffix string to format.
- * @str: Where to store the formatted string.
- * @size: The size of buffer for @str.
- *
- * Format an integer value in @val scale down by 10^(@ndecimals) without @suffix
- * if @val is divisible by 10^(@ndecimals).
- * Otherwise format a value in @val just as it is with @suffix
- *
- * Returns the number of characters written into @str.
- */
-static int format_delay_ms(unsigned int val, int ndecimals, const char *suffix,
-			char *str, int size)
-{
-	u64 delay_ms = val;
-	unsigned int rem = do_div(delay_ms, int_pow(10, ndecimals));
-	int ret;
-
-	if (rem)
-		ret = scnprintf(str, size, "%u%s\n", val, suffix);
-	else
-		ret = scnprintf(str, size, "%u\n", (unsigned int)delay_ms);
-	return ret;
-}
-
-static int delay_use_set(const char *s, const struct kernel_param *kp)
-{
-	unsigned int delay_ms;
-	int ret;
-
-	ret = parse_delay_str(skip_spaces(s), 3, "ms", &delay_ms);
-	if (ret < 0)
-		return ret;
-
-	*((unsigned int *)kp->arg) = delay_ms;
-	return 0;
-}
-
-static int delay_use_get(char *s, const struct kernel_param *kp)
-{
-	unsigned int delay_ms = *((unsigned int *)kp->arg);
-
-	return format_delay_ms(delay_ms, 3, "ms", s, PAGE_SIZE);
-}
-
-static const struct kernel_param_ops delay_use_ops = {
-	.set = delay_use_set,
-	.get = delay_use_get,
-};
-module_param_cb(delay_use, &delay_use_ops, &delay_use, 0644);
-MODULE_PARM_DESC(delay_use, "time to delay before using a new device");
+static unsigned int delay_use = 1;
+module_param(delay_use, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(delay_use, "seconds to delay before using a new device");
 
 static char quirks[128];
 module_param_string(quirks, quirks, sizeof(quirks), S_IRUGO | S_IWUSR);
@@ -204,6 +110,17 @@ MODULE_PARM_DESC(quirks, "supplemental list of device IDs and their quirks");
 	.useTransport = use_transport,	\
 }
 
+#define UNUSUAL_VENDOR_INTF(idVendor, cl, sc, pr, \
+		vendor_name, product_name, use_protocol, use_transport, \
+		init_function, Flags) \
+{ \
+	.vendorName = vendor_name,	\
+	.productName = product_name,	\
+	.useProtocol = use_protocol,	\
+	.useTransport = use_transport,	\
+	.initFunction = init_function,	\
+}
+
 static const struct us_unusual_dev us_unusual_dev_list[] = {
 #	include "unusual_devs.h"
 	{ }		/* Terminating entry */
@@ -215,6 +132,7 @@ static const struct us_unusual_dev for_dynamic_ids =
 #undef UNUSUAL_DEV
 #undef COMPLIANT_DEV
 #undef USUAL_DEV
+#undef UNUSUAL_VENDOR_INTF
 
 #ifdef CONFIG_LOCKDEP
 
@@ -306,16 +224,113 @@ EXPORT_SYMBOL_GPL(usb_stor_reset_resume);
 
 int usb_stor_pre_reset(struct usb_interface *iface)
 {
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+	struct us_data *us;
+	unsigned long jiffies_expire = jiffies + HZ;
+	int mu_lock = 1;
+
+	pr_info("%s +\n", __func__);
+
+	us = usb_get_intfdata(iface);
+
+	/* Make sure no command runs during the reset */
+	while (!mutex_trylock(&us->dev_mutex)) {
+
+		/* If we can't acquire the lock after waiting one second,
+		 * we're probably deadlocked */
+		if (time_after(jiffies, jiffies_expire))
+			goto busy;
+
+		msleep(15);
+		if (us->pusb_dev->state == USB_STATE_NOTATTACHED) {
+			mu_lock = 0;
+			goto skip;
+		}
+		if (us->pusb_dev->state == USB_STATE_SUSPENDED) {
+			mu_lock = 0;
+			goto skip;
+		}
+		if (iface->condition == USB_INTERFACE_UNBINDING ||
+				iface->condition == USB_INTERFACE_UNBOUND) {
+			mu_lock = 0;
+			goto skip;
+		}
+	}
+	
+	goto skip;
+	
+busy:
+	pr_info("%s busy\n", __func__);
+	set_bit(US_FLIDX_ABORTING, &us->dflags);
+	usb_stor_stop_transport(us);
+	/* wait 6 seconds. usb unlink may be spend 5 sec. */
+	jiffies_expire = jiffies + 6*HZ;
+	pr_info("%s try lock again\n", __func__);
+	while (!mutex_trylock(&us->dev_mutex)) {
+
+		/* If we can't acquire the lock after waiting one second,
+		 * we're probably deadlocked */
+		if (time_after(jiffies, jiffies_expire)) {
+			mu_lock = 0;
+			goto skip;
+		}
+
+		msleep(15);
+		if (us->pusb_dev->state == USB_STATE_NOTATTACHED) {
+			mu_lock = 0;
+			goto skip;
+		}
+		if (us->pusb_dev->state == USB_STATE_SUSPENDED) {
+			mu_lock = 0;
+			goto skip;
+		}
+		if (iface->condition == USB_INTERFACE_UNBINDING ||
+				iface->condition == USB_INTERFACE_UNBOUND) {
+			mu_lock = 0;
+			goto skip;
+		}
+	}
+skip:
+	set_bit(US_FLIDX_RESETTING, &us->dflags);
+	if (mu_lock)
+		set_bit(US_FLIDX_MUTEX_LOCK, &us->dflags);
+	
+	pr_info("%s -\n", __func__);
+	return 0;
+#else
 	struct us_data *us = usb_get_intfdata(iface);
 
 	/* Make sure no command runs during the reset */
 	mutex_lock(&us->dev_mutex);
 	return 0;
+#endif
 }
 EXPORT_SYMBOL_GPL(usb_stor_pre_reset);
 
 int usb_stor_post_reset(struct usb_interface *iface)
 {
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+	struct us_data *us = usb_get_intfdata(iface);
+
+	pr_info("%s +\n", __func__);
+	/* Report the reset to the SCSI core */
+	usb_stor_report_bus_reset(us);
+
+	/*
+	 * If any of the subdrivers implemented a reinitialization scheme,
+	 * this is where the callback would be invoked.
+	 */
+
+	clear_bit(US_FLIDX_RESETTING, &us->dflags);
+	clear_bit(US_FLIDX_ABORTING, &us->dflags);
+	if (test_bit(US_FLIDX_MUTEX_LOCK, &us->dflags)) {
+		mutex_unlock(&us->dev_mutex);
+		clear_bit(US_FLIDX_MUTEX_LOCK, &us->dflags);
+		pr_info("%s mutex_unlock\n", __func__);
+	}
+	pr_info("%s -\n", __func__);
+	return 0;
+#else
 	struct us_data *us = usb_get_intfdata(iface);
 
 	/* Report the reset to the SCSI core */
@@ -328,6 +343,7 @@ int usb_stor_post_reset(struct usb_interface *iface)
 
 	mutex_unlock(&us->dev_mutex);
 	return 0;
+#endif
 }
 EXPORT_SYMBOL_GPL(usb_stor_post_reset);
 
@@ -470,7 +486,7 @@ static int usb_stor_control_thread(void * __us)
 		if (srb->result == DID_ABORT << 16) {
 SkipForAbort:
 			usb_stor_dbg(us, "scsi command aborted\n");
-			srb = NULL;	/* Don't call scsi_done() */
+			srb = NULL;	/* Don't call srb->scsi_done() */
 		}
 
 		/*
@@ -486,6 +502,10 @@ SkipForAbort:
 			/* Allow USB transfers to resume */
 			clear_bit(US_FLIDX_ABORTING, &us->dflags);
 			clear_bit(US_FLIDX_TIMED_OUT, &us->dflags);
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+			printk(KERN_ERR "usb_storage: %s clear TIMED_OUT\n",
+				__func__);
+#endif
 		}
 
 		/* finished working on this command */
@@ -499,7 +519,7 @@ SkipForAbort:
 		if (srb) {
 			usb_stor_dbg(us, "scsi cmd done, result=0x%x\n",
 					srb->result);
-			scsi_done_direct(srb);
+			srb->scsi_done(srb);
 		}
 	} /* for (;;) */
 
@@ -554,13 +574,13 @@ static int associate_dev(struct us_data *us, struct usb_interface *intf)
 #define TOLOWER(x) ((x) | 0x20)
 
 /* Adjust device flags based on the "quirks=" module parameter */
-void usb_stor_adjust_quirks(struct usb_device *udev, u64 *fflags)
+void usb_stor_adjust_quirks(struct usb_device *udev, unsigned long *fflags)
 {
 	char *p;
 	u16 vid = le16_to_cpu(udev->descriptor.idVendor);
 	u16 pid = le16_to_cpu(udev->descriptor.idProduct);
-	u64 f = 0;
-	u64 mask = (US_FL_SANE_SENSE | US_FL_BAD_SENSE |
+	unsigned f = 0;
+	unsigned int mask = (US_FL_SANE_SENSE | US_FL_BAD_SENSE |
 			US_FL_FIX_CAPACITY | US_FL_IGNORE_UAS |
 			US_FL_CAPACITY_HEURISTICS | US_FL_IGNORE_DEVICE |
 			US_FL_NOT_LOCKABLE | US_FL_MAX_SECTORS_64 |
@@ -699,7 +719,7 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id,
 		us->fflags &= ~US_FL_GO_SLOW;
 
 	if (us->fflags)
-		dev_info(pdev, "Quirks match for vid %04x pid %04x: %llx\n",
+		dev_info(pdev, "Quirks match for vid %04x pid %04x: %lx\n",
 				le16_to_cpu(dev->descriptor.idVendor),
 				le16_to_cpu(dev->descriptor.idProduct),
 				us->fflags);
@@ -1019,7 +1039,7 @@ int usb_stor_probe1(struct us_data **pus,
 		struct usb_interface *intf,
 		const struct usb_device_id *id,
 		const struct us_unusual_dev *unusual_dev,
-		const struct scsi_host_template *sht)
+		struct scsi_host_template *sht)
 {
 	struct Scsi_Host *host;
 	struct us_data *us;
@@ -1055,22 +1075,6 @@ int usb_stor_probe1(struct us_data **pus,
 	if (result)
 		goto BadDevice;
 
-	/*
-	 * Some USB host controllers can't do DMA: They have to use PIO, or they
-	 * have to use a small dedicated local memory area, or they have other
-	 * restrictions on addressable memory.
-	 *
-	 * We can't support these controllers on highmem systems as we don't
-	 * kmap or bounce buffer.
-	 */
-	if (IS_ENABLED(CONFIG_HIGHMEM) &&
-	    (!hcd_uses_dma(bus_to_hcd(us->pusb_dev->bus)) ||
-	     bus_to_hcd(us->pusb_dev->bus)->localmem_pool)) {
-		dev_warn(&intf->dev, "USB Mass Storage not supported on this host controller\n");
-		result = -EINVAL;
-		goto release;
-	}
-
 	/* Get the unusual_devs entries and the descriptors */
 	result = get_device_info(us, id, unusual_dev);
 	if (result)
@@ -1088,7 +1092,6 @@ int usb_stor_probe1(struct us_data **pus,
 
 BadDevice:
 	usb_stor_dbg(us, "storage_probe() failed\n");
-release:
 	release_everything(us);
 	return result;
 }
@@ -1165,7 +1168,7 @@ int usb_stor_probe2(struct us_data *us)
 	if (delay_use > 0)
 		dev_dbg(dev, "waiting for device to settle before scanning\n");
 	queue_delayed_work(system_freezable_wq, &us->scan_dwork,
-			msecs_to_jiffies(delay_use));
+			delay_use * HZ);
 	return 0;
 
 	/* We come here if there are any problems */
@@ -1183,8 +1186,17 @@ void usb_stor_disconnect(struct usb_interface *intf)
 {
 	struct us_data *us = usb_get_intfdata(intf);
 
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	pr_info("%s enter\n", __func__);
+#endif
 	quiesce_and_remove_host(us);
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	pr_info("%s doing\n", __func__);
+#endif
 	release_everything(us);
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	pr_info("%s exit\n", __func__);
+#endif
 }
 EXPORT_SYMBOL_GPL(usb_stor_disconnect);
 

@@ -46,8 +46,6 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 
-#include "helpers.h"
-
 /* Pull in AR_xyz defines. */
 typedef unsigned int u32;
 typedef unsigned short u16;
@@ -138,6 +136,31 @@ static unsigned short GDT3(int idx)
 static unsigned short LDT3(int idx)
 {
 	return (idx << 3) | 7;
+}
+
+/* Our sigaltstack scratch space. */
+static char altstack_data[SIGSTKSZ];
+
+static void sethandler(int sig, void (*handler)(int, siginfo_t *, void *),
+		       int flags)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = handler;
+	sa.sa_flags = SA_SIGINFO | flags;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(sig, &sa, 0))
+		err(1, "sigaction");
+}
+
+static void clearhandler(int sig)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(sig, &sa, 0))
+		err(1, "sigaction");
 }
 
 static void add_ldt(const struct user_desc *desc, unsigned short *var,
@@ -467,7 +490,7 @@ static void sigtrap(int sig, siginfo_t *info, void *ctx_void)
 	greg_t asm_ss = ctx->uc_mcontext.gregs[REG_CX];
 	if (asm_ss != sig_ss && sig == SIGTRAP) {
 		/* Sanity check failure. */
-		printf("[FAIL]\tSIGTRAP: ss = %hx, frame ss = %x, ax = %llx\n",
+		printf("[FAIL]\tSIGTRAP: ss = %hx, frame ss = %hx, ax = %llx\n",
 		       ss, *ssptr(ctx), (unsigned long long)asm_ss);
 		nerrs++;
 	}
@@ -748,8 +771,7 @@ int main()
 	setup_ldt();
 
 	stack_t stack = {
-		/* Our sigaltstack scratch space. */
-		.ss_sp = malloc(sizeof(char) * SIGSTKSZ),
+		.ss_sp = altstack_data,
 		.ss_size = SIGSTKSZ,
 	};
 	if (sigaltstack(&stack, NULL) != 0)
@@ -850,6 +872,5 @@ int main()
 	total_nerrs += test_nonstrict_ss();
 #endif
 
-	free(stack.ss_sp);
 	return total_nerrs ? 1 : 0;
 }

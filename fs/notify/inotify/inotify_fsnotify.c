@@ -10,7 +10,7 @@
  * Copyright 2006 Hewlett-Packard Development Company, L.P.
  *
  * Copyright (C) 2009 Eric Paris <Red Hat Inc>
- * inotify was largely rewritten to make use of the fsnotify infrastructure
+ * inotify was largely rewriten to make use of the fsnotify infrastructure
  */
 
 #include <linux/dcache.h> /* d_unlinked */
@@ -46,10 +46,9 @@ static bool event_compare(struct fsnotify_event *old_fsn,
 	return false;
 }
 
-static int inotify_merge(struct fsnotify_group *group,
-			 struct fsnotify_event *event)
+static int inotify_merge(struct list_head *list,
+			  struct fsnotify_event *event)
 {
-	struct list_head *list = &group->notification_list;
 	struct fsnotify_event *last_event;
 
 	last_event = list_entry(list->prev, struct fsnotify_event, list);
@@ -115,13 +114,13 @@ int inotify_handle_inode_event(struct fsnotify_mark *inode_mark, u32 mask,
 		mask &= ~IN_ISDIR;
 
 	fsn_event = &event->fse;
-	fsnotify_init_event(fsn_event);
+	fsnotify_init_event(fsn_event, 0);
 	event->mask = mask;
 	event->wd = wd;
 	event->sync_cookie = cookie;
 	event->name_len = len;
 	if (len)
-		strscpy(event->name, name->name, event->name_len + 1);
+		strcpy(event->name, name->name);
 
 	ret = fsnotify_add_event(group, fsn_event, inotify_merge);
 	if (ret) {
@@ -129,7 +128,7 @@ int inotify_handle_inode_event(struct fsnotify_mark *inode_mark, u32 mask,
 		fsnotify_destroy_event(group, fsn_event);
 	}
 
-	if (inode_mark->flags & FSNOTIFY_MARK_FLAG_IN_ONESHOT)
+	if (inode_mark->mask & IN_ONESHOT)
 		fsnotify_destroy_mark(inode_mark, group);
 
 	return 0;
@@ -184,8 +183,7 @@ static void inotify_free_group_priv(struct fsnotify_group *group)
 		dec_inotify_instances(group->inotify_data.ucounts);
 }
 
-static void inotify_free_event(struct fsnotify_group *group,
-			       struct fsnotify_event *fsn_event)
+static void inotify_free_event(struct fsnotify_event *fsn_event)
 {
 	kfree(INOTIFY_E(fsn_event));
 }

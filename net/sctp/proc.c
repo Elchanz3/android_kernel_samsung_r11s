@@ -52,21 +52,21 @@ static const struct snmp_mib sctp_snmp_list[] = {
 	SNMP_MIB_ITEM("SctpInPktBacklog", SCTP_MIB_IN_PKT_BACKLOG),
 	SNMP_MIB_ITEM("SctpInPktDiscards", SCTP_MIB_IN_PKT_DISCARDS),
 	SNMP_MIB_ITEM("SctpInDataChunkDiscards", SCTP_MIB_IN_DATA_CHUNK_DISCARDS),
+	SNMP_MIB_SENTINEL
 };
 
 /* Display sctp snmp mib statistics(/proc/net/sctp/snmp). */
 static int sctp_snmp_seq_show(struct seq_file *seq, void *v)
 {
-	unsigned long buff[ARRAY_SIZE(sctp_snmp_list)];
-	const int cnt = ARRAY_SIZE(sctp_snmp_list);
+	unsigned long buff[SCTP_MIB_MAX];
 	struct net *net = seq->private;
 	int i;
 
-	memset(buff, 0, sizeof(buff));
+	memset(buff, 0, sizeof(unsigned long) * SCTP_MIB_MAX);
 
-	snmp_get_cpu_field_batch_cnt(buff, sctp_snmp_list, cnt,
-				     net->sctp.sctp_statistics);
-	for (i = 0; i < cnt; i++)
+	snmp_get_cpu_field_batch(buff, sctp_snmp_list,
+				 net->sctp.sctp_statistics);
+	for (i = 0; sctp_snmp_list[i].name; i++)
 		seq_printf(seq, "%-32s\t%ld\n", sctp_snmp_list[i].name,
 						buff[i]);
 
@@ -161,6 +161,7 @@ static void *sctp_eps_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 static int sctp_eps_seq_show(struct seq_file *seq, void *v)
 {
 	struct sctp_hashbucket *head;
+	struct sctp_ep_common *epb;
 	struct sctp_endpoint *ep;
 	struct sock *sk;
 	int    hash = *(loff_t *)v;
@@ -170,17 +171,18 @@ static int sctp_eps_seq_show(struct seq_file *seq, void *v)
 
 	head = &sctp_ep_hashtable[hash];
 	read_lock_bh(&head->lock);
-	sctp_for_each_hentry(ep, &head->chain) {
-		sk = ep->base.sk;
+	sctp_for_each_hentry(epb, &head->chain) {
+		ep = sctp_ep(epb);
+		sk = epb->sk;
 		if (!net_eq(sock_net(sk), seq_file_net(seq)))
 			continue;
 		seq_printf(seq, "%8pK %8pK %-3d %-3d %-4d %-5d %5u %5lu ", ep, sk,
 			   sctp_sk(sk)->type, sk->sk_state, hash,
-			   ep->base.bind_addr.port,
-			   from_kuid_munged(seq_user_ns(seq), sk_uid(sk)),
+			   epb->bind_addr.port,
+			   from_kuid_munged(seq_user_ns(seq), sock_i_uid(sk)),
 			   sock_i_ino(sk));
 
-		sctp_seq_dump_local_addrs(seq, &ep->base);
+		sctp_seq_dump_local_addrs(seq, epb);
 		seq_printf(seq, "\n");
 	}
 	read_unlock_bh(&head->lock);
@@ -267,7 +269,7 @@ static int sctp_assocs_seq_show(struct seq_file *seq, void *v)
 		   assoc->assoc_id,
 		   assoc->sndbuf_used,
 		   atomic_read(&assoc->rmem_alloc),
-		   from_kuid_munged(seq_user_ns(seq), sk_uid(sk)),
+		   from_kuid_munged(seq_user_ns(seq), sock_i_uid(sk)),
 		   sock_i_ino(sk),
 		   epb->bind_addr.port,
 		   assoc->peer.port);

@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/rculist.h>
+#include <net/p8022.h>
 #include <net/arp.h>
 #include <linux/rtnetlink.h>
 #include <linux/notifier.h>
@@ -66,12 +67,9 @@ static int vlan_group_prealloc_vid(struct vlan_group *vg,
 		return 0;
 
 	size = sizeof(struct net_device *) * VLAN_GROUP_ARRAY_PART_LEN;
-	array = kzalloc(size, GFP_KERNEL_ACCOUNT);
+	array = kzalloc(size, GFP_KERNEL);
 	if (array == NULL)
 		return -ENOBUFS;
-
-	/* paired with smp_rmb() in __vlan_group_get_device() */
-	smp_wmb();
 
 	vg->vlan_devices_arrays[pidx][vidx] = array;
 	return 0;
@@ -130,8 +128,7 @@ int vlan_check_real_dev(struct net_device *real_dev,
 {
 	const char *name = real_dev->name;
 
-	if (real_dev->features & NETIF_F_VLAN_CHALLENGED ||
-	    real_dev->type != ARPHRD_ETHER) {
+	if (real_dev->features & NETIF_F_VLAN_CHALLENGED) {
 		pr_info("VLANs not supported on %s\n", name);
 		NL_SET_ERR_MSG_MOD(extack, "VLANs not supported on device");
 		return -EOPNOTSUPP;
@@ -319,7 +316,8 @@ static void vlan_transfer_features(struct net_device *dev,
 {
 	struct vlan_dev_priv *vlan = vlan_dev_priv(vlandev);
 
-	netif_inherit_tso_max(vlandev, dev);
+	vlandev->gso_max_size = dev->gso_max_size;
+	vlandev->gso_max_segs = dev->gso_max_segs;
 
 	if (vlan_hw_offload_capable(dev->features, vlan->vlan_proto))
 		vlandev->hard_header_len = dev->hard_header_len;
@@ -357,35 +355,6 @@ static int __vlan_device_event(struct net_device *dev, unsigned long event)
 	return err;
 }
 
-static void vlan_vid0_add(struct net_device *dev)
-{
-	struct vlan_info *vlan_info;
-	int err;
-
-	if (!(dev->features & NETIF_F_HW_VLAN_CTAG_FILTER))
-		return;
-
-	pr_info("adding VLAN 0 to HW filter on device %s\n", dev->name);
-
-	err = vlan_vid_add(dev, htons(ETH_P_8021Q), 0);
-	if (err)
-		return;
-
-	vlan_info = rtnl_dereference(dev->vlan_info);
-	vlan_info->auto_vid0 = true;
-}
-
-static void vlan_vid0_del(struct net_device *dev)
-{
-	struct vlan_info *vlan_info = rtnl_dereference(dev->vlan_info);
-
-	if (!vlan_info || !vlan_info->auto_vid0)
-		return;
-
-	vlan_info->auto_vid0 = false;
-	vlan_vid_del(dev, htons(ETH_P_8021Q), 0);
-}
-
 static int vlan_device_event(struct notifier_block *unused, unsigned long event,
 			     void *ptr)
 {
@@ -407,10 +376,15 @@ static int vlan_device_event(struct notifier_block *unused, unsigned long event,
 			return notifier_from_errno(err);
 	}
 
-	if (event == NETDEV_UP)
-		vlan_vid0_add(dev);
-	else if (event == NETDEV_DOWN)
-		vlan_vid0_del(dev);
+	if ((event == NETDEV_UP) &&
+	    (dev->features & NETIF_F_HW_VLAN_CTAG_FILTER)) {
+		pr_info("adding VLAN 0 to HW filter on device %s\n",
+			dev->name);
+		vlan_vid_add(dev, htons(ETH_P_8021Q), 0);
+	}
+	if (event == NETDEV_DOWN &&
+	    (dev->features & NETIF_F_HW_VLAN_CTAG_FILTER))
+		vlan_vid_del(dev, htons(ETH_P_8021Q), 0);
 
 	vlan_info = rtnl_dereference(dev->vlan_info);
 	if (!vlan_info)
@@ -470,7 +444,7 @@ static int vlan_device_event(struct notifier_block *unused, unsigned long event,
 				list_add(&vlandev->close_list, &close_list);
 		}
 
-		netif_close_many(&close_list, false);
+		dev_close_many(&close_list, false);
 
 		list_for_each_entry_safe(vlandev, tmp, &close_list, close_list) {
 			vlan_stacked_transfer_operstate(dev, vlandev,
@@ -483,7 +457,7 @@ static int vlan_device_event(struct notifier_block *unused, unsigned long event,
 	case NETDEV_UP:
 		/* Put all VLANs for this dev in the up state too.  */
 		vlan_group_for_each_dev(grp, i, vlandev) {
-			flgs = netif_get_flags(vlandev);
+			flgs = dev_get_flags(vlandev);
 			if (flgs & IFF_UP)
 				continue;
 
@@ -655,8 +629,7 @@ static int vlan_ioctl_handler(struct net *net, void __user *arg)
 
 	case GET_VLAN_REALDEV_NAME_CMD:
 		err = 0;
-		vlan_dev_get_realdev_name(dev, args.u.device2,
-					  sizeof(args.u.device2));
+		vlan_dev_get_realdev_name(dev, args.u.device2);
 		if (copy_to_user(arg, &args,
 				 sizeof(struct vlan_ioctl_args)))
 			err = -EFAULT;
@@ -762,7 +735,5 @@ static void __exit vlan_cleanup_module(void)
 module_init(vlan_proto_init);
 module_exit(vlan_cleanup_module);
 
-MODULE_DESCRIPTION("802.1Q/802.1ad VLAN Protocol");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
-MODULE_IMPORT_NS("NETDEV_INTERNAL");

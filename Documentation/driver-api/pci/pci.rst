@@ -4,12 +4,6 @@ PCI Support Library
 .. kernel-doc:: drivers/pci/pci.c
    :export:
 
-.. kernel-doc:: drivers/pci/iomap.c
-   :export:
-
-.. kernel-doc:: drivers/pci/devres.c
-   :export:
-
 .. kernel-doc:: drivers/pci/pci-driver.c
    :export:
 
@@ -19,7 +13,7 @@ PCI Support Library
 .. kernel-doc:: drivers/pci/search.c
    :export:
 
-.. kernel-doc:: drivers/pci/msi/msi.c
+.. kernel-doc:: drivers/pci/msi.c
    :export:
 
 .. kernel-doc:: drivers/pci/bus.c
@@ -45,9 +39,6 @@ PCI Support Library
 
 .. kernel-doc:: drivers/pci/pci-sysfs.c
    :internal:
-
-.. kernel-doc:: drivers/pci/tph.c
-   :export:
 
 PCI Hotplug Support Library
 ---------------------------

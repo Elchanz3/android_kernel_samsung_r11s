@@ -1195,7 +1195,7 @@ static int vortex_adbdma_bufshift(vortex_t * vortex, int adbdma)
 				VORTEX_ADBDMA_BUFBASE + (((adbdma << 2) + pp) << 2),
 				snd_pcm_sgbuf_get_addr(dma->substream,
 				dma->period_bytes * p));
-			/* Force write through cache. */
+			/* Force write thru cache. */
 			hwread(vortex->mmio, VORTEX_ADBDMA_BUFBASE +
 			       (((adbdma << 2) + pp) << 2));
 		}
@@ -1237,7 +1237,7 @@ static void vortex_adbdma_resetup(vortex_t *vortex, int adbdma) {
 			VORTEX_ADBDMA_BUFBASE + (((adbdma << 2) + pp) << 2),
 			snd_pcm_sgbuf_get_addr(dma->substream,
 					       dma->period_bytes * p));
-		/* Force write through cache. */
+		/* Force write thru cache. */
 		hwread(vortex->mmio, VORTEX_ADBDMA_BUFBASE + (((adbdma << 2)+pp) << 2));
 	}
 }
@@ -1466,7 +1466,7 @@ static int vortex_wtdma_bufshift(vortex_t * vortex, int wtdma)
 				(((wtdma << 2) + pp) << 2),
 				snd_pcm_sgbuf_get_addr(dma->substream,
 						       dma->period_bytes * p));
-			/* Force write through cache. */
+			/* Force write thru cache. */
 			hwread(vortex->mmio, VORTEX_WTDMA_BUFBASE +
 			       (((wtdma << 2) + pp) << 2));
 		}
@@ -1854,7 +1854,7 @@ vortex_connection_mixin_mix(vortex_t * vortex, int en, unsigned char mixin,
 		vortex_mix_disableinput(vortex, mix, mixin, a);
 }
 
-// Connect absolute address to mixin.
+// Connect absolut address to mixin.
 static void
 vortex_connection_adb_mixin(vortex_t * vortex, int en,
 			    unsigned char channel, unsigned char source,
@@ -1880,7 +1880,7 @@ vortex_connection_src_src_adbdma(vortex_t * vortex, int en,
 			ADB_DMA(adbdma));
 }
 
-// mix to absolute address.
+// mix to absolut address.
 static void
 vortex_connection_mix_adb(vortex_t * vortex, int en, unsigned char ch,
 			  unsigned char mix, unsigned char dest)
@@ -2120,9 +2120,9 @@ vortex_adb_allocroute(vortex_t *vortex, int dma, int nr_ch, int dir,
 				      VORTEX_RESOURCE_DMA);
 	} else {
 		en = 1;
-		dma = vortex_adb_checkinout(vortex, NULL, en,
-					    VORTEX_RESOURCE_DMA);
-		if (dma < 0)
+		if ((dma =
+		     vortex_adb_checkinout(vortex, NULL, en,
+					   VORTEX_RESOURCE_DMA)) < 0)
 			return -EBUSY;
 	}
 
@@ -2140,20 +2140,18 @@ vortex_adb_allocroute(vortex_t *vortex, int dma, int nr_ch, int dir,
 		/* Get SRC and MIXER hardware resources. */
 		if (stream->type != VORTEX_PCM_SPDIF) {
 			for (i = 0; i < nr_ch; i++) {
-				src[i] = vortex_adb_checkinout(vortex,
-							       stream->resources, en,
-							       VORTEX_RESOURCE_SRC);
-				if (src[i] < 0) {
+				if ((src[i] = vortex_adb_checkinout(vortex,
+							   stream->resources, en,
+							   VORTEX_RESOURCE_SRC)) < 0) {
 					memset(stream->resources, 0,
 					       sizeof(stream->resources));
 					return -EBUSY;
 				}
 				if (stream->type != VORTEX_PCM_A3D) {
-					mix[i] = vortex_adb_checkinout(vortex,
-								       stream->resources,
-								       en,
-								       VORTEX_RESOURCE_MIXIN);
-					if (mix[i] < 0) {
+					if ((mix[i] = vortex_adb_checkinout(vortex,
+								   stream->resources,
+								   en,
+								   VORTEX_RESOURCE_MIXIN)) < 0) {
 						memset(stream->resources,
 						       0,
 						       sizeof(stream->resources));
@@ -2164,10 +2162,10 @@ vortex_adb_allocroute(vortex_t *vortex, int dma, int nr_ch, int dir,
 		}
 #ifndef CHIP_AU8820
 		if (stream->type == VORTEX_PCM_A3D) {
-			a3d = vortex_adb_checkinout(vortex,
-						    stream->resources, en,
-						    VORTEX_RESOURCE_A3D);
-			if (a3d < 0) {
+			if ((a3d =
+			     vortex_adb_checkinout(vortex,
+						   stream->resources, en,
+						   VORTEX_RESOURCE_A3D)) < 0) {
 				memset(stream->resources, 0,
 				       sizeof(stream->resources));
 				dev_err(vortex->card->dev,
@@ -2280,18 +2278,19 @@ vortex_adb_allocroute(vortex_t *vortex, int dma, int nr_ch, int dir,
 
 		/* Get SRC and MIXER hardware resources. */
 		for (i = 0; i < nr_ch; i++) {
-			mix[i] = vortex_adb_checkinout(vortex,
-						       stream->resources, en,
-						       VORTEX_RESOURCE_MIXOUT);
-			if (mix[i] < 0) {
+			if ((mix[i] =
+			     vortex_adb_checkinout(vortex,
+						   stream->resources, en,
+						   VORTEX_RESOURCE_MIXOUT))
+			    < 0) {
 				memset(stream->resources, 0,
 				       sizeof(stream->resources));
 				return -EBUSY;
 			}
-			src[i] = vortex_adb_checkinout(vortex,
-						       stream->resources, en,
-						       VORTEX_RESOURCE_SRC);
-			if (src[i] < 0) {
+			if ((src[i] =
+			     vortex_adb_checkinout(vortex,
+						   stream->resources, en,
+						   VORTEX_RESOURCE_SRC)) < 0) {
 				memset(stream->resources, 0,
 				       sizeof(stream->resources));
 				return -EBUSY;

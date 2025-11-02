@@ -10,7 +10,6 @@
 #include <linux/mount.h>
 #include <linux/nfs_fs.h>
 #include <linux/nfs_ssc.h>
-#include <linux/splice.h>
 #include "delegation.h"
 #include "internal.h"
 #include "iostat.h"
@@ -33,6 +32,7 @@ nfs4_file_open(struct inode *inode, struct file *filp)
 	struct dentry *parent = NULL;
 	struct inode *dir;
 	unsigned openflags = filp->f_flags;
+	fmode_t f_mode;
 	struct iattr attr;
 	int err;
 
@@ -51,14 +51,17 @@ nfs4_file_open(struct inode *inode, struct file *filp)
 	if (err)
 		return err;
 
+	f_mode = filp->f_mode;
+	if ((openflags & O_ACCMODE) == 3)
+		f_mode |= flags_to_mode(openflags);
+
 	/* We can't create new files here */
 	openflags &= ~(O_CREAT|O_EXCL);
 
 	parent = dget_parent(dentry);
 	dir = d_inode(parent);
 
-	ctx = alloc_nfs_open_context(file_dentry(filp),
-				     flags_to_mode(openflags), filp);
+	ctx = alloc_nfs_open_context(file_dentry(filp), f_mode, filp);
 	err = PTR_ERR(ctx);
 	if (IS_ERR(ctx))
 		goto out;
@@ -90,7 +93,6 @@ nfs4_file_open(struct inode *inode, struct file *filp)
 	nfs_file_set_open_context(filp, ctx);
 	nfs_fscache_open_file(inode, filp);
 	err = 0;
-	filp->f_mode |= FMODE_CAN_ODIRECT;
 
 out_put_ctx:
 	put_nfs_open_context(ctx);
@@ -158,14 +160,16 @@ static ssize_t __nfs4_copy_file_range(struct file *file_in, loff_t pos_in,
 		sync = true;
 retry:
 	if (!nfs42_files_from_same_server(file_in, file_out)) {
-		/*
-		 * for inter copy, if copy size is too small
-		 * then fallback to generic copy.
+		/* for inter copy, if copy size if smaller than 12 RPC
+		 * payloads, fallback to traditional copy. There are
+		 * 14 RPCs during an NFSv4.x mount between source/dest
+		 * servers.
 		 */
-		if (sync)
+		if (sync ||
+			count <= 14 * NFS_SERVER(file_inode(file_in))->rsize)
 			return -EOPNOTSUPP;
 		cn_resp = kzalloc(sizeof(struct nfs42_copy_notify_res),
-				  GFP_KERNEL);
+				GFP_NOFS);
 		if (unlikely(cn_resp == NULL))
 			return -ENOMEM;
 
@@ -180,8 +184,8 @@ retry:
 	ret = nfs42_proc_copy(file_in, pos_in, file_out, pos_out, count,
 				nss, cnrs, sync);
 out:
-	kfree(cn_resp);
-
+	if (!nfs42_files_from_same_server(file_in, file_out))
+		kfree(cn_resp);
 	if (ret == -EAGAIN)
 		goto retry;
 	return ret;
@@ -196,8 +200,8 @@ static ssize_t nfs4_copy_file_range(struct file *file_in, loff_t pos_in,
 	ret = __nfs4_copy_file_range(file_in, pos_in, file_out, pos_out, count,
 				     flags);
 	if (ret == -EOPNOTSUPP || ret == -EXDEV)
-		ret = splice_copy_file_range(file_in, pos_in, file_out,
-					     pos_out, count);
+		ret = generic_copy_file_range(file_in, pos_in, file_out,
+					      pos_out, count, flags);
 	return ret;
 }
 
@@ -225,14 +229,8 @@ static long nfs42_fallocate(struct file *filep, int mode, loff_t offset, loff_t 
 	if (!S_ISREG(inode->i_mode))
 		return -EOPNOTSUPP;
 
-	switch (mode) {
-	case 0:
-	case FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE:
-	case FALLOC_FL_ZERO_RANGE:
-		break;
-	default:
+	if ((mode != 0) && (mode != (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)))
 		return -EOPNOTSUPP;
-	}
 
 	ret = inode_newsize_ok(inode, offset + len);
 	if (ret < 0)
@@ -240,8 +238,6 @@ static long nfs42_fallocate(struct file *filep, int mode, loff_t offset, loff_t 
 
 	if (mode & FALLOC_FL_PUNCH_HOLE)
 		return nfs42_proc_deallocate(filep, offset, len);
-	else if (mode & FALLOC_FL_ZERO_RANGE)
-		return nfs42_proc_zero_range(filep, offset ,len);
 	return nfs42_proc_allocate(filep, offset, len);
 }
 
@@ -253,6 +249,7 @@ static loff_t nfs42_remap_file_range(struct file *src_file, loff_t src_off,
 	struct nfs_server *server = NFS_SERVER(dst_inode);
 	struct inode *src_inode = file_inode(src_file);
 	unsigned int bs = server->clone_blksize;
+	bool same_inode = false;
 	int ret;
 
 	/* NFS does not support deduplication. */
@@ -274,15 +271,25 @@ static loff_t nfs42_remap_file_range(struct file *src_file, loff_t src_off,
 			goto out;
 	}
 
+	if (src_inode == dst_inode)
+		same_inode = true;
+
 	/* XXX: do we lock at all? what if server needs CB_RECALL_LAYOUT? */
-	lock_two_nondirectories(src_inode, dst_inode);
+	if (same_inode) {
+		inode_lock(src_inode);
+	} else if (dst_inode < src_inode) {
+		inode_lock_nested(dst_inode, I_MUTEX_PARENT);
+		inode_lock_nested(src_inode, I_MUTEX_CHILD);
+	} else {
+		inode_lock_nested(src_inode, I_MUTEX_PARENT);
+		inode_lock_nested(dst_inode, I_MUTEX_CHILD);
+	}
+
 	/* flush all pending writes on both src and dst so that server
 	 * has the latest data */
-	nfs_file_block_o_direct(NFS_I(src_inode));
 	ret = nfs_sync_inode(src_inode);
 	if (ret)
 		goto out_unlock;
-	nfs_file_block_o_direct(NFS_I(dst_inode));
 	ret = nfs_sync_inode(dst_inode);
 	if (ret)
 		goto out_unlock;
@@ -295,7 +302,15 @@ static loff_t nfs42_remap_file_range(struct file *src_file, loff_t src_off,
 		truncate_inode_pages_range(&dst_inode->i_data, dst_off, dst_off + count - 1);
 
 out_unlock:
-	unlock_two_nondirectories(src_inode, dst_inode);
+	if (same_inode) {
+		inode_unlock(src_inode);
+	} else if (dst_inode < src_inode) {
+		inode_unlock(src_inode);
+		inode_unlock(dst_inode);
+	} else {
+		inode_unlock(dst_inode);
+		inode_unlock(src_inode);
+	}
 out:
 	return ret < 0 ? ret : count;
 }
@@ -315,12 +330,12 @@ static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 	char *read_name = NULL;
 	int len, status = 0;
 
-	server = NFS_SB(ss_mnt->mnt_sb);
+	server = NFS_SERVER(ss_mnt->mnt_root->d_inode);
 
 	if (!fattr)
 		return ERR_PTR(-ENOMEM);
 
-	status = nfs4_proc_getattr(server, src_fh, fattr, NULL);
+	status = nfs4_proc_getattr(server, src_fh, fattr, NULL, NULL);
 	if (status < 0) {
 		res = ERR_PTR(status);
 		goto out;
@@ -333,27 +348,29 @@ static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 
 	res = ERR_PTR(-ENOMEM);
 	len = strlen(SSC_READ_NAME_BODY) + 16;
-	read_name = kzalloc(len, GFP_KERNEL);
+	read_name = kzalloc(len, GFP_NOFS);
 	if (read_name == NULL)
 		goto out;
 	snprintf(read_name, len, SSC_READ_NAME_BODY, read_name_gen++);
 
-	r_ino = nfs_fhget(ss_mnt->mnt_sb, src_fh, fattr);
+	r_ino = nfs_fhget(ss_mnt->mnt_root->d_inode->i_sb, src_fh, fattr,
+			NULL);
 	if (IS_ERR(r_ino)) {
 		res = ERR_CAST(r_ino);
 		goto out_free_name;
 	}
 
-	filep = alloc_file_pseudo(r_ino, ss_mnt, read_name, O_RDONLY,
+	filep = alloc_file_pseudo(r_ino, ss_mnt, read_name, FMODE_READ,
 				     r_ino->i_fop);
 	if (IS_ERR(filep)) {
 		res = ERR_CAST(filep);
 		iput(r_ino);
 		goto out_free_name;
 	}
+	filep->f_mode |= FMODE_READ;
 
-	ctx = alloc_nfs_open_context(filep->f_path.dentry,
-				     flags_to_mode(filep->f_flags), filep);
+	ctx = alloc_nfs_open_context(filep->f_path.dentry, filep->f_mode,
+					filep);
 	if (IS_ERR(ctx)) {
 		res = ERR_CAST(ctx);
 		goto out_filep;
@@ -428,26 +445,20 @@ void nfs42_ssc_unregister_ops(void)
 }
 #endif /* CONFIG_NFS_V4_2 */
 
-static int nfs4_setlease(struct file *file, int arg, struct file_lease **lease,
-			 void **priv)
-{
-	return nfs4_proc_setlease(file, arg, lease, priv);
-}
-
 const struct file_operations nfs4_file_operations = {
 	.read_iter	= nfs_file_read,
 	.write_iter	= nfs_file_write,
-	.mmap_prepare	= nfs_file_mmap_prepare,
+	.mmap		= nfs_file_mmap,
 	.open		= nfs4_file_open,
 	.flush		= nfs4_file_flush,
 	.release	= nfs_file_release,
 	.fsync		= nfs_file_fsync,
 	.lock		= nfs_lock,
 	.flock		= nfs_flock,
-	.splice_read	= nfs_file_splice_read,
+	.splice_read	= generic_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.check_flags	= nfs_check_flags,
-	.setlease	= nfs4_setlease,
+	.setlease	= simple_nosetlease,
 #ifdef CONFIG_NFS_V4_2
 	.copy_file_range = nfs4_copy_file_range,
 	.llseek		= nfs4_file_llseek,
@@ -456,5 +467,4 @@ const struct file_operations nfs4_file_operations = {
 #else
 	.llseek		= nfs_file_llseek,
 #endif
-	.fop_flags	= FOP_DONTCACHE,
 };

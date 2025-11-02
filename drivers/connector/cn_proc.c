@@ -37,6 +37,11 @@ static inline struct cn_msg *buffer_to_cn_msg(__u8 *buffer)
 }
 
 static atomic_t proc_event_num_listeners = ATOMIC_INIT(0);
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+extern int is_heimdall_enabled;
+#define MAX_PROC_EVENTS 32
+static atomic_t proc_event_selected[MAX_PROC_EVENTS] = {ATOMIC_INIT(0), };
+#endif
 static struct cb_id cn_proc_event_id = { CN_IDX_PROC, CN_VAL_PROC };
 
 /* local_event.count is used as the sequence number of the netlink message */
@@ -48,47 +53,8 @@ static DEFINE_PER_CPU(struct local_event, local_event) = {
 	.lock = INIT_LOCAL_LOCK(lock),
 };
 
-static int cn_filter(struct sock *dsk, struct sk_buff *skb, void *data)
-{
-	__u32 what, exit_code, *ptr;
-	enum proc_cn_mcast_op mc_op;
-	uintptr_t val;
-
-	if (!dsk || !dsk->sk_user_data || !data)
-		return 0;
-
-	ptr = (__u32 *)data;
-	what = *ptr++;
-	exit_code = *ptr;
-	val = ((struct proc_input *)(dsk->sk_user_data))->event_type;
-	mc_op = ((struct proc_input *)(dsk->sk_user_data))->mcast_op;
-
-	if (mc_op == PROC_CN_MCAST_IGNORE)
-		return 1;
-
-	if ((__u32)val == PROC_EVENT_ALL)
-		return 0;
-
-	/*
-	 * Drop packet if we have to report only non-zero exit status
-	 * (PROC_EVENT_NONZERO_EXIT) and exit status is 0
-	 */
-	if (((__u32)val & PROC_EVENT_NONZERO_EXIT) &&
-	    (what == PROC_EVENT_EXIT)) {
-		if (exit_code)
-			return 0;
-	}
-
-	if ((__u32)val & what)
-		return 0;
-
-	return 1;
-}
-
 static inline void send_msg(struct cn_msg *msg)
 {
-	__u32 filter_data[2];
-
 	local_lock(&local_event.lock);
 
 	msg->seq = __this_cpu_inc_return(local_event.count) - 1;
@@ -100,16 +66,7 @@ static inline void send_msg(struct cn_msg *msg)
 	 *
 	 * If cn_netlink_send() fails, the data is not sent.
 	 */
-	filter_data[0] = ((struct proc_event *)msg->data)->what;
-	if (filter_data[0] == PROC_EVENT_EXIT) {
-		filter_data[1] =
-		((struct proc_event *)msg->data)->event_data.exit.exit_code;
-	} else {
-		filter_data[1] = 0;
-	}
-
-	cn_netlink_send_mult(msg, msg->len, 0, CN_IDX_PROC, GFP_NOWAIT,
-			     cn_filter, (void *)filter_data);
+	cn_netlink_send(msg, 0, CN_IDX_PROC, GFP_NOWAIT);
 
 	local_unlock(&local_event.lock);
 }
@@ -123,6 +80,10 @@ void proc_fork_connector(struct task_struct *task)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_FORK)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -152,6 +113,10 @@ void proc_exec_connector(struct task_struct *task)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_EXEC)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -177,6 +142,11 @@ void proc_id_connector(struct task_struct *task, int which_id)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_UID)]) < 1 &&
+			atomic_read(&proc_event_selected[__ffs(PROC_EVENT_GID)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -214,6 +184,10 @@ void proc_sid_connector(struct task_struct *task)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_SID)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -238,6 +212,10 @@ void proc_ptrace_connector(struct task_struct *task, int ptrace_id)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_PTRACE)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -270,6 +248,12 @@ void proc_comm_connector(struct task_struct *task)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_COMM)]) < 1)
+		return;
+	if (task->pid != task->tgid)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -296,6 +280,10 @@ void proc_coredump_connector(struct task_struct *task)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_COREDUMP)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -329,6 +317,10 @@ void proc_exit_connector(struct task_struct *task)
 
 	if (atomic_read(&proc_event_num_listeners) < 1)
 		return;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (atomic_read(&proc_event_selected[__ffs(PROC_EVENT_EXIT)]) < 1)
+		return;
+#endif
 
 	msg = buffer_to_cn_msg(buffer);
 	ev = (struct proc_event *)msg->data;
@@ -389,17 +381,25 @@ static void cn_proc_ack(int err, int rcvd_seq, int rcvd_ack)
 
 /**
  * cn_proc_mcast_ctl
- * @msg: message sent from userspace via the connector
- * @nsp: NETLINK_CB of the client's socket buffer
+ * @data: message sent from userspace via the connector
  */
 static void cn_proc_mcast_ctl(struct cn_msg *msg,
 			      struct netlink_skb_parms *nsp)
 {
-	enum proc_cn_mcast_op mc_op = 0, prev_mc_op = 0;
-	struct proc_input *pinput = NULL;
-	enum proc_cn_event ev_type = 0;
-	int err = 0, initial = 0;
-	struct sock *sk = NULL;
+	enum proc_cn_mcast_op *mc_op = NULL;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	uint32_t mask = 0;
+	uint32_t i;
+#endif
+	int err = 0;
+
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if ((msg->len != sizeof(*mc_op) + sizeof(uint32_t)) &&
+	    (msg->len != sizeof(*mc_op)))
+#else
+	if (msg->len != sizeof(*mc_op))
+#endif
+		return;
 
 	/* 
 	 * Events are reported with respect to the initial pid
@@ -407,54 +407,43 @@ static void cn_proc_mcast_ctl(struct cn_msg *msg,
 	 * other namespaces.
 	 */
 	if ((current_user_ns() != &init_user_ns) ||
-	    !task_is_in_init_pid_ns(current))
+	    (task_active_pid_ns(current) != &init_pid_ns))
 		return;
 
-	if (msg->len == sizeof(*pinput)) {
-		pinput = (struct proc_input *)msg->data;
-		mc_op = pinput->mcast_op;
-		ev_type = pinput->event_type;
-	} else if (msg->len == sizeof(mc_op)) {
-		mc_op = *((enum proc_cn_mcast_op *)msg->data);
-		ev_type = PROC_EVENT_ALL;
-	} else {
-		return;
+	/* Can only change if privileged. */
+	if (!__netlink_ns_capable(nsp, &init_user_ns, CAP_NET_ADMIN)) {
+		err = EPERM;
+		goto out;
 	}
 
-	ev_type = valid_event((enum proc_cn_event)ev_type);
+	mc_op = (enum proc_cn_mcast_op *)msg->data;
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+	if (msg->len == sizeof(*mc_op))
+		mask = BIT(MAX_PROC_EVENTS) - 1;
+	else
+		mask = *(uint32_t *)(mc_op + 1);
+	printk("%s: client connected with event mask=0x%x\n", __func__, mask);
 
-	if (ev_type == PROC_EVENT_NONE)
-		ev_type = PROC_EVENT_ALL;
+	if (msg->len != sizeof(*mc_op))
+		is_heimdall_enabled = 1;
+#endif
 
-	if (nsp->sk) {
-		sk = nsp->sk;
-		if (sk->sk_user_data == NULL) {
-			sk->sk_user_data = kzalloc(sizeof(struct proc_input),
-						   GFP_KERNEL);
-			if (sk->sk_user_data == NULL) {
-				err = ENOMEM;
-				goto out;
-			}
-			initial = 1;
-		} else {
-			prev_mc_op =
-			((struct proc_input *)(sk->sk_user_data))->mcast_op;
-		}
-		((struct proc_input *)(sk->sk_user_data))->event_type =
-			ev_type;
-		((struct proc_input *)(sk->sk_user_data))->mcast_op = mc_op;
-	}
-
-	switch (mc_op) {
+	switch (*mc_op) {
 	case PROC_CN_MCAST_LISTEN:
-		if (initial || (prev_mc_op != PROC_CN_MCAST_LISTEN))
-			atomic_inc(&proc_event_num_listeners);
+		atomic_inc(&proc_event_num_listeners);
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+		for (i = 0; i < MAX_PROC_EVENTS; i++)
+			if (mask & (1 << i))
+				atomic_inc(&proc_event_selected[i]);
+#endif
 		break;
 	case PROC_CN_MCAST_IGNORE:
-		if (!initial && (prev_mc_op != PROC_CN_MCAST_IGNORE))
-			atomic_dec(&proc_event_num_listeners);
-		((struct proc_input *)(sk->sk_user_data))->event_type =
-			PROC_EVENT_NONE;
+		atomic_dec(&proc_event_num_listeners);
+#ifdef CONFIG_PROC_CONNECTOR_SELECT_EVENTS
+		for (i = 0; i < MAX_PROC_EVENTS; i++)
+			if (mask & (1 << i))
+				atomic_dec(&proc_event_selected[i]);
+#endif
 		break;
 	default:
 		err = EINVAL;

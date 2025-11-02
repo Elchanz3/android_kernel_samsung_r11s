@@ -13,6 +13,7 @@
 #include <linux/if_arp.h>
 #include <linux/etherdevice.h>
 #include <net/sock.h>
+#include <net/lib80211.h>
 #include <net/cfg80211.h>
 #include <linux/vmalloc.h>
 #include <linux/firmware.h>
@@ -69,6 +70,8 @@ struct qtnf_vif {
 	struct qtnf_sta_list sta_list;
 	unsigned long cons_tx_timeout_cnt;
 	int generation;
+
+	struct pcpu_sw_netstats __percpu *stats64;
 };
 
 struct qtnf_mac_info {
@@ -102,7 +105,7 @@ struct qtnf_wmac {
 	struct qtnf_mac_info macinfo;
 	struct qtnf_vif iflist[QTNF_MAX_INTF];
 	struct cfg80211_scan_request *scan_req;
-	struct mutex mac_lock;	/* lock during wmac specific ops */
+	struct mutex mac_lock;	/* lock during wmac speicific ops */
 	struct delayed_work scan_timeout;
 	struct ieee80211_regdomain *rd;
 	struct platform_device *pdev;
@@ -136,6 +139,8 @@ int qtnf_cmd_send_update_phy_params(struct qtnf_wmac *mac, u32 changed);
 struct qtnf_wmac *qtnf_core_get_mac(const struct qtnf_bus *bus, u8 macid);
 struct net_device *qtnf_classify_skb(struct qtnf_bus *bus, struct sk_buff *skb);
 void qtnf_wake_all_queues(struct net_device *ndev);
+void qtnf_update_rx_stats(struct net_device *ndev, const struct sk_buff *skb);
+void qtnf_update_tx_stats(struct net_device *ndev, const struct sk_buff *skb);
 
 void qtnf_virtual_intf_cleanup(struct net_device *ndev);
 

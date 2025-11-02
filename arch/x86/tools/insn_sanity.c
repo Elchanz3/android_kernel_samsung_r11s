@@ -14,6 +14,10 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+
+#define unlikely(cond) (cond)
+#define ARRAY_SIZE(a)	(sizeof(a)/sizeof(a[0]))
+
 #include <asm/insn.h>
 #include <inat.c>
 #include <insn.c>
@@ -218,8 +222,8 @@ static void parse_args(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-	int insns = 0, ret;
 	struct insn insn;
+	int insns = 0;
 	int errors = 0;
 	unsigned long i;
 	unsigned char insn_buff[MAX_INSN_SIZE * 2];
@@ -237,15 +241,15 @@ int main(int argc, char **argv)
 			continue;
 
 		/* Decode an instruction */
-		ret = insn_decode(&insn, insn_buff, sizeof(insn_buff),
-				  x86_64 ? INSN_MODE_64 : INSN_MODE_32);
+		insn_init(&insn, insn_buff, sizeof(insn_buff), x86_64);
+		insn_get_length(&insn);
 
 		if (insn.next_byte <= insn.kaddr ||
 		    insn.kaddr + MAX_INSN_SIZE < insn.next_byte) {
 			/* Access out-of-range memory */
 			dump_stream(stderr, "Error: Found an access violation", i, insn_buff, &insn);
 			errors++;
-		} else if (verbose && ret < 0)
+		} else if (verbose && !insn_complete(&insn))
 			dump_stream(stdout, "Info: Found an undecodable input", i, insn_buff, &insn);
 		else if (verbose >= 2)
 			dump_insn(stdout, &insn);
@@ -253,9 +257,9 @@ int main(int argc, char **argv)
 	}
 
 	fprintf((errors) ? stderr : stdout,
-		"  %s: %s: Decoded and checked %d %s instructions with %d errors (seed:0x%x)\n",
+		"%s: %s: decoded and checked %d %s instructions with %d errors (seed:0x%x)\n",
 		prog,
-		(errors) ? "failure" : "success",
+		(errors) ? "Failure" : "Success",
 		insns,
 		(input_file) ? "given" : "random",
 		errors,

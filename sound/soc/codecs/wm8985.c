@@ -688,10 +688,10 @@ static int wm8985_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 			    WM8985_FMT_MASK, format << WM8985_FMT_SHIFT);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		master = 0;
 		break;
 	default:
@@ -1100,7 +1100,7 @@ static struct snd_soc_dai_driver wm8985_dai = {
 		.formats = WM8985_FORMATS,
 	},
 	.ops = &wm8985_dai_ops,
-	.symmetric_rate = 1
+	.symmetric_rates = 1
 };
 
 static const struct snd_soc_component_driver soc_component_dev_wm8985 = {
@@ -1116,6 +1116,7 @@ static const struct snd_soc_component_driver soc_component_dev_wm8985 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config wm8985_regmap = {
@@ -1125,7 +1126,7 @@ static const struct regmap_config wm8985_regmap = {
 	.max_register = WM8985_MAX_REGISTER,
 	.writeable_reg = wm8985_writeable,
 
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 	.reg_defaults = wm8985_reg_defaults,
 	.num_reg_defaults = ARRAY_SIZE(wm8985_reg_defaults),
 };
@@ -1166,8 +1167,8 @@ static struct spi_driver wm8985_spi_driver = {
 #endif
 
 #if IS_ENABLED(CONFIG_I2C)
-
-static int wm8985_i2c_probe(struct i2c_client *i2c)
+static int wm8985_i2c_probe(struct i2c_client *i2c,
+			    const struct i2c_device_id *id)
 {
 	struct wm8985_priv *wm8985;
 	int ret;
@@ -1178,7 +1179,7 @@ static int wm8985_i2c_probe(struct i2c_client *i2c)
 
 	i2c_set_clientdata(i2c, wm8985);
 
-	wm8985->dev_type = (uintptr_t)i2c_get_match_data(i2c);
+	wm8985->dev_type = id->driver_data;
 
 	wm8985->regmap = devm_regmap_init_i2c(i2c, &wm8985_regmap);
 	if (IS_ERR(wm8985->regmap)) {

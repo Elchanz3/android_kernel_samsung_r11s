@@ -78,7 +78,7 @@ static inline unsigned long vx2_reg_addr(struct vx_core *_chip, int reg)
 }
 
 /**
- * vx2_inb - read a byte from the register
+ * snd_vx_inb - read a byte from the register
  * @chip: VX core instance
  * @offset: register enum
  */
@@ -88,7 +88,7 @@ static unsigned char vx2_inb(struct vx_core *chip, int offset)
 }
 
 /**
- * vx2_outb - write a byte on the register
+ * snd_vx_outb - write a byte on the register
  * @chip: VX core instance
  * @offset: the register offset
  * @val: the value to write
@@ -102,7 +102,7 @@ static void vx2_outb(struct vx_core *chip, int offset, unsigned char val)
 }
 
 /**
- * vx2_inl - read a 32bit word from the register
+ * snd_vx_inl - read a 32bit word from the register
  * @chip: VX core instance
  * @offset: register enum
  */
@@ -112,7 +112,7 @@ static unsigned int vx2_inl(struct vx_core *chip, int offset)
 }
 
 /**
- * vx2_outl - write a 32bit word on the register
+ * snd_vx_outl - write a 32bit word on the register
  * @chip: VX core instance
  * @offset: the register enum
  * @val: the value to write
@@ -213,7 +213,7 @@ static int vx2_test_xilinx(struct vx_core *_chip)
 
 
 /**
- * vx2_setup_pseudo_dma - set up the pseudo dma read/write mode.
+ * vx_setup_pseudo_dma - set up the pseudo dma read/write mode.
  * @chip: VX core instance
  * @do_write: 0 = read, 1 = set up for DMA write
  */
@@ -408,11 +408,9 @@ static int vx2_load_dsp(struct vx_core *vx, int index, const struct firmware *ds
 	switch (index) {
 	case 1:
 		/* xilinx image */
-		err = vx2_load_xilinx_binary(vx, dsp);
-		if (err < 0)
+		if ((err = vx2_load_xilinx_binary(vx, dsp)) < 0)
 			return err;
-		err = vx2_test_xilinx(vx);
-		if (err < 0)
+		if ((err = vx2_test_xilinx(vx)) < 0)
 			return err;
 		return 0;
 	case 2:
@@ -868,10 +866,10 @@ static int vx_input_level_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem
 {
 	struct vx_core *_chip = snd_kcontrol_chip(kcontrol);
 	struct snd_vx222 *chip = to_vx222(_chip);
-
-	guard(mutex)(&_chip->mixer_mutex);
+	mutex_lock(&_chip->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->input_level[0];
 	ucontrol->value.integer.value[1] = chip->input_level[1];
+	mutex_unlock(&_chip->mixer_mutex);
 	return 0;
 }
 
@@ -885,14 +883,16 @@ static int vx_input_level_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem
 	if (ucontrol->value.integer.value[1] < 0 ||
 	    ucontrol->value.integer.value[1] > MIC_LEVEL_MAX)
 		return -EINVAL;
-	guard(mutex)(&_chip->mixer_mutex);
+	mutex_lock(&_chip->mixer_mutex);
 	if (chip->input_level[0] != ucontrol->value.integer.value[0] ||
 	    chip->input_level[1] != ucontrol->value.integer.value[1]) {
 		chip->input_level[0] = ucontrol->value.integer.value[0];
 		chip->input_level[1] = ucontrol->value.integer.value[1];
 		vx2_set_input_level(chip);
+		mutex_unlock(&_chip->mixer_mutex);
 		return 1;
 	}
+	mutex_unlock(&_chip->mixer_mutex);
 	return 0;
 }
 
@@ -921,12 +921,14 @@ static int vx_mic_level_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_v
 	if (ucontrol->value.integer.value[0] < 0 ||
 	    ucontrol->value.integer.value[0] > MIC_LEVEL_MAX)
 		return -EINVAL;
-	guard(mutex)(&_chip->mixer_mutex);
+	mutex_lock(&_chip->mixer_mutex);
 	if (chip->mic_level != ucontrol->value.integer.value[0]) {
 		chip->mic_level = ucontrol->value.integer.value[0];
 		vx2_set_input_level(chip);
+		mutex_unlock(&_chip->mixer_mutex);
 		return 1;
 	}
+	mutex_unlock(&_chip->mixer_mutex);
 	return 0;
 }
 
@@ -970,11 +972,9 @@ static int vx2_add_mic_controls(struct vx_core *_chip)
 	vx2_set_input_level(chip);
 
 	/* controls */
-	err = snd_ctl_add(_chip->card, snd_ctl_new1(&vx_control_input_level, chip));
-	if (err < 0)
+	if ((err = snd_ctl_add(_chip->card, snd_ctl_new1(&vx_control_input_level, chip))) < 0)
 		return err;
-	err = snd_ctl_add(_chip->card, snd_ctl_new1(&vx_control_mic_level, chip));
-	if (err < 0)
+	if ((err = snd_ctl_add(_chip->card, snd_ctl_new1(&vx_control_mic_level, chip))) < 0)
 		return err;
 
 	return 0;

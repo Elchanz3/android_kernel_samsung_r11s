@@ -203,7 +203,7 @@ int nfs_idmap_init(void)
 	printk(KERN_NOTICE "NFS: Registering the %s key type\n",
 		key_type_id_resolver.name);
 
-	cred = prepare_kernel_cred(&init_task);
+	cred = prepare_kernel_cred(NULL);
 	if (!cred)
 		return -ENOMEM;
 
@@ -424,16 +424,26 @@ static void nfs_idmap_pipe_destroy(struct dentry *dir,
 		struct rpc_pipe_dir_object *pdo)
 {
 	struct idmap *idmap = pdo->pdo_data;
+	struct rpc_pipe *pipe = idmap->idmap_pipe;
 
-	rpc_unlink(idmap->idmap_pipe);
+	if (pipe->dentry) {
+		rpc_unlink(pipe->dentry);
+		pipe->dentry = NULL;
+	}
 }
 
 static int nfs_idmap_pipe_create(struct dentry *dir,
 		struct rpc_pipe_dir_object *pdo)
 {
 	struct idmap *idmap = pdo->pdo_data;
+	struct rpc_pipe *pipe = idmap->idmap_pipe;
+	struct dentry *dentry;
 
-	return rpc_mkpipe_dentry(dir, "idmap", idmap, idmap->idmap_pipe);
+	dentry = rpc_mkpipe_dentry(dir, "idmap", idmap, pipe);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+	pipe->dentry = dentry;
+	return 0;
 }
 
 static const struct rpc_pipe_dir_object_ops nfs_idmap_pipe_dir_object_ops = {
@@ -573,7 +583,7 @@ static int nfs_idmap_legacy_upcall(struct key *authkey, void *aux)
 	struct request_key_auth *rka = get_request_key_auth(authkey);
 	struct rpc_pipe_msg *msg;
 	struct idmap_msg *im;
-	struct idmap *idmap = aux;
+	struct idmap *idmap = (struct idmap *)aux;
 	struct key *key = rka->target_key;
 	int ret = -ENOKEY;
 

@@ -8,7 +8,7 @@
  * EC for audio function.
  */
 
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <linux/acpi.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -18,11 +18,9 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_reserved_mem.h>
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
 #include <linux/platform_device.h>
-#include <linux/string_choices.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -96,7 +94,7 @@ static int send_ec_host_command(struct cros_ec_device *ec_dev, uint32_t cmd,
 	if (ret < 0)
 		goto error;
 
-	if (in && insize)
+	if (insize)
 		memcpy(in, msg->data, insize);
 
 	ret = 0;
@@ -234,11 +232,11 @@ static int i2s_rx_hw_params(struct snd_pcm_substream *substream,
 	if (params_rate(params) != 48000)
 		return -EINVAL;
 
-	switch (params_width(params)) {
-	case 16:
+	switch (params_format(params)) {
+	case SNDRV_PCM_FORMAT_S16_LE:
 		depth = EC_CODEC_I2S_RX_SAMPLE_DEPTH_16;
 		break;
-	case 24:
+	case SNDRV_PCM_FORMAT_S24_LE:
 		depth = EC_CODEC_I2S_RX_SAMPLE_DEPTH_24;
 		break;
 	default:
@@ -285,8 +283,8 @@ static int i2s_rx_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct ec_param_ec_codec_i2s_rx p;
 	enum ec_codec_i2s_rx_daifmt daifmt;
 
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBC_CFC:
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBS_CFS:
 		break;
 	default:
 		return -EINVAL;
@@ -389,7 +387,6 @@ static const struct snd_soc_component_driver i2s_rx_component_driver = {
 	.num_dapm_widgets	= ARRAY_SIZE(i2s_rx_dapm_widgets),
 	.dapm_routes		= i2s_rx_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(i2s_rx_dapm_routes),
-	.endianness		= 1,
 };
 
 static void *wov_map_shm(struct cros_ec_codec_priv *priv,
@@ -659,7 +656,7 @@ static int wov_enable_put(struct snd_kcontrol *kcontrol,
 					   (uint8_t *)&p, sizeof(p), NULL, 0);
 		if (ret) {
 			dev_err(priv->dev, "failed to %s wov\n",
-				str_enable_disable(enabled));
+				enabled ? "enable" : "disable");
 			return ret;
 		}
 
@@ -962,6 +959,7 @@ static int cros_ec_codec_platform_probe(struct platform_device *pdev)
 	struct ec_response_ec_codec_get_capabilities r;
 	int ret;
 #ifdef CONFIG_OF
+	struct device_node *node;
 	struct resource res;
 	u64 ec_shm_size;
 	const __be32 *regaddr_p;
@@ -981,18 +979,22 @@ static int cros_ec_codec_platform_probe(struct platform_device *pdev)
 			priv->ec_shm_addr, priv->ec_shm_len);
 	}
 
-	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
-	if (!ret) {
-		priv->ap_shm_phys_addr = res.start;
-		priv->ap_shm_len = resource_size(&res);
-		priv->ap_shm_addr =
-			(uint64_t)(uintptr_t)devm_ioremap_wc(
-				dev, priv->ap_shm_phys_addr,
-				priv->ap_shm_len);
-		priv->ap_shm_last_alloc = priv->ap_shm_phys_addr;
+	node = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (node) {
+		ret = of_address_to_resource(node, 0, &res);
+		if (!ret) {
+			priv->ap_shm_phys_addr = res.start;
+			priv->ap_shm_len = resource_size(&res);
+			priv->ap_shm_addr =
+				(uint64_t)(uintptr_t)devm_ioremap_wc(
+					dev, priv->ap_shm_phys_addr,
+					priv->ap_shm_len);
+			priv->ap_shm_last_alloc = priv->ap_shm_phys_addr;
 
-		dev_dbg(dev, "ap_shm_phys_addr=%#llx len=%#x\n",
-			priv->ap_shm_phys_addr, priv->ap_shm_len);
+			dev_dbg(dev, "ap_shm_phys_addr=%#llx len=%#x\n",
+				priv->ap_shm_phys_addr, priv->ap_shm_len);
+		}
+		of_node_put(node);
 	}
 #endif
 
@@ -1009,18 +1011,6 @@ static int cros_ec_codec_platform_probe(struct platform_device *pdev)
 		return ret;
 	}
 	priv->ec_capabilities = r.capabilities;
-
-	/* Reset EC codec i2s rx. */
-	p.cmd = EC_CODEC_I2S_RX_RESET;
-	ret = send_ec_host_command(priv->ec_device, EC_CMD_EC_CODEC_I2S_RX,
-				   (uint8_t *)&p, sizeof(p), NULL, 0);
-	if (ret == -ENOPROTOOPT) {
-		dev_info(dev,
-			 "Missing reset command. Please update EC firmware.\n");
-	} else if (ret) {
-		dev_err(dev, "failed to EC_CODEC_I2S_RESET: %d\n", ret);
-		return ret;
-	}
 
 	platform_set_drvdata(pdev, priv);
 

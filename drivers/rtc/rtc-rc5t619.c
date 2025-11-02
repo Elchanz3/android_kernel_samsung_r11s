@@ -414,7 +414,7 @@ static int rc5t619_rtc_probe(struct platform_device *pdev)
 
 		} else {
 			/* enable wake */
-			device_init_wakeup(&pdev->dev, true);
+			device_init_wakeup(&pdev->dev, 1);
 			enable_irq_wake(rtc->irq);
 		}
 	} else {
@@ -426,26 +426,17 @@ static int rc5t619_rtc_probe(struct platform_device *pdev)
 		dev_warn(&pdev->dev, "rc5t619 interrupt is disabled\n");
 	}
 
-	return devm_rtc_register_device(rtc->rtc);
+	return rtc_register_device(rtc->rtc);
 }
-
-static const struct platform_device_id rc5t619_rtc_id[] = {
-	{
-		.name = "rc5t619-rtc",
-	}, {
-		/* sentinel */
-	}
-};
-MODULE_DEVICE_TABLE(platform, rc5t619_rtc_id);
 
 static struct platform_driver rc5t619_rtc_driver = {
 	.driver	= {
 		.name	= "rc5t619-rtc",
 	},
 	.probe	= rc5t619_rtc_probe,
-	.id_table = rc5t619_rtc_id,
 };
-module_platform_driver(rc5t619_rtc_driver);
 
+module_platform_driver(rc5t619_rtc_driver);
+MODULE_ALIAS("platform:rc5t619-rtc");
 MODULE_DESCRIPTION("RICOH RC5T619 RTC driver");
 MODULE_LICENSE("GPL");

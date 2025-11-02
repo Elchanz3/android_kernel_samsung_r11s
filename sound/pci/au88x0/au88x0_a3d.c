@@ -754,7 +754,7 @@ snd_vortex_a3d_filter_info(struct snd_kcontrol *kcontrol,
 static int
 snd_vortex_a3d_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	//a3dsrc_t *a = snd_kcontrol_chip(kcontrol);
+	//a3dsrc_t *a = kcontrol->private_data;
 	/* No read yet. Would this be really useable/needed ? */
 
 	return 0;
@@ -764,7 +764,7 @@ static int
 snd_vortex_a3d_hrtf_put(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	a3dsrc_t *a = snd_kcontrol_chip(kcontrol);
+	a3dsrc_t *a = kcontrol->private_data;
 	int i;
 	int coord[6];
 	for (i = 0; i < 6; i++)
@@ -781,7 +781,7 @@ static int
 snd_vortex_a3d_itd_put(struct snd_kcontrol *kcontrol,
 		       struct snd_ctl_elem_value *ucontrol)
 {
-	a3dsrc_t *a = snd_kcontrol_chip(kcontrol);
+	a3dsrc_t *a = kcontrol->private_data;
 	int coord[6];
 	int i;
 	for (i = 0; i < 6; i++)
@@ -800,7 +800,7 @@ static int
 snd_vortex_a3d_ild_put(struct snd_kcontrol *kcontrol,
 		       struct snd_ctl_elem_value *ucontrol)
 {
-	a3dsrc_t *a = snd_kcontrol_chip(kcontrol);
+	a3dsrc_t *a = kcontrol->private_data;
 	int l, r;
 	/* There may be some scale tranlation needed here. */
 	l = ucontrol->value.integer.value[0];
@@ -816,7 +816,7 @@ static int
 snd_vortex_a3d_filter_put(struct snd_kcontrol *kcontrol,
 			  struct snd_ctl_elem_value *ucontrol)
 {
-	a3dsrc_t *a = snd_kcontrol_chip(kcontrol);
+	a3dsrc_t *a = kcontrol->private_data;
 	int i;
 	int params[6];
 	for (i = 0; i < 6; i++)
@@ -849,50 +849,46 @@ static int vortex_a3d_register_controls(vortex_t *vortex)
 	int err, i;
 	/* HRTF controls. */
 	for (i = 0; i < NR_A3D; i++) {
-		kcontrol = snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i]);
-		if (!kcontrol)
+		if ((kcontrol =
+		     snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i])) == NULL)
 			return -ENOMEM;
 		kcontrol->id.numid = CTRLID_HRTF;
 		kcontrol->info = snd_vortex_a3d_hrtf_info;
 		kcontrol->put = snd_vortex_a3d_hrtf_put;
-		err = snd_ctl_add(vortex->card, kcontrol);
-		if (err < 0)
+		if ((err = snd_ctl_add(vortex->card, kcontrol)) < 0)
 			return err;
 	}
 	/* ITD controls. */
 	for (i = 0; i < NR_A3D; i++) {
-		kcontrol = snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i]);
-		if (!kcontrol)
+		if ((kcontrol =
+		     snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i])) == NULL)
 			return -ENOMEM;
 		kcontrol->id.numid = CTRLID_ITD;
 		kcontrol->info = snd_vortex_a3d_itd_info;
 		kcontrol->put = snd_vortex_a3d_itd_put;
-		err = snd_ctl_add(vortex->card, kcontrol);
-		if (err < 0)
+		if ((err = snd_ctl_add(vortex->card, kcontrol)) < 0)
 			return err;
 	}
 	/* ILD (gains) controls. */
 	for (i = 0; i < NR_A3D; i++) {
-		kcontrol = snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i]);
-		if (!kcontrol)
+		if ((kcontrol =
+		     snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i])) == NULL)
 			return -ENOMEM;
 		kcontrol->id.numid = CTRLID_GAINS;
 		kcontrol->info = snd_vortex_a3d_ild_info;
 		kcontrol->put = snd_vortex_a3d_ild_put;
-		err = snd_ctl_add(vortex->card, kcontrol);
-		if (err < 0)
+		if ((err = snd_ctl_add(vortex->card, kcontrol)) < 0)
 			return err;
 	}
 	/* Filter controls. */
 	for (i = 0; i < NR_A3D; i++) {
-		kcontrol = snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i]);
-		if (!kcontrol)
+		if ((kcontrol =
+		     snd_ctl_new1(&vortex_a3d_kcontrol, &vortex->a3d[i])) == NULL)
 			return -ENOMEM;
 		kcontrol->id.numid = CTRLID_FILTER;
 		kcontrol->info = snd_vortex_a3d_filter_info;
 		kcontrol->put = snd_vortex_a3d_filter_put;
-		err = snd_ctl_add(vortex->card, kcontrol);
-		if (err < 0)
+		if ((err = snd_ctl_add(vortex->card, kcontrol)) < 0)
 			return err;
 	}
 	return 0;

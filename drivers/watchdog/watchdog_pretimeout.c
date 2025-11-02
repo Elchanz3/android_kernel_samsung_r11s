@@ -7,11 +7,8 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
-#include <linux/sysfs.h>
-#include <linux/types.h>
 #include <linux/watchdog.h>
 
-#include "watchdog_core.h"
 #include "watchdog_pretimeout.h"
 
 /* Default watchdog pretimeout governor */
@@ -58,7 +55,7 @@ int watchdog_pretimeout_available_governors_get(char *buf)
 	mutex_lock(&governor_lock);
 
 	list_for_each_entry(priv, &governor_list, entry)
-		count += sysfs_emit_at(buf, count, "%s\n", priv->gov->name);
+		count += sprintf(buf + count, "%s\n", priv->gov->name);
 
 	mutex_unlock(&governor_lock);
 
@@ -71,7 +68,7 @@ int watchdog_pretimeout_governor_get(struct watchdog_device *wdd, char *buf)
 
 	spin_lock_irq(&pretimeout_lock);
 	if (wdd->gov)
-		count = sysfs_emit(buf, "%s\n", wdd->gov->name);
+		count = sprintf(buf, "%s\n", wdd->gov->name);
 	spin_unlock_irq(&pretimeout_lock);
 
 	return count;
@@ -180,7 +177,7 @@ int watchdog_register_pretimeout(struct watchdog_device *wdd)
 {
 	struct watchdog_pretimeout *p;
 
-	if (!watchdog_have_pretimeout(wdd))
+	if (!(wdd->info->options & WDIOF_PRETIMEOUT))
 		return 0;
 
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
@@ -200,7 +197,7 @@ void watchdog_unregister_pretimeout(struct watchdog_device *wdd)
 {
 	struct watchdog_pretimeout *p, *t;
 
-	if (!watchdog_have_pretimeout(wdd))
+	if (!(wdd->info->options & WDIOF_PRETIMEOUT))
 		return;
 
 	spin_lock_irq(&pretimeout_lock);
@@ -209,9 +206,10 @@ void watchdog_unregister_pretimeout(struct watchdog_device *wdd)
 	list_for_each_entry_safe(p, t, &pretimeout_list, entry) {
 		if (p->wdd == wdd) {
 			list_del(&p->entry);
-			kfree(p);
 			break;
 		}
 	}
 	spin_unlock_irq(&pretimeout_lock);
+
+	kfree(p);
 }

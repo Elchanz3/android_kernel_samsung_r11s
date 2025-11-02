@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) B.A.T.M.A.N. contributors:
+/* Copyright (C) 2007-2020  B.A.T.M.A.N. contributors:
  *
  * Marek Lindner, Simon Wunderlich
  */
@@ -39,14 +39,10 @@ int batadv_send_broadcast_skb(struct sk_buff *skb,
 			      struct batadv_hard_iface *hard_iface);
 int batadv_send_unicast_skb(struct sk_buff *skb,
 			    struct batadv_neigh_node *neigh_node);
-int batadv_forw_bcast_packet(struct batadv_priv *bat_priv,
-			     struct sk_buff *skb,
-			     unsigned long delay,
-			     bool own_packet);
-void batadv_send_bcast_packet(struct batadv_priv *bat_priv,
-			      struct sk_buff *skb,
-			      unsigned long delay,
-			      bool own_packet);
+int batadv_add_bcast_packet_to_list(struct batadv_priv *bat_priv,
+				    const struct sk_buff *skb,
+				    unsigned long delay,
+				    bool own_packet);
 void
 batadv_purge_outstanding_packets(struct batadv_priv *bat_priv,
 				 const struct batadv_hard_iface *hard_iface);
@@ -68,7 +64,7 @@ int batadv_send_skb_via_gw(struct batadv_priv *bat_priv, struct sk_buff *skb,
 
 /**
  * batadv_send_skb_via_tt() - send an skb via TT lookup
- * @bat_priv: the bat priv with all the mesh interface information
+ * @bat_priv: the bat priv with all the soft interface information
  * @skb: the payload to send
  * @dst_hint: can be used to override the destination contained in the skb
  * @vid: the vid to be used to search the translation table
@@ -89,7 +85,7 @@ static inline int batadv_send_skb_via_tt(struct batadv_priv *bat_priv,
 
 /**
  * batadv_send_skb_via_tt_4addr() - send an skb via TT lookup
- * @bat_priv: the bat priv with all the mesh interface information
+ * @bat_priv: the bat priv with all the soft interface information
  * @skb: the payload to send
  * @packet_subtype: the unicast 4addr packet subtype to use
  * @dst_hint: can be used to override the destination contained in the skb

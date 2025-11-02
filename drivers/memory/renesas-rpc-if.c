@@ -7,19 +7,148 @@
  * Copyright (C) 2019-2020 Cogent Embedded, Inc.
  */
 
-#include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 
 #include <memory/renesas-rpc-if.h>
 
-#include "renesas-rpc-if-regs.h"
-#include "renesas-xspi-if-regs.h"
+#define RPCIF_CMNCR		0x0000	/* R/W */
+#define RPCIF_CMNCR_MD		BIT(31)
+#define RPCIF_CMNCR_SFDE	BIT(24) /* undocumented but must be set */
+#define RPCIF_CMNCR_MOIIO3(val)	(((val) & 0x3) << 22)
+#define RPCIF_CMNCR_MOIIO2(val)	(((val) & 0x3) << 20)
+#define RPCIF_CMNCR_MOIIO1(val)	(((val) & 0x3) << 18)
+#define RPCIF_CMNCR_MOIIO0(val)	(((val) & 0x3) << 16)
+#define RPCIF_CMNCR_MOIIO_HIZ	(RPCIF_CMNCR_MOIIO0(3) | \
+				 RPCIF_CMNCR_MOIIO1(3) | \
+				 RPCIF_CMNCR_MOIIO2(3) | RPCIF_CMNCR_MOIIO3(3))
+#define RPCIF_CMNCR_IO3FV(val)	(((val) & 0x3) << 14) /* undocumented */
+#define RPCIF_CMNCR_IO2FV(val)	(((val) & 0x3) << 12) /* undocumented */
+#define RPCIF_CMNCR_IO0FV(val)	(((val) & 0x3) << 8)
+#define RPCIF_CMNCR_IOFV_HIZ	(RPCIF_CMNCR_IO0FV(3) | RPCIF_CMNCR_IO2FV(3) | \
+				 RPCIF_CMNCR_IO3FV(3))
+#define RPCIF_CMNCR_BSZ(val)	(((val) & 0x3) << 0)
+
+#define RPCIF_SSLDR		0x0004	/* R/W */
+#define RPCIF_SSLDR_SPNDL(d)	(((d) & 0x7) << 16)
+#define RPCIF_SSLDR_SLNDL(d)	(((d) & 0x7) << 8)
+#define RPCIF_SSLDR_SCKDL(d)	(((d) & 0x7) << 0)
+
+#define RPCIF_DRCR		0x000C	/* R/W */
+#define RPCIF_DRCR_SSLN		BIT(24)
+#define RPCIF_DRCR_RBURST(v)	((((v) - 1) & 0x1F) << 16)
+#define RPCIF_DRCR_RCF		BIT(9)
+#define RPCIF_DRCR_RBE		BIT(8)
+#define RPCIF_DRCR_SSLE		BIT(0)
+
+#define RPCIF_DRCMR		0x0010	/* R/W */
+#define RPCIF_DRCMR_CMD(c)	(((c) & 0xFF) << 16)
+#define RPCIF_DRCMR_OCMD(c)	(((c) & 0xFF) << 0)
+
+#define RPCIF_DREAR		0x0014	/* R/W */
+#define RPCIF_DREAR_EAV(c)	(((c) & 0xF) << 16)
+#define RPCIF_DREAR_EAC(c)	(((c) & 0x7) << 0)
+
+#define RPCIF_DROPR		0x0018	/* R/W */
+
+#define RPCIF_DRENR		0x001C	/* R/W */
+#define RPCIF_DRENR_CDB(o)	(u32)((((o) & 0x3) << 30))
+#define RPCIF_DRENR_OCDB(o)	(((o) & 0x3) << 28)
+#define RPCIF_DRENR_ADB(o)	(((o) & 0x3) << 24)
+#define RPCIF_DRENR_OPDB(o)	(((o) & 0x3) << 20)
+#define RPCIF_DRENR_DRDB(o)	(((o) & 0x3) << 16)
+#define RPCIF_DRENR_DME		BIT(15)
+#define RPCIF_DRENR_CDE		BIT(14)
+#define RPCIF_DRENR_OCDE	BIT(12)
+#define RPCIF_DRENR_ADE(v)	(((v) & 0xF) << 8)
+#define RPCIF_DRENR_OPDE(v)	(((v) & 0xF) << 4)
+
+#define RPCIF_SMCR		0x0020	/* R/W */
+#define RPCIF_SMCR_SSLKP	BIT(8)
+#define RPCIF_SMCR_SPIRE	BIT(2)
+#define RPCIF_SMCR_SPIWE	BIT(1)
+#define RPCIF_SMCR_SPIE		BIT(0)
+
+#define RPCIF_SMCMR		0x0024	/* R/W */
+#define RPCIF_SMCMR_CMD(c)	(((c) & 0xFF) << 16)
+#define RPCIF_SMCMR_OCMD(c)	(((c) & 0xFF) << 0)
+
+#define RPCIF_SMADR		0x0028	/* R/W */
+
+#define RPCIF_SMOPR		0x002C	/* R/W */
+#define RPCIF_SMOPR_OPD3(o)	(((o) & 0xFF) << 24)
+#define RPCIF_SMOPR_OPD2(o)	(((o) & 0xFF) << 16)
+#define RPCIF_SMOPR_OPD1(o)	(((o) & 0xFF) << 8)
+#define RPCIF_SMOPR_OPD0(o)	(((o) & 0xFF) << 0)
+
+#define RPCIF_SMENR		0x0030	/* R/W */
+#define RPCIF_SMENR_CDB(o)	(((o) & 0x3) << 30)
+#define RPCIF_SMENR_OCDB(o)	(((o) & 0x3) << 28)
+#define RPCIF_SMENR_ADB(o)	(((o) & 0x3) << 24)
+#define RPCIF_SMENR_OPDB(o)	(((o) & 0x3) << 20)
+#define RPCIF_SMENR_SPIDB(o)	(((o) & 0x3) << 16)
+#define RPCIF_SMENR_DME		BIT(15)
+#define RPCIF_SMENR_CDE		BIT(14)
+#define RPCIF_SMENR_OCDE	BIT(12)
+#define RPCIF_SMENR_ADE(v)	(((v) & 0xF) << 8)
+#define RPCIF_SMENR_OPDE(v)	(((v) & 0xF) << 4)
+#define RPCIF_SMENR_SPIDE(v)	(((v) & 0xF) << 0)
+
+#define RPCIF_SMRDR0		0x0038	/* R */
+#define RPCIF_SMRDR1		0x003C	/* R */
+#define RPCIF_SMWDR0		0x0040	/* W */
+#define RPCIF_SMWDR1		0x0044	/* W */
+
+#define RPCIF_CMNSR		0x0048	/* R */
+#define RPCIF_CMNSR_SSLF	BIT(1)
+#define RPCIF_CMNSR_TEND	BIT(0)
+
+#define RPCIF_DRDMCR		0x0058	/* R/W */
+#define RPCIF_DMDMCR_DMCYC(v)	((((v) - 1) & 0x1F) << 0)
+
+#define RPCIF_DRDRENR		0x005C	/* R/W */
+#define RPCIF_DRDRENR_HYPE(v)	(((v) & 0x7) << 12)
+#define RPCIF_DRDRENR_ADDRE	BIT(8)
+#define RPCIF_DRDRENR_OPDRE	BIT(4)
+#define RPCIF_DRDRENR_DRDRE	BIT(0)
+
+#define RPCIF_SMDMCR		0x0060	/* R/W */
+#define RPCIF_SMDMCR_DMCYC(v)	((((v) - 1) & 0x1F) << 0)
+
+#define RPCIF_SMDRENR		0x0064	/* R/W */
+#define RPCIF_SMDRENR_HYPE(v)	(((v) & 0x7) << 12)
+#define RPCIF_SMDRENR_ADDRE	BIT(8)
+#define RPCIF_SMDRENR_OPDRE	BIT(4)
+#define RPCIF_SMDRENR_SPIDRE	BIT(0)
+
+#define RPCIF_PHYCNT		0x007C	/* R/W */
+#define RPCIF_PHYCNT_CAL	BIT(31)
+#define RPCIF_PHYCNT_OCTA(v)	(((v) & 0x3) << 22)
+#define RPCIF_PHYCNT_EXDS	BIT(21)
+#define RPCIF_PHYCNT_OCT	BIT(20)
+#define RPCIF_PHYCNT_DDRCAL	BIT(19)
+#define RPCIF_PHYCNT_HS		BIT(18)
+#define RPCIF_PHYCNT_STRTIM(v)	(((v) & 0x7) << 15)
+#define RPCIF_PHYCNT_WBUF2	BIT(4)
+#define RPCIF_PHYCNT_WBUF	BIT(2)
+#define RPCIF_PHYCNT_PHYMEM(v)	(((v) & 0x3) << 0)
+
+#define RPCIF_PHYOFFSET1	0x0080	/* R/W */
+#define RPCIF_PHYOFFSET1_DDRTMG(v) (((v) & 0x3) << 28)
+
+#define RPCIF_PHYOFFSET2	0x0084	/* R/W */
+#define RPCIF_PHYOFFSET2_OCTTMG(v) (((v) & 0x7) << 8)
+
+#define RPCIF_PHYINT		0x0088	/* R/W */
+#define RPCIF_PHYINT_WPVAL	BIT(1)
+
+#define RPCIF_DIRMAP_SIZE	0x4000000
 
 static const struct regmap_range rpcif_volatile_ranges[] = {
 	regmap_reg_range(RPCIF_SMRDR0, RPCIF_SMRDR1),
@@ -32,67 +161,14 @@ static const struct regmap_access_table rpcif_volatile_table = {
 	.n_yes_ranges	= ARRAY_SIZE(rpcif_volatile_ranges),
 };
 
-static const struct regmap_range xspi_volatile_ranges[] = {
-	regmap_reg_range(XSPI_CDD0BUF0, XSPI_CDD0BUF0),
-};
-
-static const struct regmap_access_table xspi_volatile_table = {
-	.yes_ranges	= xspi_volatile_ranges,
-	.n_yes_ranges	= ARRAY_SIZE(xspi_volatile_ranges),
-};
-
-struct rpcif_priv;
-
-struct rpcif_impl {
-	int (*hw_init)(struct rpcif_priv *rpc, bool hyperflash);
-	void (*prepare)(struct rpcif_priv *rpc, const struct rpcif_op *op,
-			u64 *offs, size_t *len);
-	int (*manual_xfer)(struct rpcif_priv *rpc);
-	size_t (*dirmap_read)(struct rpcif_priv *rpc, u64 offs, size_t len,
-			      void *buf);
-	u32 status_reg;
-	u32 status_mask;
-};
-
-struct rpcif_info {
-	const struct regmap_config *regmap_config;
-	const struct rpcif_impl *impl;
-	enum rpcif_type type;
-	u8 strtim;
-};
-
-struct rpcif_priv {
-	struct device *dev;
-	void __iomem *base;
-	void __iomem *dirmap;
-	struct regmap *regmap;
-	struct reset_control *rstc;
-	struct platform_device *vdev;
-	size_t size;
-	const struct rpcif_info *info;
-	enum rpcif_data_dir dir;
-	u8 bus_size;
-	u8 xfer_size;
-	u8 addr_nbytes;		/* Specified for xSPI */
-	u32 proto;		/* Specified for xSPI */
-	void *buffer;
-	u32 xferlen;
-	u32 smcr;
-	u32 smadr;
-	u32 command;		/* DRCMR or SMCMR */
-	u32 option;		/* DROPR or SMOPR */
-	u32 enable;		/* DRENR or SMENR */
-	u32 dummy;		/* DRDMCR or SMDMCR */
-	u32 ddr;		/* DRDRENR or SMDRENR */
-};
 
 /*
  * Custom accessor functions to ensure SM[RW]DR[01] are always accessed with
- * proper width.  Requires rpcif_priv.xfer_size to be correctly set before!
+ * proper width.  Requires rpcif.xfer_size to be correctly set before!
  */
 static int rpcif_reg_read(void *context, unsigned int reg, unsigned int *val)
 {
-	struct rpcif_priv *rpc = context;
+	struct rpcif *rpc = context;
 
 	switch (reg) {
 	case RPCIF_SMRDR0:
@@ -124,11 +200,12 @@ static int rpcif_reg_read(void *context, unsigned int reg, unsigned int *val)
 
 	*val = readl(rpc->base + reg);
 	return 0;
+
 }
 
 static int rpcif_reg_write(void *context, unsigned int reg, unsigned int val)
 {
-	struct rpcif_priv *rpc = context;
+	struct rpcif *rpc = context;
 
 	switch (reg) {
 	case RPCIF_SMWDR0:
@@ -175,104 +252,85 @@ static const struct regmap_config rpcif_regmap_config = {
 	.volatile_table	= &rpcif_volatile_table,
 };
 
-static int xspi_reg_read(void *context, unsigned int reg, unsigned int *val)
+int rpcif_sw_init(struct rpcif *rpc, struct device *dev)
 {
-	struct rpcif_priv *xspi = context;
+	struct platform_device *pdev = to_platform_device(dev);
+	struct resource *res;
 
-	*val = readl(xspi->base + reg);
-	return 0;
-}
+	rpc->dev = dev;
 
-static int xspi_reg_write(void *context, unsigned int reg, unsigned int val)
-{
-	struct rpcif_priv *xspi = context;
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "regs");
+	rpc->base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(rpc->base))
+		return PTR_ERR(rpc->base);
 
-	writel(val, xspi->base + reg);
-	return 0;
-}
+	rpc->regmap = devm_regmap_init(&pdev->dev, NULL, rpc, &rpcif_regmap_config);
+	if (IS_ERR(rpc->regmap)) {
+		dev_err(&pdev->dev,
+			"failed to init regmap for rpcif, error %ld\n",
+			PTR_ERR(rpc->regmap));
+		return	PTR_ERR(rpc->regmap);
+	}
 
-static const struct regmap_config xspi_regmap_config = {
-	.reg_bits	= 32,
-	.val_bits	= 32,
-	.reg_stride	= 4,
-	.reg_read	= xspi_reg_read,
-	.reg_write	= xspi_reg_write,
-	.fast_io	= true,
-	.max_register	= XSPI_INTE,
-	.volatile_table	= &xspi_volatile_table,
-};
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dirmap");
+	rpc->dirmap = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(rpc->dirmap))
+		return PTR_ERR(rpc->dirmap);
+	rpc->size = resource_size(res);
 
-int rpcif_sw_init(struct rpcif *rpcif, struct device *dev)
-{
-	struct rpcif_priv *rpc = dev_get_drvdata(dev);
+	rpc->rstc = devm_reset_control_get_exclusive(&pdev->dev, NULL);
 
-	rpcif->dev = dev;
-	rpcif->dirmap = rpc->dirmap;
-	rpcif->size = rpc->size;
-	rpcif->xspi = rpc->info->type == XSPI_RZ_G3E;
-	return 0;
+	return PTR_ERR_OR_ZERO(rpc->rstc);
 }
 EXPORT_SYMBOL(rpcif_sw_init);
 
-static void rpcif_rzg2l_timing_adjust_sdr(struct rpcif_priv *rpc)
+void rpcif_enable_rpm(struct rpcif *rpc)
 {
-	regmap_write(rpc->regmap, RPCIF_PHYWR, 0xa5390000);
-	regmap_write(rpc->regmap, RPCIF_PHYADD, 0x80000000);
-	regmap_write(rpc->regmap, RPCIF_PHYWR, 0x00008080);
-	regmap_write(rpc->regmap, RPCIF_PHYADD, 0x80000022);
-	regmap_write(rpc->regmap, RPCIF_PHYWR, 0x00008080);
-	regmap_write(rpc->regmap, RPCIF_PHYADD, 0x80000024);
-	regmap_update_bits(rpc->regmap, RPCIF_PHYCNT, RPCIF_PHYCNT_CKSEL(3),
-			   RPCIF_PHYCNT_CKSEL(3));
-	regmap_write(rpc->regmap, RPCIF_PHYWR, 0x00000030);
-	regmap_write(rpc->regmap, RPCIF_PHYADD, 0x80000032);
+	pm_runtime_enable(rpc->dev);
 }
+EXPORT_SYMBOL(rpcif_enable_rpm);
 
-static int rpcif_hw_init_impl(struct rpcif_priv *rpc, bool hyperflash)
+void rpcif_disable_rpm(struct rpcif *rpc)
+{
+	pm_runtime_disable(rpc->dev);
+}
+EXPORT_SYMBOL(rpcif_disable_rpm);
+
+void rpcif_hw_init(struct rpcif *rpc, bool hyperflash)
 {
 	u32 dummy;
-	int ret;
 
-	if (rpc->info->type == RPCIF_RZ_G2L) {
-		ret = reset_control_reset(rpc->rstc);
-		if (ret)
-			return ret;
-		usleep_range(200, 300);
-		rpcif_rzg2l_timing_adjust_sdr(rpc);
-	}
+	pm_runtime_get_sync(rpc->dev);
 
-	regmap_update_bits(rpc->regmap, RPCIF_PHYCNT, RPCIF_PHYCNT_PHYMEM_MASK,
-			   RPCIF_PHYCNT_PHYMEM(hyperflash ? 3 : 0));
+	/*
+	 * NOTE: The 0x260 are undocumented bits, but they must be set.
+	 *	 RPCIF_PHYCNT_STRTIM is strobe timing adjustment bits,
+	 *	 0x0 : the delay is biggest,
+	 *	 0x1 : the delay is 2nd biggest,
+	 *	 On H3 ES1.x, the value should be 0, while on others,
+	 *	 the value should be 7.
+	 */
+	regmap_write(rpc->regmap, RPCIF_PHYCNT, RPCIF_PHYCNT_STRTIM(7) |
+		     RPCIF_PHYCNT_PHYMEM(hyperflash ? 3 : 0) | 0x260);
 
-	/* DMA Transfer is not supported */
-	regmap_update_bits(rpc->regmap, RPCIF_PHYCNT, RPCIF_PHYCNT_HS, 0);
-
-	regmap_update_bits(rpc->regmap, RPCIF_PHYCNT,
-			   /* create mask with all affected bits set */
-			   RPCIF_PHYCNT_STRTIM(BIT(fls(rpc->info->strtim)) - 1),
-			   RPCIF_PHYCNT_STRTIM(rpc->info->strtim));
-
-	regmap_update_bits(rpc->regmap, RPCIF_PHYOFFSET1, RPCIF_PHYOFFSET1_DDRTMG(3),
-			   RPCIF_PHYOFFSET1_DDRTMG(3));
-	regmap_update_bits(rpc->regmap, RPCIF_PHYOFFSET2, RPCIF_PHYOFFSET2_OCTTMG(7),
-			   RPCIF_PHYOFFSET2_OCTTMG(4));
+	/*
+	 * NOTE: The 0x1511144 are undocumented bits, but they must be set
+	 *       for RPCIF_PHYOFFSET1.
+	 *	 The 0x31 are undocumented bits, but they must be set
+	 *	 for RPCIF_PHYOFFSET2.
+	 */
+	regmap_write(rpc->regmap, RPCIF_PHYOFFSET1, 0x1511144 |
+		     RPCIF_PHYOFFSET1_DDRTMG(3));
+	regmap_write(rpc->regmap, RPCIF_PHYOFFSET2, 0x31 |
+		     RPCIF_PHYOFFSET2_OCTTMG(4));
 
 	if (hyperflash)
 		regmap_update_bits(rpc->regmap, RPCIF_PHYINT,
 				   RPCIF_PHYINT_WPVAL, 0);
 
-	if (rpc->info->type == RPCIF_RZ_G2L)
-		regmap_update_bits(rpc->regmap, RPCIF_CMNCR,
-				   RPCIF_CMNCR_MOIIO(3) | RPCIF_CMNCR_IOFV(3) |
-				   RPCIF_CMNCR_BSZ(3),
-				   RPCIF_CMNCR_MOIIO(1) | RPCIF_CMNCR_IOFV(3) |
-				   RPCIF_CMNCR_BSZ(hyperflash ? 1 : 0));
-	else
-		regmap_update_bits(rpc->regmap, RPCIF_CMNCR,
-				   RPCIF_CMNCR_MOIIO(3) | RPCIF_CMNCR_BSZ(3),
-				   RPCIF_CMNCR_MOIIO(3) |
-				   RPCIF_CMNCR_BSZ(hyperflash ? 1 : 0));
-
+	regmap_write(rpc->regmap, RPCIF_CMNCR, RPCIF_CMNCR_SFDE |
+		     RPCIF_CMNCR_MOIIO_HIZ | RPCIF_CMNCR_IOFV_HIZ |
+		     RPCIF_CMNCR_BSZ(hyperflash ? 1 : 0));
 	/* Set RCF after BSZ update */
 	regmap_write(rpc->regmap, RPCIF_DRCR, RPCIF_DRCR_RCF);
 	/* Dummy read according to spec */
@@ -280,65 +338,22 @@ static int rpcif_hw_init_impl(struct rpcif_priv *rpc, bool hyperflash)
 	regmap_write(rpc->regmap, RPCIF_SSLDR, RPCIF_SSLDR_SPNDL(7) |
 		     RPCIF_SSLDR_SLNDL(7) | RPCIF_SSLDR_SCKDL(7));
 
+	pm_runtime_put(rpc->dev);
+
 	rpc->bus_size = hyperflash ? 2 : 1;
-
-	return 0;
-}
-
-static int xspi_hw_init_impl(struct rpcif_priv *xspi, bool hyperflash)
-{
-	int ret;
-
-	ret = reset_control_reset(xspi->rstc);
-	if (ret)
-		return ret;
-
-	regmap_write(xspi->regmap, XSPI_WRAPCFG, 0x0);
-
-	regmap_update_bits(xspi->regmap, XSPI_LIOCFGCS0,
-			   XSPI_LIOCFG_PRTMD(0x3ff) | XSPI_LIOCFG_CSMIN(0xf) |
-			   XSPI_LIOCFG_CSASTEX | XSPI_LIOCFG_CSNEGEX,
-			   XSPI_LIOCFG_PRTMD(0) | XSPI_LIOCFG_CSMIN(0) |
-			   XSPI_LIOCFG_CSASTEX | XSPI_LIOCFG_CSNEGEX);
-
-	regmap_update_bits(xspi->regmap, XSPI_CCCTL0CS0, XSPI_CCCTL0_CAEN, 0);
-
-	regmap_update_bits(xspi->regmap, XSPI_CDCTL0,
-			   XSPI_CDCTL0_TRREQ | XSPI_CDCTL0_CSSEL, 0);
-
-	regmap_update_bits(xspi->regmap, XSPI_INTE, XSPI_INTE_CMDCMPE,
-			   XSPI_INTE_CMDCMPE);
-
-	return 0;
-}
-
-int rpcif_hw_init(struct device *dev, bool hyperflash)
-{
-	struct rpcif_priv *rpc = dev_get_drvdata(dev);
-	int ret;
-
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret)
-		return ret;
-
-	ret = rpc->info->impl->hw_init(rpc, hyperflash);
-
-	pm_runtime_put(dev);
-
-	return ret;
 }
 EXPORT_SYMBOL(rpcif_hw_init);
 
-static int wait_msg_xfer_end(struct rpcif_priv *rpc)
+static int wait_msg_xfer_end(struct rpcif *rpc)
 {
 	u32 sts;
 
-	return regmap_read_poll_timeout(rpc->regmap, rpc->info->impl->status_reg,
-					sts, sts & rpc->info->impl->status_mask,
-					0, USEC_PER_SEC);
+	return regmap_read_poll_timeout(rpc->regmap, RPCIF_CMNSR, sts,
+					sts & RPCIF_CMNSR_TEND, 0,
+					USEC_PER_SEC);
 }
 
-static u8 rpcif_bits_set(struct rpcif_priv *rpc, u32 nbytes)
+static u8 rpcif_bits_set(struct rpcif *rpc, u32 nbytes)
 {
 	if (rpc->bus_size == 2)
 		nbytes /= 2;
@@ -351,8 +366,8 @@ static u8 rpcif_bit_size(u8 buswidth)
 	return buswidth > 4 ? 2 : ilog2(buswidth);
 }
 
-static void rpcif_prepare_impl(struct rpcif_priv *rpc, const struct rpcif_op *op,
-			       u64 *offs, size_t *len)
+void rpcif_prepare(struct rpcif *rpc, const struct rpcif_op *op, u64 *offs,
+		   size_t *len)
 {
 	rpc->smcr = 0;
 	rpc->smadr = 0;
@@ -395,7 +410,8 @@ static void rpcif_prepare_impl(struct rpcif_priv *rpc, const struct rpcif_op *op
 
 	if (op->dummy.buswidth) {
 		rpc->enable |= RPCIF_SMENR_DME;
-		rpc->dummy = RPCIF_SMDMCR_DMCYC(op->dummy.ncycles);
+		rpc->dummy = RPCIF_SMDMCR_DMCYC(op->dummy.ncycles /
+						op->dummy.buswidth);
 	}
 
 	if (op->option.buswidth) {
@@ -434,75 +450,14 @@ static void rpcif_prepare_impl(struct rpcif_priv *rpc, const struct rpcif_op *op
 		rpc->enable |= RPCIF_SMENR_SPIDB(rpcif_bit_size(op->data.buswidth));
 	}
 }
-
-static void xspi_prepare_impl(struct rpcif_priv *xspi, const struct rpcif_op *op,
-			      u64 *offs, size_t *len)
-{
-	xspi->smadr = 0;
-	xspi->addr_nbytes = 0;
-	xspi->command = 0;
-	xspi->option = 0;
-	xspi->dummy = 0;
-	xspi->xferlen = 0;
-	xspi->proto = 0;
-
-	if (op->cmd.buswidth)
-		xspi->command = op->cmd.opcode;
-
-	if (op->ocmd.buswidth)
-		xspi->command = (xspi->command << 8) | op->ocmd.opcode;
-
-	if (op->addr.buswidth) {
-		xspi->addr_nbytes = op->addr.nbytes;
-		if (offs && len)
-			xspi->smadr = *offs;
-		else
-			xspi->smadr = op->addr.val;
-	}
-
-	if (op->dummy.buswidth)
-		xspi->dummy = op->dummy.ncycles;
-
-	xspi->dir = op->data.dir;
-	if (op->data.buswidth) {
-		u32 nbytes;
-
-		xspi->buffer = op->data.buf.in;
-
-		if (offs && len)
-			nbytes = *len;
-		else
-			nbytes = op->data.nbytes;
-		xspi->xferlen = nbytes;
-	}
-
-	if (op->cmd.buswidth == 1) {
-		if (op->addr.buswidth == 2 || op->data.buswidth == 2)
-			xspi->proto = PROTO_1S_2S_2S;
-		else if (op->addr.buswidth == 4 || op->data.buswidth == 4)
-			xspi->proto = PROTO_1S_4S_4S;
-	} else if (op->cmd.buswidth == 2 &&
-		   (op->addr.buswidth == 2 || op->data.buswidth == 2)) {
-		xspi->proto = PROTO_2S_2S_2S;
-	} else if (op->cmd.buswidth == 4 &&
-		   (op->addr.buswidth == 4 || op->data.buswidth == 4)) {
-		xspi->proto = PROTO_4S_4S_4S;
-	}
-}
-
-void rpcif_prepare(struct device *dev, const struct rpcif_op *op, u64 *offs,
-		   size_t *len)
-{
-	struct rpcif_priv *rpc = dev_get_drvdata(dev);
-
-	rpc->info->impl->prepare(rpc, op, offs, len);
-}
 EXPORT_SYMBOL(rpcif_prepare);
 
-static int rpcif_manual_xfer_impl(struct rpcif_priv *rpc)
+int rpcif_manual_xfer(struct rpcif *rpc)
 {
 	u32 smenr, smcr, pos = 0, max = rpc->bus_size == 2 ? 8 : 4;
 	int ret = 0;
+
+	pm_runtime_get_sync(rpc->dev);
 
 	regmap_update_bits(rpc->regmap, RPCIF_PHYCNT,
 			   RPCIF_PHYCNT_CAL, RPCIF_PHYCNT_CAL);
@@ -519,7 +474,7 @@ static int rpcif_manual_xfer_impl(struct rpcif_priv *rpc)
 	case RPCIF_DATA_OUT:
 		while (pos < rpc->xferlen) {
 			u32 bytes_left = rpc->xferlen - pos;
-			u32 nbytes, data[2], *p = data;
+			u32 nbytes, data[2];
 
 			smcr = rpc->smcr | RPCIF_SMCR_SPIE;
 
@@ -533,9 +488,15 @@ static int rpcif_manual_xfer_impl(struct rpcif_priv *rpc)
 			rpc->xfer_size = nbytes;
 
 			memcpy(data, rpc->buffer + pos, nbytes);
-			if (nbytes == 8)
-				regmap_write(rpc->regmap, RPCIF_SMWDR1, *p++);
-			regmap_write(rpc->regmap, RPCIF_SMWDR0, *p);
+			if (nbytes == 8) {
+				regmap_write(rpc->regmap, RPCIF_SMWDR1,
+					     data[0]);
+				regmap_write(rpc->regmap, RPCIF_SMWDR0,
+					     data[1]);
+			} else {
+				regmap_write(rpc->regmap, RPCIF_SMWDR0,
+					     data[0]);
+			}
 
 			regmap_write(rpc->regmap, RPCIF_SMCR, smcr);
 			ret = wait_msg_xfer_end(rpc);
@@ -577,7 +538,7 @@ static int rpcif_manual_xfer_impl(struct rpcif_priv *rpc)
 		}
 		while (pos < rpc->xferlen) {
 			u32 bytes_left = rpc->xferlen - pos;
-			u32 nbytes, data[2], *p = data;
+			u32 nbytes, data[2];
 
 			/* nbytes may only be 1, 2, 4, or 8 */
 			nbytes = bytes_left >= max ? max : (1 << ilog2(bytes_left));
@@ -594,9 +555,15 @@ static int rpcif_manual_xfer_impl(struct rpcif_priv *rpc)
 			if (ret)
 				goto err_out;
 
-			if (nbytes == 8)
-				regmap_read(rpc->regmap, RPCIF_SMRDR1, p++);
-			regmap_read(rpc->regmap, RPCIF_SMRDR0, p);
+			if (nbytes == 8) {
+				regmap_read(rpc->regmap, RPCIF_SMRDR1,
+					    &data[0]);
+				regmap_read(rpc->regmap, RPCIF_SMRDR0,
+					    &data[1]);
+			} else {
+				regmap_read(rpc->regmap, RPCIF_SMRDR0,
+					    &data[0]);
+			}
 			memcpy(rpc->buffer + pos, data, nbytes);
 
 			pos += nbytes;
@@ -611,222 +578,27 @@ static int rpcif_manual_xfer_impl(struct rpcif_priv *rpc)
 			goto err_out;
 	}
 
+exit:
+	pm_runtime_put(rpc->dev);
 	return ret;
 
 err_out:
 	if (reset_control_reset(rpc->rstc))
 		dev_err(rpc->dev, "Failed to reset HW\n");
-	rpcif_hw_init_impl(rpc, rpc->bus_size == 2);
-	return ret;
-}
-
-static int xspi_manual_xfer_impl(struct rpcif_priv *xspi)
-{
-	u32 pos = 0, max = 8;
-	int ret = 0;
-
-	regmap_update_bits(xspi->regmap, XSPI_CDCTL0, XSPI_CDCTL0_TRNUM(0x3),
-			   XSPI_CDCTL0_TRNUM(0));
-
-	regmap_update_bits(xspi->regmap, XSPI_CDCTL0, XSPI_CDCTL0_TRREQ, 0);
-
-	regmap_write(xspi->regmap, XSPI_CDTBUF0,
-		     XSPI_CDTBUF_CMDSIZE(0x1) | XSPI_CDTBUF_CMD_FIELD(xspi->command));
-
-	regmap_write(xspi->regmap, XSPI_CDABUF0, 0);
-
-	regmap_update_bits(xspi->regmap, XSPI_CDTBUF0, XSPI_CDTBUF_ADDSIZE(0x7),
-			   XSPI_CDTBUF_ADDSIZE(xspi->addr_nbytes));
-
-	regmap_write(xspi->regmap, XSPI_CDABUF0, xspi->smadr);
-
-	regmap_update_bits(xspi->regmap, XSPI_LIOCFGCS0, XSPI_LIOCFG_PRTMD(0x3ff),
-			   XSPI_LIOCFG_PRTMD(xspi->proto));
-
-	switch (xspi->dir) {
-	case RPCIF_DATA_OUT:
-		while (pos < xspi->xferlen) {
-			u32 bytes_left = xspi->xferlen - pos;
-			u32 nbytes, data[2], *p = data;
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_TRTYPE, XSPI_CDTBUF_TRTYPE);
-
-			nbytes = bytes_left >= max ? max : bytes_left;
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_DATASIZE(0xf),
-					   XSPI_CDTBUF_DATASIZE(nbytes));
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_ADDSIZE(0x7),
-					   XSPI_CDTBUF_ADDSIZE(xspi->addr_nbytes));
-
-			memcpy(data, xspi->buffer + pos, nbytes);
-
-			if (nbytes > 4) {
-				regmap_write(xspi->regmap, XSPI_CDD0BUF0, *p++);
-				regmap_write(xspi->regmap, XSPI_CDD1BUF0, *p);
-			} else {
-				regmap_write(xspi->regmap, XSPI_CDD0BUF0, *p);
-			}
-
-			regmap_write(xspi->regmap, XSPI_CDABUF0, xspi->smadr + pos);
-
-			regmap_update_bits(xspi->regmap, XSPI_CDCTL0,
-					   XSPI_CDCTL0_TRREQ, XSPI_CDCTL0_TRREQ);
-
-			ret = wait_msg_xfer_end(xspi);
-			if (ret)
-				goto err_out;
-
-			regmap_update_bits(xspi->regmap, XSPI_INTC,
-					   XSPI_INTC_CMDCMPC, XSPI_INTC_CMDCMPC);
-
-			pos += nbytes;
-		}
-		regmap_update_bits(xspi->regmap, XSPI_CDCTL0, XSPI_CDCTL0_TRREQ, 0);
-		break;
-	case RPCIF_DATA_IN:
-		while (pos < xspi->xferlen) {
-			u32 bytes_left = xspi->xferlen - pos;
-			u32 nbytes, data[2], *p = data;
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_TRTYPE,
-					   ~(u32)XSPI_CDTBUF_TRTYPE);
-
-			/* nbytes can be up to 8 bytes */
-			nbytes = bytes_left >= max ? max : bytes_left;
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_DATASIZE(0xf),
-					   XSPI_CDTBUF_DATASIZE(nbytes));
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_ADDSIZE(0x7),
-					   XSPI_CDTBUF_ADDSIZE(xspi->addr_nbytes));
-
-			if (xspi->addr_nbytes)
-				regmap_write(xspi->regmap, XSPI_CDABUF0,
-					     xspi->smadr + pos);
-
-			regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-					   XSPI_CDTBUF_LATE(0x1f),
-					   XSPI_CDTBUF_LATE(xspi->dummy));
-
-			regmap_update_bits(xspi->regmap, XSPI_CDCTL0,
-					   XSPI_CDCTL0_TRREQ, XSPI_CDCTL0_TRREQ);
-
-			ret = wait_msg_xfer_end(xspi);
-			if (ret)
-				goto err_out;
-
-			if (nbytes > 4) {
-				regmap_read(xspi->regmap, XSPI_CDD0BUF0, p++);
-				regmap_read(xspi->regmap, XSPI_CDD1BUF0, p);
-			} else {
-				regmap_read(xspi->regmap, XSPI_CDD0BUF0, p);
-			}
-
-			memcpy(xspi->buffer + pos, data, nbytes);
-
-			regmap_update_bits(xspi->regmap, XSPI_INTC,
-					   XSPI_INTC_CMDCMPC, XSPI_INTC_CMDCMPC);
-
-			pos += nbytes;
-		}
-		regmap_update_bits(xspi->regmap, XSPI_CDCTL0,
-				   XSPI_CDCTL0_TRREQ, 0);
-		break;
-	default:
-		regmap_update_bits(xspi->regmap, XSPI_CDTBUF0,
-				   XSPI_CDTBUF_TRTYPE, XSPI_CDTBUF_TRTYPE);
-		regmap_update_bits(xspi->regmap, XSPI_CDCTL0,
-				   XSPI_CDCTL0_TRREQ, XSPI_CDCTL0_TRREQ);
-
-		ret = wait_msg_xfer_end(xspi);
-		if (ret)
-			goto err_out;
-
-		regmap_update_bits(xspi->regmap, XSPI_INTC,
-				   XSPI_INTC_CMDCMPC, XSPI_INTC_CMDCMPC);
-	}
-
-	return ret;
-
-err_out:
-	xspi_hw_init_impl(xspi, false);
-	return ret;
-}
-
-int rpcif_manual_xfer(struct device *dev)
-{
-	struct rpcif_priv *rpc = dev_get_drvdata(dev);
-	int ret;
-
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret)
-		return ret;
-
-	ret = rpc->info->impl->manual_xfer(rpc);
-
-	pm_runtime_put(dev);
-
-	return ret;
+	rpcif_hw_init(rpc, rpc->bus_size == 2);
+	goto exit;
 }
 EXPORT_SYMBOL(rpcif_manual_xfer);
 
-static void memcpy_fromio_readw(void *to,
-				const void __iomem *from,
-				size_t count)
+ssize_t rpcif_dirmap_read(struct rpcif *rpc, u64 offs, size_t len, void *buf)
 {
-	const int maxw = (IS_ENABLED(CONFIG_64BIT)) ? 8 : 4;
-	u8 buf[2];
-
-	if (count && ((unsigned long)from & 1)) {
-		*(u16 *)buf = __raw_readw((void __iomem *)((unsigned long)from & ~1));
-		*(u8 *)to = buf[1];
-		from++;
-		to++;
-		count--;
-	}
-	while (count >= 2 && !IS_ALIGNED((unsigned long)from, maxw)) {
-		*(u16 *)to = __raw_readw(from);
-		from += 2;
-		to += 2;
-		count -= 2;
-	}
-	while (count >= maxw) {
-#ifdef CONFIG_64BIT
-		*(u64 *)to = __raw_readq(from);
-#else
-		*(u32 *)to = __raw_readl(from);
-#endif
-		from += maxw;
-		to += maxw;
-		count -= maxw;
-	}
-	while (count >= 2) {
-		*(u16 *)to = __raw_readw(from);
-		from += 2;
-		to += 2;
-		count -= 2;
-	}
-	if (count) {
-		*(u16 *)buf = __raw_readw(from);
-		*(u8 *)to = buf[0];
-	}
-}
-
-static size_t rpcif_dirmap_read_impl(struct rpcif_priv *rpc, u64 offs,
-				     size_t len, void *buf)
-{
-	loff_t from = offs & (rpc->size - 1);
-	size_t size = rpc->size - from;
+	loff_t from = offs & (RPCIF_DIRMAP_SIZE - 1);
+	size_t size = RPCIF_DIRMAP_SIZE - from;
 
 	if (len > size)
 		len = size;
+
+	pm_runtime_get_sync(rpc->dev);
 
 	regmap_update_bits(rpc->regmap, RPCIF_CMNCR, RPCIF_CMNCR_MD, 0);
 	regmap_write(rpc->regmap, RPCIF_DRCR, 0);
@@ -839,147 +611,24 @@ static size_t rpcif_dirmap_read_impl(struct rpcif_priv *rpc, u64 offs,
 	regmap_write(rpc->regmap, RPCIF_DRDMCR, rpc->dummy);
 	regmap_write(rpc->regmap, RPCIF_DRDRENR, rpc->ddr);
 
-	if (rpc->bus_size == 2)
-		memcpy_fromio_readw(buf, rpc->dirmap + from, len);
-	else
-		memcpy_fromio(buf, rpc->dirmap + from, len);
+	memcpy_fromio(buf, rpc->dirmap + from, len);
+
+	pm_runtime_put(rpc->dev);
 
 	return len;
-}
-
-static size_t xspi_dirmap_read_impl(struct rpcif_priv *xspi, u64 offs,
-				    size_t len, void *buf)
-{
-	loff_t from = offs & (xspi->size - 1);
-	size_t size = xspi->size - from;
-	u8 addsize = xspi->addr_nbytes - 1;
-
-	if (len > size)
-		len = size;
-
-	regmap_update_bits(xspi->regmap, XSPI_CMCFG0CS0,
-			   XSPI_CMCFG0_FFMT(0x3) | XSPI_CMCFG0_ADDSIZE(0x3),
-			   XSPI_CMCFG0_FFMT(0) | XSPI_CMCFG0_ADDSIZE(addsize));
-
-	regmap_update_bits(xspi->regmap, XSPI_CMCFG1CS0,
-			   XSPI_CMCFG1_RDCMD(0xffff) | XSPI_CMCFG1_RDLATE(0x1f),
-			   XSPI_CMCFG1_RDCMD_UPPER_BYTE(xspi->command) |
-			   XSPI_CMCFG1_RDLATE(xspi->dummy));
-
-	regmap_update_bits(xspi->regmap, XSPI_BMCTL0, XSPI_BMCTL0_CS0ACC(0xff),
-			   XSPI_BMCTL0_CS0ACC(0x01));
-
-	regmap_update_bits(xspi->regmap, XSPI_BMCFG,
-			   XSPI_BMCFG_WRMD | XSPI_BMCFG_MWRCOMB |
-			   XSPI_BMCFG_MWRSIZE(0xff) | XSPI_BMCFG_PREEN,
-			   0 | XSPI_BMCFG_MWRCOMB | XSPI_BMCFG_MWRSIZE(0x0f) |
-			   XSPI_BMCFG_PREEN);
-
-	regmap_update_bits(xspi->regmap, XSPI_LIOCFGCS0, XSPI_LIOCFG_PRTMD(0x3ff),
-			   XSPI_LIOCFG_PRTMD(xspi->proto));
-
-	memcpy_fromio(buf, xspi->dirmap + from, len);
-
-	return len;
-}
-
-ssize_t rpcif_dirmap_read(struct device *dev, u64 offs, size_t len, void *buf)
-{
-	struct rpcif_priv *rpc = dev_get_drvdata(dev);
-	size_t read;
-	int ret;
-
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret)
-		return ret;
-
-	read = rpc->info->impl->dirmap_read(rpc, offs, len, buf);
-
-	pm_runtime_put(dev);
-
-	return read;
 }
 EXPORT_SYMBOL(rpcif_dirmap_read);
 
-/**
- * xspi_dirmap_write - Write data to xspi memory.
- * @dev: xspi device
- * @offs: offset
- * @len: Number of bytes to be written.
- * @buf: Buffer holding write data.
- *
- * This function writes data into xspi memory.
- *
- * Returns number of bytes written on success, else negative errno.
- */
-ssize_t xspi_dirmap_write(struct device *dev, u64 offs, size_t len, const void *buf)
-{
-	struct rpcif_priv *xspi = dev_get_drvdata(dev);
-	loff_t from = offs & (xspi->size - 1);
-	u8 addsize = xspi->addr_nbytes - 1;
-	size_t size = xspi->size - from;
-	ssize_t writebytes;
-	int ret;
-
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret)
-		return ret;
-
-	if (len > size)
-		len = size;
-
-	if (len > MWRSIZE_MAX)
-		writebytes = MWRSIZE_MAX;
-	else
-		writebytes = len;
-
-	regmap_update_bits(xspi->regmap, XSPI_CMCFG0CS0,
-			   XSPI_CMCFG0_FFMT(0x3) | XSPI_CMCFG0_ADDSIZE(0x3),
-			   XSPI_CMCFG0_FFMT(0) | XSPI_CMCFG0_ADDSIZE(addsize));
-
-	regmap_update_bits(xspi->regmap, XSPI_CMCFG2CS0,
-			   XSPI_CMCFG2_WRCMD_UPPER(0xff) | XSPI_CMCFG2_WRLATE(0x1f),
-			   XSPI_CMCFG2_WRCMD_UPPER(xspi->command) |
-			   XSPI_CMCFG2_WRLATE(xspi->dummy));
-
-	regmap_update_bits(xspi->regmap, XSPI_BMCTL0,
-			   XSPI_BMCTL0_CS0ACC(0xff), XSPI_BMCTL0_CS0ACC(0x03));
-
-	regmap_update_bits(xspi->regmap, XSPI_BMCFG,
-			   XSPI_BMCFG_WRMD | XSPI_BMCFG_MWRCOMB |
-			   XSPI_BMCFG_MWRSIZE(0xff) | XSPI_BMCFG_PREEN,
-			   0 | XSPI_BMCFG_MWRCOMB | XSPI_BMCFG_MWRSIZE(0x0f) |
-			   XSPI_BMCFG_PREEN);
-
-	regmap_update_bits(xspi->regmap, XSPI_LIOCFGCS0, XSPI_LIOCFG_PRTMD(0x3ff),
-			   XSPI_LIOCFG_PRTMD(xspi->proto));
-
-	memcpy_toio(xspi->dirmap + from, buf, writebytes);
-
-	/* Request to push the pending data */
-	if (writebytes < MWRSIZE_MAX)
-		regmap_update_bits(xspi->regmap, XSPI_BMCTL1,
-				   XSPI_BMCTL1_MWRPUSH, XSPI_BMCTL1_MWRPUSH);
-
-	pm_runtime_put(dev);
-
-	return writebytes;
-}
-EXPORT_SYMBOL_GPL(xspi_dirmap_write);
-
 static int rpcif_probe(struct platform_device *pdev)
 {
-	struct device *dev = &pdev->dev;
 	struct platform_device *vdev;
 	struct device_node *flash;
-	struct rpcif_priv *rpc;
-	struct resource *res;
 	const char *name;
 	int ret;
 
-	flash = of_get_next_child(dev->of_node, NULL);
+	flash = of_get_next_child(pdev->dev.of_node, NULL);
 	if (!flash) {
-		dev_warn(dev, "no flash node found\n");
+		dev_warn(&pdev->dev, "no flash node found\n");
 		return -ENODEV;
 	}
 
@@ -989,63 +638,16 @@ static int rpcif_probe(struct platform_device *pdev)
 		name = "rpc-if-hyperflash";
 	} else	{
 		of_node_put(flash);
-		dev_warn(dev, "unknown flash type\n");
+		dev_warn(&pdev->dev, "unknown flash type\n");
 		return -ENODEV;
 	}
 	of_node_put(flash);
 
-	rpc = devm_kzalloc(dev, sizeof(*rpc), GFP_KERNEL);
-	if (!rpc)
-		return -ENOMEM;
-
-	rpc->base = devm_platform_ioremap_resource_byname(pdev, "regs");
-	if (IS_ERR(rpc->base))
-		return PTR_ERR(rpc->base);
-	rpc->info = of_device_get_match_data(dev);
-	rpc->regmap = devm_regmap_init(dev, NULL, rpc, rpc->info->regmap_config);
-	if (IS_ERR(rpc->regmap)) {
-		dev_err(dev, "failed to init regmap for rpcif, error %ld\n",
-			PTR_ERR(rpc->regmap));
-		return	PTR_ERR(rpc->regmap);
-	}
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dirmap");
-	rpc->dirmap = devm_ioremap_resource(dev, res);
-	if (IS_ERR(rpc->dirmap))
-		return PTR_ERR(rpc->dirmap);
-
-	rpc->size = resource_size(res);
-	rpc->rstc = devm_reset_control_array_get_exclusive(dev);
-	if (IS_ERR(rpc->rstc))
-		return PTR_ERR(rpc->rstc);
-
-	/*
-	 * The enabling/disabling of spi/spix2 clocks at runtime leading to
-	 * flash write failure. So, enable these clocks during probe() and
-	 * disable it in remove().
-	 */
-	if (rpc->info->type == XSPI_RZ_G3E) {
-		struct clk *spi_clk;
-
-		spi_clk = devm_clk_get_enabled(dev, "spix2");
-		if (IS_ERR(spi_clk))
-			return dev_err_probe(dev, PTR_ERR(spi_clk),
-					     "cannot get enabled spix2 clk\n");
-
-		spi_clk = devm_clk_get_enabled(dev, "spi");
-		if (IS_ERR(spi_clk))
-			return dev_err_probe(dev, PTR_ERR(spi_clk),
-					     "cannot get enabled spi clk\n");
-	}
-
 	vdev = platform_device_alloc(name, pdev->id);
 	if (!vdev)
 		return -ENOMEM;
-	vdev->dev.parent = dev;
-
-	rpc->dev = dev;
-	rpc->vdev = vdev;
-	platform_set_drvdata(pdev, rpc);
+	vdev->dev.parent = &pdev->dev;
+	platform_set_drvdata(pdev, vdev);
 
 	ret = platform_device_add(vdev);
 	if (ret) {
@@ -1056,78 +658,24 @@ static int rpcif_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void rpcif_remove(struct platform_device *pdev)
+static int rpcif_remove(struct platform_device *pdev)
 {
-	struct rpcif_priv *rpc = platform_get_drvdata(pdev);
+	struct platform_device *vdev = platform_get_drvdata(pdev);
 
-	platform_device_unregister(rpc->vdev);
+	platform_device_unregister(vdev);
+
+	return 0;
 }
 
-static const struct rpcif_impl rpcif_impl = {
-	.hw_init = rpcif_hw_init_impl,
-	.prepare = rpcif_prepare_impl,
-	.manual_xfer = rpcif_manual_xfer_impl,
-	.dirmap_read = rpcif_dirmap_read_impl,
-	.status_reg = RPCIF_CMNSR,
-	.status_mask = RPCIF_CMNSR_TEND,
-};
-
-static const struct rpcif_impl xspi_impl = {
-	.hw_init = xspi_hw_init_impl,
-	.prepare = xspi_prepare_impl,
-	.manual_xfer = xspi_manual_xfer_impl,
-	.dirmap_read = xspi_dirmap_read_impl,
-	.status_reg = XSPI_INTS,
-	.status_mask = XSPI_INTS_CMDCMP,
-};
-
-static const struct rpcif_info rpcif_info_r8a7796 = {
-	.regmap_config = &rpcif_regmap_config,
-	.impl = &rpcif_impl,
-	.type = RPCIF_RCAR_GEN3,
-	.strtim = 6,
-};
-
-static const struct rpcif_info rpcif_info_gen3 = {
-	.regmap_config = &rpcif_regmap_config,
-	.impl = &rpcif_impl,
-	.type = RPCIF_RCAR_GEN3,
-	.strtim = 7,
-};
-
-static const struct rpcif_info rpcif_info_rz_g2l = {
-	.regmap_config = &rpcif_regmap_config,
-	.impl = &rpcif_impl,
-	.type = RPCIF_RZ_G2L,
-	.strtim = 7,
-};
-
-static const struct rpcif_info rpcif_info_gen4 = {
-	.regmap_config = &rpcif_regmap_config,
-	.impl = &rpcif_impl,
-	.type = RPCIF_RCAR_GEN4,
-	.strtim = 15,
-};
-
-static const struct rpcif_info xspi_info_r9a09g047 = {
-	.regmap_config = &xspi_regmap_config,
-	.impl = &xspi_impl,
-	.type = XSPI_RZ_G3E,
-};
-
 static const struct of_device_id rpcif_of_match[] = {
-	{ .compatible = "renesas,r8a7796-rpc-if", .data = &rpcif_info_r8a7796 },
-	{ .compatible = "renesas,r9a09g047-xspi", .data = &xspi_info_r9a09g047 },
-	{ .compatible = "renesas,rcar-gen3-rpc-if", .data = &rpcif_info_gen3 },
-	{ .compatible = "renesas,rcar-gen4-rpc-if", .data = &rpcif_info_gen4 },
-	{ .compatible = "renesas,rzg2l-rpc-if", .data = &rpcif_info_rz_g2l },
+	{ .compatible = "renesas,rcar-gen3-rpc-if", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, rpcif_of_match);
 
 static struct platform_driver rpcif_driver = {
 	.probe	= rpcif_probe,
-	.remove = rpcif_remove,
+	.remove	= rpcif_remove,
 	.driver = {
 		.name =	"rpc-if",
 		.of_match_table = rpcif_of_match,

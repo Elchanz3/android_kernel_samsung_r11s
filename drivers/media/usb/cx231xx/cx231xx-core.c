@@ -751,12 +751,13 @@ int cx231xx_ep5_bulkout(struct cx231xx *dev, u8 *firmware, u16 size)
 	int ret = -ENOMEM;
 	u32 *buffer;
 
-	buffer = kmemdup(firmware, EP5_BUF_SIZE, GFP_KERNEL);
+	buffer = kzalloc(4096, GFP_KERNEL);
 	if (buffer == NULL)
 		return -ENOMEM;
+	memcpy(&buffer[0], firmware, 4096);
 
 	ret = usb_bulk_msg(dev->udev, usb_sndbulkpipe(dev->udev, 5),
-			buffer, EP5_BUF_SIZE, &actlen, EP5_TIMEOUT_MS);
+			buffer, 4096, &actlen, 2000);
 
 	if (ret)
 		dev_err(dev->dev,
@@ -993,7 +994,7 @@ int cx231xx_init_isoc(struct cx231xx *dev, int max_packets,
 	/* De-allocates all pending stuff */
 	cx231xx_uninit_isoc(dev);
 
-	dma_q->p_left_data = kzalloc(EP5_BUF_SIZE, GFP_KERNEL);
+	dma_q->p_left_data = kzalloc(4096, GFP_KERNEL);
 	if (dma_q->p_left_data == NULL)
 		return -ENOMEM;
 
@@ -1062,8 +1063,9 @@ int cx231xx_init_isoc(struct cx231xx *dev, int max_packets,
 				       &urb->transfer_dma);
 		if (!dev->video_mode.isoc_ctl.transfer_buffer[i]) {
 			dev_err(dev->dev,
-				"unable to allocate %i bytes for transfer buffer %i\n",
-				sb_size, i);
+				"unable to allocate %i bytes for transfer buffer %i%s\n",
+				sb_size, i,
+				in_interrupt() ? " while in int" : "");
 			cx231xx_uninit_isoc(dev);
 			return -ENOMEM;
 		}
@@ -1197,8 +1199,9 @@ int cx231xx_init_bulk(struct cx231xx *dev, int max_packets,
 				     &urb->transfer_dma);
 		if (!dev->video_mode.bulk_ctl.transfer_buffer[i]) {
 			dev_err(dev->dev,
-				"unable to allocate %i bytes for transfer buffer %i\n",
-				sb_size, i);
+				"unable to allocate %i bytes for transfer buffer %i%s\n",
+				sb_size, i,
+				in_interrupt() ? " while in int" : "");
 			cx231xx_uninit_bulk(dev);
 			return -ENOMEM;
 		}

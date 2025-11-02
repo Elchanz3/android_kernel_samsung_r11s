@@ -7,12 +7,13 @@
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
  */
 
-#include <linux/gpio/driver.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/gpio/driver.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/slab.h>
+#include <linux/seq_file.h>
 
 #include <linux/mfd/arizona/core.h>
 #include <linux/mfd/arizona/pdata.h>
@@ -39,6 +40,7 @@ static int arizona_gpio_direction_in(struct gpio_chip *chip, unsigned offset)
 		return ret;
 
 	if (change && persistent) {
+		pm_runtime_mark_last_busy(chip->parent);
 		pm_runtime_put_autosuspend(chip->parent);
 	}
 
@@ -81,6 +83,7 @@ static int arizona_gpio_get(struct gpio_chip *chip, unsigned offset)
 			return ret;
 		}
 
+		pm_runtime_mark_last_busy(chip->parent);
 		pm_runtime_put_autosuspend(chip->parent);
 	}
 
@@ -119,8 +122,7 @@ static int arizona_gpio_direction_out(struct gpio_chip *chip,
 				  ARIZONA_GPN_DIR | ARIZONA_GPN_LVL, value);
 }
 
-static int arizona_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			    int value)
+static void arizona_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 {
 	struct arizona_gpio *arizona_gpio = gpiochip_get_data(chip);
 	struct arizona *arizona = arizona_gpio->arizona;
@@ -128,8 +130,8 @@ static int arizona_gpio_set(struct gpio_chip *chip, unsigned int offset,
 	if (value)
 		value = ARIZONA_GPN_LVL;
 
-	return regmap_update_bits(arizona->regmap, ARIZONA_GPIO1_CTRL + offset,
-				  ARIZONA_GPN_LVL, value);
+	regmap_update_bits(arizona->regmap, ARIZONA_GPIO1_CTRL + offset,
+			   ARIZONA_GPN_LVL, value);
 }
 
 static const struct gpio_chip template_chip = {
@@ -149,8 +151,6 @@ static int arizona_gpio_probe(struct platform_device *pdev)
 	struct arizona_gpio *arizona_gpio;
 	int ret;
 
-	device_set_node(&pdev->dev, dev_fwnode(pdev->dev.parent));
-
 	arizona_gpio = devm_kzalloc(&pdev->dev, sizeof(*arizona_gpio),
 				    GFP_KERNEL);
 	if (!arizona_gpio)
@@ -159,6 +159,9 @@ static int arizona_gpio_probe(struct platform_device *pdev)
 	arizona_gpio->arizona = arizona;
 	arizona_gpio->gpio_chip = template_chip;
 	arizona_gpio->gpio_chip.parent = &pdev->dev;
+#ifdef CONFIG_OF_GPIO
+	arizona_gpio->gpio_chip.of_node = arizona->dev->of_node;
+#endif
 
 	switch (arizona->type) {
 	case WM5102:

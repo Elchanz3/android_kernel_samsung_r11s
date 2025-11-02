@@ -5,6 +5,7 @@
 
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/gpio.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/mfd/rohm-bd71828.h>
@@ -89,7 +90,38 @@ static const struct linear_range bd71828_ldo_volts[] = {
 	REGULATOR_LINEAR_RANGE(3300000, 0x32, 0x3f, 0),
 };
 
-static const unsigned int bd71828_ramp_delay[] = { 2500, 5000, 10000, 20000 };
+static int bd71828_set_ramp_delay(struct regulator_dev *rdev, int ramp_delay)
+{
+	unsigned int val;
+
+	switch (ramp_delay) {
+	case 1 ... 2500:
+		val = 0;
+		break;
+	case 2501 ... 5000:
+		val = 1;
+		break;
+	case 5001 ... 10000:
+		val = 2;
+		break;
+	case 10001 ... 20000:
+		val = 3;
+		break;
+	default:
+		val = 3;
+		dev_err(&rdev->dev,
+			"ramp_delay: %d not supported, setting 20mV/uS",
+			 ramp_delay);
+	}
+
+	/*
+	 * On BD71828 the ramp delay level control reg is at offset +2 to
+	 * enable reg
+	 */
+	return regmap_update_bits(rdev->regmap, rdev->desc->enable_reg + 2,
+				  BD71828_MASK_RAMP_DELAY,
+				  val << (ffs(BD71828_MASK_RAMP_DELAY) - 1));
+}
 
 static int buck_set_hw_dvs_levels(struct device_node *np,
 				  const struct regulator_desc *desc,
@@ -153,7 +185,7 @@ static const struct regulator_ops bd71828_dvs_buck_ops = {
 	.set_voltage_sel = regulator_set_voltage_sel_regmap,
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
 	.set_voltage_time_sel = regulator_set_voltage_time_sel,
-	.set_ramp_delay = regulator_set_ramp_delay_regmap,
+	.set_ramp_delay = bd71828_set_ramp_delay,
 };
 
 static const struct regulator_ops bd71828_ldo_ops = {
@@ -187,10 +219,6 @@ static const struct bd71828_regulator_data bd71828_rdata[] = {
 			.enable_mask = BD71828_MASK_RUN_EN,
 			.vsel_reg = BD71828_REG_BUCK1_VOLT,
 			.vsel_mask = BD71828_MASK_BUCK1267_VOLT,
-			.ramp_delay_table = bd71828_ramp_delay,
-			.n_ramp_values = ARRAY_SIZE(bd71828_ramp_delay),
-			.ramp_reg = BD71828_REG_BUCK1_MODE,
-			.ramp_mask = BD71828_MASK_RAMP_DELAY,
 			.owner = THIS_MODULE,
 			.of_parse_cb = buck_set_hw_dvs_levels,
 		},
@@ -230,10 +258,6 @@ static const struct bd71828_regulator_data bd71828_rdata[] = {
 			.enable_mask = BD71828_MASK_RUN_EN,
 			.vsel_reg = BD71828_REG_BUCK2_VOLT,
 			.vsel_mask = BD71828_MASK_BUCK1267_VOLT,
-			.ramp_delay_table = bd71828_ramp_delay,
-			.n_ramp_values = ARRAY_SIZE(bd71828_ramp_delay),
-			.ramp_reg = BD71828_REG_BUCK2_MODE,
-			.ramp_mask = BD71828_MASK_RAMP_DELAY,
 			.owner = THIS_MODULE,
 			.of_parse_cb = buck_set_hw_dvs_levels,
 		},
@@ -376,10 +400,6 @@ static const struct bd71828_regulator_data bd71828_rdata[] = {
 			.enable_mask = BD71828_MASK_RUN_EN,
 			.vsel_reg = BD71828_REG_BUCK6_VOLT,
 			.vsel_mask = BD71828_MASK_BUCK1267_VOLT,
-			.ramp_delay_table = bd71828_ramp_delay,
-			.n_ramp_values = ARRAY_SIZE(bd71828_ramp_delay),
-			.ramp_reg = BD71828_REG_BUCK6_MODE,
-			.ramp_mask = BD71828_MASK_RAMP_DELAY,
 			.owner = THIS_MODULE,
 			.of_parse_cb = buck_set_hw_dvs_levels,
 		},
@@ -417,10 +437,6 @@ static const struct bd71828_regulator_data bd71828_rdata[] = {
 			.enable_mask = BD71828_MASK_RUN_EN,
 			.vsel_reg = BD71828_REG_BUCK7_VOLT,
 			.vsel_mask = BD71828_MASK_BUCK1267_VOLT,
-			.ramp_delay_table = bd71828_ramp_delay,
-			.n_ramp_values = ARRAY_SIZE(bd71828_ramp_delay),
-			.ramp_reg = BD71828_REG_BUCK7_MODE,
-			.ramp_mask = BD71828_MASK_RAMP_DELAY,
 			.owner = THIS_MODULE,
 			.of_parse_cb = buck_set_hw_dvs_levels,
 		},
@@ -679,14 +695,19 @@ static const struct bd71828_regulator_data bd71828_rdata[] = {
 
 static int bd71828_probe(struct platform_device *pdev)
 {
+	struct rohm_regmap_dev *bd71828;
 	int i, j, ret;
 	struct regulator_config config = {
 		.dev = pdev->dev.parent,
 	};
 
-	config.regmap = dev_get_regmap(pdev->dev.parent, NULL);
-	if (!config.regmap)
-		return -ENODEV;
+	bd71828 = dev_get_drvdata(pdev->dev.parent);
+	if (!bd71828) {
+		dev_err(&pdev->dev, "No MFD driver data\n");
+		return -EINVAL;
+	}
+
+	config.regmap = bd71828->regmap;
 
 	for (i = 0; i < ARRAY_SIZE(bd71828_rdata); i++) {
 		struct regulator_dev *rdev;
@@ -695,20 +716,23 @@ static int bd71828_probe(struct platform_device *pdev)
 		rd = &bd71828_rdata[i];
 		rdev = devm_regulator_register(&pdev->dev,
 					       &rd->desc, &config);
-		if (IS_ERR(rdev))
-			return dev_err_probe(&pdev->dev, PTR_ERR(rdev),
-					     "failed to register %s regulator\n",
-					     rd->desc.name);
-
+		if (IS_ERR(rdev)) {
+			dev_err(&pdev->dev,
+				"failed to register %s regulator\n",
+				rd->desc.name);
+			return PTR_ERR(rdev);
+		}
 		for (j = 0; j < rd->reg_init_amnt; j++) {
-			ret = regmap_update_bits(config.regmap,
+			ret = regmap_update_bits(bd71828->regmap,
 						 rd->reg_inits[j].reg,
 						 rd->reg_inits[j].mask,
 						 rd->reg_inits[j].val);
-			if (ret)
-				return dev_err_probe(&pdev->dev, ret,
-						     "regulator %s init failed\n",
-						     rd->desc.name);
+			if (ret) {
+				dev_err(&pdev->dev,
+					"regulator %s init failed\n",
+					rd->desc.name);
+				return ret;
+			}
 		}
 	}
 	return 0;
@@ -716,8 +740,7 @@ static int bd71828_probe(struct platform_device *pdev)
 
 static struct platform_driver bd71828_regulator = {
 	.driver = {
-		.name = "bd71828-pmic",
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+		.name = "bd71828-pmic"
 	},
 	.probe = bd71828_probe,
 };

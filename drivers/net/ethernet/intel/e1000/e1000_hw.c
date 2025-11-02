@@ -5,7 +5,6 @@
  * Shared functions for accessing and configuring the MAC
  */
 
-#include <linux/bitfield.h>
 #include "e1000.h"
 
 static s32 e1000_check_downshift(struct e1000_hw *hw);
@@ -1184,7 +1183,6 @@ static s32 e1000_copper_link_igp_setup(struct e1000_hw *hw)
 			break;
 		case e1000_ms_auto:
 			phy_data &= ~CR_1000T_MS_ENABLE;
-			break;
 		default:
 			break;
 		}
@@ -2001,7 +1999,7 @@ s32 e1000_force_mac_fc(struct e1000_hw *hw)
 	 *      1:  Rx flow control is enabled (we can receive pause
 	 *          frames but not send pause frames).
 	 *      2:  Tx flow control is enabled (we can send pause frames
-	 *          but we do not receive pause frames).
+	 *          frames but we do not receive pause frames).
 	 *      3:  Both Rx and TX flow control (symmetric) is enabled.
 	 *  other:  No other values should be possible at this point.
 	 */
@@ -2523,7 +2521,7 @@ s32 e1000_check_for_link(struct e1000_hw *hw)
 				 * turn it on. For compatibility with a TBI link
 				 * partner, we will store bad packets. Some
 				 * frames have an additional byte on the end and
-				 * will look like CRC errors to the hardware.
+				 * will look like CRC errors to to the hardware.
 				 */
 				if (!hw->tbi_compatibility_on) {
 					hw->tbi_compatibility_on = true;
@@ -2724,7 +2722,7 @@ static void e1000_shift_out_mdi_bits(struct e1000_hw *hw, u32 data, u16 count)
  * e1000_shift_in_mdi_bits - Shifts data bits in from the PHY
  * @hw: Struct containing variables accessed by shared code
  *
- * Bits are shifted in MSB to LSB order.
+ * Bits are shifted in in MSB to LSB order.
  */
 static u16 e1000_shift_in_mdi_bits(struct e1000_hw *hw)
 {
@@ -3261,7 +3259,8 @@ static s32 e1000_phy_igp_get_info(struct e1000_hw *hw,
 		return ret_val;
 
 	phy_info->mdix_mode =
-	    (e1000_auto_x_mode)FIELD_GET(IGP01E1000_PSSR_MDIX, phy_data);
+	    (e1000_auto_x_mode) ((phy_data & IGP01E1000_PSSR_MDIX) >>
+				 IGP01E1000_PSSR_MDIX_SHIFT);
 
 	if ((phy_data & IGP01E1000_PSSR_SPEED_MASK) ==
 	    IGP01E1000_PSSR_SPEED_1000MBPS) {
@@ -3272,11 +3271,11 @@ static s32 e1000_phy_igp_get_info(struct e1000_hw *hw,
 		if (ret_val)
 			return ret_val;
 
-		phy_info->local_rx = FIELD_GET(SR_1000T_LOCAL_RX_STATUS,
-					       phy_data) ?
+		phy_info->local_rx = ((phy_data & SR_1000T_LOCAL_RX_STATUS) >>
+				      SR_1000T_LOCAL_RX_STATUS_SHIFT) ?
 		    e1000_1000t_rx_status_ok : e1000_1000t_rx_status_not_ok;
-		phy_info->remote_rx = FIELD_GET(SR_1000T_REMOTE_RX_STATUS,
-						phy_data) ?
+		phy_info->remote_rx = ((phy_data & SR_1000T_REMOTE_RX_STATUS) >>
+				       SR_1000T_REMOTE_RX_STATUS_SHIFT) ?
 		    e1000_1000t_rx_status_ok : e1000_1000t_rx_status_not_ok;
 
 		/* Get cable length */
@@ -3326,12 +3325,14 @@ static s32 e1000_phy_m88_get_info(struct e1000_hw *hw,
 		return ret_val;
 
 	phy_info->extended_10bt_distance =
-	    FIELD_GET(M88E1000_PSCR_10BT_EXT_DIST_ENABLE, phy_data) ?
+	    ((phy_data & M88E1000_PSCR_10BT_EXT_DIST_ENABLE) >>
+	     M88E1000_PSCR_10BT_EXT_DIST_ENABLE_SHIFT) ?
 	    e1000_10bt_ext_dist_enable_lower :
 	    e1000_10bt_ext_dist_enable_normal;
 
 	phy_info->polarity_correction =
-	    FIELD_GET(M88E1000_PSCR_POLARITY_REVERSAL, phy_data) ?
+	    ((phy_data & M88E1000_PSCR_POLARITY_REVERSAL) >>
+	     M88E1000_PSCR_POLARITY_REVERSAL_SHIFT) ?
 	    e1000_polarity_reversal_disabled : e1000_polarity_reversal_enabled;
 
 	/* Check polarity status */
@@ -3345,25 +3346,27 @@ static s32 e1000_phy_m88_get_info(struct e1000_hw *hw,
 		return ret_val;
 
 	phy_info->mdix_mode =
-	    (e1000_auto_x_mode)FIELD_GET(M88E1000_PSSR_MDIX, phy_data);
+	    (e1000_auto_x_mode) ((phy_data & M88E1000_PSSR_MDIX) >>
+				 M88E1000_PSSR_MDIX_SHIFT);
 
 	if ((phy_data & M88E1000_PSSR_SPEED) == M88E1000_PSSR_1000MBS) {
 		/* Cable Length Estimation and Local/Remote Receiver Information
 		 * are only valid at 1000 Mbps.
 		 */
 		phy_info->cable_length =
-		    (e1000_cable_length)FIELD_GET(M88E1000_PSSR_CABLE_LENGTH,
-						  phy_data);
+		    (e1000_cable_length) ((phy_data &
+					   M88E1000_PSSR_CABLE_LENGTH) >>
+					  M88E1000_PSSR_CABLE_LENGTH_SHIFT);
 
 		ret_val = e1000_read_phy_reg(hw, PHY_1000T_STATUS, &phy_data);
 		if (ret_val)
 			return ret_val;
 
-		phy_info->local_rx = FIELD_GET(SR_1000T_LOCAL_RX_STATUS,
-					       phy_data) ?
+		phy_info->local_rx = ((phy_data & SR_1000T_LOCAL_RX_STATUS) >>
+				      SR_1000T_LOCAL_RX_STATUS_SHIFT) ?
 		    e1000_1000t_rx_status_ok : e1000_1000t_rx_status_not_ok;
-		phy_info->remote_rx = FIELD_GET(SR_1000T_REMOTE_RX_STATUS,
-						phy_data) ?
+		phy_info->remote_rx = ((phy_data & SR_1000T_REMOTE_RX_STATUS) >>
+				       SR_1000T_REMOTE_RX_STATUS_SHIFT) ?
 		    e1000_1000t_rx_status_ok : e1000_1000t_rx_status_not_ok;
 	}
 
@@ -3511,7 +3514,7 @@ s32 e1000_init_eeprom_params(struct e1000_hw *hw)
 		if (ret_val)
 			return ret_val;
 		eeprom_size =
-		    FIELD_GET(EEPROM_SIZE_MASK, eeprom_size);
+		    (eeprom_size & EEPROM_SIZE_MASK) >> EEPROM_SIZE_SHIFT;
 		/* 256B eeprom size was not supported in earlier hardware, so we
 		 * bump eeprom_size up one to ensure that "1" (which maps to
 		 * 256B) is never the result used in the shifting logic below.
@@ -3970,7 +3973,7 @@ s32 e1000_validate_eeprom_checksum(struct e1000_hw *hw)
 		return E1000_SUCCESS;
 
 #endif
-	if (checksum == EEPROM_SUM)
+	if (checksum == (u16)EEPROM_SUM)
 		return E1000_SUCCESS;
 	else {
 		e_dbg("EEPROM Checksum Invalid\n");
@@ -3997,7 +4000,7 @@ s32 e1000_update_eeprom_checksum(struct e1000_hw *hw)
 		}
 		checksum += eeprom_data;
 	}
-	checksum = EEPROM_SUM - checksum;
+	checksum = (u16)EEPROM_SUM - checksum;
 	if (e1000_write_eeprom(hw, EEPROM_CHECKSUM_REG, 1, &checksum) < 0) {
 		e_dbg("EEPROM Write Error\n");
 		return -E1000_ERR_EEPROM;
@@ -4372,7 +4375,7 @@ void e1000_rar_set(struct e1000_hw *hw, u8 *addr, u32 index)
 /**
  * e1000_write_vfta - Writes a value to the specified offset in the VLAN filter table.
  * @hw: Struct containing variables accessed by shared code
- * @offset: Offset in VLAN filter table to write
+ * @offset: Offset in VLAN filer table to write
  * @value: Value to write into VLAN filter table
  */
 void e1000_write_vfta(struct e1000_hw *hw, u32 offset, u32 value)
@@ -4392,7 +4395,7 @@ void e1000_write_vfta(struct e1000_hw *hw, u32 offset, u32 value)
 }
 
 /**
- * e1000_clear_vfta - Clears the VLAN filter table
+ * e1000_clear_vfta - Clears the VLAN filer table
  * @hw: Struct containing variables accessed by shared code
  */
 static void e1000_clear_vfta(struct e1000_hw *hw)
@@ -4887,7 +4890,8 @@ static s32 e1000_get_cable_length(struct e1000_hw *hw, u16 *min_length,
 					     &phy_data);
 		if (ret_val)
 			return ret_val;
-		cable_length = FIELD_GET(M88E1000_PSSR_CABLE_LENGTH, phy_data);
+		cable_length = (phy_data & M88E1000_PSSR_CABLE_LENGTH) >>
+		    M88E1000_PSSR_CABLE_LENGTH_SHIFT;
 
 		/* Convert the enum value to ranged values */
 		switch (cable_length) {
@@ -4996,7 +5000,8 @@ static s32 e1000_check_polarity(struct e1000_hw *hw,
 					     &phy_data);
 		if (ret_val)
 			return ret_val;
-		*polarity = FIELD_GET(M88E1000_PSSR_REV_POLARITY, phy_data) ?
+		*polarity = ((phy_data & M88E1000_PSSR_REV_POLARITY) >>
+			     M88E1000_PSSR_REV_POLARITY_SHIFT) ?
 		    e1000_rev_polarity_reversed : e1000_rev_polarity_normal;
 
 	} else if (hw->phy_type == e1000_phy_igp) {
@@ -5066,8 +5071,8 @@ static s32 e1000_check_downshift(struct e1000_hw *hw)
 		if (ret_val)
 			return ret_val;
 
-		hw->speed_downgraded = FIELD_GET(M88E1000_PSSR_DOWNSHIFT,
-						 phy_data);
+		hw->speed_downgraded = (phy_data & M88E1000_PSSR_DOWNSHIFT) >>
+		    M88E1000_PSSR_DOWNSHIFT_SHIFT;
 	}
 
 	return E1000_SUCCESS;

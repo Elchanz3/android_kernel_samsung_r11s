@@ -13,7 +13,6 @@
 #include "util/evlist.h"
 #include "util/cpumap.h"
 #include "util/mmap.h"
-#include "util/sample.h"
 #include "util/thread_map.h"
 #include <perf/evlist.h>
 #include <perf/mmap.h>
@@ -43,8 +42,8 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 		.disabled = 1,
 		.freq = 1,
 	};
-	struct perf_cpu_map *cpus = NULL;
-	struct perf_thread_map *threads = NULL;
+	struct perf_cpu_map *cpus;
+	struct perf_thread_map *threads;
 	struct mmap *md;
 
 	attr.sample_freq = 500;
@@ -62,15 +61,18 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 	}
 	evlist__add(evlist, evsel);
 
-	cpus = perf_cpu_map__new_any_cpu();
+	cpus = perf_cpu_map__dummy_new();
 	threads = thread_map__new_by_tid(getpid());
 	if (!cpus || !threads) {
 		err = -ENOMEM;
 		pr_debug("Not enough memory to create thread/cpu maps\n");
-		goto out_delete_evlist;
+		goto out_free_maps;
 	}
 
 	perf_evlist__set_maps(&evlist->core, cpus, threads);
+
+	cpus	= NULL;
+	threads = NULL;
 
 	if (evlist__open(evlist)) {
 		const char *knob = "/proc/sys/kernel/perf_event_max_sample_rate";
@@ -104,14 +106,12 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 	while ((event = perf_mmap__read_event(&md->core)) != NULL) {
 		struct perf_sample sample;
 
-		perf_sample__init(&sample, /*all=*/false);
 		if (event->header.type != PERF_RECORD_SAMPLE)
 			goto next_event;
 
-		err = evlist__parse_sample(evlist, event, &sample);
+		err = perf_evlist__parse_sample(evlist, event, &sample);
 		if (err < 0) {
 			pr_debug("Error during parse sample\n");
-			perf_sample__exit(&sample);
 			goto out_delete_evlist;
 		}
 
@@ -119,7 +119,6 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 		nr_samples++;
 next_event:
 		perf_mmap__consume(&md->core);
-		perf_sample__exit(&sample);
 	}
 	perf_mmap__read_done(&md->core);
 
@@ -130,14 +129,15 @@ out_init:
 		err = -1;
 	}
 
-out_delete_evlist:
+out_free_maps:
 	perf_cpu_map__put(cpus);
 	perf_thread_map__put(threads);
+out_delete_evlist:
 	evlist__delete(evlist);
 	return err;
 }
 
-static int test__sw_clock_freq(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
+int test__sw_clock_freq(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	int ret;
 
@@ -147,5 +147,3 @@ static int test__sw_clock_freq(struct test_suite *test __maybe_unused, int subte
 
 	return ret;
 }
-
-DEFINE_SUITE("Software clock events period values", sw_clock_freq);

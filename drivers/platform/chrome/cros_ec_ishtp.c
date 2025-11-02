@@ -41,12 +41,9 @@ enum cros_ec_ish_channel {
 #define ISHTP_SEND_TIMEOUT			(3 * HZ)
 
 /* ISH Transport CrOS EC ISH client unique GUID */
-static const struct ishtp_device_id cros_ec_ishtp_id_table[] = {
-	{ .guid = GUID_INIT(0x7b7154d0, 0x56f4, 0x4bdc,
-		  0xb0, 0xd8, 0x9e, 0x7c, 0xda,	0xe0, 0xd6, 0xa0), },
-	{ }
-};
-MODULE_DEVICE_TABLE(ishtp, cros_ec_ishtp_id_table);
+static const guid_t cros_ish_guid =
+	GUID_INIT(0x7b7154d0, 0x56f4, 0x4bdc,
+		  0xb0, 0xd8, 0x9e, 0x7c, 0xda,	0xe0, 0xd6, 0xa0);
 
 struct header {
 	u8 channel;
@@ -143,8 +140,12 @@ static void ish_evt_handler(struct work_struct *work)
 {
 	struct ishtp_cl_data *client_data =
 		container_of(work, struct ishtp_cl_data, work_ec_evt);
+	struct cros_ec_device *ec_dev = client_data->ec_dev;
+	bool ec_has_more_events;
 
-	cros_ec_irq_thread(0, client_data->ec_dev);
+	do {
+		ec_has_more_events = cros_ec_handle_event(ec_dev);
+	} while (ec_has_more_events);
 }
 
 /**
@@ -367,33 +368,55 @@ static void ish_event_cb(struct ishtp_cl_device *cl_device)
 /**
  * cros_ish_init() - Init function for ISHTP client
  * @cros_ish_cl: ISHTP client instance
- * @reset: true if called from reset handler
  *
  * This function complete the initializtion of the client.
  *
  * Return: 0 for success, negative error code for failure.
  */
-static int cros_ish_init(struct ishtp_cl *cros_ish_cl, bool reset)
+static int cros_ish_init(struct ishtp_cl *cros_ish_cl)
 {
 	int rv;
+	struct ishtp_device *dev;
+	struct ishtp_fw_client *fw_client;
 	struct ishtp_cl_data *client_data = ishtp_get_client_data(cros_ish_cl);
 
-	rv = ishtp_cl_establish_connection(cros_ish_cl,
-					   &cros_ec_ishtp_id_table[0].guid,
-					   CROS_ISH_CL_TX_RING_SIZE,
-					   CROS_ISH_CL_RX_RING_SIZE,
-					   reset);
+	rv = ishtp_cl_link(cros_ish_cl);
+	if (rv) {
+		dev_err(cl_data_to_dev(client_data),
+			"ishtp_cl_link failed\n");
+		return rv;
+	}
+
+	dev = ishtp_get_ishtp_device(cros_ish_cl);
+
+	/* Connect to firmware client */
+	ishtp_set_tx_ring_size(cros_ish_cl, CROS_ISH_CL_TX_RING_SIZE);
+	ishtp_set_rx_ring_size(cros_ish_cl, CROS_ISH_CL_RX_RING_SIZE);
+
+	fw_client = ishtp_fw_cl_get_client(dev, &cros_ish_guid);
+	if (!fw_client) {
+		dev_err(cl_data_to_dev(client_data),
+			"ish client uuid not found\n");
+		rv = -ENOENT;
+		goto err_cl_unlink;
+	}
+
+	ishtp_cl_set_fw_client_id(cros_ish_cl,
+				  ishtp_get_fw_client_id(fw_client));
+	ishtp_set_connection_state(cros_ish_cl, ISHTP_CL_CONNECTING);
+
+	rv = ishtp_cl_connect(cros_ish_cl);
 	if (rv) {
 		dev_err(cl_data_to_dev(client_data),
 			"client connect fail\n");
-		goto err_cl_disconnect;
+		goto err_cl_unlink;
 	}
 
 	ishtp_register_event_cb(client_data->cl_device, ish_event_cb);
 	return 0;
 
-err_cl_disconnect:
-	ishtp_cl_destroy_connection(cros_ish_cl, reset);
+err_cl_unlink:
+	ishtp_cl_unlink(cros_ish_cl);
 	return rv;
 }
 
@@ -405,7 +428,10 @@ err_cl_disconnect:
  */
 static void cros_ish_deinit(struct ishtp_cl *cros_ish_cl)
 {
-	ishtp_cl_destroy_connection(cros_ish_cl, false);
+	ishtp_set_connection_state(cros_ish_cl, ISHTP_CL_DISCONNECTING);
+	ishtp_cl_disconnect(cros_ish_cl);
+	ishtp_cl_unlink(cros_ish_cl);
+	ishtp_cl_flush_queues(cros_ish_cl);
 
 	/* Disband and free all Tx and Rx client-level rings */
 	ishtp_cl_free(cros_ish_cl);
@@ -496,9 +522,7 @@ static int cros_ec_pkt_xfer_ish(struct cros_ec_device *ec_dev,
 	out_msg->hdr.status = 0;
 
 	ec_dev->dout += OUT_MSG_EC_REQUEST_PREAMBLE;
-	rv = cros_ec_prepare_tx(ec_dev, msg);
-	if (rv < 0)
-		goto end_error;
+	cros_ec_prepare_tx(ec_dev, msg);
 	ec_dev->dout -= OUT_MSG_EC_REQUEST_PREAMBLE;
 
 	dev_dbg(dev,
@@ -543,17 +567,21 @@ static int cros_ec_dev_init(struct ishtp_cl_data *client_data)
 	struct cros_ec_device *ec_dev;
 	struct device *dev = cl_data_to_dev(client_data);
 
-	ec_dev = cros_ec_device_alloc(dev);
+	ec_dev = devm_kzalloc(dev, sizeof(*ec_dev), GFP_KERNEL);
 	if (!ec_dev)
 		return -ENOMEM;
 
 	client_data->ec_dev = ec_dev;
 	dev->driver_data = ec_dev;
 
+	ec_dev->dev = dev;
 	ec_dev->priv = client_data->cros_ish_cl;
 	ec_dev->cmd_xfer = NULL;
 	ec_dev->pkt_xfer = cros_ec_pkt_xfer_ish;
 	ec_dev->phys_name = dev_name(dev);
+	ec_dev->din_size = sizeof(struct cros_ish_in_msg) +
+			   sizeof(struct ec_response_get_protocol_info);
+	ec_dev->dout_size = sizeof(struct cros_ish_out_msg);
 
 	return cros_ec_register(ec_dev);
 }
@@ -563,6 +591,7 @@ static void reset_handler(struct work_struct *work)
 	int rv;
 	struct device *dev;
 	struct ishtp_cl *cros_ish_cl;
+	struct ishtp_cl_device *cl_device;
 	struct ishtp_cl_data *client_data =
 		container_of(work, struct ishtp_cl_data, work_ishtp_reset);
 
@@ -570,11 +599,26 @@ static void reset_handler(struct work_struct *work)
 	down_write(&init_lock);
 
 	cros_ish_cl = client_data->cros_ish_cl;
+	cl_device = client_data->cl_device;
 
-	ishtp_cl_destroy_connection(cros_ish_cl, true);
+	/* Unlink, flush queues & start again */
+	ishtp_cl_unlink(cros_ish_cl);
+	ishtp_cl_flush_queues(cros_ish_cl);
+	ishtp_cl_free(cros_ish_cl);
 
-	rv = cros_ish_init(cros_ish_cl, true);
+	cros_ish_cl = ishtp_cl_allocate(cl_device);
+	if (!cros_ish_cl) {
+		up_write(&init_lock);
+		return;
+	}
+
+	ishtp_set_drvdata(cl_device, cros_ish_cl);
+	ishtp_set_client_data(cros_ish_cl, client_data);
+	client_data->cros_ish_cl = cros_ish_cl;
+
+	rv = cros_ish_init(cros_ish_cl);
 	if (rv) {
+		ishtp_cl_free(cros_ish_cl);
 		dev_err(cl_data_to_dev(client_data), "Reset Failed\n");
 		up_write(&init_lock);
 		return;
@@ -627,7 +671,7 @@ static int cros_ec_ishtp_probe(struct ishtp_cl_device *cl_device)
 	INIT_WORK(&client_data->work_ec_evt,
 		  ish_evt_handler);
 
-	rv = cros_ish_init(cros_ish_cl, false);
+	rv = cros_ish_init(cros_ish_cl);
 	if (rv)
 		goto end_ishtp_cl_init_error;
 
@@ -645,7 +689,10 @@ static int cros_ec_ishtp_probe(struct ishtp_cl_device *cl_device)
 	return 0;
 
 end_cros_ec_dev_init_error:
-	ishtp_cl_destroy_connection(cros_ish_cl, false);
+	ishtp_set_connection_state(cros_ish_cl, ISHTP_CL_DISCONNECTING);
+	ishtp_cl_disconnect(cros_ish_cl);
+	ishtp_cl_unlink(cros_ish_cl);
+	ishtp_cl_flush_queues(cros_ish_cl);
 	ishtp_put_device(cl_device);
 end_ishtp_cl_init_error:
 	ishtp_cl_free(cros_ish_cl);
@@ -660,7 +707,7 @@ end_ishtp_cl_alloc_error:
  *
  * Return: 0
  */
-static void cros_ec_ishtp_remove(struct ishtp_cl_device *cl_device)
+static int cros_ec_ishtp_remove(struct ishtp_cl_device *cl_device)
 {
 	struct ishtp_cl	*cros_ish_cl = ishtp_get_drvdata(cl_device);
 	struct ishtp_cl_data *client_data = ishtp_get_client_data(cros_ish_cl);
@@ -669,6 +716,8 @@ static void cros_ec_ishtp_remove(struct ishtp_cl_device *cl_device)
 	cancel_work_sync(&client_data->work_ec_evt);
 	cros_ish_deinit(cros_ish_cl);
 	ishtp_put_device(cl_device);
+
+	return 0;
 }
 
 /**
@@ -722,7 +771,7 @@ static SIMPLE_DEV_PM_OPS(cros_ec_ishtp_pm_ops, cros_ec_ishtp_suspend,
 
 static struct ishtp_cl_driver	cros_ec_ishtp_driver = {
 	.name = "cros_ec_ishtp",
-	.id = cros_ec_ishtp_id_table,
+	.guid = &cros_ish_guid,
 	.probe = cros_ec_ishtp_probe,
 	.remove = cros_ec_ishtp_remove,
 	.reset = cros_ec_ishtp_reset,
@@ -748,3 +797,4 @@ MODULE_DESCRIPTION("ChromeOS EC ISHTP Client Driver");
 MODULE_AUTHOR("Rushikesh S Kadam <rushikesh.s.kadam@intel.com>");
 
 MODULE_LICENSE("GPL v2");
+MODULE_ALIAS("ishtp:*");

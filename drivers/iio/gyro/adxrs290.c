@@ -75,7 +75,7 @@ struct adxrs290_state {
 	/* Ensure correct alignment of timestamp when present */
 	struct {
 		s16 channels[3];
-		aligned_s64 ts;
+		s64 ts __aligned(8);
 	} buffer;
 };
 
@@ -290,8 +290,9 @@ static int adxrs290_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret)
+			return ret;
 
 		switch (chan->type) {
 		case IIO_ANGL_VEL:
@@ -315,7 +316,7 @@ static int adxrs290_read_raw(struct iio_dev *indio_dev,
 			break;
 		}
 
-		iio_device_release_direct(indio_dev);
+		iio_device_release_direct_mode(indio_dev);
 		return ret;
 	case IIO_CHAN_INFO_SCALE:
 		switch (chan->type) {
@@ -365,8 +366,9 @@ static int adxrs290_write_raw(struct iio_dev *indio_dev,
 	struct adxrs290_state *st = iio_priv(indio_dev);
 	int ret, lpf_idx, hpf_idx;
 
-	if (!iio_device_claim_direct(indio_dev))
-		return -EBUSY;
+	ret = iio_device_claim_direct_mode(indio_dev);
+	if (ret)
+		return ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_LOW_PASS_FILTER_3DB_FREQUENCY:
@@ -406,7 +408,7 @@ static int adxrs290_write_raw(struct iio_dev *indio_dev,
 		break;
 	}
 
-	iio_device_release_direct(indio_dev);
+	iio_device_release_direct_mode(indio_dev);
 	return ret;
 }
 
@@ -477,7 +479,7 @@ static int adxrs290_data_rdy_trigger_set_state(struct iio_trigger *trig,
 	return ret;
 }
 
-static void adxrs290_reset_trig(struct iio_trigger *trig)
+static int adxrs290_reset_trig(struct iio_trigger *trig)
 {
 	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
 	int val;
@@ -490,12 +492,14 @@ static void adxrs290_reset_trig(struct iio_trigger *trig)
 	 */
 	adxrs290_get_rate_data(indio_dev,
 			       ADXRS290_READ_REG(ADXRS290_REG_DATAY0), &val);
+
+	return 0;
 }
 
 static const struct iio_trigger_ops adxrs290_trigger_ops = {
 	.set_trigger_state = &adxrs290_data_rdy_trigger_set_state,
 	.validate_device = &iio_trigger_validate_own_device,
-	.reenable = &adxrs290_reset_trig,
+	.try_reenable = &adxrs290_reset_trig,
 };
 
 static irqreturn_t adxrs290_trigger_handler(int irq, void *p)
@@ -588,10 +592,11 @@ static int adxrs290_probe_trigger(struct iio_dev *indio_dev)
 
 	st->dready_trig = devm_iio_trigger_alloc(&st->spi->dev, "%s-dev%d",
 						 indio_dev->name,
-						 iio_device_id(indio_dev));
+						 indio_dev->id);
 	if (!st->dready_trig)
 		return -ENOMEM;
 
+	st->dready_trig->dev.parent = &st->spi->dev;
 	st->dready_trig->ops = &adxrs290_trigger_ops;
 	iio_trigger_set_drvdata(st->dready_trig, indio_dev);
 

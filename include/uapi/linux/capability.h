@@ -6,10 +6,9 @@
  * Alexander Kjeldaas <astor@guardian.no>
  * with help from Aleph1, Roland Buresund and Andrew Main.
  *
- * See here for the libcap2 library (compliant with Section 25 of
- * the withdrawn POSIX 1003.1e Draft 17):
+ * See here for the libcap library ("POSIX draft" compliance):
  *
- * https://www.kernel.org/pub/linux/libs/security/linux-privs/libcap2/
+ * ftp://www.kernel.org/pub/linux/libs/security/linux-privs/kernel-2.6/
  */
 
 #ifndef _UAPI_LINUX_CAPABILITY_H
@@ -42,12 +41,11 @@ typedef struct __user_cap_header_struct {
 	int pid;
 } __user *cap_user_header_t;
 
-struct __user_cap_data_struct {
+typedef struct __user_cap_data_struct {
         __u32 effective;
         __u32 permitted;
         __u32 inheritable;
-};
-typedef struct __user_cap_data_struct __user *cap_user_data_t;
+} __user *cap_user_data_t;
 
 
 #define VFS_CAP_REVISION_MASK	0xFF000000
@@ -245,6 +243,7 @@ struct vfs_ns_cap_data {
 /* Allow examination and configuration of disk quotas */
 /* Allow setting the domainname */
 /* Allow setting the hostname */
+/* Allow calling bdflush() */
 /* Allow mount() and umount(), setting up new smb connection */
 /* Allow some autofs root ioctls */
 /* Allow nfsservctl */
@@ -276,7 +275,6 @@ struct vfs_ns_cap_data {
 /* Allow setting encryption key on loopback filesystem */
 /* Allow setting zone reclaim policy */
 /* Allow everything under CAP_BPF and CAP_PERFMON for backward compatibility */
-/* Allow setting hardware protection emergency action */
 
 #define CAP_SYS_ADMIN        21
 
@@ -290,8 +288,6 @@ struct vfs_ns_cap_data {
    processes and setting the scheduling algorithm used by another
    process. */
 /* Allow setting cpu affinity on other processes */
-/* Allow setting realtime ioprio class */
-/* Allow setting ioprio class on other processes */
 
 #define CAP_SYS_NICE         23
 

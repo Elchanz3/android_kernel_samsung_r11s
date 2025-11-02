@@ -14,7 +14,7 @@ extern void dump_cpu_task(int cpu);
 /*
  * Only dump TASK_* tasks. (0 for all tasks)
  */
-extern void show_state_filter(unsigned int state_filter);
+extern void show_state_filter(unsigned long state_filter);
 
 static inline void show_state(void)
 {
@@ -24,6 +24,9 @@ static inline void show_state(void)
 struct pt_regs;
 
 extern void show_regs(struct pt_regs *);
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+extern void show_regs_auto_comment(struct pt_regs *regs, bool comm);
+#endif
 
 /*
  * TASK is a pointer to the task whose backtrace we want to see (or NULL for current
@@ -35,10 +38,17 @@ extern void show_stack(struct task_struct *task, unsigned long *sp,
 
 extern void sched_show_task(struct task_struct *p);
 
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+extern void show_stack_auto_comment(struct task_struct *task, unsigned long *sp);
+extern void sched_show_task_auto_comment(struct task_struct *p);
+#endif
+
+#ifdef CONFIG_SCHED_DEBUG
 struct seq_file;
 extern void proc_sched_show_task(struct task_struct *p,
 				 struct pid_namespace *ns, struct seq_file *m);
 extern void proc_sched_set_task(struct task_struct *p);
+#endif
 
 /* Attach to any functions which should be ignored in wchan output. */
 #define __sched		__section(".sched.text")

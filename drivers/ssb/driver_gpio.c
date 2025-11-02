@@ -45,14 +45,12 @@ static int ssb_gpio_chipco_get_value(struct gpio_chip *chip, unsigned int gpio)
 	return !!ssb_chipco_gpio_in(&bus->chipco, 1 << gpio);
 }
 
-static int ssb_gpio_chipco_set_value(struct gpio_chip *chip, unsigned int gpio,
-				     int value)
+static void ssb_gpio_chipco_set_value(struct gpio_chip *chip, unsigned int gpio,
+				      int value)
 {
 	struct ssb_bus *bus = gpiochip_get_data(chip);
 
 	ssb_chipco_gpio_out(&bus->chipco, 1 << gpio, value ? 1 << gpio : 0);
-
-	return 0;
 }
 
 static int ssb_gpio_chipco_direction_input(struct gpio_chip *chip,
@@ -134,8 +132,7 @@ static irqreturn_t ssb_gpio_irq_chipco_handler(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	for_each_set_bit(gpio, &irqs, bus->gpio.ngpio)
-		generic_handle_domain_irq_safe(bus->irq_domain, gpio);
-
+		generic_handle_irq(ssb_gpio_to_irq(&bus->gpio, gpio));
 	ssb_chipco_gpio_polarity(chipco, irqs, val & irqs);
 
 	return IRQ_HANDLED;
@@ -150,8 +147,8 @@ static int ssb_gpio_irq_chipco_domain_init(struct ssb_bus *bus)
 	if (bus->bustype != SSB_BUSTYPE_SSB)
 		return 0;
 
-	bus->irq_domain = irq_domain_create_linear(NULL, chip->ngpio, &irq_domain_simple_ops,
-						   chipco);
+	bus->irq_domain = irq_domain_add_linear(NULL, chip->ngpio,
+						&irq_domain_simple_ops, chipco);
 	if (!bus->irq_domain) {
 		err = -ENODEV;
 		goto err_irq_domain;
@@ -234,8 +231,7 @@ static int ssb_gpio_chipco_init(struct ssb_bus *bus)
 	chip->ngpio		= 16;
 	/* There is just one SoC in one device and its GPIO addresses should be
 	 * deterministic to address them more easily. The other buses could get
-	 * a random base number.
-	 */
+	 * a random base number. */
 	if (bus->bustype == SSB_BUSTYPE_SSB)
 		chip->base		= 0;
 	else
@@ -267,14 +263,12 @@ static int ssb_gpio_extif_get_value(struct gpio_chip *chip, unsigned int gpio)
 	return !!ssb_extif_gpio_in(&bus->extif, 1 << gpio);
 }
 
-static int ssb_gpio_extif_set_value(struct gpio_chip *chip, unsigned int gpio,
-				    int value)
+static void ssb_gpio_extif_set_value(struct gpio_chip *chip, unsigned int gpio,
+				     int value)
 {
 	struct ssb_bus *bus = gpiochip_get_data(chip);
 
 	ssb_extif_gpio_out(&bus->extif, 1 << gpio, value ? 1 << gpio : 0);
-
-	return 0;
 }
 
 static int ssb_gpio_extif_direction_input(struct gpio_chip *chip,
@@ -335,8 +329,7 @@ static irqreturn_t ssb_gpio_irq_extif_handler(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	for_each_set_bit(gpio, &irqs, bus->gpio.ngpio)
-		generic_handle_domain_irq_safe(bus->irq_domain, gpio);
-
+		generic_handle_irq(ssb_gpio_to_irq(&bus->gpio, gpio));
 	ssb_extif_gpio_polarity(extif, irqs, val & irqs);
 
 	return IRQ_HANDLED;
@@ -351,8 +344,8 @@ static int ssb_gpio_irq_extif_domain_init(struct ssb_bus *bus)
 	if (bus->bustype != SSB_BUSTYPE_SSB)
 		return 0;
 
-	bus->irq_domain = irq_domain_create_linear(NULL, chip->ngpio, &irq_domain_simple_ops,
-						   extif);
+	bus->irq_domain = irq_domain_add_linear(NULL, chip->ngpio,
+						&irq_domain_simple_ops, extif);
 	if (!bus->irq_domain) {
 		err = -ENODEV;
 		goto err_irq_domain;
@@ -431,8 +424,7 @@ static int ssb_gpio_extif_init(struct ssb_bus *bus)
 	chip->ngpio		= 5;
 	/* There is just one SoC in one device and its GPIO addresses should be
 	 * deterministic to address them more easily. The other buses could get
-	 * a random base number.
-	 */
+	 * a random base number. */
 	if (bus->bustype == SSB_BUSTYPE_SSB)
 		chip->base		= 0;
 	else

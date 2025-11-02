@@ -14,7 +14,10 @@
 #include <bpf/bpf_endian.h>
 #define BPF_PROG_TEST_TCP_HDR_OPTIONS
 #include "test_tcp_hdr_options.h"
-#include "bpf_misc.h"
+
+#ifndef sizeof_field
+#define sizeof_field(TYPE, MEMBER) sizeof((((TYPE *)0)->MEMBER))
+#endif
 
 __u8 test_kind = TCPOPT_EXP;
 __u16 test_magic = 0xeB9F;
@@ -591,7 +594,7 @@ static int handle_parse_hdr(struct bpf_sock_ops *skops)
 	return CG_OK;
 }
 
-SEC("sockops")
+SEC("sockops/estab")
 int estab(struct bpf_sock_ops *skops)
 {
 	int true_val = 1;

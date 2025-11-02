@@ -9,7 +9,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
+#include <linux/acpi.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/iio/events.h>
@@ -361,13 +361,21 @@ static int us5182d_shutdown_en(struct us5182d_data *data, u8 state)
 
 static int us5182d_set_power_state(struct us5182d_data *data, bool on)
 {
+	int ret;
+
 	if (data->power_mode == US5182D_ONESHOT)
 		return 0;
 
-	if (on)
-		return pm_runtime_resume_and_get(&data->client->dev);
+	if (on) {
+		ret = pm_runtime_get_sync(&data->client->dev);
+		if (ret < 0)
+			pm_runtime_put_noidle(&data->client->dev);
+	} else {
+		pm_runtime_mark_last_busy(&data->client->dev);
+		ret = pm_runtime_put_autosuspend(&data->client->dev);
+	}
 
-	return pm_runtime_put_autosuspend(&data->client->dev);
+	return ret;
 }
 
 static int us5182d_read_value(struct us5182d_data *data,
@@ -621,7 +629,7 @@ static int us5182d_read_event_config(struct iio_dev *indio_dev,
 
 static int us5182d_write_event_config(struct iio_dev *indio_dev,
 	const struct iio_chan_spec *chan, enum iio_event_type type,
-	enum iio_event_direction dir, bool state)
+	enum iio_event_direction dir, int state)
 {
 	struct us5182d_data *data = iio_priv(indio_dev);
 	int ret;
@@ -826,7 +834,8 @@ static irqreturn_t us5182d_irq_thread_handler(int irq, void *private)
 	return IRQ_HANDLED;
 }
 
-static int us5182d_probe(struct i2c_client *client)
+static int us5182d_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	struct us5182d_data *data;
 	struct iio_dev *indio_dev;
@@ -897,22 +906,19 @@ out_err:
 
 }
 
-static void us5182d_remove(struct i2c_client *client)
+static int us5182d_remove(struct i2c_client *client)
 {
 	struct us5182d_data *data = iio_priv(i2c_get_clientdata(client));
-	int ret;
 
 	iio_device_unregister(i2c_get_clientdata(client));
 
 	pm_runtime_disable(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
 
-	ret = us5182d_shutdown_en(data, US5182D_CFG0_SHUTDOWN_EN);
-	if (ret)
-		dev_warn(&client->dev, "Failed to shut down (%pe)\n",
-			 ERR_PTR(ret));
+	return us5182d_shutdown_en(data, US5182D_CFG0_SHUTDOWN_EN);
 }
 
+#if defined(CONFIG_PM_SLEEP) || defined(CONFIG_PM)
 static int us5182d_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(to_i2c_client(dev));
@@ -935,38 +941,39 @@ static int us5182d_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
 static const struct dev_pm_ops us5182d_pm_ops = {
-	SYSTEM_SLEEP_PM_OPS(us5182d_suspend, us5182d_resume)
-	RUNTIME_PM_OPS(us5182d_suspend, us5182d_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(us5182d_suspend, us5182d_resume)
+	SET_RUNTIME_PM_OPS(us5182d_suspend, us5182d_resume, NULL)
 };
 
 static const struct acpi_device_id us5182d_acpi_match[] = {
-	{ "USD5182", 0 },
-	{ }
+	{ "USD5182", 0},
+	{}
 };
 
 MODULE_DEVICE_TABLE(acpi, us5182d_acpi_match);
 
 static const struct i2c_device_id us5182d_id[] = {
-	{ "usd5182" },
-	{ }
+		{"usd5182", 0},
+		{}
 };
 
 MODULE_DEVICE_TABLE(i2c, us5182d_id);
 
 static const struct of_device_id us5182d_of_match[] = {
 	{ .compatible = "upisemi,usd5182" },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(of, us5182d_of_match);
 
 static struct i2c_driver us5182d_driver = {
 	.driver = {
 		.name = US5182D_DRV_NAME,
-		.pm = pm_ptr(&us5182d_pm_ops),
+		.pm = &us5182d_pm_ops,
 		.of_match_table = us5182d_of_match,
-		.acpi_match_table = us5182d_acpi_match,
+		.acpi_match_table = ACPI_PTR(us5182d_acpi_match),
 	},
 	.probe = us5182d_probe,
 	.remove = us5182d_remove,

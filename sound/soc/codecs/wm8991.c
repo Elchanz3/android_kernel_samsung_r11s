@@ -958,10 +958,10 @@ static int wm8991_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	/* set master/slave audio interface */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		audio3 &= ~WM8991_AIF_MSTR1;
 		break;
-	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		audio3 |= WM8991_AIF_MSTR1;
 		break;
 	default:
@@ -1243,6 +1243,7 @@ static const struct snd_soc_component_driver soc_component_dev_wm8991 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config wm8991_regmap = {
@@ -1253,10 +1254,11 @@ static const struct regmap_config wm8991_regmap = {
 	.volatile_reg = wm8991_volatile,
 	.reg_defaults = wm8991_reg_defaults,
 	.num_reg_defaults = ARRAY_SIZE(wm8991_reg_defaults),
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 };
 
-static int wm8991_i2c_probe(struct i2c_client *i2c)
+static int wm8991_i2c_probe(struct i2c_client *i2c,
+			    const struct i2c_device_id *id)
 {
 	struct wm8991_priv *wm8991;
 	unsigned int val;
@@ -1314,7 +1316,7 @@ static int wm8991_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8991_i2c_id[] = {
-	{ "wm8991" },
+	{ "wm8991", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8991_i2c_id);

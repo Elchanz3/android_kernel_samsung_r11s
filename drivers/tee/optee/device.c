@@ -7,7 +7,7 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/tee_core.h>
+#include <linux/tee_drv.h>
 #include <linux/uuid.h>
 #include "optee_private.h"
 
@@ -43,13 +43,6 @@ static int get_devices(struct tee_context *ctx, u32 session,
 	ret = tee_client_invoke_func(ctx, &inv_arg, param);
 	if ((ret < 0) || ((inv_arg.ret != TEEC_SUCCESS) &&
 			  (inv_arg.ret != TEEC_ERROR_SHORT_BUFFER))) {
-		/*
-		 * TEE_ERROR_STORAGE_NOT_AVAILABLE is returned when getting
-		 * the list of device TAs that depends on RPMB but a usable
-		 * RPMB device isn't found.
-		 */
-		if (inv_arg.ret == TEE_ERROR_STORAGE_NOT_AVAILABLE)
-			return -ENODEV;
 		pr_err("PTA_CMD_GET_DEVICES invoke function err: %x\n",
 		       inv_arg.ret);
 		return -EINVAL;
@@ -127,7 +120,7 @@ static int __optee_enumerate_devices(u32 func)
 		return -ENODEV;
 
 	/* Open session with device enumeration pseudo TA */
-	export_uuid(sess_arg.uuid, &pta_uuid);
+	memcpy(sess_arg.uuid, pta_uuid.b, TEE_IOCTL_UUID_LEN);
 	sess_arg.clnt_login = TEE_IOCTL_LOGIN_PUBLIC;
 	sess_arg.num_params = 0;
 
@@ -142,9 +135,10 @@ static int __optee_enumerate_devices(u32 func)
 	if (rc < 0 || !shm_size)
 		goto out_sess;
 
-	device_shm = tee_shm_alloc_kernel_buf(ctx, shm_size);
+	device_shm = tee_shm_alloc(ctx, shm_size,
+				   TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
 	if (IS_ERR(device_shm)) {
-		pr_err("tee_shm_alloc_kernel_buf failed\n");
+		pr_err("tee_shm_alloc failed\n");
 		rc = PTR_ERR(device_shm);
 		goto out_sess;
 	}

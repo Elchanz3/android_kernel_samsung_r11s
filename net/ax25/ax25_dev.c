@@ -22,12 +22,11 @@
 #include <net/sock.h>
 #include <linux/uaccess.h>
 #include <linux/fcntl.h>
-#include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 
-static LIST_HEAD(ax25_dev_list);
+ax25_dev *ax25_dev_list;
 DEFINE_SPINLOCK(ax25_dev_lock);
 
 ax25_dev *ax25_addr_ax25dev(ax25_address *addr)
@@ -35,11 +34,10 @@ ax25_dev *ax25_addr_ax25dev(ax25_address *addr)
 	ax25_dev *ax25_dev, *res = NULL;
 
 	spin_lock_bh(&ax25_dev_lock);
-	list_for_each_entry(ax25_dev, &ax25_dev_list, list)
-		if (ax25cmp(addr, (const ax25_address *)ax25_dev->dev->dev_addr) == 0) {
+	for (ax25_dev = ax25_dev_list; ax25_dev != NULL; ax25_dev = ax25_dev->next)
+		if (ax25cmp(addr, (ax25_address *)ax25_dev->dev->dev_addr) == 0) {
 			res = ax25_dev;
 			ax25_dev_hold(ax25_dev);
-			break;
 		}
 	spin_unlock_bh(&ax25_dev_lock);
 
@@ -54,17 +52,16 @@ void ax25_dev_device_up(struct net_device *dev)
 {
 	ax25_dev *ax25_dev;
 
-	ax25_dev = kzalloc(sizeof(*ax25_dev), GFP_KERNEL);
-	if (!ax25_dev) {
+	if ((ax25_dev = kzalloc(sizeof(*ax25_dev), GFP_ATOMIC)) == NULL) {
 		printk(KERN_ERR "AX.25: ax25_dev_device_up - out of memory\n");
 		return;
 	}
 
 	refcount_set(&ax25_dev->refcount, 1);
+	dev->ax25_ptr     = ax25_dev;
 	ax25_dev->dev     = dev;
-	netdev_hold(dev, &ax25_dev->dev_tracker, GFP_KERNEL);
+	dev_hold(dev);
 	ax25_dev->forward = NULL;
-	ax25_dev->device_up = true;
 
 	ax25_dev->values[AX25_VALUES_IPDEFMODE] = AX25_DEF_IPDEFMODE;
 	ax25_dev->values[AX25_VALUES_AXDEFMODE] = AX25_DEF_AXDEFMODE;
@@ -79,19 +76,17 @@ void ax25_dev_device_up(struct net_device *dev)
 	ax25_dev->values[AX25_VALUES_N2]        = AX25_DEF_N2;
 	ax25_dev->values[AX25_VALUES_PACLEN]	= AX25_DEF_PACLEN;
 	ax25_dev->values[AX25_VALUES_PROTOCOL]  = AX25_DEF_PROTOCOL;
-
-#ifdef CONFIG_AX25_DAMA_SLAVE
 	ax25_dev->values[AX25_VALUES_DS_TIMEOUT]= AX25_DEF_DS_TIMEOUT;
-#endif
 
 #if defined(CONFIG_AX25_DAMA_SLAVE) || defined(CONFIG_AX25_DAMA_MASTER)
 	ax25_ds_setup_timer(ax25_dev);
 #endif
 
 	spin_lock_bh(&ax25_dev_lock);
-	list_add(&ax25_dev->list, &ax25_dev_list);
-	rcu_assign_pointer(dev->ax25_ptr, ax25_dev);
+	ax25_dev->next = ax25_dev_list;
+	ax25_dev_list  = ax25_dev;
 	spin_unlock_bh(&ax25_dev_lock);
+	ax25_dev_hold(ax25_dev);
 
 	ax25_register_dev_sysctl(ax25_dev);
 }
@@ -108,26 +103,41 @@ void ax25_dev_device_down(struct net_device *dev)
 	spin_lock_bh(&ax25_dev_lock);
 
 #ifdef CONFIG_AX25_DAMA_SLAVE
-	timer_shutdown_sync(&ax25_dev->dama.slave_timer);
+	ax25_ds_del_timer(ax25_dev);
 #endif
 
 	/*
 	 *	Remove any packet forwarding that points to this device.
 	 */
-	list_for_each_entry(s, &ax25_dev_list, list)
+	for (s = ax25_dev_list; s != NULL; s = s->next)
 		if (s->forward == dev)
 			s->forward = NULL;
 
-	list_for_each_entry(s, &ax25_dev_list, list) {
-		if (s == ax25_dev) {
-			list_del(&s->list);
-			break;
-		}
+	if ((s = ax25_dev_list) == ax25_dev) {
+		ax25_dev_list = s->next;
+		spin_unlock_bh(&ax25_dev_lock);
+		ax25_dev_put(ax25_dev);
+		dev->ax25_ptr = NULL;
+		dev_put(dev);
+		ax25_dev_put(ax25_dev);
+		return;
 	}
 
-	RCU_INIT_POINTER(dev->ax25_ptr, NULL);
+	while (s != NULL && s->next != NULL) {
+		if (s->next == ax25_dev) {
+			s->next = ax25_dev->next;
+			spin_unlock_bh(&ax25_dev_lock);
+			ax25_dev_put(ax25_dev);
+			dev->ax25_ptr = NULL;
+			dev_put(dev);
+			ax25_dev_put(ax25_dev);
+			return;
+		}
+
+		s = s->next;
+	}
 	spin_unlock_bh(&ax25_dev_lock);
-	netdev_put(dev, &ax25_dev->dev_tracker);
+	dev->ax25_ptr = NULL;
 	ax25_dev_put(ax25_dev);
 }
 
@@ -190,13 +200,16 @@ struct net_device *ax25_fwd_dev(struct net_device *dev)
  */
 void __exit ax25_dev_free(void)
 {
-	ax25_dev *s, *n;
+	ax25_dev *s, *ax25_dev;
 
 	spin_lock_bh(&ax25_dev_lock);
-	list_for_each_entry_safe(s, n, &ax25_dev_list, list) {
-		netdev_put(s->dev, &s->dev_tracker);
-		list_del(&s->list);
-		ax25_dev_put(s);
+	ax25_dev = ax25_dev_list;
+	while (ax25_dev != NULL) {
+		s        = ax25_dev;
+		dev_put(ax25_dev->dev);
+		ax25_dev = ax25_dev->next;
+		kfree(s);
 	}
+	ax25_dev_list = NULL;
 	spin_unlock_bh(&ax25_dev_lock);
 }

@@ -7,7 +7,7 @@
 
 #include "ff.h"
 
-#define READY_TIMEOUT_MS	200
+#define CALLBACK_TIMEOUT_MS	200
 
 int snd_ff_stream_get_multiplier_mode(enum cip_sfc sfc,
 				      enum snd_ff_stream_mode *mode)
@@ -199,15 +199,14 @@ int snd_ff_stream_start_duplex(struct snd_ff *ff, unsigned int rate)
 		if (err < 0)
 			goto error;
 
-		// NOTE: The device doesn't transfer packets unless receiving any packet. The
-		// sequence of tx packets includes cycle skip corresponding to empty packet or
-		// NODATA packet in IEC 61883-1/6. The sequence of the number of data blocks per
-		// packet is important for media clock recovery.
-		err = amdtp_domain_start(&ff->domain, 0, true, true);
+		err = amdtp_domain_start(&ff->domain, 0);
 		if (err < 0)
 			goto error;
 
-		if (!amdtp_domain_wait_ready(&ff->domain, READY_TIMEOUT_MS)) {
+		if (!amdtp_stream_wait_callback(&ff->rx_stream,
+						CALLBACK_TIMEOUT_MS) ||
+		    !amdtp_stream_wait_callback(&ff->tx_stream,
+						CALLBACK_TIMEOUT_MS)) {
 			err = -ETIMEDOUT;
 			goto error;
 		}
@@ -253,24 +252,33 @@ void snd_ff_stream_lock_changed(struct snd_ff *ff)
 
 int snd_ff_stream_lock_try(struct snd_ff *ff)
 {
-	guard(spinlock_irq)(&ff->lock);
+	int err;
+
+	spin_lock_irq(&ff->lock);
 
 	/* user land lock this */
-	if (ff->dev_lock_count < 0)
-		return -EBUSY;
+	if (ff->dev_lock_count < 0) {
+		err = -EBUSY;
+		goto end;
+	}
 
 	/* this is the first time */
 	if (ff->dev_lock_count++ == 0)
 		snd_ff_stream_lock_changed(ff);
-	return 0;
+	err = 0;
+end:
+	spin_unlock_irq(&ff->lock);
+	return err;
 }
 
 void snd_ff_stream_lock_release(struct snd_ff *ff)
 {
-	guard(spinlock_irq)(&ff->lock);
+	spin_lock_irq(&ff->lock);
 
 	if (WARN_ON(ff->dev_lock_count <= 0))
-		return;
+		goto end;
 	if (--ff->dev_lock_count == 0)
 		snd_ff_stream_lock_changed(ff);
+end:
+	spin_unlock_irq(&ff->lock);
 }

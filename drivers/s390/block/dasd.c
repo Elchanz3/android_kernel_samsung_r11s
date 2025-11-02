@@ -8,7 +8,9 @@
  * Copyright IBM Corp. 1999, 2009
  */
 
-#include <linux/export.h>
+#define KMSG_COMPONENT "dasd"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/kmod.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -22,12 +24,14 @@
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
 
-#include <asm/machine.h>
 #include <asm/ccwdev.h>
 #include <asm/ebcdic.h>
 #include <asm/idals.h>
 #include <asm/itcw.h>
 #include <asm/diag.h>
+
+/* This is ugly... */
+#define PRINTK_HEADER "dasd:"
 
 #include "dasd_int.h"
 /*
@@ -36,6 +40,15 @@
 #define DASD_CHANQ_MAX_SIZE 4
 
 #define DASD_DIAG_MOD		"dasd_diag_mod"
+
+static unsigned int queue_depth = 32;
+static unsigned int nr_hw_queues = 4;
+
+module_param(queue_depth, uint, 0444);
+MODULE_PARM_DESC(queue_depth, "Default queue depth for new DASD devices");
+
+module_param(nr_hw_queues, uint, 0444);
+MODULE_PARM_DESC(nr_hw_queues, "Default number of hardware queues for new DASD devices");
 
 /*
  * SECTION: exported variables of dasd.c
@@ -50,15 +63,19 @@ void dasd_int_handler(struct ccw_device *, unsigned long, struct irb *);
 MODULE_AUTHOR("Holger Smolinski <Holger.Smolinski@de.ibm.com>");
 MODULE_DESCRIPTION("Linux on S/390 DASD device driver,"
 		   " Copyright IBM Corp. 2000");
+MODULE_SUPPORTED_DEVICE("dasd");
 MODULE_LICENSE("GPL");
 
 /*
  * SECTION: prototypes for static functions of dasd.c
  */
+static int  dasd_alloc_queue(struct dasd_block *);
+static void dasd_free_queue(struct dasd_block *);
 static int dasd_flush_block_queue(struct dasd_block *);
 static void dasd_device_tasklet(unsigned long);
 static void dasd_block_tasklet(unsigned long);
 static void do_kick_device(struct work_struct *);
+static void do_restore_device(struct work_struct *);
 static void do_reload_device(struct work_struct *);
 static void do_requeue_requests(struct work_struct *);
 static void dasd_return_cqr_cb(struct dasd_ccw_req *, void *);
@@ -69,8 +86,7 @@ static void dasd_profile_init(struct dasd_profile *, struct dentry *);
 static void dasd_profile_exit(struct dasd_profile *);
 static void dasd_hosts_init(struct dentry *, struct dasd_device *);
 static void dasd_hosts_exit(struct dasd_device *);
-static int dasd_handle_autoquiesce(struct dasd_device *, struct dasd_ccw_req *,
-				   unsigned int);
+
 /*
  * SECTION: Operations on the device structure.
  */
@@ -122,6 +138,7 @@ struct dasd_device *dasd_alloc_device(void)
 	INIT_LIST_HEAD(&device->ccw_queue);
 	timer_setup(&device->timer, dasd_device_timeout, 0);
 	INIT_WORK(&device->kick_work, do_kick_device);
+	INIT_WORK(&device->restore_device, do_restore_device);
 	INIT_WORK(&device->reload_device, do_reload_device);
 	INIT_WORK(&device->requeue_requests, do_requeue_requests);
 	device->state = DASD_STATE_NEW;
@@ -184,11 +201,21 @@ EXPORT_SYMBOL_GPL(dasd_free_block);
  */
 static int dasd_state_new_to_known(struct dasd_device *device)
 {
+	int rc;
+
 	/*
 	 * As long as the device is not in state DASD_STATE_NEW we want to
 	 * keep the reference count > 0.
 	 */
 	dasd_get_device(device);
+
+	if (device->block) {
+		rc = dasd_alloc_queue(device->block);
+		if (rc) {
+			dasd_put_device(device);
+			return rc;
+		}
+	}
 	device->state = DASD_STATE_KNOWN;
 	return 0;
 }
@@ -201,6 +228,9 @@ static int dasd_state_known_to_new(struct dasd_device *device)
 	/* Disable extended error reporting for this device. */
 	dasd_eer_disable(device);
 	device->state = DASD_STATE_NEW;
+
+	if (device->block)
+		dasd_free_queue(device->block);
 
 	/* Give up reference we took in dasd_state_new_to_known. */
 	dasd_put_device(device);
@@ -309,62 +339,39 @@ static int dasd_state_basic_to_known(struct dasd_device *device)
  */
 static int dasd_state_basic_to_ready(struct dasd_device *device)
 {
-	struct dasd_block *block = device->block;
-	struct queue_limits lim;
-	int rc = 0;
+	int rc;
+	struct dasd_block *block;
+	struct gendisk *disk;
 
+	rc = 0;
+	block = device->block;
 	/* make disk known with correct capacity */
-	if (!block) {
-		device->state = DASD_STATE_READY;
-		goto out;
-	}
-
-	if (block->base->discipline->do_analysis != NULL)
-		rc = block->base->discipline->do_analysis(block);
-	if (rc) {
-		if (rc == -EAGAIN)
+	if (block) {
+		if (block->base->discipline->do_analysis != NULL)
+			rc = block->base->discipline->do_analysis(block);
+		if (rc) {
+			if (rc != -EAGAIN) {
+				device->state = DASD_STATE_UNFMT;
+				disk = device->block->gdp;
+				kobject_uevent(&disk_to_dev(disk)->kobj,
+					       KOBJ_CHANGE);
+				goto out;
+			}
 			return rc;
-		device->state = DASD_STATE_UNFMT;
-		kobject_uevent(&disk_to_dev(device->block->gdp)->kobj,
-			       KOBJ_CHANGE);
-		goto out;
+		}
+		if (device->discipline->setup_blk_queue)
+			device->discipline->setup_blk_queue(block);
+		set_capacity(block->gdp,
+			     block->blocks << block->s2b_shift);
+		device->state = DASD_STATE_READY;
+		rc = dasd_scan_partitions(block);
+		if (rc) {
+			device->state = DASD_STATE_BASIC;
+			return rc;
+		}
+	} else {
+		device->state = DASD_STATE_READY;
 	}
-
-	lim = queue_limits_start_update(block->gdp->queue);
-	lim.max_dev_sectors = device->discipline->max_sectors(block);
-	lim.max_hw_sectors = lim.max_dev_sectors;
-	lim.logical_block_size = block->bp_block;
-	/*
-	 * Adjust dma_alignment to match block_size - 1
-	 * to ensure proper buffer alignment checks in the block layer.
-	 */
-	lim.dma_alignment = lim.logical_block_size - 1;
-
-	if (device->discipline->has_discard) {
-		unsigned int max_bytes;
-
-		lim.discard_granularity = block->bp_block;
-
-		/* Calculate max_discard_sectors and make it PAGE aligned */
-		max_bytes = USHRT_MAX * block->bp_block;
-		max_bytes = ALIGN_DOWN(max_bytes, PAGE_SIZE);
-
-		lim.max_hw_discard_sectors = max_bytes / block->bp_block;
-		lim.max_write_zeroes_sectors = lim.max_hw_discard_sectors;
-	}
-	rc = queue_limits_commit_update(block->gdp->queue, &lim);
-	if (rc)
-		return rc;
-
-	set_capacity(block->gdp, block->blocks << block->s2b_shift);
-	device->state = DASD_STATE_READY;
-
-	rc = dasd_scan_partitions(block);
-	if (rc) {
-		device->state = DASD_STATE_BASIC;
-		return rc;
-	}
-
 out:
 	if (device->discipline->basic_to_ready)
 		rc = device->discipline->basic_to_ready(device);
@@ -423,16 +430,23 @@ static int dasd_state_unfmt_to_basic(struct dasd_device *device)
 static int
 dasd_state_ready_to_online(struct dasd_device * device)
 {
+	struct gendisk *disk;
+	struct disk_part_iter piter;
+	struct hd_struct *part;
+
 	device->state = DASD_STATE_ONLINE;
 	if (device->block) {
 		dasd_schedule_block_bh(device->block);
 		if ((device->features & DASD_FEATURE_USERAW)) {
-			kobject_uevent(&disk_to_dev(device->block->gdp)->kobj,
-					KOBJ_CHANGE);
+			disk = device->block->gdp;
+			kobject_uevent(&disk_to_dev(disk)->kobj, KOBJ_CHANGE);
 			return 0;
 		}
-		disk_uevent(file_bdev(device->block->bdev_file)->bd_disk,
-			    KOBJ_CHANGE);
+		disk = device->block->bdev->bd_disk;
+		disk_part_iter_init(&piter, disk, DISK_PITER_INCL_PART0);
+		while ((part = disk_part_iter_next(&piter)))
+			kobject_uevent(&part_to_dev(part)->kobj, KOBJ_CHANGE);
+		disk_part_iter_exit(&piter);
 	}
 	return 0;
 }
@@ -443,6 +457,9 @@ dasd_state_ready_to_online(struct dasd_device * device)
 static int dasd_state_online_to_ready(struct dasd_device *device)
 {
 	int rc;
+	struct gendisk *disk;
+	struct disk_part_iter piter;
+	struct hd_struct *part;
 
 	if (device->discipline->online_to_ready) {
 		rc = device->discipline->online_to_ready(device);
@@ -451,9 +468,13 @@ static int dasd_state_online_to_ready(struct dasd_device *device)
 	}
 
 	device->state = DASD_STATE_READY;
-	if (device->block && !(device->features & DASD_FEATURE_USERAW))
-		disk_uevent(file_bdev(device->block->bdev_file)->bd_disk,
-			    KOBJ_CHANGE);
+	if (device->block && !(device->features & DASD_FEATURE_USERAW)) {
+		disk = device->block->bdev->bd_disk;
+		disk_part_iter_init(&piter, disk, DISK_PITER_INCL_PART0);
+		while ((part = disk_part_iter_next(&piter)))
+			kobject_uevent(&part_to_dev(part)->kobj, KOBJ_CHANGE);
+		disk_part_iter_exit(&piter);
+	}
 	return 0;
 }
 
@@ -600,6 +621,26 @@ void dasd_reload_device(struct dasd_device *device)
 EXPORT_SYMBOL(dasd_reload_device);
 
 /*
+ * dasd_restore_device will schedule a call do do_restore_device to the kernel
+ * event daemon.
+ */
+static void do_restore_device(struct work_struct *work)
+{
+	struct dasd_device *device = container_of(work, struct dasd_device,
+						  restore_device);
+	device->cdev->drv->restore(device->cdev);
+	dasd_put_device(device);
+}
+
+void dasd_restore_device(struct dasd_device *device)
+{
+	dasd_get_device(device);
+	/* queue call to dasd_restore_device to the kernel event daemon. */
+	if (!schedule_work(&device->restore_device))
+		dasd_put_device(device);
+}
+
+/*
  * Set the target state for a device and starts the state change.
  */
 void dasd_set_target_state(struct dasd_device *device, int target)
@@ -619,6 +660,7 @@ void dasd_set_target_state(struct dasd_device *device, int target)
 	mutex_unlock(&device->state_mutex);
 	dasd_put_device(device);
 }
+EXPORT_SYMBOL(dasd_set_target_state);
 
 /*
  * Enable devices with device numbers in [from..to].
@@ -1125,6 +1167,12 @@ static void dasd_statistics_removeroot(void)
 	return;
 }
 
+int dasd_stats_generic_show(struct seq_file *m, void *v)
+{
+	seq_puts(m, "Statistics are not activated in this kernel\n");
+	return 0;
+}
+
 static void dasd_profile_init(struct dasd_profile *profile,
 			      struct dentry *base_dentry)
 {
@@ -1320,6 +1368,7 @@ int dasd_term_IO(struct dasd_ccw_req *cqr)
 {
 	struct dasd_device *device;
 	int retries, rc;
+	char errorstring[ERRORLENGTH];
 
 	/* Check the cqr */
 	rc = dasd_check_cqr(cqr);
@@ -1358,8 +1407,10 @@ int dasd_term_IO(struct dasd_ccw_req *cqr)
 			rc = 0;
 			break;
 		default:
-			dev_err(&device->cdev->dev,
-				"Unexpected error during request termination %d\n", rc);
+			/* internal error 10 - unknown rc*/
+			snprintf(errorstring, ERRORLENGTH, "10 %d", rc);
+			dev_err(&device->cdev->dev, "An error occurred in the "
+				"DASD device driver, reason=%s\n", errorstring);
 			BUG();
 			break;
 		}
@@ -1378,6 +1429,7 @@ int dasd_start_IO(struct dasd_ccw_req *cqr)
 {
 	struct dasd_device *device;
 	int rc;
+	char errorstring[ERRORLENGTH];
 
 	/* Check the cqr */
 	rc = dasd_check_cqr(cqr);
@@ -1397,8 +1449,10 @@ int dasd_start_IO(struct dasd_ccw_req *cqr)
 		return -EPERM;
 	}
 	if (cqr->retries < 0) {
-		dev_err(&device->cdev->dev,
-			"Start I/O ran out of retries\n");
+		/* internal error 14 - start_IO run out of retries */
+		sprintf(errorstring, "14 %p", cqr);
+		dev_err(&device->cdev->dev, "An error occurred in the DASD "
+			"device driver, reason=%s\n", errorstring);
 		cqr->status = DASD_CQR_ERROR;
 		return -EIO;
 	}
@@ -1463,21 +1517,23 @@ int dasd_start_IO(struct dasd_ccw_req *cqr)
 	case -ENODEV:
 		DBF_DEV_EVENT(DBF_WARNING, device, "%s",
 			      "start_IO: -ENODEV device gone, retry");
-		/* this is equivalent to CC=3 for SSCH report this to EER */
-		dasd_handle_autoquiesce(device, cqr, DASD_EER_STARTIO);
 		break;
 	case -EIO:
 		DBF_DEV_EVENT(DBF_WARNING, device, "%s",
 			      "start_IO: -EIO device gone, retry");
 		break;
 	case -EINVAL:
+		/* most likely caused in power management context */
 		DBF_DEV_EVENT(DBF_WARNING, device, "%s",
 			      "start_IO: -EINVAL device currently "
 			      "not accessible");
 		break;
 	default:
+		/* internal error 11 - unknown rc */
+		snprintf(errorstring, ERRORLENGTH, "11 %d", rc);
 		dev_err(&device->cdev->dev,
-			"Unexpected error during request start %d", rc);
+			"An error occurred in the DASD device driver, "
+			"reason=%s\n", errorstring);
 		BUG();
 		break;
 	}
@@ -1499,7 +1555,7 @@ static void dasd_device_timeout(struct timer_list *t)
 	unsigned long flags;
 	struct dasd_device *device;
 
-	device = timer_container_of(device, t, timer);
+	device = from_timer(device, t, timer);
 	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	/* re-activate request queue */
 	dasd_device_remove_stop_bits(device, DASD_STOPPED_PENDING);
@@ -1513,7 +1569,7 @@ static void dasd_device_timeout(struct timer_list *t)
 void dasd_device_set_timer(struct dasd_device *device, int expires)
 {
 	if (expires == 0)
-		timer_delete(&device->timer);
+		del_timer(&device->timer);
 	else
 		mod_timer(&device->timer, jiffies + expires);
 }
@@ -1524,7 +1580,7 @@ EXPORT_SYMBOL(dasd_device_set_timer);
  */
 void dasd_device_clear_timer(struct dasd_device *device)
 {
-	timer_delete(&device->timer);
+	del_timer(&device->timer);
 }
 EXPORT_SYMBOL(dasd_device_clear_timer);
 
@@ -1578,8 +1634,9 @@ void dasd_generic_handle_state_change(struct dasd_device *device)
 	dasd_schedule_device_bh(device);
 	if (device->block) {
 		dasd_schedule_block_bh(device->block);
-		if (device->block->gdp)
-			blk_mq_run_hw_queues(device->block->gdp->queue, true);
+		if (device->block->request_queue)
+			blk_mq_run_hw_queues(device->block->request_queue,
+					     true);
 	}
 }
 EXPORT_SYMBOL_GPL(dasd_generic_handle_state_change);
@@ -1608,15 +1665,9 @@ static int dasd_ese_needs_format(struct dasd_block *block, struct irb *irb)
 	if (!sense)
 		return 0;
 
-	if (sense[1] & SNS1_NO_REC_FOUND)
-		return 1;
-
-	if ((sense[1] & SNS1_INV_TRACK_FORMAT) &&
-	    scsw_is_tm(&irb->scsw) &&
-	    !(sense[2] & SNS2_ENV_DATA_PRESENT))
-		return 1;
-
-	return 0;
+	return !!(sense[1] & SNS1_NO_REC_FOUND) ||
+		!!(sense[1] & SNS1_FILE_PROTECTED) ||
+		scsw_cstat(&irb->scsw) == SCHN_STAT_INCORR_LEN;
 }
 
 static int dasd_ese_oos_cond(u8 *sense)
@@ -1637,7 +1688,7 @@ void dasd_int_handler(struct ccw_device *cdev, unsigned long intparm,
 	struct dasd_device *device;
 	unsigned long now;
 	int nrf_suppressed = 0;
-	int it_suppressed = 0;
+	int fp_suppressed = 0;
 	struct request *req;
 	u8 *sense = NULL;
 	int expires;
@@ -1692,9 +1743,8 @@ void dasd_int_handler(struct ccw_device *cdev, unsigned long intparm,
 		 */
 		sense = dasd_get_sense(irb);
 		if (sense) {
-			it_suppressed =	(sense[1] & SNS1_INV_TRACK_FORMAT) &&
-				!(sense[2] & SNS2_ENV_DATA_PRESENT) &&
-				test_bit(DASD_CQR_SUPPRESS_IT, &cqr->flags);
+			fp_suppressed = (sense[1] & SNS1_FILE_PROTECTED) &&
+				test_bit(DASD_CQR_SUPPRESS_FP, &cqr->flags);
 			nrf_suppressed = (sense[1] & SNS1_NO_REC_FOUND) &&
 				test_bit(DASD_CQR_SUPPRESS_NRF, &cqr->flags);
 
@@ -1709,7 +1759,7 @@ void dasd_int_handler(struct ccw_device *cdev, unsigned long intparm,
 				return;
 			}
 		}
-		if (!(it_suppressed || nrf_suppressed))
+		if (!(fp_suppressed || nrf_suppressed))
 			device->discipline->dump_sense_dbf(device, irb, "int");
 
 		if (device->features & DASD_FEATURE_ERPLOG)
@@ -1718,7 +1768,7 @@ void dasd_int_handler(struct ccw_device *cdev, unsigned long intparm,
 		dasd_put_device(device);
 	}
 
-	/* check for attention message */
+	/* check for for attention message */
 	if (scsw_dstat(&irb->scsw) & DEV_STAT_ATTENTION) {
 		device = dasd_device_from_cdev_locked(cdev);
 		if (!IS_ERR(device)) {
@@ -1921,6 +1971,8 @@ static void __dasd_device_process_ccw_queue(struct dasd_device *device,
 static void __dasd_process_cqr(struct dasd_device *device,
 			       struct dasd_ccw_req *cqr)
 {
+	char errorstring[ERRORLENGTH];
+
 	switch (cqr->status) {
 	case DASD_CQR_SUCCESS:
 		cqr->status = DASD_CQR_DONE;
@@ -1932,8 +1984,11 @@ static void __dasd_process_cqr(struct dasd_device *device,
 		cqr->status = DASD_CQR_TERMINATED;
 		break;
 	default:
+		/* internal error 12 - wrong cqr status*/
+		snprintf(errorstring, ERRORLENGTH, "12 %p %x02", cqr, cqr->status);
 		dev_err(&device->cdev->dev,
-			"Unexpected CQR status %02x", cqr->status);
+			"An error occurred in the DASD device driver, "
+			"reason=%s\n", errorstring);
 		BUG();
 	}
 	if (cqr->callback)
@@ -1966,16 +2021,6 @@ static void __dasd_device_process_final_queue(struct dasd_device *device,
 }
 
 /*
- * check if device should be autoquiesced due to too many timeouts
- */
-static void __dasd_device_check_autoquiesce_timeout(struct dasd_device *device,
-						    struct dasd_ccw_req *cqr)
-{
-	if ((device->default_retries - cqr->retries) >= device->aq_timeouts)
-		dasd_handle_autoquiesce(device, cqr, DASD_EER_TIMEOUTS);
-}
-
-/*
  * Take a look at the first request on the ccw queue and check
  * if it reached its expire time. If so, terminate the IO.
  */
@@ -1998,16 +2043,17 @@ static void __dasd_device_check_expire(struct dasd_device *device)
 		if (device->discipline->term_IO(cqr) != 0) {
 			/* Hmpf, try again in 5 sec */
 			dev_err(&device->cdev->dev,
-				"CQR timed out (%lus) but cannot be ended, retrying in 5s\n",
-				(cqr->expires / HZ));
+				"cqr %p timed out (%lus) but cannot be "
+				"ended, retrying in 5 s\n",
+				cqr, (cqr->expires/HZ));
 			cqr->expires += 5*HZ;
 			dasd_device_set_timer(device, 5*HZ);
 		} else {
 			dev_err(&device->cdev->dev,
-				"CQR timed out (%lus), %i retries remaining\n",
-				(cqr->expires / HZ), cqr->retries);
+				"cqr %p timed out (%lus), %i retries "
+				"remaining\n", cqr, (cqr->expires/HZ),
+				cqr->retries);
 		}
-		__dasd_device_check_autoquiesce_timeout(device, cqr);
 	}
 }
 
@@ -2017,7 +2063,7 @@ static void __dasd_device_check_expire(struct dasd_device *device)
 static int __dasd_device_is_unusable(struct dasd_device *device,
 				     struct dasd_ccw_req *cqr)
 {
-	int mask = ~(DASD_STOPPED_DC_WAIT | DASD_STOPPED_NOSPC);
+	int mask = ~(DASD_STOPPED_DC_WAIT | DASD_UNRESUMED_PM | DASD_STOPPED_NOSPC);
 
 	if (test_bit(DASD_FLAG_OFFLINE, &device->flags) &&
 	    !test_bit(DASD_FLAG_SAFE_OFFLINE_RUNNING, &device->flags)) {
@@ -2076,27 +2122,20 @@ static void __dasd_device_start_head(struct dasd_device *device)
 
 static void __dasd_device_check_path_events(struct dasd_device *device)
 {
-	__u8 tbvpm, fcsecpm;
 	int rc;
 
-	tbvpm = dasd_path_get_tbvpm(device);
-	fcsecpm = dasd_path_get_fcsecpm(device);
-
-	if (!tbvpm && !fcsecpm)
+	if (!dasd_path_get_tbvpm(device))
 		return;
 
-	if (device->stopped & ~(DASD_STOPPED_DC_WAIT))
+	if (device->stopped &
+	    ~(DASD_STOPPED_DC_WAIT | DASD_UNRESUMED_PM))
 		return;
-
-	dasd_path_clear_all_verify(device);
-	dasd_path_clear_all_fcsec(device);
-
-	rc = device->discipline->pe_handler(device, tbvpm, fcsecpm);
-	if (rc) {
-		dasd_path_add_tbvpm(device, tbvpm);
-		dasd_path_add_fcsecpm(device, fcsecpm);
+	rc = device->discipline->pe_handler(device,
+					    dasd_path_get_tbvpm(device));
+	if (rc)
 		dasd_device_set_timer(device, 50);
-	}
+	else
+		dasd_path_clear_all_verify(device);
 };
 
 /*
@@ -2124,9 +2163,10 @@ int dasd_flush_device_queue(struct dasd_device *device)
 		case DASD_CQR_IN_IO:
 			rc = device->discipline->term_IO(cqr);
 			if (rc) {
-				/* unable to terminate request */
+				/* unable to terminate requeust */
 				dev_err(&device->cdev->dev,
-					"Flushing the DASD request queue failed\n");
+					"Flushing the DASD request queue "
+					"failed for request %p\n", cqr);
 				/* stop flush processing */
 				goto finished;
 			}
@@ -2346,7 +2386,7 @@ static int _dasd_sleep_on(struct dasd_ccw_req *maincqr, int interruptible)
 		/* Non-temporary stop condition will trigger fail fast */
 		if (device->stopped & ~DASD_STOPPED_PENDING &&
 		    test_bit(DASD_CQR_FLAGS_FAILFAST, &cqr->flags) &&
-		    !dasd_eer_enabled(device) && device->aq_mask == 0) {
+		    (!dasd_eer_enabled(device))) {
 			cqr->status = DASD_CQR_FAILED;
 			cqr->intrc = -ENOLINK;
 			continue;
@@ -2473,17 +2513,14 @@ retry:
 	rc = 0;
 	list_for_each_entry_safe(cqr, n, ccw_queue, blocklist) {
 		/*
-		 * In some cases certain errors might be expected and
-		 * error recovery would be unnecessary in these cases.
-		 * Check if the according suppress bit is set.
+		 * In some cases the 'File Protected' or 'Incorrect Length'
+		 * error might be expected and error recovery would be
+		 * unnecessary in these cases.	Check if the according suppress
+		 * bit is set.
 		 */
 		sense = dasd_get_sense(&cqr->irb);
-		if (sense && (sense[1] & SNS1_INV_TRACK_FORMAT) &&
-		    !(sense[2] & SNS2_ENV_DATA_PRESENT) &&
-		    test_bit(DASD_CQR_SUPPRESS_IT, &cqr->flags))
-			continue;
-		if (sense && (sense[1] & SNS1_NO_REC_FOUND) &&
-		    test_bit(DASD_CQR_SUPPRESS_NRF, &cqr->flags))
+		if (sense && sense[1] & SNS1_FILE_PROTECTED &&
+		    test_bit(DASD_CQR_SUPPRESS_FP, &cqr->flags))
 			continue;
 		if (scsw_cstat(&cqr->irb.scsw) == 0x40 &&
 		    test_bit(DASD_CQR_SUPPRESS_IL, &cqr->flags))
@@ -2645,7 +2682,8 @@ static int __dasd_cancel_req(struct dasd_ccw_req *cqr)
 		rc = device->discipline->term_IO(cqr);
 		if (rc) {
 			dev_err(&device->cdev->dev,
-				"Cancelling request failed with rc=%d\n", rc);
+				"Cancelling request %p failed with rc=%d\n",
+				cqr, rc);
 		} else {
 			cqr->stopclk = get_tod_clock();
 		}
@@ -2683,13 +2721,13 @@ static void dasd_block_timeout(struct timer_list *t)
 	unsigned long flags;
 	struct dasd_block *block;
 
-	block = timer_container_of(block, t, timer);
+	block = from_timer(block, t, timer);
 	spin_lock_irqsave(get_ccwdev_lock(block->base->cdev), flags);
 	/* re-activate request queue */
 	dasd_device_remove_stop_bits(block->base, DASD_STOPPED_PENDING);
 	spin_unlock_irqrestore(get_ccwdev_lock(block->base->cdev), flags);
 	dasd_schedule_block_bh(block);
-	blk_mq_run_hw_queues(block->gdp->queue, true);
+	blk_mq_run_hw_queues(block->request_queue, true);
 }
 
 /*
@@ -2698,7 +2736,7 @@ static void dasd_block_timeout(struct timer_list *t)
 void dasd_block_set_timer(struct dasd_block *block, int expires)
 {
 	if (expires == 0)
-		timer_delete(&block->timer);
+		del_timer(&block->timer);
 	else
 		mod_timer(&block->timer, jiffies + expires);
 }
@@ -2709,7 +2747,7 @@ EXPORT_SYMBOL(dasd_block_set_timer);
  */
 void dasd_block_clear_timer(struct dasd_block *block)
 {
-	timer_delete(&block->timer);
+	del_timer(&block->timer);
 }
 EXPORT_SYMBOL(dasd_block_clear_timer);
 
@@ -2746,12 +2784,7 @@ static void __dasd_cleanup_cqr(struct dasd_ccw_req *cqr)
 	else if (status == 0) {
 		switch (cqr->intrc) {
 		case -EPERM:
-			/*
-			 * DASD doesn't implement SCSI/NVMe reservations, but it
-			 * implements a locking scheme similar to them. We
-			 * return this error when we no longer have the lock.
-			 */
-			error = BLK_STS_RESV_CONFLICT;
+			error = BLK_STS_NEXUS;
 			break;
 		case -ENOLINK:
 			error = BLK_STS_TRANSPORT;
@@ -2829,18 +2862,20 @@ restart:
 			dasd_log_sense(cqr, &cqr->irb);
 		}
 
-		/*
-		 * First call extended error reporting and check for autoquiesce
-		 */
-		spin_lock_irqsave(get_ccwdev_lock(base->cdev), flags);
-		if (cqr->status == DASD_CQR_FAILED &&
-		    dasd_handle_autoquiesce(base, cqr, DASD_EER_FATALERROR)) {
+		/* First of all call extended error reporting. */
+		if (dasd_eer_enabled(base) &&
+		    cqr->status == DASD_CQR_FAILED) {
+			dasd_eer_write(base, cqr, DASD_EER_FATALERROR);
+
+			/* restart request  */
 			cqr->status = DASD_CQR_FILLED;
 			cqr->retries = 255;
-			spin_unlock_irqrestore(get_ccwdev_lock(base->cdev), flags);
+			spin_lock_irqsave(get_ccwdev_lock(base->cdev), flags);
+			dasd_device_set_stop_bits(base, DASD_STOPPED_QUIESCE);
+			spin_unlock_irqrestore(get_ccwdev_lock(base->cdev),
+					       flags);
 			goto restart;
 		}
-		spin_unlock_irqrestore(get_ccwdev_lock(base->cdev), flags);
 
 		/* Process finished ERP request. */
 		if (cqr->refers) {
@@ -2882,7 +2917,7 @@ static void __dasd_block_start_head(struct dasd_block *block)
 		/* Non-temporary stop condition will trigger fail fast */
 		if (block->base->stopped & ~DASD_STOPPED_PENDING &&
 		    test_bit(DASD_CQR_FLAGS_FAILFAST, &cqr->flags) &&
-		    !dasd_eer_enabled(block->base) && block->base->aq_mask == 0) {
+		    (!dasd_eer_enabled(block->base))) {
 			cqr->status = DASD_CQR_FAILED;
 			cqr->intrc = -ENOLINK;
 			dasd_schedule_block_bh(block);
@@ -3119,14 +3154,12 @@ static blk_status_t do_dasd_request(struct blk_mq_hw_ctx *hctx,
 		    PTR_ERR(cqr) == -ENOMEM ||
 		    PTR_ERR(cqr) == -EAGAIN) {
 			rc = BLK_STS_RESOURCE;
-		} else if (PTR_ERR(cqr) == -EINVAL) {
-			rc = BLK_STS_INVAL;
-		} else {
-			DBF_DEV_EVENT(DBF_ERR, basedev,
-				      "CCW creation failed (rc=%ld) on request %p",
-				      PTR_ERR(cqr), req);
-			rc = BLK_STS_IOERR;
+			goto out;
 		}
+		DBF_DEV_EVENT(DBF_ERR, basedev,
+			      "CCW creation failed (rc=%ld) on request %p",
+			      PTR_ERR(cqr), req);
+		rc = BLK_STS_IOERR;
 		goto out;
 	}
 	/*
@@ -3158,7 +3191,7 @@ out:
  * BLK_EH_DONE if the request is handled or terminated
  *		      by the driver.
  */
-enum blk_eh_timer_return dasd_times_out(struct request *req)
+enum blk_eh_timer_return dasd_times_out(struct request *req, bool reserved)
 {
 	struct dasd_block *block = req->q->queuedata;
 	struct dasd_device *device;
@@ -3252,7 +3285,7 @@ static void dasd_request_done(struct request *req)
 	blk_mq_run_hw_queues(req->q, true);
 }
 
-struct blk_mq_ops dasd_mq_ops = {
+static struct blk_mq_ops dasd_mq_ops = {
 	.queue_rq = do_dasd_request,
 	.complete = dasd_request_done,
 	.timeout = dasd_times_out,
@@ -3260,12 +3293,51 @@ struct blk_mq_ops dasd_mq_ops = {
 	.exit_hctx = dasd_exit_hctx,
 };
 
-static int dasd_open(struct gendisk *disk, blk_mode_t mode)
+/*
+ * Allocate and initialize request queue and default I/O scheduler.
+ */
+static int dasd_alloc_queue(struct dasd_block *block)
+{
+	int rc;
+
+	block->tag_set.ops = &dasd_mq_ops;
+	block->tag_set.cmd_size = sizeof(struct dasd_ccw_req);
+	block->tag_set.nr_hw_queues = nr_hw_queues;
+	block->tag_set.queue_depth = queue_depth;
+	block->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+	block->tag_set.numa_node = NUMA_NO_NODE;
+
+	rc = blk_mq_alloc_tag_set(&block->tag_set);
+	if (rc)
+		return rc;
+
+	block->request_queue = blk_mq_init_queue(&block->tag_set);
+	if (IS_ERR(block->request_queue))
+		return PTR_ERR(block->request_queue);
+
+	block->request_queue->queuedata = block;
+
+	return 0;
+}
+
+/*
+ * Deactivate and free request queue.
+ */
+static void dasd_free_queue(struct dasd_block *block)
+{
+	if (block->request_queue) {
+		blk_cleanup_queue(block->request_queue);
+		blk_mq_free_tag_set(&block->tag_set);
+		block->request_queue = NULL;
+	}
+}
+
+static int dasd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct dasd_device *base;
 	int rc;
 
-	base = dasd_device_from_gendisk(disk);
+	base = dasd_device_from_gendisk(bdev->bd_disk);
 	if (!base)
 		return -ENODEV;
 
@@ -3294,12 +3366,14 @@ static int dasd_open(struct gendisk *disk, blk_mode_t mode)
 		rc = -ENODEV;
 		goto out;
 	}
-	if ((mode & BLK_OPEN_WRITE) &&
+
+	if ((mode & FMODE_WRITE) &&
 	    (test_bit(DASD_FLAG_DEVICE_RO, &base->flags) ||
 	     (base->features & DASD_FEATURE_READONLY))) {
 		rc = -EROFS;
 		goto out;
 	}
+
 	dasd_put_device(base);
 	return 0;
 
@@ -3311,7 +3385,7 @@ unlock:
 	return rc;
 }
 
-static void dasd_release(struct gendisk *disk)
+static void dasd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct dasd_device *base = dasd_device_from_gendisk(disk);
 	if (base) {
@@ -3324,11 +3398,11 @@ static void dasd_release(struct gendisk *disk)
 /*
  * Return disk geometry.
  */
-static int dasd_getgeo(struct gendisk *disk, struct hd_geometry *geo)
+static int dasd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 {
 	struct dasd_device *base;
 
-	base = dasd_device_from_gendisk(disk);
+	base = dasd_device_from_gendisk(bdev->bd_disk);
 	if (!base)
 		return -ENODEV;
 
@@ -3338,8 +3412,7 @@ static int dasd_getgeo(struct gendisk *disk, struct hd_geometry *geo)
 		return -EINVAL;
 	}
 	base->discipline->fill_geometry(base->block, geo);
-	// geo->start is left unchanged by the above
-	geo->start >>= base->block->s2b_shift;
+	geo->start = get_start_sect(bdev) >> base->block->s2b_shift;
 	dasd_put_device(base);
 	return 0;
 }
@@ -3352,7 +3425,6 @@ dasd_device_operations = {
 	.ioctl		= dasd_ioctl,
 	.compat_ioctl	= dasd_ioctl,
 	.getgeo		= dasd_getgeo,
-	.set_read_only	= dasd_set_read_only,
 };
 
 /*******************************************************************************
@@ -3392,7 +3464,7 @@ int dasd_device_is_ro(struct dasd_device *device)
 	struct diag210 diag_data;
 	int rc;
 
-	if (!machine_is_vm())
+	if (!MACHINE_IS_VM)
 		return 0;
 	ccw_device_get_id(device->cdev, &dev_id);
 	memset(&diag_data, 0, sizeof(diag_data));
@@ -3416,15 +3488,26 @@ static void dasd_generic_auto_online(void *data, async_cookie_t cookie)
 
 	ret = ccw_device_set_online(cdev);
 	if (ret)
-		dev_warn(&cdev->dev, "Setting the DASD online failed with rc=%d\n", ret);
+		pr_warn("%s: Setting the DASD online failed with rc=%d\n",
+			dev_name(&cdev->dev), ret);
 }
 
 /*
  * Initial attempt at a probe function. this can be simplified once
  * the other detection code is gone.
  */
-int dasd_generic_probe(struct ccw_device *cdev)
+int dasd_generic_probe(struct ccw_device *cdev,
+		       struct dasd_discipline *discipline)
 {
+	int ret;
+
+	ret = dasd_add_sysfs_files(cdev);
+	if (ret) {
+		DBF_EVENT_DEVID(DBF_WARNING, cdev, "%s",
+				"dasd_generic_probe: could not add "
+				"sysfs entries");
+		return ret;
+	}
 	cdev->handler = &dasd_int_handler;
 
 	/*
@@ -3465,13 +3548,15 @@ void dasd_generic_remove(struct ccw_device *cdev)
 	struct dasd_block *block;
 
 	device = dasd_device_from_cdev(cdev);
-	if (IS_ERR(device))
+	if (IS_ERR(device)) {
+		dasd_remove_sysfs_files(cdev);
 		return;
-
+	}
 	if (test_and_set_bit(DASD_FLAG_OFFLINE, &device->flags) &&
 	    !test_bit(DASD_FLAG_SAFE_OFFLINE_RUNNING, &device->flags)) {
 		/* Already doing offline processing */
 		dasd_put_device(device);
+		dasd_remove_sysfs_files(cdev);
 		return;
 	}
 	/*
@@ -3490,6 +3575,8 @@ void dasd_generic_remove(struct ccw_device *cdev)
 	 */
 	if (block)
 		dasd_free_block(block);
+
+	dasd_remove_sysfs_files(cdev);
 }
 EXPORT_SYMBOL_GPL(dasd_generic_remove);
 
@@ -3503,10 +3590,7 @@ int dasd_generic_set_online(struct ccw_device *cdev,
 {
 	struct dasd_discipline *discipline;
 	struct dasd_device *device;
-	struct device *dev;
 	int rc;
-
-	dev = &cdev->dev;
 
 	/* first online clears initial online feature flag */
 	dasd_set_feature(cdev, DASD_FEATURE_INITIAL_ONLINE, 0);
@@ -3520,10 +3604,11 @@ int dasd_generic_set_online(struct ccw_device *cdev,
 			/* Try to load the required module. */
 			rc = request_module(DASD_DIAG_MOD);
 			if (rc) {
-				dev_warn(dev, "Setting the DASD online failed "
-					 "because the required module %s "
-					 "could not be loaded (rc=%d)\n",
-					 DASD_DIAG_MOD, rc);
+				pr_warn("%s Setting the DASD online failed "
+					"because the required module %s "
+					"could not be loaded (rc=%d)\n",
+					dev_name(&cdev->dev), DASD_DIAG_MOD,
+					rc);
 				dasd_delete_device(device);
 				return -ENODEV;
 			}
@@ -3531,7 +3616,8 @@ int dasd_generic_set_online(struct ccw_device *cdev,
 		/* Module init could have failed, so check again here after
 		 * request_module(). */
 		if (!dasd_diag_discipline_pointer) {
-			dev_warn(dev, "Setting the DASD online failed because of missing DIAG discipline\n");
+			pr_warn("%s Setting the DASD online failed because of missing DIAG discipline\n",
+				dev_name(&cdev->dev));
 			dasd_delete_device(device);
 			return -ENODEV;
 		}
@@ -3541,33 +3627,37 @@ int dasd_generic_set_online(struct ccw_device *cdev,
 		dasd_delete_device(device);
 		return -EINVAL;
 	}
-	device->base_discipline = base_discipline;
 	if (!try_module_get(discipline->owner)) {
+		module_put(base_discipline->owner);
 		dasd_delete_device(device);
 		return -EINVAL;
 	}
+	device->base_discipline = base_discipline;
 	device->discipline = discipline;
 
 	/* check_device will allocate block device if necessary */
 	rc = discipline->check_device(device);
 	if (rc) {
-		dev_warn(dev, "Setting the DASD online with discipline %s failed with rc=%i\n",
-			 discipline->name, rc);
+		pr_warn("%s Setting the DASD online with discipline %s failed with rc=%i\n",
+			dev_name(&cdev->dev), discipline->name, rc);
+		module_put(discipline->owner);
+		module_put(base_discipline->owner);
 		dasd_delete_device(device);
 		return rc;
 	}
 
 	dasd_set_target_state(device, DASD_STATE_ONLINE);
 	if (device->state <= DASD_STATE_KNOWN) {
-		dev_warn(dev, "Setting the DASD online failed because of a missing discipline\n");
+		pr_warn("%s Setting the DASD online failed because of a missing discipline\n",
+			dev_name(&cdev->dev));
 		rc = -ENODEV;
 		dasd_set_target_state(device, DASD_STATE_NEW);
 		if (device->block)
 			dasd_free_block(device->block);
 		dasd_delete_device(device);
-	} else {
-		dev_dbg(dev, "dasd_generic device found\n");
-	}
+	} else
+		pr_debug("dasd_generic device %s found\n",
+				dev_name(&cdev->dev));
 
 	wait_event(dasd_init_waitq, _wait_for_device(device));
 
@@ -3578,13 +3668,10 @@ EXPORT_SYMBOL_GPL(dasd_generic_set_online);
 
 int dasd_generic_set_offline(struct ccw_device *cdev)
 {
-	int max_count, open_count, rc;
 	struct dasd_device *device;
 	struct dasd_block *block;
+	int max_count, open_count, rc;
 	unsigned long flags;
-	struct device *dev;
-
-	dev = &cdev->dev;
 
 	rc = 0;
 	spin_lock_irqsave(get_ccwdev_lock(cdev), flags);
@@ -3601,14 +3688,15 @@ int dasd_generic_set_offline(struct ccw_device *cdev)
 	 * in the other openers.
 	 */
 	if (device->block) {
-		max_count = device->block->bdev_file ? 0 : -1;
+		max_count = device->block->bdev ? 0 : -1;
 		open_count = atomic_read(&device->block->open_count);
 		if (open_count > max_count) {
 			if (open_count > 0)
-				dev_warn(dev, "The DASD cannot be set offline with open count %i\n",
-					 open_count);
+				pr_warn("%s: The DASD cannot be set offline with open count %i\n",
+					dev_name(&cdev->dev), open_count);
 			else
-				dev_warn(dev, "The DASD cannot be set offline while it is in use\n");
+				pr_warn("%s: The DASD cannot be set offline while it is in use\n",
+					dev_name(&cdev->dev));
 			rc = -EBUSY;
 			goto out_err;
 		}
@@ -3646,8 +3734,11 @@ int dasd_generic_set_offline(struct ccw_device *cdev)
 		 * so sync bdev first and then wait for our queues to become
 		 * empty
 		 */
-		if (device->block && device->block->bdev_file)
-			bdev_mark_dead(file_bdev(device->block->bdev_file), false);
+		if (device->block) {
+			rc = fsync_bdev(device->block->bdev);
+			if (rc != 0)
+				goto interrupted;
+		}
 		dasd_schedule_device_bh(device);
 		rc = wait_event_interruptible(shutdown_waitq,
 					      _wait_for_empty_queues(device));
@@ -3702,8 +3793,8 @@ int dasd_generic_last_path_gone(struct dasd_device *device)
 	dev_warn(&device->cdev->dev, "No operational channel path is left "
 		 "for the device\n");
 	DBF_DEV_EVENT(DBF_WARNING, device, "%s", "last path gone");
-	/* First call extended error reporting and check for autoquiesce. */
-	dasd_handle_autoquiesce(device, NULL, DASD_EER_NOPATH);
+	/* First of all call extended error reporting. */
+	dasd_eer_write(device, NULL, DASD_EER_NOPATH);
 
 	if (device->state < DASD_STATE_BASIC)
 		return 0;
@@ -3727,12 +3818,18 @@ int dasd_generic_path_operational(struct dasd_device *device)
 		 "operational\n");
 	DBF_DEV_EVENT(DBF_WARNING, device, "%s", "path operational");
 	dasd_device_remove_stop_bits(device, DASD_STOPPED_DC_WAIT);
+	if (device->stopped & DASD_UNRESUMED_PM) {
+		dasd_device_remove_stop_bits(device, DASD_UNRESUMED_PM);
+		dasd_restore_device(device);
+		return 1;
+	}
 	dasd_schedule_device_bh(device);
 	if (device->block) {
 		dasd_schedule_block_bh(device->block);
-		if (device->block->gdp)
-			blk_mq_run_hw_queues(device->block->gdp->queue, true);
-	}
+		if (device->block->request_queue)
+			blk_mq_run_hw_queues(device->block->request_queue,
+					     true);
+		}
 
 	if (!device->stopped)
 		wake_up(&generic_waitq);
@@ -3802,10 +3899,6 @@ void dasd_generic_path_event(struct ccw_device *cdev, int *path_event)
 			if (device->discipline->kick_validate)
 				device->discipline->kick_validate(device);
 		}
-		if (path_event[chp] & PE_PATH_FCES_EVENT) {
-			dasd_path_fcsec_update(device, chp);
-			dasd_schedule_device_bh(device);
-		}
 	}
 	hpfpm = dasd_path_get_hpfpm(device);
 	ifccpm = dasd_path_get_ifccpm(device);
@@ -3835,8 +3928,7 @@ void dasd_generic_path_event(struct ccw_device *cdev, int *path_event)
 			 "No verified channel paths remain for the device\n");
 		DBF_DEV_EVENT(DBF_WARNING, device,
 			      "%s", "last verified path gone");
-		/* First call extended error reporting and check for autoquiesce. */
-		dasd_handle_autoquiesce(device, NULL, DASD_EER_NOPATH);
+		dasd_eer_write(device, NULL, DASD_EER_NOPATH);
 		dasd_device_set_stop_bits(device,
 					  DASD_STOPPED_DC_WAIT);
 	}
@@ -3858,8 +3950,7 @@ EXPORT_SYMBOL_GPL(dasd_generic_verify_path);
 void dasd_generic_space_exhaust(struct dasd_device *device,
 				struct dasd_ccw_req *cqr)
 {
-	/* First call extended error reporting and check for autoquiesce. */
-	dasd_handle_autoquiesce(device, NULL, DASD_EER_NOSPC);
+	dasd_eer_write(device, NULL, DASD_EER_NOSPC);
 
 	if (device->state < DASD_STATE_BASIC)
 		return;
@@ -3885,8 +3976,8 @@ void dasd_generic_space_avail(struct dasd_device *device)
 
 	if (device->block) {
 		dasd_schedule_block_bh(device->block);
-		if (device->block->gdp)
-			blk_mq_run_hw_queues(device->block->gdp->queue, true);
+		if (device->block->request_queue)
+			blk_mq_run_hw_queues(device->block->request_queue, true);
 	}
 	if (!device->stopped)
 		wake_up(&generic_waitq);
@@ -3896,7 +3987,7 @@ EXPORT_SYMBOL_GPL(dasd_generic_space_avail);
 /*
  * clear active requests and requeue them to block layer if possible
  */
-int dasd_generic_requeue_all_requests(struct dasd_device *device)
+static int dasd_generic_requeue_all_requests(struct dasd_device *device)
 {
 	struct dasd_block *block = device->block;
 	struct list_head requeue_queue;
@@ -3931,7 +4022,6 @@ restart_cb:
 	dasd_schedule_device_bh(device);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(dasd_generic_requeue_all_requests);
 
 static void do_requeue_requests(struct work_struct *work)
 {
@@ -3953,30 +4043,65 @@ void dasd_schedule_requeue(struct dasd_device *device)
 }
 EXPORT_SYMBOL(dasd_schedule_requeue);
 
-static int dasd_handle_autoquiesce(struct dasd_device *device,
-				   struct dasd_ccw_req *cqr,
-				   unsigned int reason)
+int dasd_generic_pm_freeze(struct ccw_device *cdev)
 {
-	/* in any case write eer message with reason */
-	if (dasd_eer_enabled(device))
-		dasd_eer_write(device, cqr, reason);
+	struct dasd_device *device = dasd_device_from_cdev(cdev);
 
-	if (!test_bit(reason, &device->aq_mask))
-		return 0;
+	if (IS_ERR(device))
+		return PTR_ERR(device);
 
-	/* notify eer about autoquiesce */
-	if (dasd_eer_enabled(device))
-		dasd_eer_write(device, NULL, DASD_EER_AUTOQUIESCE);
+	/* mark device as suspended */
+	set_bit(DASD_FLAG_SUSPENDED, &device->flags);
 
-	dev_info(&device->cdev->dev,
-		 "The DASD has been put in the quiesce state\n");
-	dasd_device_set_stop_bits(device, DASD_STOPPED_QUIESCE);
+	if (device->discipline->freeze)
+		device->discipline->freeze(device);
 
-	if (device->features & DASD_FEATURE_REQUEUEQUIESCE)
-		dasd_schedule_requeue(device);
+	/* disallow new I/O  */
+	dasd_device_set_stop_bits(device, DASD_STOPPED_PM);
 
-	return 1;
+	return dasd_generic_requeue_all_requests(device);
 }
+EXPORT_SYMBOL_GPL(dasd_generic_pm_freeze);
+
+int dasd_generic_restore_device(struct ccw_device *cdev)
+{
+	struct dasd_device *device = dasd_device_from_cdev(cdev);
+	int rc = 0;
+
+	if (IS_ERR(device))
+		return PTR_ERR(device);
+
+	/* allow new IO again */
+	dasd_device_remove_stop_bits(device,
+				     (DASD_STOPPED_PM | DASD_UNRESUMED_PM));
+
+	dasd_schedule_device_bh(device);
+
+	/*
+	 * call discipline restore function
+	 * if device is stopped do nothing e.g. for disconnected devices
+	 */
+	if (device->discipline->restore && !(device->stopped))
+		rc = device->discipline->restore(device);
+	if (rc || device->stopped)
+		/*
+		 * if the resume failed for the DASD we put it in
+		 * an UNRESUMED stop state
+		 */
+		device->stopped |= DASD_UNRESUMED_PM;
+
+	if (device->block) {
+		dasd_schedule_block_bh(device->block);
+		if (device->block->request_queue)
+			blk_mq_run_hw_queues(device->block->request_queue,
+					     true);
+	}
+
+	clear_bit(DASD_FLAG_SUSPENDED, &device->flags);
+	dasd_put_device(device);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dasd_generic_restore_device);
 
 static struct dasd_ccw_req *dasd_generic_build_rdc(struct dasd_device *device,
 						   int rdc_buffer_size,
@@ -3989,14 +4114,16 @@ static struct dasd_ccw_req *dasd_generic_build_rdc(struct dasd_device *device,
 				   NULL);
 
 	if (IS_ERR(cqr)) {
-		DBF_EVENT_DEVID(DBF_WARNING, device->cdev, "%s",
-				"Could not allocate RDC request");
+		/* internal error 13 - Allocating the RDC request failed*/
+		dev_err(&device->cdev->dev,
+			 "An error occurred in the DASD device driver, "
+			 "reason=%s\n", "13");
 		return cqr;
 	}
 
 	ccw = cqr->cpaddr;
 	ccw->cmd_code = CCW_CMD_RDC;
-	ccw->cda = virt_to_dma32(cqr->data);
+	ccw->cda = (__u32)(addr_t) cqr->data;
 	ccw->flags = 0;
 	ccw->count = rdc_buffer_size;
 	cqr->startdev = device;
@@ -4040,7 +4167,8 @@ char *dasd_get_sense(struct irb *irb)
 
 	if (scsw_is_tm(&irb->scsw) && (irb->scsw.tm.fcxs == 0x01)) {
 		if (irb->scsw.tm.tcw)
-			tsb = tcw_get_tsb(dma32_to_virt(irb->scsw.tm.tcw));
+			tsb = tcw_get_tsb((struct tcw *)(unsigned long)
+					  irb->scsw.tm.tcw);
 		if (tsb && tsb->length == 64 && tsb->flags)
 			switch (tsb->flags & 0x07) {
 			case 1:	/* tsa_iostat */

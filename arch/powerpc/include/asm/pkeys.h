@@ -30,9 +30,9 @@ extern u32 reserved_allocation_mask; /* bits set for reserved keys */
 #endif
 
 
-static inline vm_flags_t pkey_to_vmflag_bits(u16 pkey)
+static inline u64 pkey_to_vmflag_bits(u16 pkey)
 {
-	return (((vm_flags_t)pkey << VM_PKEY_SHIFT) & ARCH_VM_PKEY_FLAGS);
+	return (((u64)pkey << VM_PKEY_SHIFT) & ARCH_VM_PKEY_FLAGS);
 }
 
 static inline int vma_pkey(struct vm_area_struct *vma)
@@ -169,4 +169,10 @@ static inline bool arch_pkeys_enabled(void)
 }
 
 extern void pkey_mm_init(struct mm_struct *mm);
+extern bool arch_supports_pkeys(int cap);
+extern unsigned int arch_usable_pkeys(void);
+extern void thread_pkey_regs_save(struct thread_struct *thread);
+extern void thread_pkey_regs_restore(struct thread_struct *new_thread,
+				     struct thread_struct *old_thread);
+extern void thread_pkey_regs_init(struct thread_struct *thread);
 #endif /*_ASM_POWERPC_KEYS_H */

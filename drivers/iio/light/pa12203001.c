@@ -185,10 +185,17 @@ static int pa12203001_set_power_state(struct pa12203001_data *data, bool on,
 		mutex_unlock(&data->lock);
 	}
 
-	if (on)
-		return pm_runtime_resume_and_get(&data->client->dev);
+	if (on) {
+		ret = pm_runtime_get_sync(&data->client->dev);
+		if (ret < 0)
+			pm_runtime_put_noidle(&data->client->dev);
 
-	return pm_runtime_put_autosuspend(&data->client->dev);
+	} else {
+		pm_runtime_mark_last_busy(&data->client->dev);
+		ret = pm_runtime_put_autosuspend(&data->client->dev);
+	}
+
+	return ret;
 
 err:
 	mutex_unlock(&data->lock);
@@ -333,7 +340,8 @@ out:
 	return ret;
 }
 
-static int pa12203001_probe(struct i2c_client *client)
+static int pa12203001_probe(struct i2c_client *client,
+			    const struct i2c_device_id *id)
 {
 	struct pa12203001_data *data;
 	struct iio_dev *indio_dev;
@@ -388,20 +396,16 @@ out_err:
 	return ret;
 }
 
-static void pa12203001_remove(struct i2c_client *client)
+static int pa12203001_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
-	int ret;
 
 	iio_device_unregister(indio_dev);
 
 	pm_runtime_disable(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
 
-	ret = pa12203001_power_chip(indio_dev, PA12203001_CHIP_DISABLE);
-	if (ret)
-		dev_warn(&client->dev, "Failed to power down (%pe)\n",
-			 ERR_PTR(ret));
+	return pa12203001_power_chip(indio_dev, PA12203001_CHIP_DISABLE);
 }
 
 #if defined(CONFIG_PM_SLEEP) || defined(CONFIG_PM)
@@ -450,15 +454,15 @@ static const struct dev_pm_ops pa12203001_pm_ops = {
 };
 
 static const struct acpi_device_id pa12203001_acpi_match[] = {
-	{ "TXCPA122", 0 },
-	{ }
+	{ "TXCPA122", 0},
+	{}
 };
 
 MODULE_DEVICE_TABLE(acpi, pa12203001_acpi_match);
 
 static const struct i2c_device_id pa12203001_id[] = {
-		{ "txcpa122" },
-		{ }
+		{"txcpa122", 0},
+		{}
 };
 
 MODULE_DEVICE_TABLE(i2c, pa12203001_id);
@@ -467,7 +471,7 @@ static struct i2c_driver pa12203001_driver = {
 	.driver = {
 		.name = PA12203001_DRIVER_NAME,
 		.pm = &pa12203001_pm_ops,
-		.acpi_match_table = pa12203001_acpi_match,
+		.acpi_match_table = ACPI_PTR(pa12203001_acpi_match),
 	},
 	.probe = pa12203001_probe,
 	.remove = pa12203001_remove,

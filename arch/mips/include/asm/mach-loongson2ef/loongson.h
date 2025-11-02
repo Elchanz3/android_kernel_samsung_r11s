@@ -18,9 +18,6 @@ extern void bonito_irq_init(void);
 extern void mach_prepare_reboot(void);
 extern void mach_prepare_shutdown(void);
 
-/* machine-specific PROM functions */
-extern void __init mach_prom_init_machtype(void);
-
 /* environment arguments from bootloader */
 extern u32 cpu_clock_freq;
 extern u32 memsize, highmemsize;
@@ -48,12 +45,6 @@ extern void __init mach_init_irq(void);
 extern void mach_irq_dispatch(unsigned int pending);
 extern int mach_i8259_irq(void);
 
-/* power management functions */
-extern void setup_wakeup_events(void);
-extern int wakeup_loongson(void);
-extern void __weak mach_suspend(void);
-extern void __weak mach_resume(void);
-
 /* We need this in some places... */
 #define delay() ({		\
 	int x;				\
@@ -65,6 +56,15 @@ extern void __weak mach_resume(void);
 	(*(volatile u32 *)((char *)CKSEG1ADDR(LOONGSON_REG_BASE) + (x)))
 
 #define LOONGSON_IRQ_BASE	32
+#define LOONGSON2_PERFCNT_IRQ	(MIPS_CPU_IRQ_BASE + 6) /* cpu perf counter */
+
+#include <linux/interrupt.h>
+static inline void do_perfcnt_IRQ(void)
+{
+#if IS_ENABLED(CONFIG_OPROFILE)
+	do_IRQ(LOONGSON2_PERFCNT_IRQ);
+#endif
+}
 
 #define LOONGSON_FLASH_BASE	0x1c000000
 #define LOONGSON_FLASH_SIZE	0x02000000	/* 32M */

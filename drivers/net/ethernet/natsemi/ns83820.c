@@ -820,7 +820,7 @@ static void rx_irq(struct net_device *ndev)
 	struct ns83820 *dev = PRIV(ndev);
 	struct rx_info *info = &dev->rx_info;
 	unsigned next_rx;
-	int len;
+	int rx_rc, len;
 	u32 cmdsts;
 	__le32 *desc;
 	unsigned long flags;
@@ -881,10 +881,8 @@ static void rx_irq(struct net_device *ndev)
 		if (likely(CMDSTS_OK & cmdsts)) {
 #endif
 			skb_put(skb, len);
-			if (unlikely(!skb)) {
-				ndev->stats.rx_dropped++;
+			if (unlikely(!skb))
 				goto netdev_mangle_me_harder_failed;
-			}
 			if (cmdsts & CMDSTS_DEST_MULTI)
 				ndev->stats.multicast++;
 			ndev->stats.rx_packets++;
@@ -903,12 +901,15 @@ static void rx_irq(struct net_device *ndev)
 				__vlan_hwaccel_put_tag(skb, htons(ETH_P_IPV6), tag);
 			}
 #endif
-			netif_rx(skb);
+			rx_rc = netif_rx(skb);
+			if (NET_RX_DROP == rx_rc) {
+netdev_mangle_me_harder_failed:
+				ndev->stats.rx_dropped++;
+			}
 		} else {
 			dev_kfree_skb_irq(skb);
 		}
 
-netdev_mangle_me_harder_failed:
 		nr++;
 		next_rx = info->next_rx;
 		desc = info->descs + (DESC_SIZE * next_rx);
@@ -1350,9 +1351,9 @@ static int ns83820_set_link_ksettings(struct net_device *ndev,
 static void ns83820_get_drvinfo(struct net_device *ndev, struct ethtool_drvinfo *info)
 {
 	struct ns83820 *dev = PRIV(ndev);
-	strscpy(info->driver, "ns83820", sizeof(info->driver));
-	strscpy(info->version, VERSION, sizeof(info->version));
-	strscpy(info->bus_info, pci_name(dev->pci_dev), sizeof(info->bus_info));
+	strlcpy(info->driver, "ns83820", sizeof(info->driver));
+	strlcpy(info->version, VERSION, sizeof(info->version));
+	strlcpy(info->bus_info, pci_name(dev->pci_dev), sizeof(info->bus_info));
 }
 
 static u32 ns83820_get_link(struct net_device *ndev)
@@ -1526,7 +1527,7 @@ static int ns83820_stop(struct net_device *ndev)
 	struct ns83820 *dev = PRIV(ndev);
 
 	/* FIXME: protect against interrupt handler? */
-	timer_delete_sync(&dev->tx_watchdog);
+	del_timer_sync(&dev->tx_watchdog);
 
 	ns83820_disable_interrupts(dev);
 
@@ -1586,7 +1587,7 @@ static void ns83820_tx_timeout(struct net_device *ndev, unsigned int txqueue)
 
 static void ns83820_tx_watch(struct timer_list *t)
 {
-	struct ns83820 *dev = timer_container_of(dev, t, tx_watchdog);
+	struct ns83820 *dev = from_timer(dev, t, tx_watchdog);
 	struct net_device *ndev = dev->ndev;
 
 #if defined(DEBUG)
@@ -1648,11 +1649,9 @@ failed:
 	return ret;
 }
 
-static void ns83820_getmac(struct ns83820 *dev, struct net_device *ndev)
+static void ns83820_getmac(struct ns83820 *dev, u8 *mac)
 {
-	u8 mac[ETH_ALEN];
 	unsigned i;
-
 	for (i=0; i<3; i++) {
 		u32 data;
 
@@ -1662,10 +1661,9 @@ static void ns83820_getmac(struct ns83820 *dev, struct net_device *ndev)
 		writel(i*2, dev->base + RFCR);
 		data = readl(dev->base + RFDR);
 
-		mac[i * 2] = data;
-		mac[i * 2 + 1] = data >> 8;
+		*mac++ = data;
+		*mac++ = data >> 8;
 	}
-	eth_hw_addr_set(ndev, mac);
 }
 
 static void ns83820_set_multicast(struct net_device *ndev)
@@ -2089,7 +2087,7 @@ static int ns83820_init_one(struct pci_dev *pci_dev,
 	 */
 	/* Ramit : 1024 DMA is not a good idea, it ends up banging
 	 * some DELL and COMPAQ SMP systems
-	 * Turn on ALP, only we are accepting Jumbo Packets */
+	 * Turn on ALP, only we are accpeting Jumbo Packets */
 	writel(RXCFG_AEP | RXCFG_ARP | RXCFG_AIRL | RXCFG_RX_FD
 		| RXCFG_STRIPCRC
 		//| RXCFG_ALP
@@ -2138,7 +2136,7 @@ static int ns83820_init_one(struct pci_dev *pci_dev,
 	/* Disable Wake On Lan */
 	writel(0, dev->base + WCSR);
 
-	ns83820_getmac(dev, ndev);
+	ns83820_getmac(dev, ndev->dev_addr);
 
 	/* Yes, we support dumb IP checksum on transmit */
 	ndev->features |= NETIF_F_SG;

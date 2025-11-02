@@ -216,7 +216,7 @@ static int doc_ecc_decode(struct rs_control *rs, uint8_t *data, uint8_t *ecc)
 
 static void DoC_Delay(struct doc_priv *doc, unsigned short cycles)
 {
-	volatile char __always_unused dummy;
+	volatile char dummy;
 	int i;
 
 	for (i = 0; i < cycles; i++) {
@@ -703,7 +703,7 @@ static int doc200x_calculate_ecc(struct nand_chip *this, const u_char *dat,
 	struct doc_priv *doc = nand_get_controller_data(this);
 	void __iomem *docptr = doc->virtadr;
 	int i;
-	int __always_unused emptymatch = 1;
+	int emptymatch = 1;
 
 	/* flush the pipeline */
 	if (DoC_is_2000(doc)) {
@@ -1098,7 +1098,7 @@ static inline int __init inftl_partscan(struct mtd_info *mtd, struct mtd_partiti
 		    (i == 0) && (ip->firstUnit > 0)) {
 			parts[0].name = " DiskOnChip IPL / Media Header partition";
 			parts[0].offset = 0;
-			parts[0].size = (uint64_t)mtd->erasesize * ip->firstUnit;
+			parts[0].size = mtd->erasesize * ip->firstUnit;
 			numparts = 1;
 		}
 
@@ -1491,12 +1491,10 @@ static int __init doc_probe(unsigned long physadr)
 	else
 		numchips = doc2001_init(mtd);
 
-	ret = nand_scan(nand, numchips);
-	if (ret)
-		goto fail;
-
-	ret = doc->late_init(mtd);
-	if (ret) {
+	if ((ret = nand_scan(nand, numchips)) || (ret = doc->late_init(mtd))) {
+		/* DBB note: i believe nand_cleanup is necessary here, as
+		   buffers may have been allocated in nand_base.  Check with
+		   Thomas. FIX ME! */
 		nand_cleanup(nand);
 		goto fail;
 	}

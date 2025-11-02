@@ -14,7 +14,6 @@
 #include <lantiq_soc.h>
 
 #include "../clk.h"
-#include "../prom.h"
 
 /* infrastructure control register */
 #define SYS1_INFRAC		0x00bc
@@ -72,6 +71,11 @@
 
 static void __iomem *sysctl_membase[3], *status_membase;
 void __iomem *ltq_sys1_membase, *ltq_ebu_membase;
+
+void falcon_trigger_hrst(int level)
+{
+	sysctl_w32(SYSCTL_SYS1, level & 1, SYS1_HRSTOUTC);
+}
 
 static inline void sysctl_wait(struct clk *clk,
 		unsigned int test, unsigned int reg)
@@ -137,7 +141,7 @@ static void falcon_gpe_enable(void)
 	unsigned int freq;
 	unsigned int status;
 
-	/* if the clock is already enabled */
+	/* if if the clock is already enabled */
 	status = sysctl_r32(SYSCTL_SYS1, SYS1_INFRAC);
 	if (status & (1 << (GPPC_OFFSET + 1)))
 		return;
@@ -204,22 +208,19 @@ void __init ltq_soc_init(void)
 			of_address_to_resource(np_sysgpe, 0, &res_sys[2]))
 		panic("Failed to get core resources");
 
-	of_node_put(np_status);
-	of_node_put(np_ebu);
-	of_node_put(np_sys1);
-	of_node_put(np_syseth);
-	of_node_put(np_sysgpe);
-
-	if ((!request_mem_region(res_status.start, resource_size(&res_status),
-				 res_status.name)) ||
-	    (!request_mem_region(res_ebu.start, resource_size(&res_ebu),
-				 res_ebu.name)) ||
-	    (!request_mem_region(res_sys[0].start, resource_size(&res_sys[0]),
-				 res_sys[0].name)) ||
-	    (!request_mem_region(res_sys[1].start, resource_size(&res_sys[1]),
-				 res_sys[1].name)) ||
-	    (!request_mem_region(res_sys[2].start, resource_size(&res_sys[2]),
-				 res_sys[2].name)))
+	if ((request_mem_region(res_status.start, resource_size(&res_status),
+				res_status.name) < 0) ||
+		(request_mem_region(res_ebu.start, resource_size(&res_ebu),
+				res_ebu.name) < 0) ||
+		(request_mem_region(res_sys[0].start,
+				resource_size(&res_sys[0]),
+				res_sys[0].name) < 0) ||
+		(request_mem_region(res_sys[1].start,
+				resource_size(&res_sys[1]),
+				res_sys[1].name) < 0) ||
+		(request_mem_region(res_sys[2].start,
+				resource_size(&res_sys[2]),
+				res_sys[2].name) < 0))
 		pr_err("Failed to request core resources");
 
 	status_membase = ioremap(res_status.start,

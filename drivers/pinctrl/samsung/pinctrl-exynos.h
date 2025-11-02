@@ -16,9 +16,6 @@
 #ifndef __PINCTRL_SAMSUNG_EXYNOS_H
 #define __PINCTRL_SAMSUNG_EXYNOS_H
 
-/* Values for the pin CON register */
-#define EXYNOS_PIN_CON_FUNC_EINT	0xf
-
 /* External GPIO and wakeup interrupt related definitions */
 #define EXYNOS_GPIO_ECON_OFFSET		0x700
 #define EXYNOS_GPIO_EFLTCON_OFFSET	0x800
@@ -31,7 +28,6 @@
 #define EXYNOS7_WKUP_EMASK_OFFSET	0x900
 #define EXYNOS7_WKUP_EPEND_OFFSET	0xA00
 #define EXYNOS_SVC_OFFSET		0xB08
-#define EXYNOSAUTO_SVC_OFFSET		0xF008
 
 /* helpers to access interrupt service register */
 #define EXYNOS_SVC_GROUP_SHIFT		3
@@ -49,28 +45,15 @@
 #define EXYNOS_EINT_CON_MASK		0xF
 #define EXYNOS_EINT_CON_LEN		4
 
+/* EINT filter configuration */
+#define EXYNOS_EINT_FLTCON_EN		(1 << 7)
+#define EXYNOS_EINT_FLTCON_SEL		(1 << 6)
+#define EXYNOS_EINT_FLTCON_WIDTH(x)	((x) & 0x3f)
+#define EXYNOS_EINT_FLTCON_MASK		0xFF
+#define EXYNOS_EINT_FLTCON_LEN		8
+
 #define EXYNOS_EINT_MAX_PER_BANK	8
 #define EXYNOS_EINT_NR_WKUP_EINT
-
-/*
- * EINT filter configuration register (on alive banks) has
- * the following layout.
- *
- * BitfieldName[PinNum][Bit:Bit]
- * FLT_EN[3][31] FLT_SEL[3][30] FLT_WIDTH[3][29:24]
- * FLT_EN[2][23] FLT_SEL[2][22] FLT_WIDTH[2][21:16]
- * FLT_EN[1][15] FLT_SEL[1][14] FLT_WIDTH[1][13:8]
- * FLT_EN[0][7]  FLT_SEL[0][6]  FLT_WIDTH[0][5:0]
- *
- * FLT_EN	0x0 = Disable, 0x1=Enable
- * FLT_SEL	0x0 = Analog delay filter, 0x1 Digital filter (clock count)
- * FLT_WIDTH	Filtering width. Valid when FLT_SEL is 0x1
- */
-
-#define EXYNOS_FLTCON_EN		BIT(7)
-#define EXYNOS_FLTCON_DIGITAL		BIT(6)
-#define EXYNOS_FLTCON_ANALOG		(0 << 6)
-#define EXYNOS_FLTCON_LEN		8
 
 #define EXYNOS_PIN_BANK_EINTN(pins, reg, id)		\
 	{						\
@@ -132,118 +115,48 @@
 		.pctl_res_idx   = pctl_idx,			\
 	}							\
 
-#define EXYNOS7870_PIN_BANK_EINTN(pins, reg, id)		\
-	{							\
-		.type		= &exynos7870_bank_type_alive,	\
-		.pctl_offset	= reg,				\
-		.nr_pins	= pins,				\
-		.eint_type	= EINT_TYPE_NONE,		\
-		.name		= id				\
+#define EXYNOS9_PIN_BANK_EINTN(types, pins, reg, id)	\
+	{						\
+		.type		= &types,		\
+		.pctl_offset	= reg,			\
+		.nr_pins	= pins,			\
+		.eint_type	= EINT_TYPE_NONE,	\
+		.name		= id			\
 	}
 
-#define EXYNOS7870_PIN_BANK_EINTW(pins, reg, id, offs)		\
-	{							\
-		.type		= &exynos7870_bank_type_alive,	\
-		.pctl_offset	= reg,				\
-		.nr_pins	= pins,				\
-		.eint_type	= EINT_TYPE_WKUP,		\
-		.eint_offset	= offs,				\
-		.name		= id				\
+#define EXYNOS9_PIN_BANK_EINTG(types, pins, reg, id, offs, fltcon_offs)	\
+	{						\
+		.type		= &types,		\
+		.pctl_offset	= reg,			\
+		.nr_pins	= pins,			\
+		.eint_type	= EINT_TYPE_GPIO,	\
+		.eint_offset	= offs,			\
+		.fltcon_offset	= fltcon_offs,		\
+		.name		= id			\
 	}
 
-#define EXYNOS850_PIN_BANK_EINTN(pins, reg, id)			\
-	{							\
-		.type		= &exynos850_bank_type_alive,	\
-		.pctl_offset	= reg,				\
-		.nr_pins	= pins,				\
-		.eint_type	= EINT_TYPE_NONE,		\
-		.name		= id				\
+#define EXYNOS9_PIN_BANK_EINTW(types, pins, reg, id, offs, fltcon_offs)	\
+	{						\
+		.type		= &types,		\
+		.pctl_offset	= reg,			\
+		.nr_pins	= pins,			\
+		.eint_type	= EINT_TYPE_WKUP,	\
+		.eint_offset	= offs,			\
+		.fltcon_offset	= fltcon_offs,		\
+		.name		= id			\
 	}
 
-#define EXYNOS850_PIN_BANK_EINTG(pins, reg, id, offs)		\
-	{							\
-		.type		= &exynos850_bank_type_off,	\
-		.pctl_offset	= reg,				\
-		.nr_pins	= pins,				\
-		.eint_type	= EINT_TYPE_GPIO,		\
-		.eint_offset	= offs,				\
-		.name		= id				\
-	}
-
-#define EXYNOS850_PIN_BANK_EINTW(pins, reg, id, offs)		\
-	{							\
-		.type		= &exynos850_bank_type_alive,	\
-		.pctl_offset	= reg,				\
-		.nr_pins	= pins,				\
-		.eint_type	= EINT_TYPE_WKUP,		\
-		.eint_offset	= offs,				\
-		.name		= id				\
-	}
-
-#define EXYNOS8895_PIN_BANK_EINTG(pins, reg, id, offs)		\
-	{							\
-		.type		= &exynos8895_bank_type_off,	\
-		.pctl_offset	= reg,				\
-		.nr_pins	= pins,				\
-		.eint_type	= EINT_TYPE_GPIO,		\
-		.eint_offset	= offs,				\
-		.name		= id				\
-	}
-
-#define EXYNOSV920_PIN_BANK_EINTG(pins, reg, id, con_offs, mask_offs, pend_offs)	\
-	{							\
-		.type			= &exynos850_bank_type_off,	\
-		.pctl_offset		= reg,				\
-		.nr_pins		= pins,				\
-		.eint_type		= EINT_TYPE_GPIO,		\
-		.eint_con_offset	= con_offs,			\
-		.eint_mask_offset	= mask_offs,			\
-		.eint_pend_offset	= pend_offs,			\
-		.name			= id				\
-	}
-
-#define EXYNOSV920_PIN_BANK_EINTW(pins, reg, id, con_offs, mask_offs, pend_offs)	\
-	{							\
-		.type			= &exynos850_bank_type_alive,	\
-		.pctl_offset		= reg,				\
-		.nr_pins		= pins,				\
-		.eint_type		= EINT_TYPE_WKUP,		\
-		.eint_con_offset	= con_offs,			\
-		.eint_mask_offset	= mask_offs,			\
-		.eint_pend_offset	= pend_offs,			\
-		.name			= id				\
-	}
-
-#define GS101_PIN_BANK_EINTG(pins, reg, id, offs, fltcon_offs) \
-	{							\
-		.type			= &exynos850_bank_type_off,	\
-		.pctl_offset		= reg,			\
-		.nr_pins		= pins,			\
-		.eint_type		= EINT_TYPE_GPIO,	\
-		.eint_offset		= offs,			\
-		.eint_fltcon_offset	= fltcon_offs,		\
-		.name			= id			\
-	}
-
-#define GS101_PIN_BANK_EINTW(pins, reg, id, offs, fltcon_offs) \
-	{								\
-		.type			= &exynos850_bank_type_alive,	\
-		.pctl_offset		= reg,				\
-		.nr_pins		= pins,				\
-		.eint_type		= EINT_TYPE_WKUP,		\
-		.eint_offset		= offs,				\
-		.eint_fltcon_offset	= fltcon_offs,			\
-		.name			= id				\
-	}
-
-#define ARTPEC_PIN_BANK_EINTG(pins, reg, id, offs)			\
-	{								\
-		.type			= &artpec_bank_type_off,	\
-		.pctl_offset		= reg,				\
-		.nr_pins		= pins,				\
-		.eint_type		= EINT_TYPE_GPIO,		\
-		.eint_offset		= offs,				\
-		.name			= id				\
+#define EXYNOS_CMGP_PIN_BANK_EINTW(types, pins, reg, id, offs, fltcon_offs, sysreg_offs, sysreg_bit)   \
+	{                                               \
+		.type           = &types,               \
+		.pctl_offset    = reg,                  \
+		.nr_pins        = pins,                 \
+		.eint_type      = EINT_TYPE_WKUP,       \
+		.eint_offset    = offs,                 \
+		.fltcon_offset  = fltcon_offs,          \
+		.sysreg_cmgp_offs = sysreg_offs,        \
+		.sysreg_cmgp_bit = sysreg_bit,          \
+		.name           = id                    \
 	}
 
 /**
@@ -265,17 +178,13 @@ struct exynos_weint_data {
  */
 struct exynos_muxed_weint_data {
 	unsigned int nr_banks;
-	struct samsung_pin_bank *banks[] __counted_by(nr_banks);
+	struct samsung_pin_bank *banks[];
 };
 
 int exynos_eint_gpio_init(struct samsung_pinctrl_drv_data *d);
 int exynos_eint_wkup_init(struct samsung_pinctrl_drv_data *d);
-void exynosautov920_pinctrl_resume(struct samsung_pin_bank *bank);
-void exynosautov920_pinctrl_suspend(struct samsung_pin_bank *bank);
-void exynos_pinctrl_suspend(struct samsung_pin_bank *bank);
-void exynos_pinctrl_resume(struct samsung_pin_bank *bank);
-void gs101_pinctrl_suspend(struct samsung_pin_bank *bank);
-void gs101_pinctrl_resume(struct samsung_pin_bank *bank);
+void exynos_pinctrl_suspend(struct samsung_pinctrl_drv_data *drvdata);
+void exynos_pinctrl_resume(struct samsung_pinctrl_drv_data *drvdata);
 struct samsung_retention_ctrl *
 exynos_retention_init(struct samsung_pinctrl_drv_data *drvdata,
 		      const struct samsung_retention_data *data);

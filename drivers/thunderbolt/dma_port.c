@@ -197,8 +197,6 @@ static int dma_find_port(struct tb_switch *sw)
  *
  * The DMA control port is functional also when the switch is in safe
  * mode.
- *
- * Return: &struct tb_dma_port on success, %NULL otherwise.
  */
 struct tb_dma_port *dma_port_alloc(struct tb_switch *sw)
 {
@@ -301,13 +299,15 @@ static int dma_port_request(struct tb_dma_port *dma, u32 in,
 	return status_to_errno(out);
 }
 
-static int dma_port_flash_read_block(void *data, unsigned int dwaddress,
-				     void *buf, size_t dwords)
+static int dma_port_flash_read_block(struct tb_dma_port *dma, u32 address,
+				     void *buf, u32 size)
 {
-	struct tb_dma_port *dma = data;
 	struct tb_switch *sw = dma->sw;
+	u32 in, dwaddress, dwords;
 	int ret;
-	u32 in;
+
+	dwaddress = address / 4;
+	dwords = size / 4;
 
 	in = MAIL_IN_CMD_FLASH_READ << MAIL_IN_CMD_SHIFT;
 	if (dwords < MAIL_DATA_DWORDS)
@@ -323,25 +323,28 @@ static int dma_port_flash_read_block(void *data, unsigned int dwaddress,
 			     dma->base + MAIL_DATA, dwords, DMA_PORT_TIMEOUT);
 }
 
-static int dma_port_flash_write_block(void *data, unsigned int dwaddress,
-				      const void *buf, size_t dwords)
+static int dma_port_flash_write_block(struct tb_dma_port *dma, u32 address,
+				      const void *buf, u32 size)
 {
-	struct tb_dma_port *dma = data;
 	struct tb_switch *sw = dma->sw;
+	u32 in, dwaddress, dwords;
 	int ret;
-	u32 in;
+
+	dwords = size / 4;
 
 	/* Write the block to MAIL_DATA registers */
 	ret = dma_port_write(sw->tb->ctl, buf, tb_route(sw), dma->port,
 			    dma->base + MAIL_DATA, dwords, DMA_PORT_TIMEOUT);
-	if (ret)
-		return ret;
 
 	in = MAIL_IN_CMD_FLASH_WRITE << MAIL_IN_CMD_SHIFT;
 
 	/* CSS header write is always done to the same magic address */
-	if (dwaddress >= DMA_PORT_CSS_ADDRESS)
+	if (address >= DMA_PORT_CSS_ADDRESS) {
+		dwaddress = DMA_PORT_CSS_ADDRESS;
 		in |= MAIL_IN_CSS;
+	} else {
+		dwaddress = address / 4;
+	}
 
 	in |= ((dwords - 1) << MAIL_IN_DWORDS_SHIFT) & MAIL_IN_DWORDS_MASK;
 	in |= (dwaddress << MAIL_IN_ADDRESS_SHIFT) & MAIL_IN_ADDRESS_MASK;
@@ -356,14 +359,40 @@ static int dma_port_flash_write_block(void *data, unsigned int dwaddress,
  * @address: Address relative to the start of active region
  * @buf: Buffer where the data is read
  * @size: Size of the buffer
- *
- * Return: %0 on success, negative errno otherwise.
  */
 int dma_port_flash_read(struct tb_dma_port *dma, unsigned int address,
 			void *buf, size_t size)
 {
-	return tb_nvm_read_data(address, buf, size, DMA_PORT_RETRIES,
-				dma_port_flash_read_block, dma);
+	unsigned int retries = DMA_PORT_RETRIES;
+
+	do {
+		unsigned int offset;
+		size_t nbytes;
+		int ret;
+
+		offset = address & 3;
+		nbytes = min_t(size_t, size + offset, MAIL_DATA_DWORDS * 4);
+
+		ret = dma_port_flash_read_block(dma, address, dma->buf,
+						ALIGN(nbytes, 4));
+		if (ret) {
+			if (ret == -ETIMEDOUT) {
+				if (retries--)
+					continue;
+				ret = -EIO;
+			}
+			return ret;
+		}
+
+		nbytes -= offset;
+		memcpy(buf, dma->buf + offset, nbytes);
+
+		size -= nbytes;
+		address += nbytes;
+		buf += nbytes;
+	} while (size > 0);
+
+	return 0;
 }
 
 /**
@@ -376,17 +405,44 @@ int dma_port_flash_read(struct tb_dma_port *dma, unsigned int address,
  * Writes block of data to the non-active flash region of the switch. If
  * the address is given as %DMA_PORT_CSS_ADDRESS the block is written
  * using CSS command.
- *
- * Return: %0 on success, negative errno otherwise.
  */
 int dma_port_flash_write(struct tb_dma_port *dma, unsigned int address,
 			 const void *buf, size_t size)
 {
-	if (address >= DMA_PORT_CSS_ADDRESS && size > DMA_PORT_CSS_MAX_SIZE)
-		return -E2BIG;
+	unsigned int retries = DMA_PORT_RETRIES;
+	unsigned int offset;
 
-	return tb_nvm_write_data(address, buf, size, DMA_PORT_RETRIES,
-				 dma_port_flash_write_block, dma);
+	if (address >= DMA_PORT_CSS_ADDRESS) {
+		offset = 0;
+		if (size > DMA_PORT_CSS_MAX_SIZE)
+			return -E2BIG;
+	} else {
+		offset = address & 3;
+		address = address & ~3;
+	}
+
+	do {
+		u32 nbytes = min_t(u32, size, MAIL_DATA_DWORDS * 4);
+		int ret;
+
+		memcpy(dma->buf + offset, buf, nbytes);
+
+		ret = dma_port_flash_write_block(dma, address, buf, nbytes);
+		if (ret) {
+			if (ret == -ETIMEDOUT) {
+				if (retries--)
+					continue;
+				ret = -EIO;
+			}
+			return ret;
+		}
+
+		size -= nbytes;
+		address += nbytes;
+		buf += nbytes;
+	} while (size > 0);
+
+	return 0;
 }
 
 /**
@@ -399,8 +455,6 @@ int dma_port_flash_write(struct tb_dma_port *dma, unsigned int address,
  * dma_port_flash_update_auth_status() to get status of this command.
  * This is because if the switch in question is root switch the
  * thunderbolt host controller gets reset as well.
- *
- * Return: %0 on success, negative errno otherwise.
  */
 int dma_port_flash_update_auth(struct tb_dma_port *dma)
 {
@@ -418,13 +472,12 @@ int dma_port_flash_update_auth(struct tb_dma_port *dma)
  * @status: Status code of the operation
  *
  * The function checks if there is status available from the last update
- * auth command.
+ * auth command. Returns %0 if there is no status and no further
+ * action is required. If there is status, %1 is returned instead and
+ * @status holds the failure code.
  *
- * Return:
- * * %0 - If there is no status and no further action is required.
- * * %1 - If there is some status. @status holds the failure code.
- * * Negative errno - An error occurred when reading status from the
- *   switch.
+ * Negative return means there was an error reading status from the
+ * switch.
  */
 int dma_port_flash_update_auth_status(struct tb_dma_port *dma, u32 *status)
 {
@@ -455,8 +508,6 @@ int dma_port_flash_update_auth_status(struct tb_dma_port *dma, u32 *status)
  * @dma: DMA control port
  *
  * Triggers power cycle to the switch.
- *
- * Return: %0 on success, negative errno otherwise.
  */
 int dma_port_power_cycle(struct tb_dma_port *dma)
 {

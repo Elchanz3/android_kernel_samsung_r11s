@@ -1,5 +1,15 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Copyright (C) 2014 Broadcom Corporation
+/*
+ * Copyright (C) 2014 Broadcom Corporation
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation version 2.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
 
 #include <linux/kernel.h>
 #include <linux/err.h>
@@ -98,27 +108,22 @@ static unsigned long iproc_asiu_clk_recalc_rate(struct clk_hw *hw,
 	return clk->rate;
 }
 
-static int iproc_asiu_clk_determine_rate(struct clk_hw *hw,
-					 struct clk_rate_request *req)
+static long iproc_asiu_clk_round_rate(struct clk_hw *hw, unsigned long rate,
+				      unsigned long *parent_rate)
 {
 	unsigned int div;
 
-	if (req->rate == 0 || req->best_parent_rate == 0)
+	if (rate == 0 || *parent_rate == 0)
 		return -EINVAL;
 
-	if (req->rate == req->best_parent_rate)
-		return 0;
+	if (rate == *parent_rate)
+		return *parent_rate;
 
-	div = DIV_ROUND_CLOSEST(req->best_parent_rate, req->rate);
-	if (div < 2) {
-		req->rate = req->best_parent_rate;
+	div = DIV_ROUND_CLOSEST(*parent_rate, rate);
+	if (div < 2)
+		return *parent_rate;
 
-		return 0;
-	}
-
-	req->rate = req->best_parent_rate / div;
-
-	return 0;
+	return *parent_rate / div;
 }
 
 static int iproc_asiu_clk_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -173,7 +178,7 @@ static const struct clk_ops iproc_asiu_ops = {
 	.enable = iproc_asiu_clk_enable,
 	.disable = iproc_asiu_clk_disable,
 	.recalc_rate = iproc_asiu_clk_recalc_rate,
-	.determine_rate = iproc_asiu_clk_determine_rate,
+	.round_rate = iproc_asiu_clk_round_rate,
 	.set_rate = iproc_asiu_clk_set_rate,
 };
 

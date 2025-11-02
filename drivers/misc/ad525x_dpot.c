@@ -73,7 +73,6 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 
 #include "ad525x_dpot.h"
 
@@ -139,9 +138,6 @@ static s32 dpot_read_spi(struct dpot_data *dpot, u8 reg)
 
 			value = dpot_read_r8d8(dpot,
 				DPOT_AD5291_READ_RDAC << 2);
-
-			if (value < 0)
-				return value;
 
 			if (dpot->uid == DPOT_UID(AD5291_ID))
 				value = value >> 2;
@@ -419,8 +415,10 @@ static ssize_t sysfs_show_reg(struct device *dev,
 	s32 value;
 
 	if (reg & DPOT_ADDR_OTP_EN)
-		return sprintf(buf, "%s\n", str_enabled_disabled(
-			test_bit(DPOT_RDAC_MASK & reg, data->otp_en_mask)));
+		return sprintf(buf, "%s\n",
+			test_bit(DPOT_RDAC_MASK & reg, data->otp_en_mask) ?
+			"enabled" : "disabled");
+
 
 	mutex_lock(&data->update_lock);
 	value = dpot_read(data, reg);
@@ -742,7 +740,7 @@ exit:
 }
 EXPORT_SYMBOL(ad_dpot_probe);
 
-void ad_dpot_remove(struct device *dev)
+int ad_dpot_remove(struct device *dev)
 {
 	struct dpot_data *data = dev_get_drvdata(dev);
 	int i;
@@ -752,6 +750,8 @@ void ad_dpot_remove(struct device *dev)
 			ad_dpot_remove_files(dev, data->feat, i);
 
 	kfree(data);
+
+	return 0;
 }
 EXPORT_SYMBOL(ad_dpot_remove);
 

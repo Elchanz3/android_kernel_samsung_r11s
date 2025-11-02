@@ -268,10 +268,8 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 		return err;
 
 	rtc->alarm_irq = platform_get_irq(pdev, 0);
-	rtc->alarm_enabled = true;
 	err = devm_request_threaded_irq(dev, rtc->alarm_irq, NULL,
-					cpcap_rtc_alarm_irq,
-					IRQF_TRIGGER_NONE | IRQF_ONESHOT,
+					cpcap_rtc_alarm_irq, IRQF_TRIGGER_NONE,
 					"rtc_alarm", rtc);
 	if (err) {
 		dev_err(dev, "Could not request alarm irq: %d\n", err);
@@ -287,8 +285,7 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 	 */
 	rtc->update_irq = platform_get_irq(pdev, 1);
 	err = devm_request_threaded_irq(dev, rtc->update_irq, NULL,
-					cpcap_rtc_update_irq,
-					IRQF_TRIGGER_NONE | IRQF_ONESHOT,
+					cpcap_rtc_update_irq, IRQF_TRIGGER_NONE,
 					"rtc_1hz", rtc);
 	if (err) {
 		dev_err(dev, "Could not request update irq: %d\n", err);
@@ -296,13 +293,13 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 	}
 	disable_irq(rtc->update_irq);
 
-	err = device_init_wakeup(dev, true);
+	err = device_init_wakeup(dev, 1);
 	if (err) {
 		dev_err(dev, "wakeup initialization failed (%d)\n", err);
 		/* ignore error and continue without wakeup support */
 	}
 
-	return devm_rtc_register_device(rtc->rtc_dev);
+	return rtc_register_device(rtc->rtc_dev);
 }
 
 static const struct of_device_id cpcap_rtc_of_match[] = {
@@ -321,6 +318,7 @@ static struct platform_driver cpcap_rtc_driver = {
 
 module_platform_driver(cpcap_rtc_driver);
 
+MODULE_ALIAS("platform:cpcap-rtc");
 MODULE_DESCRIPTION("CPCAP RTC driver");
 MODULE_AUTHOR("Sebastian Reichel <sre@kernel.org>");
 MODULE_LICENSE("GPL");

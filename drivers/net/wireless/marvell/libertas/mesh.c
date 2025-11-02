@@ -109,9 +109,9 @@ static int lbs_mesh_config(struct lbs_private *priv, uint16_t action,
 
 		if (priv->mesh_dev) {
 			mesh_wdev = priv->mesh_dev->ieee80211_ptr;
-			ie->val.mesh_id_len = mesh_wdev->u.mesh.id_up_len;
-			memcpy(ie->val.mesh_id, mesh_wdev->u.mesh.id,
-						mesh_wdev->u.mesh.id_up_len);
+			ie->val.mesh_id_len = mesh_wdev->mesh_id_up_len;
+			memcpy(ie->val.mesh_id, mesh_wdev->ssid,
+						mesh_wdev->mesh_id_up_len);
 		}
 
 		ie->len = sizeof(struct mrvl_meshie_val) -
@@ -151,13 +151,13 @@ static uint16_t lbs_mesh_get_channel(struct lbs_private *priv)
  */
 
 /**
- * anycast_mask_show - Get function for sysfs attribute anycast_mask
+ * lbs_anycast_get - Get function for sysfs attribute anycast_mask
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t anycast_mask_show(struct device *dev,
-				 struct device_attribute *attr, char *buf)
+static ssize_t lbs_anycast_get(struct device *dev,
+		struct device_attribute *attr, char * buf)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_access mesh_access;
@@ -169,30 +169,26 @@ static ssize_t anycast_mask_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "0x%X\n", le32_to_cpu(mesh_access.data[0]));
+	return snprintf(buf, 12, "0x%X\n", le32_to_cpu(mesh_access.data[0]));
 }
 
 /**
- * anycast_mask_store - Set function for sysfs attribute anycast_mask
+ * lbs_anycast_set - Set function for sysfs attribute anycast_mask
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t anycast_mask_store(struct device *dev,
-				  struct device_attribute *attr,
-				  const char *buf, size_t count)
+static ssize_t lbs_anycast_set(struct device *dev,
+		struct device_attribute *attr, const char * buf, size_t count)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_access mesh_access;
 	uint32_t datum;
 	int ret;
 
-	ret = kstrtouint(buf, 16, &datum);
-	if (ret)
-		return ret;
-
 	memset(&mesh_access, 0, sizeof(mesh_access));
+	sscanf(buf, "%x", &datum);
 	mesh_access.data[0] = cpu_to_le32(datum);
 
 	ret = lbs_mesh_access(priv, CMD_ACT_MESH_SET_ANYCAST, &mesh_access);
@@ -203,13 +199,13 @@ static ssize_t anycast_mask_store(struct device *dev,
 }
 
 /**
- * prb_rsp_limit_show - Get function for sysfs attribute prb_rsp_limit
+ * lbs_prb_rsp_limit_get - Get function for sysfs attribute prb_rsp_limit
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t prb_rsp_limit_show(struct device *dev,
-				  struct device_attribute *attr, char *buf)
+static ssize_t lbs_prb_rsp_limit_get(struct device *dev,
+		struct device_attribute *attr, char *buf)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_access mesh_access;
@@ -225,24 +221,26 @@ static ssize_t prb_rsp_limit_show(struct device *dev,
 		return ret;
 
 	retry_limit = le32_to_cpu(mesh_access.data[1]);
-	return sysfs_emit(buf, "%d\n", retry_limit);
+	return snprintf(buf, 10, "%d\n", retry_limit);
 }
 
 /**
- * prb_rsp_limit_store - Set function for sysfs attribute prb_rsp_limit
+ * lbs_prb_rsp_limit_set - Set function for sysfs attribute prb_rsp_limit
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t prb_rsp_limit_store(struct device *dev,
-				   struct device_attribute *attr,
-				   const char *buf, size_t count)
+static ssize_t lbs_prb_rsp_limit_set(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_access mesh_access;
 	int ret;
 	unsigned long retry_limit;
+
+	memset(&mesh_access, 0, sizeof(mesh_access));
+	mesh_access.data[0] = cpu_to_le32(CMD_ACT_SET);
 
 	ret = kstrtoul(buf, 10, &retry_limit);
 	if (ret)
@@ -250,8 +248,6 @@ static ssize_t prb_rsp_limit_store(struct device *dev,
 	if (retry_limit > 15)
 		return -ENOTSUPP;
 
-	memset(&mesh_access, 0, sizeof(mesh_access));
-	mesh_access.data[0] = cpu_to_le32(CMD_ACT_SET);
 	mesh_access.data[1] = cpu_to_le32(retry_limit);
 
 	ret = lbs_mesh_access(priv, CMD_ACT_MESH_SET_GET_PRB_RSP_LIMIT,
@@ -263,36 +259,32 @@ static ssize_t prb_rsp_limit_store(struct device *dev,
 }
 
 /**
- * lbs_mesh_show - Get function for sysfs attribute mesh
+ * lbs_mesh_get - Get function for sysfs attribute mesh
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t lbs_mesh_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
+static ssize_t lbs_mesh_get(struct device *dev,
+		struct device_attribute *attr, char * buf)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
-	return sysfs_emit(buf, "0x%X\n", !!priv->mesh_dev);
+	return snprintf(buf, 5, "0x%X\n", !!priv->mesh_dev);
 }
 
 /**
- * lbs_mesh_store - Set function for sysfs attribute mesh
+ * lbs_mesh_set - Set function for sysfs attribute mesh
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t lbs_mesh_store(struct device *dev,
-			      struct device_attribute *attr,
-			      const char *buf, size_t count)
+static ssize_t lbs_mesh_set(struct device *dev,
+		struct device_attribute *attr, const char * buf, size_t count)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
-	int ret, enable;
+	int enable;
 
-	ret = kstrtoint(buf, 16, &enable);
-	if (ret)
-		return ret;
-
+	sscanf(buf, "%x", &enable);
 	enable = !!enable;
 	if (enable == !!priv->mesh_dev)
 		return count;
@@ -309,19 +301,20 @@ static ssize_t lbs_mesh_store(struct device *dev,
  * lbs_mesh attribute to be exported per ethX interface
  * through sysfs (/sys/class/net/ethX/lbs_mesh)
  */
-static DEVICE_ATTR_RW(lbs_mesh);
+static DEVICE_ATTR(lbs_mesh, 0644, lbs_mesh_get, lbs_mesh_set);
 
 /*
  * anycast_mask attribute to be exported per mshX interface
  * through sysfs (/sys/class/net/mshX/anycast_mask)
  */
-static DEVICE_ATTR_RW(anycast_mask);
+static DEVICE_ATTR(anycast_mask, 0644, lbs_anycast_get, lbs_anycast_set);
 
 /*
  * prb_rsp_limit attribute to be exported per mshX interface
  * through sysfs (/sys/class/net/mshX/prb_rsp_limit)
  */
-static DEVICE_ATTR_RW(prb_rsp_limit);
+static DEVICE_ATTR(prb_rsp_limit, 0644, lbs_prb_rsp_limit_get,
+		lbs_prb_rsp_limit_set);
 
 static struct attribute *lbs_mesh_sysfs_entries[] = {
 	&dev_attr_anycast_mask.attr,
@@ -358,13 +351,13 @@ static int mesh_get_default_parameters(struct device *dev,
 }
 
 /**
- * bootflag_show - Get function for sysfs attribute bootflag
+ * bootflag_get - Get function for sysfs attribute bootflag
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t bootflag_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
+static ssize_t bootflag_get(struct device *dev,
+			    struct device_attribute *attr, char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -374,31 +367,29 @@ static ssize_t bootflag_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", le32_to_cpu(defs.bootflag));
+	return snprintf(buf, 12, "%d\n", le32_to_cpu(defs.bootflag));
 }
 
 /**
- * bootflag_store - Set function for sysfs attribute bootflag
+ * bootflag_set - Set function for sysfs attribute bootflag
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t bootflag_store(struct device *dev, struct device_attribute *attr,
-			      const char *buf, size_t count)
+static ssize_t bootflag_set(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_config cmd;
 	uint32_t datum;
 	int ret;
 
-	ret = kstrtouint(buf, 10, &datum);
-	if (ret)
-		return ret;
-	if (datum > 1)
+	memset(&cmd, 0, sizeof(cmd));
+	ret = sscanf(buf, "%d", &datum);
+	if ((ret != 1) || (datum > 1))
 		return -EINVAL;
 
-	memset(&cmd, 0, sizeof(cmd));
 	*((__le32 *)&cmd.data[0]) = cpu_to_le32(!!datum);
 	cmd.length = cpu_to_le16(sizeof(uint32_t));
 	ret = lbs_mesh_config_send(priv, &cmd, CMD_ACT_MESH_CONFIG_SET,
@@ -410,13 +401,13 @@ static ssize_t bootflag_store(struct device *dev, struct device_attribute *attr,
 }
 
 /**
- * boottime_show - Get function for sysfs attribute boottime
+ * boottime_get - Get function for sysfs attribute boottime
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t boottime_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
+static ssize_t boottime_get(struct device *dev,
+			    struct device_attribute *attr, char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -426,32 +417,28 @@ static ssize_t boottime_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", defs.boottime);
+	return snprintf(buf, 12, "%d\n", defs.boottime);
 }
 
 /**
- * boottime_store - Set function for sysfs attribute boottime
+ * boottime_set - Set function for sysfs attribute boottime
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t boottime_store(struct device *dev,
-			      struct device_attribute *attr,
-			      const char *buf, size_t count)
+static ssize_t boottime_set(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_config cmd;
 	uint32_t datum;
 	int ret;
 
-	ret = kstrtouint(buf, 10, &datum);
-	if (ret)
-		return ret;
-	if (datum > 255)
-		return -EINVAL;
-
 	memset(&cmd, 0, sizeof(cmd));
+	ret = sscanf(buf, "%d", &datum);
+	if ((ret != 1) || (datum > 255))
+		return -EINVAL;
 
 	/* A too small boot time will result in the device booting into
 	 * standalone (no-host) mode before the host can take control of it,
@@ -473,13 +460,13 @@ static ssize_t boottime_store(struct device *dev,
 }
 
 /**
- * channel_show - Get function for sysfs attribute channel
+ * channel_get - Get function for sysfs attribute channel
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t channel_show(struct device *dev,
-			    struct device_attribute *attr, char *buf)
+static ssize_t channel_get(struct device *dev,
+			   struct device_attribute *attr, char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -489,31 +476,29 @@ static ssize_t channel_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", le16_to_cpu(defs.channel));
+	return snprintf(buf, 12, "%d\n", le16_to_cpu(defs.channel));
 }
 
 /**
- * channel_store - Set function for sysfs attribute channel
+ * channel_set - Set function for sysfs attribute channel
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t channel_store(struct device *dev, struct device_attribute *attr,
-			     const char *buf, size_t count)
+static ssize_t channel_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
 {
 	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct cmd_ds_mesh_config cmd;
 	uint32_t datum;
 	int ret;
 
-	ret = kstrtouint(buf, 10, &datum);
-	if (ret)
-		return ret;
-	if (datum < 1 || datum > 11)
+	memset(&cmd, 0, sizeof(cmd));
+	ret = sscanf(buf, "%d", &datum);
+	if (ret != 1 || datum < 1 || datum > 11)
 		return -EINVAL;
 
-	memset(&cmd, 0, sizeof(cmd));
 	*((__le16 *)&cmd.data[0]) = cpu_to_le16(datum);
 	cmd.length = cpu_to_le16(sizeof(uint16_t));
 	ret = lbs_mesh_config_send(priv, &cmd, CMD_ACT_MESH_CONFIG_SET,
@@ -525,13 +510,13 @@ static ssize_t channel_store(struct device *dev, struct device_attribute *attr,
 }
 
 /**
- * mesh_id_show - Get function for sysfs attribute mesh_id
+ * mesh_id_get - Get function for sysfs attribute mesh_id
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t mesh_id_show(struct device *dev, struct device_attribute *attr,
-			    char *buf)
+static ssize_t mesh_id_get(struct device *dev, struct device_attribute *attr,
+			   char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -554,14 +539,14 @@ static ssize_t mesh_id_show(struct device *dev, struct device_attribute *attr,
 }
 
 /**
- * mesh_id_store - Set function for sysfs attribute mesh_id
+ * mesh_id_set - Set function for sysfs attribute mesh_id
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t mesh_id_store(struct device *dev, struct device_attribute *attr,
-			     const char *buf, size_t count)
+static ssize_t mesh_id_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
 {
 	struct cmd_ds_mesh_config cmd;
 	struct mrvl_mesh_defaults defs;
@@ -600,14 +585,13 @@ static ssize_t mesh_id_store(struct device *dev, struct device_attribute *attr,
 }
 
 /**
- * protocol_id_show - Get function for sysfs attribute protocol_id
+ * protocol_id_get - Get function for sysfs attribute protocol_id
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t protocol_id_show(struct device *dev,
-				struct device_attribute *attr,
-				char *buf)
+static ssize_t protocol_id_get(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -617,19 +601,18 @@ static ssize_t protocol_id_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", defs.meshie.val.active_protocol_id);
+	return snprintf(buf, 5, "%d\n", defs.meshie.val.active_protocol_id);
 }
 
 /**
- * protocol_id_store - Set function for sysfs attribute protocol_id
+ * protocol_id_set - Set function for sysfs attribute protocol_id
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t protocol_id_store(struct device *dev,
-				 struct device_attribute *attr,
-				 const char *buf, size_t count)
+static ssize_t protocol_id_set(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct cmd_ds_mesh_config cmd;
 	struct mrvl_mesh_defaults defs;
@@ -638,13 +621,10 @@ static ssize_t protocol_id_store(struct device *dev,
 	uint32_t datum;
 	int ret;
 
-	ret = kstrtouint(buf, 10, &datum);
-	if (ret)
-		return ret;
-	if (datum > 255)
-		return -EINVAL;
-
 	memset(&cmd, 0, sizeof(cmd));
+	ret = sscanf(buf, "%d", &datum);
+	if ((ret != 1) || (datum > 255))
+		return -EINVAL;
 
 	/* fetch all other Information Element parameters */
 	ret = mesh_get_default_parameters(dev, &defs);
@@ -666,13 +646,13 @@ static ssize_t protocol_id_store(struct device *dev,
 }
 
 /**
- * metric_id_show - Get function for sysfs attribute metric_id
+ * metric_id_get - Get function for sysfs attribute metric_id
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t metric_id_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
+static ssize_t metric_id_get(struct device *dev,
+		struct device_attribute *attr, char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -682,19 +662,18 @@ static ssize_t metric_id_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", defs.meshie.val.active_metric_id);
+	return snprintf(buf, 5, "%d\n", defs.meshie.val.active_metric_id);
 }
 
 /**
- * metric_id_store - Set function for sysfs attribute metric_id
+ * metric_id_set - Set function for sysfs attribute metric_id
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t metric_id_store(struct device *dev,
-			       struct device_attribute *attr,
-			       const char *buf, size_t count)
+static ssize_t metric_id_set(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
 {
 	struct cmd_ds_mesh_config cmd;
 	struct mrvl_mesh_defaults defs;
@@ -728,13 +707,13 @@ static ssize_t metric_id_store(struct device *dev,
 }
 
 /**
- * capability_show - Get function for sysfs attribute capability
+ * capability_get - Get function for sysfs attribute capability
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer where data will be returned
  */
-static ssize_t capability_show(struct device *dev,
-			       struct device_attribute *attr, char *buf)
+static ssize_t capability_get(struct device *dev,
+		struct device_attribute *attr, char *buf)
 {
 	struct mrvl_mesh_defaults defs;
 	int ret;
@@ -744,19 +723,18 @@ static ssize_t capability_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", defs.meshie.val.mesh_capability);
+	return snprintf(buf, 5, "%d\n", defs.meshie.val.mesh_capability);
 }
 
 /**
- * capability_store - Set function for sysfs attribute capability
+ * capability_set - Set function for sysfs attribute capability
  * @dev: the &struct device
  * @attr: device attributes
  * @buf: buffer that contains new attribute value
  * @count: size of buffer
  */
-static ssize_t capability_store(struct device *dev,
-				struct device_attribute *attr,
-				const char *buf, size_t count)
+static ssize_t capability_set(struct device *dev, struct device_attribute *attr,
+			      const char *buf, size_t count)
 {
 	struct cmd_ds_mesh_config cmd;
 	struct mrvl_mesh_defaults defs;
@@ -790,13 +768,13 @@ static ssize_t capability_store(struct device *dev,
 }
 
 
-static DEVICE_ATTR_RW(bootflag);
-static DEVICE_ATTR_RW(boottime);
-static DEVICE_ATTR_RW(channel);
-static DEVICE_ATTR_RW(mesh_id);
-static DEVICE_ATTR_RW(protocol_id);
-static DEVICE_ATTR_RW(metric_id);
-static DEVICE_ATTR_RW(capability);
+static DEVICE_ATTR(bootflag, 0644, bootflag_get, bootflag_set);
+static DEVICE_ATTR(boottime, 0644, boottime_get, boottime_set);
+static DEVICE_ATTR(channel, 0644, channel_get, channel_set);
+static DEVICE_ATTR(mesh_id, 0644, mesh_id_get, mesh_id_set);
+static DEVICE_ATTR(protocol_id, 0644, protocol_id_get, protocol_id_set);
+static DEVICE_ATTR(metric_id, 0644, metric_id_get, metric_id_set);
+static DEVICE_ATTR(capability, 0644, capability_get, capability_set);
 
 static struct attribute *boot_opts_attrs[] = {
 	&dev_attr_bootflag.attr,
@@ -1001,8 +979,8 @@ static int lbs_add_mesh(struct lbs_private *priv)
 	mesh_wdev->wiphy = priv->wdev->wiphy;
 
 	if (priv->mesh_tlv) {
-		sprintf(mesh_wdev->u.mesh.id, "mesh");
-		mesh_wdev->u.mesh.id_up_len = 4;
+		sprintf(mesh_wdev->ssid, "mesh");
+		mesh_wdev->mesh_id_up_len = 4;
 	}
 
 	mesh_wdev->netdev = mesh_dev;

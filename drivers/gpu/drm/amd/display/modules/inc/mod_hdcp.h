@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Advanced Micro Devices, Inc.
+ * Copyright 2019 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -97,15 +97,12 @@ enum mod_hdcp_status {
 	MOD_HDCP_STATUS_HDCP2_REAUTH_REQUEST,
 	MOD_HDCP_STATUS_HDCP2_REAUTH_LINK_INTEGRITY_FAILURE,
 	MOD_HDCP_STATUS_HDCP2_DEVICE_COUNT_MISMATCH_FAILURE,
-	MOD_HDCP_STATUS_UNSUPPORTED_PSP_VER_FAILURE,
 };
 
 struct mod_hdcp_displayport {
 	uint8_t rev;
-	uint8_t assr_enabled;
-	uint8_t mst_enabled;
-	uint8_t dp2_enabled;
-	uint8_t usb4_enabled;
+	uint8_t assr_supported;
+	uint8_t mst_supported;
 };
 
 struct mod_hdcp_hdmi {
@@ -123,32 +120,9 @@ enum mod_hdcp_display_state {
 	MOD_HDCP_DISPLAY_ENCRYPTION_ENABLED
 };
 
-struct mod_hdcp_psp_caps {
-	uint8_t dtm_v3_supported;
-};
-
-enum mod_hdcp_display_disable_option {
-	MOD_HDCP_DISPLAY_NOT_DISABLE = 0,
-	MOD_HDCP_DISPLAY_DISABLE_AUTHENTICATION,
-	MOD_HDCP_DISPLAY_DISABLE_ENCRYPTION,
-};
-
-struct mod_hdcp_atomic_op_i2c {
-	uint8_t address;
-	uint8_t offset;
-	uint8_t *data;
-	uint32_t size;
-};
-
-struct mod_hdcp_atomic_op_aux {
-	uint32_t address;
-	uint8_t *data;
-	uint32_t size;
-};
-
 struct mod_hdcp_ddc {
 	void *handle;
-	struct mod_hdcp_ddc_funcs {
+	struct {
 		bool (*read_i2c)(void *handle,
 				uint32_t address,
 				uint8_t offset,
@@ -166,34 +140,17 @@ struct mod_hdcp_ddc {
 				uint32_t address,
 				const uint8_t *data,
 				uint32_t size);
-		bool (*atomic_write_poll_read_i2c)(
-				void *handle,
-				const struct mod_hdcp_atomic_op_i2c *write,
-				const struct mod_hdcp_atomic_op_i2c *poll,
-				struct mod_hdcp_atomic_op_i2c *read,
-				uint32_t poll_timeout_us,
-				uint8_t poll_mask_msb
-		);
-		bool (*atomic_write_poll_read_aux)(
-				void *handle,
-				const struct mod_hdcp_atomic_op_aux *write,
-				const struct mod_hdcp_atomic_op_aux *poll,
-				struct mod_hdcp_atomic_op_aux *read,
-				uint32_t poll_timeout_us,
-				uint8_t poll_mask_msb
-		);
 	} funcs;
 };
 
 struct mod_hdcp_psp {
 	void *handle;
 	void *funcs;
-	struct mod_hdcp_psp_caps caps;
 };
 
 struct mod_hdcp_display_adjustment {
-	uint8_t disable			: 2;
-	uint8_t reserved		: 6;
+	uint8_t disable			: 1;
+	uint8_t reserved		: 7;
 };
 
 struct mod_hdcp_link_adjustment_hdcp1 {
@@ -214,13 +171,11 @@ struct mod_hdcp_link_adjustment_hdcp2 {
 	uint8_t force_type		: 2;
 	uint8_t force_no_stored_km	: 1;
 	uint8_t increase_h_prime_timeout: 1;
-	uint8_t force_sw_locality_check : 1;
-	uint8_t reserved		: 2;
+	uint8_t reserved		: 3;
 };
 
 struct mod_hdcp_link_adjustment {
 	uint8_t auth_delay;
-	uint8_t retry_limit;
 	struct mod_hdcp_link_adjustment_hdcp1 hdcp1;
 	struct mod_hdcp_link_adjustment_hdcp2 hdcp2;
 };
@@ -258,7 +213,6 @@ struct mod_hdcp_output {
 	uint8_t watchdog_timer_stop;
 	uint16_t callback_delay;
 	uint16_t watchdog_timer_delay;
-	uint8_t auth_complete;
 };
 
 /* used to represent per display info */
@@ -267,7 +221,6 @@ struct mod_hdcp_display {
 	uint8_t index;
 	uint8_t controller;
 	uint8_t dig_fe;
-	uint8_t stream_enc_idx;
 	union {
 		uint8_t vc_id;
 	};
@@ -280,10 +233,6 @@ struct mod_hdcp_link {
 	enum mod_hdcp_operation_mode mode;
 	uint8_t dig_be;
 	uint8_t ddc_line;
-	uint8_t link_enc_idx;
-	uint8_t phy_idx;
-	uint8_t dio_output_id;
-	uint8_t hdcp_supported_informational;
 	union {
 		struct mod_hdcp_displayport dp;
 		struct mod_hdcp_hdmi hdmi;
@@ -303,12 +252,10 @@ struct mod_hdcp_display_query {
 struct mod_hdcp_config {
 	struct mod_hdcp_psp psp;
 	struct mod_hdcp_ddc ddc;
-	struct {
-		uint8_t lc_enable_sw_fallback : 1;
-		uint8_t reserved : 7;
-	} debug;
 	uint8_t index;
 };
+
+struct mod_hdcp;
 
 /* dm allocates memory of mod_hdcp per dc_link on dm init based on memory size*/
 size_t mod_hdcp_get_memory_size(void);
@@ -320,21 +267,14 @@ enum mod_hdcp_status mod_hdcp_setup(struct mod_hdcp *hdcp,
 /* called per link on link destroy */
 enum mod_hdcp_status mod_hdcp_teardown(struct mod_hdcp *hdcp);
 
-/* called per display after stream is enabled */
+/* called per display on cp_desired set to true */
 enum mod_hdcp_status mod_hdcp_add_display(struct mod_hdcp *hdcp,
 		struct mod_hdcp_link *link, struct mod_hdcp_display *display,
 		struct mod_hdcp_output *output);
 
-/* called per display before stream is disabled */
+/* called per display on cp_desired set to false */
 enum mod_hdcp_status mod_hdcp_remove_display(struct mod_hdcp *hdcp,
 		uint8_t index, struct mod_hdcp_output *output);
-
-/* called per display to apply new authentication adjustment */
-enum mod_hdcp_status mod_hdcp_update_display(struct mod_hdcp *hdcp,
-		uint8_t index,
-		struct mod_hdcp_link_adjustment *link_adjust,
-		struct mod_hdcp_display_adjustment *display_adjust,
-		struct mod_hdcp_output *output);
 
 /* called to query hdcp information on a specific index */
 enum mod_hdcp_status mod_hdcp_query_display(struct mod_hdcp *hdcp,

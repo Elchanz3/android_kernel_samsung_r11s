@@ -1,36 +1,23 @@
 .. SPDX-License-Identifier: GPL-2.0
 
 ==========================================
-Submitting Devicetree (DT) binding patches
+Submitting devicetree (DT) binding patches
 ==========================================
 
 I. For patch submitters
 =======================
 
-  0) Normal patch submission rules from
-     Documentation/process/submitting-patches.rst applies.
+  0) Normal patch submission rules from Documentation/process/submitting-patches.rst
+     applies.
 
   1) The Documentation/ and include/dt-bindings/ portion of the patch should
      be a separate patch. The preferred subject prefix for binding patches is::
 
        "dt-bindings: <binding dir>: ..."
 
-     Few subsystems, like ASoC, media, regulators and SPI, expect reverse order
-     of the prefixes::
-
-       "<binding dir>: dt-bindings: ..."
-
      The 80 characters of the subject are precious. It is recommended to not
-     use "Documentation", "doc" or "YAML" because that is implied. All
-     bindings are docs and all new bindings are supposed to be in Devicetree
-     schema format.  Repeating "binding" again should also be avoided, so for
-     a new device it is often enough for example::
-
-       "dt-bindings: iio: adc: Add ROHM BD79100G"
-
-     Conversion of other formats to DT schema::
-
-       "dt-bindings: iio: adc: adi,ad7476: Convert to DT schema"
+     use "Documentation" or "doc" because that is implied. All bindings are
+     docs. Repeating "binding" again should also be avoided.
 
   2) DT binding files are written in DT schema format using json-schema
      vocabulary and YAML file format. The DT binding files must pass validation
@@ -38,8 +25,7 @@ I. For patch submitters
 
        make dt_binding_check
 
-     See Documentation/devicetree/bindings/writing-schema.rst for more details
-     about schema and tools setup.
+     See ../writing-schema.rst for more details about schema and tools setup.
 
   3) DT binding files should be dual licensed. The preferred license tag is
      (GPL-2.0-only OR BSD-2-Clause).
@@ -55,31 +41,27 @@ I. For patch submitters
      the code implementing the binding.
 
   6) Any compatible strings used in a chip or board DTS file must be
-     previously documented in the corresponding DT binding file
+     previously documented in the corresponding DT binding text file
      in Documentation/devicetree/bindings.  This rule applies even if
      the Linux device driver does not yet match on the compatible
      string.  [ checkpatch will emit warnings if this step is not
      followed as of commit bff5da4335256513497cc8c79f9a9d1665e09864
      ("checkpatch: add DT compatible string documentation checks"). ]
 
-  7) DTS is treated in general as driver-independent hardware description, thus
-     any DTS patches, regardless whether using existing or new bindings, should
-     be placed at the end of patchset to indicate no dependency of drivers on
-     the DTS.  DTS will be anyway applied through separate tree or branch, so
-     different order would indicate the series is non-bisectable.
+  7) The wildcard "<chip>" may be used in compatible strings, as in
+     the following example:
 
-     If a driver subsystem maintainer prefers to apply entire set, instead of
-     their relevant portion of patchset, please split the DTS patches into
-     separate patchset with a reference in changelog or cover letter to the
-     bindings submission on the mailing list.
+         - compatible: Must contain '"nvidia,<chip>-pcie",
+           "nvidia,tegra20-pcie"' where <chip> is tegra30, tegra132, ...
+
+     As in the above example, the known values of "<chip>" should be
+     documented if it is used.
 
   8) If a documented compatible string is not yet matched by the
      driver, the documentation should also include a compatible
-     string that is matched by the driver.
+     string that is matched by the driver (as in the "nvidia,tegra20-pcie"
+     example above).
 
-  9) Bindings are actively used by multiple projects other than the Linux
-     Kernel, extra care and consideration may need to be taken when making changes
-     to existing bindings.
 
 II. For kernel maintainers
 ==========================
@@ -92,21 +74,16 @@ II. For kernel maintainers
      binding, and it hasn't received an Acked-by from the devicetree
      maintainers after a few weeks, go ahead and take it.
 
-     For subsystem bindings (anything affecting more than a single device),
-     getting a devicetree maintainer to review it is required.
+     Subsystem bindings (anything affecting more than a single device)
+     then getting a devicetree maintainer to review it is required.
 
-  3) For a series going through multiple trees, the binding patch should be
+  3) For a series going though multiple trees, the binding patch should be
      kept with the driver using the binding.
-
-  4) The DTS files should however never be applied via driver subsystem tree,
-     but always via platform SoC trees on dedicated branches (see also
-     Documentation/process/maintainer-soc.rst).
 
 III. Notes
 ==========
 
-  0) Please see Documentation/devicetree/bindings/ABI.rst for details
-     regarding devicetree ABI.
+  0) Please see ...bindings/ABI.txt for details regarding devicetree ABI.
 
   1) This document is intended as a general familiarization with the process as
      decided at the 2013 Kernel Summit.  When in doubt, the current word of the

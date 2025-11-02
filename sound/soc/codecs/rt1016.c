@@ -16,6 +16,7 @@
 #include <linux/i2c.h>
 #include <linux/platform_device.h>
 #include <linux/firmware.h>
+#include <linux/gpio.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -367,11 +368,11 @@ static int rt1016_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		reg_val |= RT1016_I2S_MS_M;
 		rt1016->master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		reg_val |= RT1016_I2S_MS_S;
 		break;
 	default:
@@ -489,7 +490,7 @@ static int rt1016_set_component_pll(struct snd_soc_component *component,
 
 	ret = rl6231_pll_calc(freq_in, freq_out * 4, &pll_code);
 	if (ret < 0) {
-		dev_err(component->dev, "Unsupported input clock %d\n", freq_in);
+		dev_err(component->dev, "Unsupport input clock %d\n", freq_in);
 		return ret;
 	}
 
@@ -499,11 +500,10 @@ static int rt1016_set_component_pll(struct snd_soc_component *component,
 		(pll_code.k_bp ? 0 : pll_code.k_code));
 
 	snd_soc_component_write(component, RT1016_PLL1,
-		((pll_code.m_bp ? 0 : pll_code.m_code) << RT1016_PLL_M_SFT) |
-		(pll_code.m_bp << RT1016_PLL_M_BP_SFT) |
-		pll_code.n_code);
+		(pll_code.m_bp ? 0 : pll_code.m_code) << RT1016_PLL_M_SFT |
+		pll_code.m_bp << RT1016_PLL_M_BP_SFT | pll_code.n_code);
 	snd_soc_component_write(component, RT1016_PLL2,
-		(pll_code.k_bp << RT1016_PLL_K_BP_SFT) |
+		pll_code.k_bp << RT1016_PLL_K_BP_SFT |
 		(pll_code.k_bp ? 0 : pll_code.k_code));
 
 	rt1016->pll_in = freq_in;
@@ -534,7 +534,7 @@ static void rt1016_remove(struct snd_soc_component *component)
 #define RT1016_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S8)
 
-static const struct snd_soc_dai_ops rt1016_aif_dai_ops = {
+static struct snd_soc_dai_ops rt1016_aif_dai_ops = {
 	.hw_params = rt1016_hw_params,
 	.set_fmt = rt1016_set_dai_fmt,
 };
@@ -594,6 +594,7 @@ static const struct snd_soc_component_driver soc_component_dev_rt1016 = {
 	.set_pll = rt1016_set_component_pll,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config rt1016_regmap = {
@@ -608,7 +609,7 @@ static const struct regmap_config rt1016_regmap = {
 };
 
 static const struct i2c_device_id rt1016_i2c_id[] = {
-	{ "rt1016" },
+	{ "rt1016", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt1016_i2c_id);
@@ -616,20 +617,21 @@ MODULE_DEVICE_TABLE(i2c, rt1016_i2c_id);
 #if defined(CONFIG_OF)
 static const struct of_device_id rt1016_of_match[] = {
 	{ .compatible = "realtek,rt1016", },
-	{ }
+	{},
 };
 MODULE_DEVICE_TABLE(of, rt1016_of_match);
 #endif
 
 #ifdef CONFIG_ACPI
-static const struct acpi_device_id rt1016_acpi_match[] = {
-	{ "10EC1016" },
-	{ }
+static struct acpi_device_id rt1016_acpi_match[] = {
+	{"10EC1016", 0,},
+	{},
 };
 MODULE_DEVICE_TABLE(acpi, rt1016_acpi_match);
 #endif
 
-static int rt1016_i2c_probe(struct i2c_client *i2c)
+static int rt1016_i2c_probe(struct i2c_client *i2c,
+	const struct i2c_device_id *id)
 {
 	struct rt1016_priv *rt1016;
 	int ret;

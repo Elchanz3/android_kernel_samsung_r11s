@@ -84,7 +84,7 @@ static ssize_t led_proc_write(struct file *file, const char __user *buffer,
 	/* before we change anything we want to stop any running timers,
 	 * otherwise calls such as on will have no persistent effect
 	 */
-	timer_delete_sync(&led_blink_timer);
+	del_timer_sync(&led_blink_timer);
 
 	if (!strcmp(buf, "on")) {
 		auxio_set_led(AUXIO_LED_ON);
@@ -114,16 +114,18 @@ static const struct proc_ops led_proc_ops = {
 };
 #endif
 
+static struct proc_dir_entry *led;
+
 #define LED_VERSION	"0.1"
 
 static int __init led_init(void)
 {
 	timer_setup(&led_blink_timer, led_blink, 0);
 
-#ifdef CONFIG_PROC_FS
-	if (!proc_create("led", 0, NULL, &led_proc_ops))
+	led = proc_create("led", 0, NULL, &led_proc_ops);
+	if (!led)
 		return -ENOMEM;
-#endif
+
 	printk(KERN_INFO
 	       "led: version %s, Lars Kotthoff <metalhead@metalhead.ws>\n",
 	       LED_VERSION);
@@ -134,7 +136,7 @@ static int __init led_init(void)
 static void __exit led_exit(void)
 {
 	remove_proc_entry("led", NULL);
-	timer_delete_sync(&led_blink_timer);
+	del_timer_sync(&led_blink_timer);
 }
 
 module_init(led_init);

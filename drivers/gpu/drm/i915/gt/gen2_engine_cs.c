@@ -5,9 +5,7 @@
 
 #include "gen2_engine_cs.h"
 #include "i915_drv.h"
-#include "i915_reg.h"
 #include "intel_engine.h"
-#include "intel_engine_regs.h"
 #include "intel_gpu_commands.h"
 #include "intel_gt.h"
 #include "intel_gt_irq.h"
@@ -76,7 +74,7 @@ int gen4_emit_flush_rcs(struct i915_request *rq, u32 mode)
 	cmd = MI_FLUSH;
 	if (mode & EMIT_INVALIDATE) {
 		cmd |= MI_EXE_FLUSH;
-		if (IS_G4X(rq->i915) || GRAPHICS_VER(rq->i915) == 5)
+		if (IS_G4X(rq->engine->i915) || IS_GEN(rq->engine->i915, 5))
 			cmd |= MI_INVALIDATE_ISP;
 	}
 
@@ -145,7 +143,7 @@ static u32 *__gen2_emit_breadcrumb(struct i915_request *rq, u32 *cs,
 				   int flush, int post)
 {
 	GEM_BUG_ON(i915_request_active_timeline(rq)->hwsp_ggtt != rq->engine->status_page.vma);
-	GEM_BUG_ON(offset_in_page(rq->hwsp_seqno) != I915_GEM_HWS_SEQNO_ADDR);
+	GEM_BUG_ON(offset_in_page(i915_request_active_timeline(rq)->hwsp_offset) != I915_GEM_HWS_SEQNO_ADDR);
 
 	*cs++ = MI_FLUSH;
 
@@ -169,7 +167,7 @@ static u32 *__gen2_emit_breadcrumb(struct i915_request *rq, u32 *cs,
 	return cs;
 }
 
-u32 *gen2_emit_breadcrumb(struct i915_request *rq, u32 *cs)
+u32 *gen3_emit_breadcrumb(struct i915_request *rq, u32 *cs)
 {
 	return __gen2_emit_breadcrumb(rq, cs, 16, 8);
 }
@@ -179,7 +177,7 @@ u32 *gen5_emit_breadcrumb(struct i915_request *rq, u32 *cs)
 	return __gen2_emit_breadcrumb(rq, cs, 8, 8);
 }
 
-/* Just userspace ABI convention to limit the wa batch bo to a reasonable size */
+/* Just userspace ABI convention to limit the wa batch bo to a resonable size */
 #define I830_BATCH_LIMIT SZ_256K
 #define I830_TLB_ENTRIES (2)
 #define I830_WA_SIZE max(I830_TLB_ENTRIES * SZ_4K, I830_BATCH_LIMIT)
@@ -248,7 +246,7 @@ int i830_emit_bb_start(struct i915_request *rq,
 	return 0;
 }
 
-int gen2_emit_bb_start(struct i915_request *rq,
+int gen3_emit_bb_start(struct i915_request *rq,
 		       u64 offset, u32 len,
 		       unsigned int dispatch_flags)
 {
@@ -292,12 +290,29 @@ int gen4_emit_bb_start(struct i915_request *rq,
 
 void gen2_irq_enable(struct intel_engine_cs *engine)
 {
+	struct drm_i915_private *i915 = engine->i915;
+
+	i915->irq_mask &= ~engine->irq_enable_mask;
+	intel_uncore_write16(&i915->uncore, GEN2_IMR, i915->irq_mask);
+	ENGINE_POSTING_READ16(engine, RING_IMR);
+}
+
+void gen2_irq_disable(struct intel_engine_cs *engine)
+{
+	struct drm_i915_private *i915 = engine->i915;
+
+	i915->irq_mask |= engine->irq_enable_mask;
+	intel_uncore_write16(&i915->uncore, GEN2_IMR, i915->irq_mask);
+}
+
+void gen3_irq_enable(struct intel_engine_cs *engine)
+{
 	engine->i915->irq_mask &= ~engine->irq_enable_mask;
 	intel_uncore_write(engine->uncore, GEN2_IMR, engine->i915->irq_mask);
 	intel_uncore_posting_read_fw(engine->uncore, GEN2_IMR);
 }
 
-void gen2_irq_disable(struct intel_engine_cs *engine)
+void gen3_irq_disable(struct intel_engine_cs *engine)
 {
 	engine->i915->irq_mask |= engine->irq_enable_mask;
 	intel_uncore_write(engine->uncore, GEN2_IMR, engine->i915->irq_mask);

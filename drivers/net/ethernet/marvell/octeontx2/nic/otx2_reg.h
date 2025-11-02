@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Marvell RVU Ethernet driver
+/* Marvell OcteonTx2 RVU Ethernet driver
  *
- * Copyright (C) 2020 Marvell.
+ * Copyright (C) 2020 Marvell International Ltd.
  *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #ifndef OTX2_REG_H
@@ -41,19 +44,6 @@
 #define RVU_PF_MSIX_VECX_ADDR(a)            (0x000 | (a) << 4)
 #define RVU_PF_MSIX_VECX_CTL(a)             (0x008 | (a) << 4)
 #define RVU_PF_MSIX_PBAX(a)                 (0xF0000 | (a) << 3)
-#define RVU_PF_VF_MBOX_ADDR                 (0xC40)
-#define RVU_PF_LMTLINE_ADDR                 (0xC48)
-
-#define RVU_MBOX_PF_VFX_PFVF_TRIGX(a)		(0x2000 | (a) << 3)
-#define RVU_MBOX_PF_VFPF_INTX(a)		(0x1000 | (a) << 3)
-#define RVU_MBOX_PF_VFPF_INT_W1SX(a)		(0x1020 | (a) << 3)
-#define RVU_MBOX_PF_VFPF_INT_ENA_W1SX(a)	(0x1040 | (a) << 3)
-#define RVU_MBOX_PF_VFPF_INT_ENA_W1CX(a)	(0x1060 | (a) << 3)
-
-#define RVU_MBOX_PF_VFPF1_INTX(a)		(0x1080 | (a) << 3)
-#define RVU_MBOX_PF_VFPF1_INT_W1SX(a)		(0x10a0 | (a) << 3)
-#define RVU_MBOX_PF_VFPF1_INT_ENA_W1SX(a)	(0x10c0 | (a) << 3)
-#define RVU_MBOX_PF_VFPF1_INT_ENA_W1CX(a)	(0x10e0 | (a) << 3)
 
 /* RVU VF registers */
 #define	RVU_VF_VFPF_MBOX0		    (0x00000)
@@ -67,12 +57,6 @@
 #define	RVU_VF_MSIX_VECX_ADDR(a)	    (0x000 | (a) << 4)
 #define	RVU_VF_MSIX_VECX_CTL(a)		    (0x008 | (a) << 4)
 #define	RVU_VF_MSIX_PBAX(a)		    (0xF0000 | (a) << 3)
-#define RVU_VF_MBOX_REGION                  (0xC0000)
-
-/* CN20K RVU_MBOX_E: RVU PF/VF MBOX Address Range Enumeration */
-#define RVU_MBOX_AF_PFX_ADDR(a)             (0x5000 | (a) << 4)
-#define RVU_PFX_FUNC_PFAF_MBOX		    (0x80000)
-#define RVU_PFX_FUNCX_VFAF_MBOX		    (0x40000)
 
 #define RVU_FUNC_BLKADDR_SHIFT		20
 #define RVU_FUNC_BLKADDR_MASK		0x1FULL
@@ -107,7 +91,6 @@
 #define NPA_LF_QINTX_INT_W1S(a)         (NPA_LFBASE | 0x318 | (a) << 12)
 #define NPA_LF_QINTX_ENA_W1S(a)         (NPA_LFBASE | 0x320 | (a) << 12)
 #define NPA_LF_QINTX_ENA_W1C(a)         (NPA_LFBASE | 0x330 | (a) << 12)
-#define NPA_LF_AURA_BATCH_FREE0         (NPA_LFBASE | 0x400)
 
 /* NIX LF registers */
 #define	NIX_LFBASE			(BLKTYPE_NIX << RVU_FUNC_BLKADDR_SHIFT)
@@ -154,12 +137,24 @@
 #define	NIX_LF_CINTX_ENA_W1S(a)		(NIX_LFBASE | 0xD40 | (a) << 12)
 #define	NIX_LF_CINTX_ENA_W1C(a)		(NIX_LFBASE | 0xD50 | (a) << 12)
 
+/* NIX AF transmit scheduler registers */
+#define NIX_AF_SMQX_CFG(a)		(0x700 | (a) << 16)
+#define NIX_AF_TL1X_SCHEDULE(a)		(0xC00 | (a) << 16)
+#define NIX_AF_TL1X_CIR(a)		(0xC20 | (a) << 16)
+#define NIX_AF_TL1X_TOPOLOGY(a)		(0xC80 | (a) << 16)
+#define NIX_AF_TL2X_PARENT(a)		(0xE88 | (a) << 16)
+#define NIX_AF_TL2X_SCHEDULE(a)		(0xE00 | (a) << 16)
+#define NIX_AF_TL3X_PARENT(a)		(0x1088 | (a) << 16)
+#define NIX_AF_TL3X_SCHEDULE(a)		(0x1000 | (a) << 16)
+#define NIX_AF_TL4X_PARENT(a)		(0x1288 | (a) << 16)
+#define NIX_AF_TL4X_SCHEDULE(a)		(0x1200 | (a) << 16)
+#define NIX_AF_MDQX_SCHEDULE(a)		(0x1400 | (a) << 16)
+#define NIX_AF_MDQX_PARENT(a)		(0x1480 | (a) << 16)
+#define NIX_AF_TL3_TL2X_LINKX_CFG(a, b)	(0x1700 | (a) << 16 | (b) << 3)
+
 /* LMT LF registers */
 #define LMT_LFBASE			BIT_ULL(RVU_FUNC_BLKADDR_SHIFT)
 #define LMT_LF_LMTLINEX(a)		(LMT_LFBASE | 0x000 | (a) << 12)
 #define LMT_LF_LMTCANCEL		(LMT_LFBASE | 0x400)
-
-/* CN20K registers */
-#define RVU_PF_DISC			(0x0)
 
 #endif /* OTX2_REG_H */

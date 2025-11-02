@@ -123,7 +123,7 @@ struct usbhs_pkt *usbhs_pkt_pop(struct usbhs_pipe *pipe, struct usbhs_pkt *pkt)
 		if (fifo)
 			chan = usbhsf_dma_chan_get(fifo, pkt);
 		if (chan) {
-			dmaengine_terminate_sync(chan);
+			dmaengine_terminate_all(chan);
 			usbhsf_dma_unmap(pkt);
 		} else {
 			if (usbhs_pipe_is_dir_in(pipe))
@@ -167,10 +167,8 @@ static int usbhsf_pkt_handler(struct usbhs_pipe *pipe, int type)
 	usbhs_lock(priv, flags);
 
 	pkt = __usbhsf_pkt_get(pipe);
-	if (!pkt) {
-		ret = -EINVAL;
+	if (!pkt)
 		goto __usbhs_pkt_handler_end;
-	}
 
 	switch (type) {
 	case USBHSF_PKT_PREPARE:
@@ -366,7 +364,7 @@ static int usbhs_dcp_dir_switch_to_write(struct usbhs_pkt *pkt, int *is_done)
 
 	ret = usbhsf_fifo_select(pipe, fifo, 1);
 	if (ret < 0) {
-		dev_err(dev, "%s() failed\n", __func__);
+		dev_err(dev, "%s() faile\n", __func__);
 		return ret;
 	}
 

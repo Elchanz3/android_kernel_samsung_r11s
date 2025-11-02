@@ -15,23 +15,15 @@
 
 #include <asm/processor.h>
 #include <asm/cpu_has_feature.h>
-#include <asm/vdso/timebase.h>
 
 /* time.c */
-extern u64 decrementer_max;
-
 extern unsigned long tb_ticks_per_jiffy;
 extern unsigned long tb_ticks_per_usec;
 extern unsigned long tb_ticks_per_sec;
 extern struct clock_event_device decrementer_clockevent;
-extern u64 decrementer_max;
 
 
 extern void generic_calibrate_decr(void);
-
-#ifdef CONFIG_PPC_SPLPAR
-extern u64 get_boot_tb(void);
-#endif
 
 /* Some sane defaults: 125 MHz timebase, 1GHz processor */
 extern unsigned long ppc_proc_freq;
@@ -46,12 +38,42 @@ struct div_result {
 	u64 result_low;
 };
 
+/* For compatibility, get_tbl() is defined as get_tb() on ppc64 */
+static inline unsigned long get_tbl(void)
+{
+	return mftb();
+}
+
 static inline u64 get_vtb(void)
 {
+#ifdef CONFIG_PPC_BOOK3S_64
 	if (cpu_has_feature(CPU_FTR_ARCH_207S))
 		return mfspr(SPRN_VTB);
-
+#endif
 	return 0;
+}
+
+static inline u64 get_tb(void)
+{
+	unsigned int tbhi, tblo, tbhi2;
+
+	if (IS_ENABLED(CONFIG_PPC64))
+		return mftb();
+
+	do {
+		tbhi = mftbu();
+		tblo = mftb();
+		tbhi2 = mftbu();
+	} while (tbhi != tbhi2);
+
+	return ((u64)tbhi << 32) | tblo;
+}
+
+static inline void set_tb(unsigned int upper, unsigned int lower)
+{
+	mtspr(SPRN_TBWL, 0);
+	mtspr(SPRN_TBWU, upper);
+	mtspr(SPRN_TBWL, lower);
 }
 
 /* Accessor functions for the decrementer register.
@@ -62,6 +84,9 @@ static inline u64 get_vtb(void)
  */
 static inline u64 get_dec(void)
 {
+	if (IS_ENABLED(CONFIG_40x))
+		return mfspr(SPRN_PIT);
+
 	return mfspr(SPRN_DEC);
 }
 
@@ -72,7 +97,9 @@ static inline u64 get_dec(void)
  */
 static inline void set_dec(u64 val)
 {
-	if (IS_ENABLED(CONFIG_BOOKE))
+	if (IS_ENABLED(CONFIG_40x))
+		mtspr(SPRN_PIT, (u32)val);
+	else if (IS_ENABLED(CONFIG_BOOKE))
 		mtspr(SPRN_DEC, val);
 	else
 		mtspr(SPRN_DEC, val - 1);
@@ -90,31 +117,22 @@ static inline unsigned long tb_ticks_since(unsigned long tstamp)
 #define mulhdu(x,y) \
 ({unsigned long z; asm ("mulhdu %0,%1,%2" : "=r" (z) : "r" (x), "r" (y)); z;})
 #else
-#define mulhdu(x, y)	mul_u64_u64_shr(x, y, 64)
+extern u64 mulhdu(u64, u64);
 #endif
+
+extern void div128_by_32(u64 dividend_high, u64 dividend_low,
+			 unsigned divisor, struct div_result *dr);
 
 extern void secondary_cpu_time_init(void);
 extern void __init time_init(void);
 
 DECLARE_PER_CPU(u64, decrementers_next_tb);
 
-static inline u64 timer_get_next_tb(void)
-{
-	return __this_cpu_read(decrementers_next_tb);
-}
-
-#ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
-void timer_rearm_host_dec(u64 now);
-#endif
-
 /* Convert timebase ticks to nanoseconds */
 unsigned long long tb_to_ns(unsigned long long tb_ticks);
 
-void timer_broadcast_interrupt(void);
-
-/* SPLPAR and VIRT_CPU_ACCOUNTING_NATIVE */
-void pseries_accumulate_stolen_time(void);
-u64 pseries_calculate_stolen_time(u64 stop_tb);
+/* SPLPAR */
+void accumulate_stolen_time(void);
 
 #endif /* __KERNEL__ */
 #endif /* __POWERPC_TIME_H */

@@ -38,15 +38,6 @@
  */
 #define ZCRYPT_RNG_BUFFER_SIZE	4096
 
-/**
- * The zcrypt_wait_api_operational() function waits this
- * amount in milliseconds for ap_wait_aqpn_bindings_complete().
- * Also on a cprb send failure with ENODEV the send functions
- * trigger an ap bus rescan and wait this time in milliseconds
- * for ap_wait_aqpn_bindings_complete() before resending.
- */
-#define ZCRYPT_WAIT_BINDINGS_COMPLETE_MS 30000
-
 /*
  * Identifier for Crypto Request Performance Index
  */
@@ -69,19 +60,15 @@ struct zcrypt_track {
 	int again_counter;		/* retry attempts counter */
 	int last_qid;			/* last qid used */
 	int last_rc;			/* last return code */
+#ifdef CONFIG_ZCRYPT_DEBUG
+	struct ap_fi fi;		/* failure injection cmd */
+#endif
 };
 
 /* defines related to message tracking */
 #define TRACK_AGAIN_MAX 10
 #define TRACK_AGAIN_CARD_WEIGHT_PENALTY  1000
 #define TRACK_AGAIN_QUEUE_WEIGHT_PENALTY 10000
-
-/*
- * xflags - to be used with zcrypt_send_cprb() and
- * zcrypt_send_ep11_cprb() for the xflags parameter.
- */
-#define ZCRYPT_XFLAG_USERSPACE	0x0001	/* data ptrs address userspace */
-#define ZCRYPT_XFLAG_NOMEMALLOC 0x0002	/* do not allocate memory via kmalloc */
 
 struct zcrypt_ops {
 	long (*rsa_modexpo)(struct zcrypt_queue *, struct ica_rsa_modexpo *,
@@ -137,9 +124,8 @@ struct zcrypt_queue {
 extern atomic_t zcrypt_rescan_req;
 
 extern spinlock_t zcrypt_list_lock;
+extern int zcrypt_device_count;
 extern struct list_head zcrypt_card_list;
-
-extern unsigned int zcrypt_mempool_threshold;
 
 #define for_each_zcrypt_card(_zc) \
 	list_for_each_entry(_zc, &zcrypt_card_list, list)
@@ -160,7 +146,7 @@ void zcrypt_queue_get(struct zcrypt_queue *);
 int zcrypt_queue_put(struct zcrypt_queue *);
 int zcrypt_queue_register(struct zcrypt_queue *);
 void zcrypt_queue_unregister(struct zcrypt_queue *);
-bool zcrypt_queue_force_online(struct zcrypt_queue *zq, int online);
+void zcrypt_queue_force_online(struct zcrypt_queue *, int);
 
 int zcrypt_rng_device_add(void);
 void zcrypt_rng_device_remove(void);
@@ -170,14 +156,11 @@ void zcrypt_msgtype_unregister(struct zcrypt_ops *);
 struct zcrypt_ops *zcrypt_msgtype(unsigned char *, int);
 int zcrypt_api_init(void);
 void zcrypt_api_exit(void);
-long zcrypt_send_cprb(struct ica_xcRB *xcRB, u32 xflags);
-long zcrypt_send_ep11_cprb(struct ep11_urb *urb, u32 xflags);
-void zcrypt_device_status_mask_ext(struct zcrypt_device_status_ext *devstatus,
-				   int maxcard, int maxqueue);
+long zcrypt_send_cprb(struct ica_xcRB *xcRB);
+long zcrypt_send_ep11_cprb(struct ep11_urb *urb);
+void zcrypt_device_status_mask_ext(struct zcrypt_device_status_ext *devstatus);
 int zcrypt_device_status_ext(int card, int queue,
 			     struct zcrypt_device_status_ext *devstatus);
-
-int zcrypt_wait_api_operational(void);
 
 static inline unsigned long z_copy_from_user(bool userspace,
 					     void *to,
@@ -186,7 +169,7 @@ static inline unsigned long z_copy_from_user(bool userspace,
 {
 	if (likely(userspace))
 		return copy_from_user(to, from, n);
-	memcpy(to, (void __force *)from, n);
+	memcpy(to, (void __force *) from, n);
 	return 0;
 }
 
@@ -197,7 +180,7 @@ static inline unsigned long z_copy_to_user(bool userspace,
 {
 	if (likely(userspace))
 		return copy_to_user(to, from, n);
-	memcpy((void __force *)to, from, n);
+	memcpy((void __force *) to, from, n);
 	return 0;
 }
 

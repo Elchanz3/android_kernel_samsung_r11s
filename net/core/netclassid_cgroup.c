@@ -21,9 +21,7 @@ static inline struct cgroup_cls_state *css_cls_state(struct cgroup_subsys_state 
 struct cgroup_cls_state *task_cls_state(struct task_struct *p)
 {
 	return css_cls_state(task_css_check(p, net_cls_cgrp_id,
-					    rcu_read_lock_held() ||
-					    rcu_read_lock_bh_held() ||
-					    rcu_read_lock_trace_held()));
+					    rcu_read_lock_bh_held()));
 }
 EXPORT_SYMBOL_GPL(task_cls_state);
 
@@ -68,13 +66,17 @@ struct update_classid_context {
 
 #define UPDATE_CLASSID_BATCH 1000
 
-static int update_classid_sock(const void *v, struct file *file, unsigned int n)
+static int update_classid_sock(const void *v, struct file *file, unsigned n)
 {
+	int err;
 	struct update_classid_context *ctx = (void *)v;
-	struct socket *sock = sock_from_file(file);
+	struct socket *sock = sock_from_file(file, &err);
 
-	if (sock)
+	if (sock) {
+		spin_lock(&cgroup_sk_update_lock);
 		sock_cgroup_set_classid(&sock->sk->sk_cgrp_data, ctx->classid);
+		spin_unlock(&cgroup_sk_update_lock);
+	}
 	if (--ctx->batch == 0) {
 		ctx->batch = UPDATE_CLASSID_BATCH;
 		return n + 1;
@@ -89,12 +91,6 @@ static void update_classid_task(struct task_struct *p, u32 classid)
 		.batch = UPDATE_CLASSID_BATCH
 	};
 	unsigned int fd = 0;
-
-	/* Only update the leader task, when many threads in this task,
-	 * so it can avoid the useless traversal.
-	 */
-	if (p != p->group_leader)
-		return;
 
 	do {
 		task_lock(p);
@@ -125,6 +121,8 @@ static int write_classid(struct cgroup_subsys_state *css, struct cftype *cft,
 	struct cgroup_cls_state *cs = css_cls_state(css);
 	struct css_task_iter it;
 	struct task_struct *p;
+
+	cgroup_sk_alloc_disable();
 
 	cs->classid = (u32)value;
 

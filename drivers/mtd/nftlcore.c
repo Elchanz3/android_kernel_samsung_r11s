@@ -124,7 +124,7 @@ int nftl_read_oob(struct mtd_info *mtd, loff_t offs, size_t len,
 		  size_t *retlen, uint8_t *buf)
 {
 	loff_t mask = mtd->writesize - 1;
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 	int res;
 
 	ops.mode = MTD_OPS_PLACE_OOB;
@@ -145,7 +145,7 @@ int nftl_write_oob(struct mtd_info *mtd, loff_t offs, size_t len,
 		   size_t *retlen, uint8_t *buf)
 {
 	loff_t mask = mtd->writesize - 1;
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 	int res;
 
 	ops.mode = MTD_OPS_PLACE_OOB;
@@ -168,7 +168,7 @@ static int nftl_write(struct mtd_info *mtd, loff_t offs, size_t len,
 		      size_t *retlen, uint8_t *buf, uint8_t *oob)
 {
 	loff_t mask = mtd->writesize - 1;
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 	int res;
 
 	ops.mode = MTD_OPS_PLACE_OOB;
@@ -226,25 +226,6 @@ static u16 NFTL_findfreeblock(struct NFTLrecord *nftl, int desperate )
 	} while (pot != nftl->LastFreeEUN);
 
 	return BLOCK_NIL;
-}
-
-static noinline_for_stack void NFTL_move_block(struct mtd_info *mtd, loff_t src, loff_t dst)
-{
-	unsigned char movebuf[512];
-	struct nftl_oob oob;
-	size_t retlen;
-	int ret;
-
-	ret = mtd_read(mtd, src, 512, &retlen, movebuf);
-	if (ret < 0 && !mtd_is_bitflip(ret)) {
-		ret = mtd_read(mtd, src, 512, &retlen, movebuf);
-		if (ret != -EIO)
-			printk("Error went away on retry.\n");
-	}
-	memset(&oob, 0xff, sizeof(struct nftl_oob));
-	oob.b.Status = oob.b.Status1 = SECTOR_USED;
-
-	nftl_write(mtd, dst, 512, &retlen, movebuf, (char *)&oob);
 }
 
 static u16 NFTL_foldchain (struct NFTLrecord *nftl, unsigned thisVUC, unsigned pendingblock )
@@ -408,6 +389,9 @@ static u16 NFTL_foldchain (struct NFTLrecord *nftl, unsigned thisVUC, unsigned p
 	*/
 	pr_debug("Folding chain %d into unit %d\n", thisVUC, targetEUN);
 	for (block = 0; block < nftl->EraseSize / 512 ; block++) {
+		unsigned char movebuf[512];
+		int ret;
+
 		/* If it's in the target EUN already, or if it's pending write, do nothing */
 		if (BlockMap[block] == targetEUN ||
 		    (pendingblock == (thisVUC * (nftl->EraseSize / 512) + block))) {
@@ -419,8 +403,25 @@ static u16 NFTL_foldchain (struct NFTLrecord *nftl, unsigned thisVUC, unsigned p
 		if (BlockMap[block] == BLOCK_NIL)
 			continue;
 
-		NFTL_move_block(mtd, (nftl->EraseSize * BlockMap[block]) + (block * 512),
-				(nftl->EraseSize * targetEUN) + (block * 512));
+		ret = mtd_read(mtd,
+			       (nftl->EraseSize * BlockMap[block]) + (block * 512),
+			       512,
+			       &retlen,
+			       movebuf);
+		if (ret < 0 && !mtd_is_bitflip(ret)) {
+			ret = mtd_read(mtd,
+				       (nftl->EraseSize * BlockMap[block]) + (block * 512),
+				       512,
+				       &retlen,
+				       movebuf);
+			if (ret != -EIO)
+				printk("Error went away on retry.\n");
+		}
+		memset(&oob, 0xff, sizeof(struct nftl_oob));
+		oob.b.Status = oob.b.Status1 = SECTOR_USED;
+
+		nftl_write(nftl->mbd.mtd, (nftl->EraseSize * targetEUN) +
+			   (block * 512), 512, &retlen, movebuf, (char *)&oob);
 	}
 
 	/* add the header so that it is now a valid chain */
@@ -618,6 +619,7 @@ static inline u16 NFTL_findwriteunit(struct NFTLrecord *nftl, unsigned block)
 				return BLOCK_NIL;
 			}
 			//printk("Restarting scan\n");
+			lastEUN = BLOCK_NIL;
 			continue;
 		}
 
@@ -795,7 +797,18 @@ static struct mtd_blktrans_ops nftl_tr = {
 	.owner		= THIS_MODULE,
 };
 
-module_mtd_blktrans(nftl_tr);
+static int __init init_nftl(void)
+{
+	return register_mtd_blktrans(&nftl_tr);
+}
+
+static void __exit cleanup_nftl(void)
+{
+	deregister_mtd_blktrans(&nftl_tr);
+}
+
+module_init(init_nftl);
+module_exit(cleanup_nftl);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>, Fabrice Bellard <fabrice.bellard@netgem.com> et al.");

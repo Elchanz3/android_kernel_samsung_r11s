@@ -8,50 +8,36 @@
 #include <asm/kvm_hyp.h>
 #include <asm/kvm_mmu.h>
 #include <asm/kvm_pgtable.h>
-#include <asm/kvm_pkvm.h>
 
 #include <nvhe/early_alloc.h>
-#include <nvhe/ffa.h>
 #include <nvhe/gfp.h>
 #include <nvhe/memory.h>
 #include <nvhe/mem_protect.h>
 #include <nvhe/mm.h>
-#include <nvhe/pkvm.h>
 #include <nvhe/trap_handler.h>
 
+struct hyp_pool hpool;
+struct kvm_pgtable_mm_ops pkvm_pgtable_mm_ops;
 unsigned long hyp_nr_cpus;
 
 #define hyp_percpu_size ((unsigned long)__per_cpu_end - \
 			 (unsigned long)__per_cpu_start)
 
 static void *vmemmap_base;
-static void *vm_table_base;
 static void *hyp_pgt_base;
-static void *host_s2_pgt_base;
-static void *selftest_base;
-static void *ffa_proxy_pages;
-static struct kvm_pgtable_mm_ops pkvm_pgtable_mm_ops;
-static struct hyp_pool hpool;
+static void *host_s2_mem_pgt_base;
+static void *host_s2_dev_pgt_base;
 
 static int divide_memory_pool(void *virt, unsigned long size)
 {
-	unsigned long nr_pages;
+	unsigned long vstart, vend, nr_pages;
 
 	hyp_early_alloc_init(virt, size);
 
-	nr_pages = pkvm_selftest_pages();
-	selftest_base = hyp_early_alloc_contig(nr_pages);
-	if (nr_pages && !selftest_base)
-		return -ENOMEM;
-
-	nr_pages = hyp_vmemmap_pages(sizeof(struct hyp_page));
+	hyp_vmemmap_range(__hyp_pa(virt), size, &vstart, &vend);
+	nr_pages = (vend - vstart) >> PAGE_SHIFT;
 	vmemmap_base = hyp_early_alloc_contig(nr_pages);
 	if (!vmemmap_base)
-		return -ENOMEM;
-
-	nr_pages = hyp_vm_table_pages();
-	vm_table_base = hyp_early_alloc_contig(nr_pages);
-	if (!vm_table_base)
 		return -ENOMEM;
 
 	nr_pages = hyp_s1_pgtable_pages();
@@ -59,37 +45,15 @@ static int divide_memory_pool(void *virt, unsigned long size)
 	if (!hyp_pgt_base)
 		return -ENOMEM;
 
-	nr_pages = host_s2_pgtable_pages();
-	host_s2_pgt_base = hyp_early_alloc_contig(nr_pages);
-	if (!host_s2_pgt_base)
+	nr_pages = host_s2_mem_pgtable_pages();
+	host_s2_mem_pgt_base = hyp_early_alloc_contig(nr_pages);
+	if (!host_s2_mem_pgt_base)
 		return -ENOMEM;
 
-	nr_pages = hyp_ffa_proxy_pages();
-	ffa_proxy_pages = hyp_early_alloc_contig(nr_pages);
-	if (!ffa_proxy_pages)
+	nr_pages = host_s2_dev_pgtable_pages();
+	host_s2_dev_pgt_base = hyp_early_alloc_contig(nr_pages);
+	if (!host_s2_dev_pgt_base)
 		return -ENOMEM;
-
-	return 0;
-}
-
-static int pkvm_create_host_sve_mappings(void)
-{
-	void *start, *end;
-	int ret, i;
-
-	if (!system_supports_sve())
-		return 0;
-
-	for (i = 0; i < hyp_nr_cpus; i++) {
-		struct kvm_host_data *host_data = per_cpu_ptr(&kvm_host_data, i);
-		struct cpu_sve_state *sve_state = host_data->sve_state;
-
-		start = kern_hyp_va(sve_state);
-		end = start + PAGE_ALIGN(pkvm_host_sve_state_size());
-		ret = pkvm_create_mappings(start, end, PAGE_HYP);
-		if (ret)
-			return ret;
-	}
 
 	return 0;
 }
@@ -117,7 +81,7 @@ static int recreate_hyp_mappings(phys_addr_t phys, unsigned long size,
 	if (ret)
 		return ret;
 
-	ret = hyp_back_vmemmap(hyp_virt_to_phys(vmemmap_base));
+	ret = hyp_back_vmemmap(phys, size, hyp_virt_to_phys(vmemmap_base));
 	if (ret)
 		return ret;
 
@@ -125,7 +89,7 @@ static int recreate_hyp_mappings(phys_addr_t phys, unsigned long size,
 	if (ret)
 		return ret;
 
-	ret = pkvm_create_mappings(__hyp_data_start, __hyp_data_end, PAGE_HYP);
+	ret = pkvm_create_mappings(__start_rodata, __end_rodata, PAGE_HYP_RO);
 	if (ret)
 		return ret;
 
@@ -137,25 +101,29 @@ static int recreate_hyp_mappings(phys_addr_t phys, unsigned long size,
 	if (ret)
 		return ret;
 
+	ret = pkvm_create_mappings(__hyp_bss_end, __bss_stop, PAGE_HYP_RO);
+	if (ret)
+		return ret;
+
 	ret = pkvm_create_mappings(virt, virt + size, PAGE_HYP);
 	if (ret)
 		return ret;
 
 	for (i = 0; i < hyp_nr_cpus; i++) {
-		struct kvm_nvhe_init_params *params = per_cpu_ptr(&kvm_init_params, i);
-
 		start = (void *)kern_hyp_va(per_cpu_base[i]);
 		end = start + PAGE_ALIGN(hyp_percpu_size);
 		ret = pkvm_create_mappings(start, end, PAGE_HYP);
 		if (ret)
 			return ret;
 
-		ret = pkvm_create_stack(params->stack_pa, &params->stack_hyp_va);
+		end = (void *)per_cpu_ptr(&kvm_init_params, i)->stack_hyp_va;
+		start = end - PAGE_SIZE;
+		ret = pkvm_create_mappings(start, end, PAGE_HYP);
 		if (ret)
 			return ret;
 	}
 
-	return pkvm_create_host_sve_mappings();
+	return 0;
 }
 
 static void update_nvhe_init_params(void)
@@ -166,8 +134,7 @@ static void update_nvhe_init_params(void)
 	for (i = 0; i < hyp_nr_cpus; i++) {
 		params = per_cpu_ptr(&kvm_init_params, i);
 		params->pgd_pa = __hyp_pa(pkvm_pgtable.pgd);
-		dcache_clean_inval_poc((unsigned long)params,
-				    (unsigned long)params + sizeof(*params));
+		__flush_dcache_area(params, sizeof(*params));
 	}
 }
 
@@ -176,117 +143,10 @@ static void *hyp_zalloc_hyp_page(void *arg)
 	return hyp_alloc_pages(&hpool, 0);
 }
 
-static void hpool_get_page(void *addr)
-{
-	hyp_get_page(&hpool, addr);
-}
-
-static void hpool_put_page(void *addr)
-{
-	hyp_put_page(&hpool, addr);
-}
-
-static int fix_host_ownership_walker(const struct kvm_pgtable_visit_ctx *ctx,
-				     enum kvm_pgtable_walk_flags visit)
-{
-	enum pkvm_page_state state;
-	struct hyp_page *page;
-	phys_addr_t phys;
-	enum kvm_pgtable_prot prot;
-
-	if (!kvm_pte_valid(ctx->old))
-		return 0;
-
-	if (ctx->level != KVM_PGTABLE_LAST_LEVEL)
-		return -EINVAL;
-
-	phys = kvm_pte_to_phys(ctx->old);
-	if (!addr_is_memory(phys))
-		return -EINVAL;
-
-	page = hyp_phys_to_page(phys);
-
-	/*
-	 * Adjust the host stage-2 mappings to match the ownership attributes
-	 * configured in the hypervisor stage-1, and make sure to propagate them
-	 * to the hyp_vmemmap state.
-	 */
-	prot = kvm_pgtable_hyp_pte_prot(ctx->old);
-	state = pkvm_getstate(prot);
-	switch (state) {
-	case PKVM_PAGE_OWNED:
-		set_hyp_state(page, PKVM_PAGE_OWNED);
-		/* hyp text is RO in the host stage-2 to be inspected on panic. */
-		if (prot == PAGE_HYP_EXEC) {
-			set_host_state(page, PKVM_NOPAGE);
-			return host_stage2_idmap_locked(phys, PAGE_SIZE, KVM_PGTABLE_PROT_R);
-		} else {
-			return host_stage2_set_owner_locked(phys, PAGE_SIZE, PKVM_ID_HYP);
-		}
-	case PKVM_PAGE_SHARED_OWNED:
-		set_hyp_state(page, PKVM_PAGE_SHARED_OWNED);
-		set_host_state(page, PKVM_PAGE_SHARED_BORROWED);
-		break;
-	case PKVM_PAGE_SHARED_BORROWED:
-		set_hyp_state(page, PKVM_PAGE_SHARED_BORROWED);
-		set_host_state(page, PKVM_PAGE_SHARED_OWNED);
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int fix_hyp_pgtable_refcnt_walker(const struct kvm_pgtable_visit_ctx *ctx,
-					 enum kvm_pgtable_walk_flags visit)
-{
-	/*
-	 * Fix-up the refcount for the page-table pages as the early allocator
-	 * was unable to access the hyp_vmemmap and so the buddy allocator has
-	 * initialised the refcount to '1'.
-	 */
-	if (kvm_pte_valid(ctx->old))
-		ctx->mm_ops->get_page(ctx->ptep);
-
-	return 0;
-}
-
-static int fix_host_ownership(void)
-{
-	struct kvm_pgtable_walker walker = {
-		.cb	= fix_host_ownership_walker,
-		.flags	= KVM_PGTABLE_WALK_LEAF,
-	};
-	int i, ret;
-
-	for (i = 0; i < hyp_memblock_nr; i++) {
-		struct memblock_region *reg = &hyp_memory[i];
-		u64 start = (u64)hyp_phys_to_virt(reg->base);
-
-		ret = kvm_pgtable_walk(&pkvm_pgtable, start, reg->size, &walker);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-static int fix_hyp_pgtable_refcnt(void)
-{
-	struct kvm_pgtable_walker walker = {
-		.cb	= fix_hyp_pgtable_refcnt_walker,
-		.flags	= KVM_PGTABLE_WALK_LEAF | KVM_PGTABLE_WALK_TABLE_POST,
-		.arg	= pkvm_pgtable.mm_ops,
-	};
-
-	return kvm_pgtable_walk(&pkvm_pgtable, 0, BIT(pkvm_pgtable.ia_bits),
-				&walker);
-}
-
 void __noreturn __pkvm_init_finalise(void)
 {
-	struct kvm_cpu_context *host_ctxt = host_data_ptr(host_ctxt);
+	struct kvm_host_data *host_data = this_cpu_ptr(&kvm_host_data);
+	struct kvm_cpu_context *host_ctxt = &host_data->host_ctxt;
 	unsigned long nr_pages, reserved_pages, pfn;
 	int ret;
 
@@ -298,7 +158,7 @@ void __noreturn __pkvm_init_finalise(void)
 	if (ret)
 		goto out;
 
-	ret = kvm_host_prepare_stage2(host_s2_pgt_base);
+	ret = kvm_host_prepare_stage2(host_s2_mem_pgt_base, host_s2_dev_pgt_base);
 	if (ret)
 		goto out;
 
@@ -306,31 +166,11 @@ void __noreturn __pkvm_init_finalise(void)
 		.zalloc_page = hyp_zalloc_hyp_page,
 		.phys_to_virt = hyp_phys_to_virt,
 		.virt_to_phys = hyp_virt_to_phys,
-		.get_page = hpool_get_page,
-		.put_page = hpool_put_page,
-		.page_count = hyp_page_count,
+		.get_page = hyp_get_page,
+		.put_page = hyp_put_page,
 	};
 	pkvm_pgtable.mm_ops = &pkvm_pgtable_mm_ops;
 
-	ret = fix_host_ownership();
-	if (ret)
-		goto out;
-
-	ret = fix_hyp_pgtable_refcnt();
-	if (ret)
-		goto out;
-
-	ret = hyp_create_fixmap();
-	if (ret)
-		goto out;
-
-	ret = hyp_ffa_init(ffa_proxy_pages);
-	if (ret)
-		goto out;
-
-	pkvm_hyp_vm_table_init(vm_table_base);
-
-	pkvm_ownership_selftest(selftest_base);
 out:
 	/*
 	 * We tail-called to here from handle___pkvm_init() and will not return,
@@ -346,10 +186,8 @@ int __pkvm_init(phys_addr_t phys, unsigned long size, unsigned long nr_cpus,
 {
 	struct kvm_nvhe_init_params *params;
 	void *virt = hyp_phys_to_virt(phys);
-	typeof(__pkvm_init_switch_pgd) *fn;
+	void (*fn)(phys_addr_t params_pa, void *finalize_fn_va);
 	int ret;
-
-	BUG_ON(kvm_check_pvm_sysreg_table());
 
 	if (!PAGE_ALIGNED(phys) || !PAGE_ALIGNED(size))
 		return -EINVAL;
@@ -370,7 +208,7 @@ int __pkvm_init(phys_addr_t phys, unsigned long size, unsigned long nr_cpus,
 	/* Jump in the idmap page to switch to the new page-tables */
 	params = this_cpu_ptr(&kvm_init_params);
 	fn = (typeof(fn))__hyp_pa(__pkvm_init_switch_pgd);
-	fn(params->pgd_pa, params->stack_hyp_va, __pkvm_init_finalise);
+	fn(__hyp_pa(params), __pkvm_init_finalise);
 
 	unreachable();
 }

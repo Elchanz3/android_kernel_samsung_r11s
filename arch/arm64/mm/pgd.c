@@ -15,40 +15,72 @@
 #include <asm/page.h>
 #include <asm/tlbflush.h>
 
-static struct kmem_cache *pgd_cache __ro_after_init;
+#ifdef CONFIG_RKP
+#include <linux/uh.h>
+#include <linux/rkp.h>
+#endif
 
-static bool pgdir_is_page_size(void)
-{
-	if (PGD_SIZE == PAGE_SIZE)
-		return true;
-	if (CONFIG_PGTABLE_LEVELS == 4)
-		return !pgtable_l4_enabled();
-	if (CONFIG_PGTABLE_LEVELS == 5)
-		return !pgtable_l5_enabled();
-	return false;
-}
+static struct kmem_cache *pgd_cache __ro_after_init;
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
 	gfp_t gfp = GFP_PGTABLE_USER;
+#ifdef CONFIG_RKP
+	pgd_t *ret = NULL;
 
-	if (pgdir_is_page_size())
-		return __pgd_alloc(mm, 0);
+	if (rkp_started)
+		ret = (pgd_t *) rkp_ro_alloc();
+
+	if (!ret) {
+		if (PGD_SIZE == PAGE_SIZE)
+			ret = (pgd_t *)__get_free_page(gfp);
+		else
+			ret = kmem_cache_alloc(pgd_cache, gfp);
+	}
+
+	if (unlikely(!ret)) {
+		pr_warn("%s: pgd alloc is failed\n", __func__);
+		return ret;
+	}
+
+	if (rkp_started)
+		uh_call(UH_APP_RKP, RKP_PGD_RO, (u64)ret, 0, 0, 0);
+
+	return ret;
+#else
+	if (PGD_SIZE == PAGE_SIZE)
+		return (pgd_t *)__get_free_page(gfp);
 	else
 		return kmem_cache_alloc(pgd_cache, gfp);
+#endif
 }
 
 void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
-	if (pgdir_is_page_size())
-		__pgd_free(mm, pgd);
+#ifdef CONFIG_RKP
+	if (rkp_started)
+		uh_call(UH_APP_RKP, RKP_PGD_RW, (u64)pgd, 0, 0, 0);
+
+	/* if pgd memory come from read only buffer, the put it back */
+	if (is_rkp_ro_buffer((u64)pgd)) {
+		rkp_ro_free((void *)pgd);
+	} else {
+		if (PGD_SIZE == PAGE_SIZE)
+			free_page((unsigned long)pgd);
+		else
+			kmem_cache_free(pgd_cache, pgd);
+	}
+#else
+	if (PGD_SIZE == PAGE_SIZE)
+		free_page((unsigned long)pgd);
 	else
 		kmem_cache_free(pgd_cache, pgd);
+#endif
 }
 
 void __init pgtable_cache_init(void)
 {
-	if (pgdir_is_page_size())
+	if (PGD_SIZE == PAGE_SIZE)
 		return;
 
 #ifdef CONFIG_ARM64_PA_BITS_52

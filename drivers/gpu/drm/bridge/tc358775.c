@@ -13,19 +13,19 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
-#include <linux/media-bus-format.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
-#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
+#include <drm/drm_crtc_helper.h>
+#include <drm/drm_dp_helper.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
+#include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 
 #define FLD_VAL(val, start, end) FIELD_PREP(GENMASK(start, end), val)
@@ -107,7 +107,6 @@
 #define RDPKTLN         0x0404  /* Command Read Packet Length */
 
 #define VPCTRL          0x0450  /* Video Path Control */
-#define EVTMODE		BIT(5)  /* Video event mode enable, tc35876x only */
 #define HTIM1           0x0454  /* Horizontal Timing Control 1 */
 #define HTIM2           0x0458  /* Horizontal Timing Control 2 */
 #define VTIM1           0x045C  /* Vertical Timing Control 1 */
@@ -242,7 +241,7 @@ static inline u32 TC358775_LVCFG_PCLKDIV(uint32_t val)
 }
 
 #define TC358775_LVCFG_LVDLINK__MASK                         0x00000002
-#define TC358775_LVCFG_LVDLINK__SHIFT                        1
+#define TC358775_LVCFG_LVDLINK__SHIFT                        0
 static inline u32 TC358775_LVCFG_LVDLINK(uint32_t val)
 {
 	return ((val) << TC358775_LVCFG_LVDLINK__SHIFT) &
@@ -253,11 +252,6 @@ enum tc358775_ports {
 	TC358775_DSI_IN,
 	TC358775_LVDS_OUT0,
 	TC358775_LVDS_OUT1,
-};
-
-enum tc3587x5_type {
-	TC358765 = 0x65,
-	TC358775 = 0x75,
 };
 
 struct tc_data {
@@ -277,8 +271,6 @@ struct tc_data {
 	struct gpio_desc	*stby_gpio;
 	u8			lvds_link; /* single-link or dual-link */
 	u8			bpc;
-
-	enum tc3587x5_type	type;
 };
 
 static inline struct tc_data *bridge_to_tc(struct drm_bridge *b)
@@ -286,8 +278,7 @@ static inline struct tc_data *bridge_to_tc(struct drm_bridge *b)
 	return container_of(b, struct tc_data, bridge);
 }
 
-static void tc_bridge_atomic_pre_enable(struct drm_bridge *bridge,
-					struct drm_atomic_state *state)
+static void tc_bridge_pre_enable(struct drm_bridge *bridge)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 	struct device *dev = &tc->dsi->dev;
@@ -310,8 +301,7 @@ static void tc_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 	usleep_range(10, 20);
 }
 
-static void tc_bridge_atomic_post_disable(struct drm_bridge *bridge,
-					  struct drm_atomic_state *state)
+static void tc_bridge_post_disable(struct drm_bridge *bridge)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 	struct device *dev = &tc->dsi->dev;
@@ -349,7 +339,6 @@ static void d2l_read(struct i2c_client *i2c, u16 addr, u32 *val)
 		goto fail;
 
 	pr_debug("d2l: I2C : addr:%04x value:%08x\n", addr, *val);
-	return;
 
 fail:
 	dev_err(&i2c->dev, "Error %d reading from subaddress 0x%x\n",
@@ -370,21 +359,30 @@ static void d2l_write(struct i2c_client *i2c, u16 addr, u32 val)
 			ret, addr);
 }
 
-static void tc_bridge_atomic_enable(struct drm_bridge *bridge,
-				    struct drm_atomic_state *state)
+/* helper function to access bus_formats */
+static struct drm_connector *get_connector(struct drm_encoder *encoder)
+{
+	struct drm_device *dev = encoder->dev;
+	struct drm_connector *connector;
+
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head)
+		if (connector->encoder == encoder)
+			return connector;
+
+	return NULL;
+}
+
+static void tc_bridge_enable(struct drm_bridge *bridge)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 	u32 hback_porch, hsync_len, hfront_porch, hactive, htime1, htime2;
 	u32 vback_porch, vsync_len, vfront_porch, vactive, vtime1, vtime2;
 	u32 val = 0;
 	u16 dsiclk, clkdiv, byteclk, t1, t2, t3, vsdelay;
-	struct drm_connector *connector =
-		drm_atomic_get_new_connector_for_encoder(state, bridge->encoder);
-	struct drm_connector_state *conn_state =
-		drm_atomic_get_new_connector_state(state, connector);
-	struct drm_crtc_state *crtc_state =
-		drm_atomic_get_new_crtc_state(state, conn_state->crtc);
-	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+	struct drm_display_mode *mode;
+	struct drm_connector *connector = get_connector(bridge->encoder);
+
+	mode = &bridge->encoder->crtc->state->adjusted_mode;
 
 	hback_porch = mode->htotal - mode->hsync_end;
 	hsync_len  = mode->hsync_end - mode->hsync_start;
@@ -408,7 +406,7 @@ static void tc_bridge_atomic_enable(struct drm_bridge *bridge,
 		 (val >> 8) & 0xFF, val & 0xFF);
 
 	d2l_write(tc->i2c, SYSRST, SYS_RST_REG | SYS_RST_DSIRX | SYS_RST_BM |
-		  SYS_RST_LCD | SYS_RST_I2CM);
+		  SYS_RST_LCD | SYS_RST_I2CM | SYS_RST_I2CS);
 	usleep_range(30000, 40000);
 
 	d2l_write(tc->i2c, PPI_TX_RX_TA, TTA_GET | TTA_SURE);
@@ -425,19 +423,13 @@ static void tc_bridge_atomic_enable(struct drm_bridge *bridge,
 	d2l_write(tc->i2c, PPI_STARTPPI, PPI_START_FUNCTION);
 	d2l_write(tc->i2c, DSI_STARTDSI, DSI_RX_START);
 
-	/* Video event mode vs pulse mode bit, does not exist for tc358775 */
-	if (tc->type == TC358765)
-		val = EVTMODE;
-	else
-		val = 0;
-
 	if (tc->bpc == 8)
-		val |= TC358775_VPCTRL_OPXLFMT(1);
+		val = TC358775_VPCTRL_OPXLFMT(1);
 	else /* bpc = 6; */
-		val |= TC358775_VPCTRL_MSF(1);
+		val = TC358775_VPCTRL_MSF(1);
 
 	dsiclk = mode->crtc_clock * 3 * tc->bpc / tc->num_dsi_lanes / 1000;
-	clkdiv = dsiclk / (tc->lvds_link == DUAL_LINK ? DIVIDE_BY_6 : DIVIDE_BY_3);
+	clkdiv = dsiclk / DIVIDE_BY_3 * tc->lvds_link;
 	byteclk = dsiclk / 4;
 	t1 = hactive * (tc->bpc * 3 / 8) / tc->num_dsi_lanes;
 	t2 = ((100000 / clkdiv)) * (hactive + hback_porch + hsync_len + hfront_porch) / 1000;
@@ -532,28 +524,42 @@ tc_mode_valid(struct drm_bridge *bridge,
 static int tc358775_parse_dt(struct device_node *np, struct tc_data *tc)
 {
 	struct device_node *endpoint;
+	struct device_node *parent;
 	struct device_node *remote;
-	int dsi_lanes = -1;
+	struct property *prop;
+	int len = 0;
 
+	/*
+	 * To get the data-lanes of dsi, we need to access the dsi0_out of port1
+	 *  of dsi0 endpoint from bridge port0 of d2l_in
+	 */
 	endpoint = of_graph_get_endpoint_by_regs(tc->dev->of_node,
 						 TC358775_DSI_IN, -1);
-	dsi_lanes = drm_of_get_data_lanes_count(endpoint, 1, 4);
-
-	/* Quirk old dtb: Use data lanes from the DSI host side instead of bridge */
-	if (dsi_lanes == -EINVAL || dsi_lanes == -ENODEV) {
-		remote = of_graph_get_remote_endpoint(endpoint);
-		dsi_lanes = drm_of_get_data_lanes_count(remote, 1, 4);
-		of_node_put(remote);
-		if (dsi_lanes >= 1)
-			dev_warn(tc->dev, "no dsi-lanes for the bridge, using host lanes\n");
+	if (endpoint) {
+		/* dsi0_out node */
+		parent = of_graph_get_remote_port_parent(endpoint);
+		of_node_put(endpoint);
+		if (parent) {
+			/* dsi0 port 1 */
+			endpoint = of_graph_get_endpoint_by_regs(parent, 1, -1);
+			of_node_put(parent);
+			if (endpoint) {
+				prop = of_find_property(endpoint, "data-lanes",
+							&len);
+				of_node_put(endpoint);
+				if (!prop) {
+					dev_err(tc->dev,
+						"failed to find data lane\n");
+					return -EPROBE_DEFER;
+				}
+			}
+		}
 	}
 
-	of_node_put(endpoint);
+	tc->num_dsi_lanes = len / sizeof(u32);
 
-	if (dsi_lanes < 0)
-		return dsi_lanes;
-
-	tc->num_dsi_lanes = dsi_lanes;
+	if (tc->num_dsi_lanes < 1 || tc->num_dsi_lanes > 4)
+		return -EINVAL;
 
 	tc->host_node = of_graph_get_remote_node(np, 0, 0);
 	if (!tc->host_node)
@@ -582,33 +588,14 @@ static int tc358775_parse_dt(struct device_node *np, struct tc_data *tc)
 }
 
 static int tc_bridge_attach(struct drm_bridge *bridge,
-			    struct drm_encoder *encoder,
 			    enum drm_bridge_attach_flags flags)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
-
-	/* Attach the panel-bridge to the dsi bridge */
-	return drm_bridge_attach(encoder, tc->panel_bridge,
-				 &tc->bridge, flags);
-}
-
-static const struct drm_bridge_funcs tc_bridge_funcs = {
-	.attach = tc_bridge_attach,
-	.atomic_pre_enable = tc_bridge_atomic_pre_enable,
-	.atomic_enable = tc_bridge_atomic_enable,
-	.mode_valid = tc_mode_valid,
-	.atomic_post_disable = tc_bridge_atomic_post_disable,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
-	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-};
-
-static int tc_attach_host(struct tc_data *tc)
-{
 	struct device *dev = &tc->i2c->dev;
 	struct mipi_dsi_host *host;
 	struct mipi_dsi_device *dsi;
 	int ret;
+
 	const struct mipi_dsi_device_info info = { .type = "tc358775",
 							.channel = 0,
 							.node = NULL,
@@ -618,58 +605,64 @@ static int tc_attach_host(struct tc_data *tc)
 	if (!host)
 		return dev_err_probe(dev, -EPROBE_DEFER, "failed to find dsi host\n");
 
-	dsi = devm_mipi_dsi_device_register_full(dev, host, &info);
+	dsi = mipi_dsi_device_register_full(host, &info);
 	if (IS_ERR(dsi)) {
 		dev_err(dev, "failed to create dsi device\n");
-		return PTR_ERR(dsi);
+		ret = PTR_ERR(dsi);
+		goto err_dsi_device;
 	}
 
 	tc->dsi = dsi;
 
 	dsi->lanes = tc->num_dsi_lanes;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_LPM;
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO;
 
-	/*
-	 * The hs_rate and lp_rate are data rate values. The HS mode is
-	 * differential, while the LP mode is single ended. As the HS mode
-	 * uses DDR, the DSI clock frequency is half the hs_rate. The 10 Mbs
-	 * data rate for LP mode is not specified in the bridge data sheet,
-	 * but seems to be part of the MIPI DSI spec.
-	 */
-	if (tc->type == TC358765)
-		dsi->hs_rate = 800000000;
-	else
-		dsi->hs_rate = 1000000000;
-	dsi->lp_rate = 10000000;
-
-	ret = devm_mipi_dsi_attach(dev, dsi);
+	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
 		dev_err(dev, "failed to attach dsi to host\n");
-		return ret;
+		goto err_dsi_attach;
 	}
 
-	return 0;
+	/* Attach the panel-bridge to the dsi bridge */
+	return drm_bridge_attach(bridge->encoder, tc->panel_bridge,
+				 &tc->bridge, flags);
+err_dsi_attach:
+	mipi_dsi_device_unregister(dsi);
+err_dsi_device:
+	return ret;
 }
 
-static int tc_probe(struct i2c_client *client)
+static const struct drm_bridge_funcs tc_bridge_funcs = {
+	.attach = tc_bridge_attach,
+	.pre_enable = tc_bridge_pre_enable,
+	.enable = tc_bridge_enable,
+	.mode_valid = tc_mode_valid,
+	.post_disable = tc_bridge_post_disable,
+};
+
+static int tc_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
+	struct drm_panel *panel;
 	struct tc_data *tc;
 	int ret;
 
-	tc = devm_drm_bridge_alloc(dev, struct tc_data, bridge,
-				   &tc_bridge_funcs);
-	if (IS_ERR(tc))
-		return PTR_ERR(tc);
+	tc = devm_kzalloc(dev, sizeof(*tc), GFP_KERNEL);
+	if (!tc)
+		return -ENOMEM;
 
 	tc->dev = dev;
 	tc->i2c = client;
-	tc->type = (enum tc3587x5_type)(unsigned long)of_device_get_match_data(dev);
 
-	tc->panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node,
-						  TC358775_LVDS_OUT0, 0);
+	ret = drm_of_find_panel_or_bridge(dev->of_node, TC358775_LVDS_OUT0,
+					  0, &panel, NULL);
+	if (ret < 0)
+		return ret;
+	if (!panel)
+		return -ENODEV;
+
+	tc->panel_bridge = devm_drm_panel_bridge_add(dev, panel);
 	if (IS_ERR(tc->panel_bridge))
 		return PTR_ERR(tc->panel_bridge);
 
@@ -691,9 +684,12 @@ static int tc_probe(struct i2c_client *client)
 		return ret;
 	}
 
-	tc->stby_gpio = devm_gpiod_get_optional(dev, "stby", GPIOD_OUT_HIGH);
-	if (IS_ERR(tc->stby_gpio))
-		return PTR_ERR(tc->stby_gpio);
+	tc->stby_gpio = devm_gpiod_get(dev, "stby", GPIOD_OUT_HIGH);
+	if (IS_ERR(tc->stby_gpio)) {
+		ret = PTR_ERR(tc->stby_gpio);
+		dev_err(dev, "cannot get stby-gpio %d\n", ret);
+		return ret;
+	}
 
 	tc->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(tc->reset_gpio)) {
@@ -702,40 +698,32 @@ static int tc_probe(struct i2c_client *client)
 		return ret;
 	}
 
+	tc->bridge.funcs = &tc_bridge_funcs;
 	tc->bridge.of_node = dev->of_node;
-	tc->bridge.pre_enable_prev_first = true;
 	drm_bridge_add(&tc->bridge);
 
 	i2c_set_clientdata(client, tc);
 
-	ret = tc_attach_host(tc);
-	if (ret)
-		goto err_bridge_remove;
-
 	return 0;
-
-err_bridge_remove:
-	drm_bridge_remove(&tc->bridge);
-	return ret;
 }
 
-static void tc_remove(struct i2c_client *client)
+static int tc_remove(struct i2c_client *client)
 {
 	struct tc_data *tc = i2c_get_clientdata(client);
 
 	drm_bridge_remove(&tc->bridge);
+
+	return 0;
 }
 
 static const struct i2c_device_id tc358775_i2c_ids[] = {
-	{ "tc358765", TC358765, },
-	{ "tc358775", TC358775, },
+	{ "tc358775", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tc358775_i2c_ids);
 
 static const struct of_device_id tc358775_of_ids[] = {
-	{ .compatible = "toshiba,tc358765", .data = (void *)TC358765, },
-	{ .compatible = "toshiba,tc358775", .data = (void *)TC358775, },
+	{ .compatible = "toshiba,tc358775", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, tc358775_of_ids);

@@ -28,10 +28,12 @@ static DEFINE_PER_CPU(int, cpu_vas_id);
 
 static int vas_irq_fault_window_setup(struct vas_instance *vinst)
 {
+	char devname[64];
 	int rc = 0;
 
+	snprintf(devname, sizeof(devname), "vas-%d", vinst->vas_id);
 	rc = request_threaded_irq(vinst->virq, vas_fault_handler,
-				vas_fault_thread_fn, 0, vinst->name, vinst);
+				vas_fault_thread_fn, 0, devname, vinst);
 
 	if (rc) {
 		pr_err("VAS[%d]: Request IRQ(%d) failed with %d\n",
@@ -78,12 +80,6 @@ static int init_vas_instance(struct platform_device *pdev)
 	if (!vinst)
 		return -ENOMEM;
 
-	vinst->name = kasprintf(GFP_KERNEL, "vas-%d", vasid);
-	if (!vinst->name) {
-		kfree(vinst);
-		return -ENOMEM;
-	}
-
 	INIT_LIST_HEAD(&vinst->node);
 	ida_init(&vinst->ida);
 	mutex_init(&vinst->mutex);
@@ -121,7 +117,7 @@ static int init_vas_instance(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	xd = irq_get_chip_data(vinst->virq);
+	xd = irq_get_handler_data(vinst->virq);
 	if (!xd) {
 		pr_err("Inst%d: Invalid virq %d\n",
 				vinst->vas_id, vinst->virq);
@@ -166,7 +162,6 @@ static int init_vas_instance(struct platform_device *pdev)
 	return 0;
 
 free_vinst:
-	kfree(vinst->name);
 	kfree(vinst);
 	return -ENODEV;
 

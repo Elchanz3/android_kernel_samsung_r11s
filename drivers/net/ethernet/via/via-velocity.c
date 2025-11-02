@@ -57,8 +57,8 @@
 #include <linux/if.h>
 #include <linux/uaccess.h>
 #include <linux/proc_fs.h>
-#include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/of_irq.h>
 #include <linux/inetdevice.h>
 #include <linux/platform_device.h>
@@ -1897,7 +1897,7 @@ static void velocity_error(struct velocity_info *vptr, int status)
 }
 
 /**
- *	velocity_tx_srv		-	transmit interrupt service
+ *	tx_srv		-	transmit interrupt service
  *	@vptr: Velocity
  *
  *	Scan the queues looking for transmitted packets that
@@ -2294,7 +2294,7 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 	int ret = 0;
 
 	if (!netif_running(dev)) {
-		WRITE_ONCE(dev->mtu, new_mtu);
+		dev->mtu = new_mtu;
 		goto out_0;
 	}
 
@@ -2320,8 +2320,7 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 		if (ret < 0)
 			goto out_free_tmp_vptr_1;
 
-		netdev_lock(dev);
-		napi_disable_locked(&vptr->napi);
+		napi_disable(&vptr->napi);
 
 		spin_lock_irqsave(&vptr->lock, flags);
 
@@ -2337,19 +2336,18 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 		tmp_vptr->rx = rx;
 		tmp_vptr->tx = tx;
 
-		WRITE_ONCE(dev->mtu, new_mtu);
+		dev->mtu = new_mtu;
 
 		velocity_init_registers(vptr, VELOCITY_INIT_COLD);
 
 		velocity_give_many_rx_descs(vptr);
 
-		napi_enable_locked(&vptr->napi);
+		napi_enable(&vptr->napi);
 
 		mac_enable_int(vptr->mac_regs);
 		netif_start_queue(dev);
 
 		spin_unlock_irqrestore(&vptr->lock, flags);
-		netdev_unlock(dev);
 
 		velocity_free_rings(tmp_vptr);
 
@@ -2455,7 +2453,7 @@ static int velocity_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 }
 
 /**
- *	velocity_get_stats	-	statistics callback
+ *	velocity_get_status	-	statistics callback
  *	@dev: network device
  *
  *	Callback from the network layer to allow driver statistics
@@ -2527,7 +2525,7 @@ static int velocity_close(struct net_device *dev)
  *	@skb: buffer to transmit
  *	@dev: network device
  *
- *	Called by the network layer to request a packet is queued to
+ *	Called by the networ layer to request a packet is queued to
  *	the velocity. Returns zero on success.
  */
 static netdev_tx_t velocity_xmit(struct sk_buff *skb,
@@ -2639,7 +2637,7 @@ static const struct net_device_ops velocity_netdev_ops = {
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_set_rx_mode	= velocity_set_multi,
 	.ndo_change_mtu		= velocity_change_mtu,
-	.ndo_eth_ioctl		= velocity_ioctl,
+	.ndo_do_ioctl		= velocity_ioctl,
 	.ndo_vlan_rx_add_vid	= velocity_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= velocity_vlan_rx_kill_vid,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -2711,7 +2709,8 @@ static int velocity_get_platform_info(struct velocity_info *vptr)
 	struct resource res;
 	int ret;
 
-	vptr->no_eeprom = of_property_read_bool(vptr->dev->of_node, "no-eeprom");
+	if (of_get_property(vptr->dev->of_node, "no-eeprom", NULL))
+		vptr->no_eeprom = 1;
 
 	ret = of_address_to_resource(vptr->dev->of_node, 0, &res);
 	if (ret) {
@@ -2768,7 +2767,6 @@ static int velocity_probe(struct device *dev, int irq,
 	struct velocity_info *vptr;
 	struct mac_regs __iomem *regs;
 	int ret = -ENOMEM;
-	u8 addr[ETH_ALEN];
 
 	/* FIXME: this driver, like almost all other ethernet drivers,
 	 * can support more than MAX_UNITS.
@@ -2822,8 +2820,7 @@ static int velocity_probe(struct device *dev, int irq,
 	mac_wol_reset(regs);
 
 	for (i = 0; i < 6; i++)
-		addr[i] = readb(&regs->PAR[i]);
-	eth_hw_addr_set(netdev, addr);
+		netdev->dev_addr[i] = readb(&regs->PAR[i]);
 
 
 	velocity_get_options(&vptr->options, velocity_nics);
@@ -2847,7 +2844,8 @@ static int velocity_probe(struct device *dev, int irq,
 
 	netdev->netdev_ops = &velocity_netdev_ops;
 	netdev->ethtool_ops = &velocity_ethtool_ops;
-	netif_napi_add(netdev, &vptr->napi, velocity_poll);
+	netif_napi_add(netdev, &vptr->napi, velocity_poll,
+							VELOCITY_NAPI_WEIGHT);
 
 	netdev->hw_features = NETIF_F_IP_CSUM | NETIF_F_SG |
 			   NETIF_F_HW_VLAN_CTAG_TX;
@@ -2945,12 +2943,14 @@ static void velocity_pci_remove(struct pci_dev *pdev)
 
 static int velocity_platform_probe(struct platform_device *pdev)
 {
+	const struct of_device_id *of_id;
 	const struct velocity_info_tbl *info;
 	int irq;
 
-	info = of_device_get_match_data(&pdev->dev);
-	if (!info)
+	of_id = of_match_device(velocity_of_ids, &pdev->dev);
+	if (!of_id)
 		return -EINVAL;
+	info = of_id->data;
 
 	irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
 	if (!irq)
@@ -2959,9 +2959,11 @@ static int velocity_platform_probe(struct platform_device *pdev)
 	return velocity_probe(&pdev->dev, irq, info, BUS_PLATFORM);
 }
 
-static void velocity_platform_remove(struct platform_device *pdev)
+static int velocity_platform_remove(struct platform_device *pdev)
 {
 	velocity_remove(&pdev->dev);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -3418,13 +3420,13 @@ static void velocity_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo 
 {
 	struct velocity_info *vptr = netdev_priv(dev);
 
-	strscpy(info->driver, VELOCITY_NAME, sizeof(info->driver));
-	strscpy(info->version, VELOCITY_VERSION, sizeof(info->version));
+	strlcpy(info->driver, VELOCITY_NAME, sizeof(info->driver));
+	strlcpy(info->version, VELOCITY_VERSION, sizeof(info->version));
 	if (vptr->pdev)
-		strscpy(info->bus_info, pci_name(vptr->pdev),
+		strlcpy(info->bus_info, pci_name(vptr->pdev),
 						sizeof(info->bus_info));
 	else
-		strscpy(info->bus_info, "platform", sizeof(info->bus_info));
+		strlcpy(info->bus_info, "platform", sizeof(info->bus_info));
 }
 
 static void velocity_ethtool_get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
@@ -3518,9 +3520,7 @@ static void set_pending_timer_val(int *val, u32 us)
 
 
 static int velocity_get_coalesce(struct net_device *dev,
-				 struct ethtool_coalesce *ecmd,
-				 struct kernel_ethtool_coalesce *kernel_coal,
-				 struct netlink_ext_ack *extack)
+		struct ethtool_coalesce *ecmd)
 {
 	struct velocity_info *vptr = netdev_priv(dev);
 
@@ -3534,9 +3534,7 @@ static int velocity_get_coalesce(struct net_device *dev,
 }
 
 static int velocity_set_coalesce(struct net_device *dev,
-				 struct ethtool_coalesce *ecmd,
-				 struct kernel_ethtool_coalesce *kernel_coal,
-				 struct netlink_ext_ack *extack)
+		struct ethtool_coalesce *ecmd)
 {
 	struct velocity_info *vptr = netdev_priv(dev);
 	int max_us = 0x3f * 64;
@@ -3725,7 +3723,7 @@ static int __init velocity_init_module(void)
 }
 
 /**
- *	velocity_cleanup_module		-	module unload
+ *	velocity_cleanup	-	module unload
  *
  *	When the velocity hardware is unloaded this function is called.
  *	It will clean up the notifiers and the unregister the PCI

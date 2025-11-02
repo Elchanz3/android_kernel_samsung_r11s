@@ -17,17 +17,12 @@
 #define STM32_PIN_GPIO		0
 #define STM32_PIN_AF(x)		((x) + 1)
 #define STM32_PIN_ANALOG	(STM32_PIN_AF(15) + 1)
-#define STM32_PIN_RSVD		(STM32_PIN_ANALOG + 1)
-#define STM32_CONFIG_NUM	(STM32_PIN_RSVD + 1)
 
 /*  package information */
 #define STM32MP_PKG_AA		BIT(0)
 #define STM32MP_PKG_AB		BIT(1)
 #define STM32MP_PKG_AC		BIT(2)
 #define STM32MP_PKG_AD		BIT(3)
-#define STM32MP_PKG_AI		BIT(8)
-#define STM32MP_PKG_AK		BIT(10)
-#define STM32MP_PKG_AL		BIT(11)
 
 struct stm32_desc_function {
 	const char *name;
@@ -36,26 +31,26 @@ struct stm32_desc_function {
 
 struct stm32_desc_pin {
 	struct pinctrl_pin_desc pin;
-	const struct stm32_desc_function functions[STM32_CONFIG_NUM];
+	const struct stm32_desc_function *functions;
 	const unsigned int pkg;
 };
 
 #define STM32_PIN(_pin, ...)					\
 	{							\
 		.pin = _pin,					\
-		.functions = {	\
-			__VA_ARGS__},			\
+		.functions = (struct stm32_desc_function[]){	\
+			__VA_ARGS__, { } },			\
 	}
 
 #define STM32_PIN_PKG(_pin, _pkg, ...)					\
 	{							\
 		.pin = _pin,					\
 		.pkg  = _pkg,				\
-		.functions = {	\
-			__VA_ARGS__},			\
+		.functions = (struct stm32_desc_function[]){	\
+			__VA_ARGS__, { } },			\
 	}
 #define STM32_FUNCTION(_num, _name)		\
-	[_num] = {						\
+	{							\
 		.num = _num,					\
 		.name = _name,					\
 	}
@@ -63,26 +58,13 @@ struct stm32_desc_pin {
 struct stm32_pinctrl_match_data {
 	const struct stm32_desc_pin *pins;
 	const unsigned int npins;
-	bool secure_control;
-	bool rif_control;
 };
 
-/**
- * stm32_pctl_probe() - Common probe for stm32 pinctrl drivers.
- * @pdev: Pinctrl platform device.
- */
+struct stm32_gpio_bank;
+
 int stm32_pctl_probe(struct platform_device *pdev);
-
-/**
- * stm32_pinctrl_suspend() - Common suspend for stm32 pinctrl drivers.
- * @dev: Pinctrl device.
- */
-int stm32_pinctrl_suspend(struct device *dev);
-
-/**
- * stm32_pinctrl_resume() - Common resume for stm32 pinctrl drivers.
- * @dev: Pinctrl device.
- */
+void stm32_pmx_get_mode(struct stm32_gpio_bank *bank,
+			int pin, u32 *mode, u32 *alt);
 int stm32_pinctrl_resume(struct device *dev);
 
 #endif /* __PINCTRL_STM32_H */

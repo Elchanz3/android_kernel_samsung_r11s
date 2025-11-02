@@ -22,7 +22,6 @@
 #include "xfs_attr_remote.h"
 #include "xfs_trace.h"
 #include "xfs_error.h"
-#include "xfs_health.h"
 
 #define ATTR_RMTVALUE_MAPSIZE	1	/* # of map entries at once */
 
@@ -43,32 +42,19 @@
  * the logging system and therefore never have a log item.
  */
 
-/* How many bytes can be stored in a remote value buffer? */
-inline unsigned int
-xfs_attr3_rmt_buf_space(
-	struct xfs_mount	*mp)
-{
-	unsigned int		blocksize = mp->m_attr_geo->blksize;
-
-	if (xfs_has_crc(mp))
-		return blocksize - sizeof(struct xfs_attr3_rmt_hdr);
-
-	return blocksize;
-}
-
-/* Compute number of fsblocks needed to store a remote attr value */
-unsigned int
+/*
+ * Each contiguous block has a header, so it is not just a simple attribute
+ * length to FSB conversion.
+ */
+int
 xfs_attr3_rmt_blocks(
-	struct xfs_mount	*mp,
-	unsigned int		attrlen)
+	struct xfs_mount *mp,
+	int		attrlen)
 {
-	/*
-	 * Each contiguous block has a header, so it is not just a simple
-	 * attribute length to FSB conversion.
-	 */
-	if (xfs_has_crc(mp))
-		return howmany(attrlen, xfs_attr3_rmt_buf_space(mp));
-
+	if (xfs_sb_version_hascrc(&mp->m_sb)) {
+		int buflen = XFS_ATTR3_RMT_BUF_SPACE(mp, mp->m_sb.sb_blocksize);
+		return (attrlen + buflen - 1) / buflen;
+	}
 	return XFS_B_TO_FSB(mp, attrlen);
 }
 
@@ -105,6 +91,7 @@ xfs_attr3_rmt_verify(
 	struct xfs_mount	*mp,
 	struct xfs_buf		*bp,
 	void			*ptr,
+	int			fsbsize,
 	xfs_daddr_t		bno)
 {
 	struct xfs_attr3_rmt_hdr *rmt = ptr;
@@ -115,7 +102,7 @@ xfs_attr3_rmt_verify(
 		return __this_address;
 	if (be64_to_cpu(rmt->rm_blkno) != bno)
 		return __this_address;
-	if (be32_to_cpu(rmt->rm_bytes) > mp->m_attr_geo->blksize - sizeof(*rmt))
+	if (be32_to_cpu(rmt->rm_bytes) > fsbsize - sizeof(*rmt))
 		return __this_address;
 	if (be32_to_cpu(rmt->rm_offset) +
 				be32_to_cpu(rmt->rm_bytes) > XFS_XATTR_SIZE_MAX)
@@ -134,16 +121,16 @@ __xfs_attr3_rmt_read_verify(
 {
 	struct xfs_mount *mp = bp->b_mount;
 	char		*ptr;
-	unsigned int	len;
+	int		len;
 	xfs_daddr_t	bno;
-	unsigned int	blksize = mp->m_attr_geo->blksize;
+	int		blksize = mp->m_attr_geo->blksize;
 
 	/* no verification of non-crc buffers */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return 0;
 
 	ptr = bp->b_addr;
-	bno = xfs_buf_daddr(bp);
+	bno = bp->b_bn;
 	len = BBTOB(bp->b_length);
 	ASSERT(len >= blksize);
 
@@ -153,7 +140,7 @@ __xfs_attr3_rmt_read_verify(
 			*failaddr = __this_address;
 			return -EFSBADCRC;
 		}
-		*failaddr = xfs_attr3_rmt_verify(mp, bp, ptr, bno);
+		*failaddr = xfs_attr3_rmt_verify(mp, bp, ptr, blksize, bno);
 		if (*failaddr)
 			return -EFSCORRUPTED;
 		len -= blksize;
@@ -198,24 +185,24 @@ xfs_attr3_rmt_write_verify(
 {
 	struct xfs_mount *mp = bp->b_mount;
 	xfs_failaddr_t	fa;
-	unsigned int	blksize = mp->m_attr_geo->blksize;
+	int		blksize = mp->m_attr_geo->blksize;
 	char		*ptr;
 	int		len;
 	xfs_daddr_t	bno;
 
 	/* no verification of non-crc buffers */
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return;
 
 	ptr = bp->b_addr;
-	bno = xfs_buf_daddr(bp);
+	bno = bp->b_bn;
 	len = BBTOB(bp->b_length);
 	ASSERT(len >= blksize);
 
 	while (len > 0) {
 		struct xfs_attr3_rmt_hdr *rmt = (struct xfs_attr3_rmt_hdr *)ptr;
 
-		fa = xfs_attr3_rmt_verify(mp, bp, ptr, bno);
+		fa = xfs_attr3_rmt_verify(mp, bp, ptr, blksize, bno);
 		if (fa) {
 			xfs_verifier_error(bp, -EFSCORRUPTED, fa);
 			return;
@@ -259,7 +246,7 @@ xfs_attr3_rmt_hdr_set(
 {
 	struct xfs_attr3_rmt_hdr *rmt = ptr;
 
-	if (!xfs_has_crc(mp))
+	if (!xfs_sb_version_hascrc(&mp->m_sb))
 		return 0;
 
 	rmt->rm_magic = cpu_to_be32(XFS_ATTR3_RMT_MAGIC);
@@ -289,34 +276,32 @@ xfs_attr3_rmt_hdr_set(
  */
 STATIC int
 xfs_attr_rmtval_copyout(
-	struct xfs_mount	*mp,
-	struct xfs_buf		*bp,
-	struct xfs_inode	*dp,
-	xfs_ino_t		owner,
-	unsigned int		*offset,
-	unsigned int		*valuelen,
-	uint8_t			**dst)
+	struct xfs_mount *mp,
+	struct xfs_buf	*bp,
+	xfs_ino_t	ino,
+	int		*offset,
+	int		*valuelen,
+	uint8_t		**dst)
 {
-	char			*src = bp->b_addr;
-	xfs_daddr_t		bno = xfs_buf_daddr(bp);
-	unsigned int		len = BBTOB(bp->b_length);
-	unsigned int		blksize = mp->m_attr_geo->blksize;
+	char		*src = bp->b_addr;
+	xfs_daddr_t	bno = bp->b_bn;
+	int		len = BBTOB(bp->b_length);
+	int		blksize = mp->m_attr_geo->blksize;
 
 	ASSERT(len >= blksize);
 
 	while (len > 0 && *valuelen > 0) {
-		unsigned int hdr_size = 0;
-		unsigned int byte_cnt = xfs_attr3_rmt_buf_space(mp);
+		int hdr_size = 0;
+		int byte_cnt = XFS_ATTR3_RMT_BUF_SPACE(mp, blksize);
 
 		byte_cnt = min(*valuelen, byte_cnt);
 
-		if (xfs_has_crc(mp)) {
-			if (xfs_attr3_rmt_hdr_ok(src, owner, *offset,
+		if (xfs_sb_version_hascrc(&mp->m_sb)) {
+			if (xfs_attr3_rmt_hdr_ok(src, ino, *offset,
 						  byte_cnt, bno)) {
 				xfs_alert(mp,
 "remote attribute header mismatch bno/off/len/owner (0x%llx/0x%x/Ox%x/0x%llx)",
-					bno, *offset, byte_cnt, owner);
-				xfs_dirattr_mark_sick(dp, XFS_ATTR_FORK);
+					bno, *offset, byte_cnt, ino);
 				return -EFSCORRUPTED;
 			}
 			hdr_size = sizeof(struct xfs_attr3_rmt_hdr);
@@ -342,20 +327,20 @@ xfs_attr_rmtval_copyin(
 	struct xfs_mount *mp,
 	struct xfs_buf	*bp,
 	xfs_ino_t	ino,
-	unsigned int	*offset,
-	unsigned int	*valuelen,
+	int		*offset,
+	int		*valuelen,
 	uint8_t		**src)
 {
 	char		*dst = bp->b_addr;
-	xfs_daddr_t	bno = xfs_buf_daddr(bp);
-	unsigned int	len = BBTOB(bp->b_length);
-	unsigned int	blksize = mp->m_attr_geo->blksize;
+	xfs_daddr_t	bno = bp->b_bn;
+	int		len = BBTOB(bp->b_length);
+	int		blksize = mp->m_attr_geo->blksize;
 
 	ASSERT(len >= blksize);
 
 	while (len > 0 && *valuelen > 0) {
-		unsigned int hdr_size;
-		unsigned int byte_cnt = xfs_attr3_rmt_buf_space(mp);
+		int hdr_size;
+		int byte_cnt = XFS_ATTR3_RMT_BUF_SPACE(mp, blksize);
 
 		byte_cnt = min(*valuelen, byte_cnt);
 		hdr_size = xfs_attr3_rmt_hdr_set(mp, dst, ino, *offset,
@@ -401,12 +386,12 @@ xfs_attr_rmtval_get(
 	struct xfs_buf		*bp;
 	xfs_dablk_t		lblkno = args->rmtblkno;
 	uint8_t			*dst = args->value;
-	unsigned int		valuelen;
+	int			valuelen;
 	int			nmap;
 	int			error;
-	unsigned int		blkcnt = args->rmtblkcnt;
+	int			blkcnt = args->rmtblkcnt;
 	int			i;
-	unsigned int		offset = 0;
+	int			offset = 0;
 
 	trace_xfs_attr_rmtval_get(args);
 
@@ -433,20 +418,12 @@ xfs_attr_rmtval_get(
 			dblkcnt = XFS_FSB_TO_BB(mp, map[i].br_blockcount);
 			error = xfs_buf_read(mp->m_ddev_targp, dblkno, dblkcnt,
 					0, &bp, &xfs_attr3_rmt_buf_ops);
-			if (xfs_metadata_is_sick(error))
-				xfs_dirattr_mark_sick(args->dp, XFS_ATTR_FORK);
-			/*
-			 * ENODATA from disk implies a disk medium failure;
-			 * ENODATA for xattrs means attribute not found, so
-			 * disambiguate that here.
-			 */
-			if (error == -ENODATA)
-				error = -EIO;
 			if (error)
 				return error;
 
-			error = xfs_attr_rmtval_copyout(mp, bp, args->dp,
-					args->owner, &offset, &valuelen, &dst);
+			error = xfs_attr_rmtval_copyout(mp, bp, args->dp->i_ino,
+							&offset, &valuelen,
+							&dst);
 			xfs_buf_relse(bp);
 			if (error)
 				return error;
@@ -462,16 +439,16 @@ xfs_attr_rmtval_get(
 
 /*
  * Find a "hole" in the attribute address space large enough for us to drop the
- * new attributes value into
+ * new attribute's value into
  */
-int
+STATIC int
 xfs_attr_rmt_find_hole(
 	struct xfs_da_args	*args)
 {
 	struct xfs_inode	*dp = args->dp;
 	struct xfs_mount	*mp = dp->i_mount;
 	int			error;
-	unsigned int		blkcnt;
+	int			blkcnt;
 	xfs_fileoff_t		lfileoff = 0;
 
 	/*
@@ -491,7 +468,7 @@ xfs_attr_rmt_find_hole(
 	return 0;
 }
 
-int
+STATIC int
 xfs_attr_rmtval_set_value(
 	struct xfs_da_args	*args)
 {
@@ -500,11 +477,11 @@ xfs_attr_rmtval_set_value(
 	struct xfs_bmbt_irec	map;
 	xfs_dablk_t		lblkno;
 	uint8_t			*src = args->value;
-	unsigned int		blkcnt;
-	unsigned int		valuelen;
+	int			blkcnt;
+	int			valuelen;
 	int			nmap;
 	int			error;
-	unsigned int		offset = 0;
+	int			offset = 0;
 
 	/*
 	 * Roll through the "value", copying the attribute value to the
@@ -540,8 +517,8 @@ xfs_attr_rmtval_set_value(
 			return error;
 		bp->b_ops = &xfs_attr3_rmt_buf_ops;
 
-		xfs_attr_rmtval_copyin(mp, bp, args->owner, &offset, &valuelen,
-				&src);
+		xfs_attr_rmtval_copyin(mp, bp, args->dp->i_ino, &offset,
+				       &valuelen, &src);
 
 		error = xfs_bwrite(bp);	/* GROT: NOTE: synchronous write */
 		xfs_buf_relse(bp);
@@ -566,92 +543,88 @@ xfs_attr_rmtval_stale(
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_buf		*bp;
-	int			error;
 
-	xfs_assert_ilocked(ip, XFS_ILOCK_EXCL);
+	ASSERT(xfs_isilocked(ip, XFS_ILOCK_EXCL));
 
 	if (XFS_IS_CORRUPT(mp, map->br_startblock == DELAYSTARTBLOCK) ||
-	    XFS_IS_CORRUPT(mp, map->br_startblock == HOLESTARTBLOCK)) {
-		xfs_bmap_mark_sick(ip, XFS_ATTR_FORK);
+	    XFS_IS_CORRUPT(mp, map->br_startblock == HOLESTARTBLOCK))
 		return -EFSCORRUPTED;
-	}
 
-	error = xfs_buf_incore(mp->m_ddev_targp,
+	bp = xfs_buf_incore(mp->m_ddev_targp,
 			XFS_FSB_TO_DADDR(mp, map->br_startblock),
-			XFS_FSB_TO_BB(mp, map->br_blockcount),
-			incore_flags, &bp);
-	if (error) {
-		if (error == -ENOENT)
-			return 0;
-		return error;
+			XFS_FSB_TO_BB(mp, map->br_blockcount), incore_flags);
+	if (bp) {
+		xfs_buf_stale(bp);
+		xfs_buf_relse(bp);
 	}
 
-	xfs_buf_stale(bp);
-	xfs_buf_relse(bp);
 	return 0;
 }
 
 /*
- * Find a hole for the attr and store it in the delayed attr context.  This
- * initializes the context to roll through allocating an attr extent for a
- * delayed attr operation
+ * Write the value associated with an attribute into the out-of-line buffer
+ * that we have defined for it.
  */
 int
-xfs_attr_rmtval_find_space(
-	struct xfs_attr_intent		*attr)
+xfs_attr_rmtval_set(
+	struct xfs_da_args	*args)
 {
-	struct xfs_da_args		*args = attr->xattri_da_args;
-	struct xfs_bmbt_irec		*map = &attr->xattri_map;
-	int				error;
+	struct xfs_inode	*dp = args->dp;
+	struct xfs_bmbt_irec	map;
+	xfs_dablk_t		lblkno;
+	int			blkcnt;
+	int			nmap;
+	int			error;
 
-	attr->xattri_lblkno = 0;
-	attr->xattri_blkcnt = 0;
-	args->rmtblkcnt = 0;
-	args->rmtblkno = 0;
-	memset(map, 0, sizeof(struct xfs_bmbt_irec));
+	trace_xfs_attr_rmtval_set(args);
 
 	error = xfs_attr_rmt_find_hole(args);
 	if (error)
 		return error;
 
-	attr->xattri_blkcnt = args->rmtblkcnt;
-	attr->xattri_lblkno = args->rmtblkno;
+	blkcnt = args->rmtblkcnt;
+	lblkno = (xfs_dablk_t)args->rmtblkno;
+	/*
+	 * Roll through the "value", allocating blocks on disk as required.
+	 */
+	while (blkcnt > 0) {
+		/*
+		 * Allocate a single extent, up to the size of the value.
+		 *
+		 * Note that we have to consider this a data allocation as we
+		 * write the remote attribute without logging the contents.
+		 * Hence we must ensure that we aren't using blocks that are on
+		 * the busy list so that we don't overwrite blocks which have
+		 * recently been freed but their transactions are not yet
+		 * committed to disk. If we overwrite the contents of a busy
+		 * extent and then crash then the block may not contain the
+		 * correct metadata after log recovery occurs.
+		 */
+		nmap = 1;
+		error = xfs_bmapi_write(args->trans, dp, (xfs_fileoff_t)lblkno,
+				  blkcnt, XFS_BMAPI_ATTRFORK, args->total, &map,
+				  &nmap);
+		if (error)
+			return error;
+		error = xfs_defer_finish(&args->trans);
+		if (error)
+			return error;
 
-	return 0;
-}
+		ASSERT(nmap == 1);
+		ASSERT((map.br_startblock != DELAYSTARTBLOCK) &&
+		       (map.br_startblock != HOLESTARTBLOCK));
+		lblkno += map.br_blockcount;
+		blkcnt -= map.br_blockcount;
 
-/*
- * Write one block of the value associated with an attribute into the
- * out-of-line buffer that we have defined for it. This is similar to a subset
- * of xfs_attr_rmtval_set, but records the current block to the delayed attr
- * context, and leaves transaction handling to the caller.
- */
-int
-xfs_attr_rmtval_set_blk(
-	struct xfs_attr_intent		*attr)
-{
-	struct xfs_da_args		*args = attr->xattri_da_args;
-	struct xfs_inode		*dp = args->dp;
-	struct xfs_bmbt_irec		*map = &attr->xattri_map;
-	int nmap;
-	int error;
+		/*
+		 * Start the next trans in the chain.
+		 */
+		error = xfs_trans_roll_inode(&args->trans, dp);
+		if (error)
+			return error;
+	}
 
-	nmap = 1;
-	error = xfs_bmapi_write(args->trans, dp,
-			(xfs_fileoff_t)attr->xattri_lblkno,
-			attr->xattri_blkcnt, XFS_BMAPI_ATTRFORK, args->total,
-			map, &nmap);
-	if (error)
-		return error;
-
-	ASSERT((map->br_startblock != DELAYSTARTBLOCK) &&
-	       (map->br_startblock != HOLESTARTBLOCK));
-
-	/* roll attribute extent map forwards */
-	attr->xattri_lblkno += map->br_blockcount;
-	attr->xattri_blkcnt -= map->br_blockcount;
-
-	return 0;
+	return xfs_attr_rmtval_set_value(args);
 }
 
 /*
@@ -663,7 +636,7 @@ xfs_attr_rmtval_invalidate(
 	struct xfs_da_args	*args)
 {
 	xfs_dablk_t		lblkno;
-	unsigned int		blkcnt;
+	int			blkcnt;
 	int			error;
 
 	/*
@@ -683,10 +656,8 @@ xfs_attr_rmtval_invalidate(
 				       blkcnt, &map, &nmap, XFS_BMAPI_ATTRFORK);
 		if (error)
 			return error;
-		if (XFS_IS_CORRUPT(args->dp->i_mount, nmap != 1)) {
-			xfs_bmap_mark_sick(args->dp, XFS_ATTR_FORK);
+		if (XFS_IS_CORRUPT(args->dp->i_mount, nmap != 1))
 			return -EFSCORRUPTED;
-		}
 		error = xfs_attr_rmtval_stale(args->dp, &map, XBF_TRYLOCK);
 		if (error)
 			return error;
@@ -698,17 +669,47 @@ xfs_attr_rmtval_invalidate(
 }
 
 /*
- * Remove the value associated with an attribute by deleting the out-of-line
- * buffer that it is stored on. Returns -EAGAIN for the caller to refresh the
- * transaction and re-call the function.  Callers should keep calling this
- * routine until it returns something other than -EAGAIN.
+ * Remove the value associated with an attribute by deleting the
+ * out-of-line buffer that it is stored on.
  */
 int
 xfs_attr_rmtval_remove(
-	struct xfs_attr_intent		*attr)
+	struct xfs_da_args      *args)
 {
-	struct xfs_da_args		*args = attr->xattri_da_args;
-	int				error, done;
+	int			error;
+	int			retval;
+
+	trace_xfs_attr_rmtval_remove(args);
+
+	/*
+	 * Keep de-allocating extents until the remote-value region is gone.
+	 */
+	do {
+		retval = __xfs_attr_rmtval_remove(args);
+		if (retval && retval != -EAGAIN)
+			return retval;
+
+		/*
+		 * Close out trans and start the next one in the chain.
+		 */
+		error = xfs_trans_roll_inode(&args->trans, args->dp);
+		if (error)
+			return error;
+	} while (retval == -EAGAIN);
+
+	return 0;
+}
+
+/*
+ * Remove the value associated with an attribute by deleting the out-of-line
+ * buffer that it is stored on. Returns EAGAIN for the caller to refresh the
+ * transaction and re-call the function
+ */
+int
+__xfs_attr_rmtval_remove(
+	struct xfs_da_args	*args)
+{
+	int			error, done;
 
 	/*
 	 * Unmap value blocks for this attr.
@@ -718,21 +719,12 @@ xfs_attr_rmtval_remove(
 	if (error)
 		return error;
 
-	/*
-	 * We don't need an explicit state here to pick up where we left off. We
-	 * can figure it out using the !done return code. The actual value of
-	 * attr->xattri_dela_state may be some value reminiscent of the calling
-	 * function, but it's value is irrelevant with in the context of this
-	 * function. Once we are done here, the next state is set as needed by
-	 * the parent
-	 */
-	if (!done) {
-		trace_xfs_attr_rmtval_remove_return(attr->xattri_dela_state,
-						    args->dp);
-		return -EAGAIN;
-	}
+	error = xfs_defer_finish(&args->trans);
+	if (error)
+		return error;
 
-	args->rmtblkno = 0;
-	args->rmtblkcnt = 0;
-	return 0;
+	if (!done)
+		return -EAGAIN;
+
+	return error;
 }

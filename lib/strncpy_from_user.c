@@ -25,7 +25,7 @@
  * hit it), 'max' is the address space maximum (and we return
  * -EFAULT if we hit it).
  */
-static __always_inline long do_strncpy_from_user(char *dst, const char __user *src,
+static inline long do_strncpy_from_user(char *dst, const char __user *src,
 					unsigned long count, unsigned long max)
 {
 	const struct word_at_a_time constants = WORD_AT_A_TIME_CONSTANTS;
@@ -120,19 +120,7 @@ long strncpy_from_user(char *dst, const char __user *src, long count)
 	if (unlikely(count <= 0))
 		return 0;
 
-	kasan_check_write(dst, count);
-	check_object_size(dst, count, false);
-
-	if (can_do_masked_user_access()) {
-		long retval;
-
-		src = masked_user_access_begin(src);
-		retval = do_strncpy_from_user(dst, src, count, count);
-		user_read_access_end();
-		return retval;
-	}
-
-	max_addr = TASK_SIZE_MAX;
+	max_addr = user_addr_max();
 	src_addr = (unsigned long)untagged_addr(src);
 	if (likely(src_addr < max_addr)) {
 		unsigned long max = max_addr - src_addr;
@@ -145,6 +133,8 @@ long strncpy_from_user(char *dst, const char __user *src, long count)
 		if (max > count)
 			max = count;
 
+		kasan_check_write(dst, count);
+		check_object_size(dst, count, false);
 		if (user_read_access_begin(src, max)) {
 			retval = do_strncpy_from_user(dst, src, count, max);
 			user_read_access_end();

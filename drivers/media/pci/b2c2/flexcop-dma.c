@@ -17,7 +17,7 @@ int flexcop_dma_allocate(struct pci_dev *pdev,
 		return -EINVAL;
 	}
 
-	tcpu = dma_alloc_coherent(&pdev->dev, size, &tdma, GFP_KERNEL);
+	tcpu = pci_alloc_consistent(pdev, size, &tdma);
 	if (tcpu != NULL) {
 		dma->pdev = pdev;
 		dma->cpu_addr0 = tcpu;
@@ -33,8 +33,8 @@ EXPORT_SYMBOL(flexcop_dma_allocate);
 
 void flexcop_dma_free(struct flexcop_dma *dma)
 {
-	dma_free_coherent(&dma->pdev->dev, dma->size * 2, dma->cpu_addr0,
-			  dma->dma_addr0);
+	pci_free_consistent(dma->pdev, dma->size*2,
+			dma->cpu_addr0, dma->dma_addr0);
 	memset(dma, 0, sizeof(struct flexcop_dma));
 }
 EXPORT_SYMBOL(flexcop_dma_free);
@@ -122,6 +122,23 @@ static int flexcop_dma_remap(struct flexcop_device *fc,
 	fc->write_ibi_reg(fc, r, v);
 	return 0;
 }
+
+int flexcop_dma_control_size_irq(struct flexcop_device *fc,
+		flexcop_dma_index_t no,
+		int onoff)
+{
+	flexcop_ibi_value v = fc->read_ibi_reg(fc, ctrl_208);
+
+	if (no & FC_DMA_1)
+		v.ctrl_208.DMA1_IRQ_Enable_sig = onoff;
+
+	if (no & FC_DMA_2)
+		v.ctrl_208.DMA2_IRQ_Enable_sig = onoff;
+
+	fc->write_ibi_reg(fc, ctrl_208, v);
+	return 0;
+}
+EXPORT_SYMBOL(flexcop_dma_control_size_irq);
 
 int flexcop_dma_control_timer_irq(struct flexcop_device *fc,
 		flexcop_dma_index_t no,

@@ -271,6 +271,7 @@ static int gp2ap002_read_raw(struct iio_dev *indio_dev,
 	}
 
 out:
+	pm_runtime_mark_last_busy(gp2ap002->dev);
 	pm_runtime_put_autosuspend(gp2ap002->dev);
 
 	return ret;
@@ -339,7 +340,7 @@ static int gp2ap002_write_event_config(struct iio_dev *indio_dev,
 				       const struct iio_chan_spec *chan,
 				       enum iio_event_type type,
 				       enum iio_event_direction dir,
-				       bool state)
+				       int state)
 {
 	struct gp2ap002 *gp2ap002 = iio_priv(indio_dev);
 
@@ -352,6 +353,7 @@ static int gp2ap002_write_event_config(struct iio_dev *indio_dev,
 		pm_runtime_get_sync(gp2ap002->dev);
 		gp2ap002->enabled = true;
 	} else {
+		pm_runtime_mark_last_busy(gp2ap002->dev);
 		pm_runtime_put_autosuspend(gp2ap002->dev);
 		gp2ap002->enabled = false;
 	}
@@ -418,12 +420,13 @@ static int gp2ap002_regmap_i2c_write(void *context, unsigned int reg,
 	return i2c_smbus_write_byte_data(i2c, reg, val);
 }
 
-static const struct regmap_bus gp2ap002_regmap_bus = {
+static struct regmap_bus gp2ap002_regmap_bus = {
 	.reg_read = gp2ap002_regmap_i2c_read,
 	.reg_write = gp2ap002_regmap_i2c_write,
 };
 
-static int gp2ap002_probe(struct i2c_client *client)
+static int gp2ap002_probe(struct i2c_client *client,
+			  const struct i2c_device_id *id)
 {
 	struct gp2ap002 *gp2ap002;
 	struct iio_dev *indio_dev;
@@ -462,7 +465,8 @@ static int gp2ap002_probe(struct i2c_client *client)
 
 	regmap = devm_regmap_init(dev, &gp2ap002_regmap_bus, dev, &config);
 	if (IS_ERR(regmap)) {
-		dev_err(dev, "Failed to register i2c regmap %ld\n", PTR_ERR(regmap));
+		dev_err(dev, "Failed to register i2c regmap %d\n",
+			(int)PTR_ERR(regmap));
 		return PTR_ERR(regmap);
 	}
 	gp2ap002->map = regmap;
@@ -500,9 +504,12 @@ static int gp2ap002_probe(struct i2c_client *client)
 	if (!gp2ap002->is_gp2ap002s00f) {
 		gp2ap002->alsout = devm_iio_channel_get(dev, "alsout");
 		if (IS_ERR(gp2ap002->alsout)) {
-			ret = PTR_ERR(gp2ap002->alsout);
-			ret = (ret == -ENODEV) ? -EPROBE_DEFER : ret;
-			return dev_err_probe(dev, ret, "failed to get ALSOUT ADC channel\n");
+			if (PTR_ERR(gp2ap002->alsout) == -ENODEV) {
+				dev_err(dev, "no ADC, deferring...\n");
+				return -EPROBE_DEFER;
+			}
+			dev_err(dev, "failed to get ALSOUT ADC channel\n");
+			return PTR_ERR(gp2ap002->alsout);
 		}
 		ret = iio_get_channel_type(gp2ap002->alsout, &ch_type);
 		if (ret < 0)
@@ -515,14 +522,15 @@ static int gp2ap002_probe(struct i2c_client *client)
 	}
 
 	gp2ap002->vdd = devm_regulator_get(dev, "vdd");
-	if (IS_ERR(gp2ap002->vdd))
-		return dev_err_probe(dev, PTR_ERR(gp2ap002->vdd),
-				     "failed to get VDD regulator\n");
-
+	if (IS_ERR(gp2ap002->vdd)) {
+		dev_err(dev, "failed to get VDD regulator\n");
+		return PTR_ERR(gp2ap002->vdd);
+	}
 	gp2ap002->vio = devm_regulator_get(dev, "vio");
-	if (IS_ERR(gp2ap002->vio))
-		return dev_err_probe(dev, PTR_ERR(gp2ap002->vio),
-				     "failed to get VIO regulator\n");
+	if (IS_ERR(gp2ap002->vio)) {
+		dev_err(dev, "failed to get VIO regulator\n");
+		return PTR_ERR(gp2ap002->vio);
+	}
 
 	/* Operating voltage 2.4V .. 3.6V according to datasheet */
 	ret = regulator_set_voltage(gp2ap002->vdd, 2400000, 3600000);
@@ -616,7 +624,7 @@ out_disable_vdd:
 	return ret;
 }
 
-static void gp2ap002_remove(struct i2c_client *client)
+static int gp2ap002_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct gp2ap002 *gp2ap002 = iio_priv(indio_dev);
@@ -628,9 +636,11 @@ static void gp2ap002_remove(struct i2c_client *client)
 	iio_device_unregister(indio_dev);
 	regulator_disable(gp2ap002->vio);
 	regulator_disable(gp2ap002->vdd);
+
+	return 0;
 }
 
-static int gp2ap002_runtime_suspend(struct device *dev)
+static int __maybe_unused gp2ap002_runtime_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct gp2ap002 *gp2ap002 = iio_priv(indio_dev);
@@ -655,7 +665,7 @@ static int gp2ap002_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int gp2ap002_runtime_resume(struct device *dev)
+static int __maybe_unused gp2ap002_runtime_resume(struct device *dev)
 {
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct gp2ap002 *gp2ap002 = iio_priv(indio_dev);
@@ -686,19 +696,23 @@ static int gp2ap002_runtime_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_RUNTIME_DEV_PM_OPS(gp2ap002_dev_pm_ops, gp2ap002_runtime_suspend,
-				 gp2ap002_runtime_resume, NULL);
+static const struct dev_pm_ops gp2ap002_dev_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
+	SET_RUNTIME_PM_OPS(gp2ap002_runtime_suspend,
+			   gp2ap002_runtime_resume, NULL)
+};
 
 static const struct i2c_device_id gp2ap002_id_table[] = {
-	{ "gp2ap002" },
-	{ }
+	{ "gp2ap002", 0 },
+	{ },
 };
 MODULE_DEVICE_TABLE(i2c, gp2ap002_id_table);
 
 static const struct of_device_id gp2ap002_of_match[] = {
 	{ .compatible = "sharp,gp2ap002a00f" },
 	{ .compatible = "sharp,gp2ap002s00f" },
-	{ }
+	{ },
 };
 MODULE_DEVICE_TABLE(of, gp2ap002_of_match);
 
@@ -706,7 +720,7 @@ static struct i2c_driver gp2ap002_driver = {
 	.driver = {
 		.name = "gp2ap002",
 		.of_match_table = gp2ap002_of_match,
-		.pm = pm_ptr(&gp2ap002_dev_pm_ops),
+		.pm = &gp2ap002_dev_pm_ops,
 	},
 	.probe = gp2ap002_probe,
 	.remove = gp2ap002_remove,

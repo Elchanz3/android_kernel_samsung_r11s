@@ -10,7 +10,7 @@
 
 #include <asm/page.h>
 
-#ifdef __ASSEMBLER__
+#ifdef __ASSEMBLY__
 #include <asm/thread_info.h>	/* TI_UWINMASK for WINDOW_FLUSH */
 #endif
 
@@ -53,13 +53,21 @@
 
 #define SRMMU_CHG_MASK    (0xffffff00 | SRMMU_REF | SRMMU_DIRTY)
 
-/* SRMMU swap entry encoding */
+/* SRMMU swap entry encoding
+ *
+ * We use 5 bits for the type and 19 for the offset.  This gives us
+ * 32 swapfiles of 4GB each.  Encoding looks like:
+ *
+ * oooooooooooooooooootttttRRRRRRRR
+ * fedcba9876543210fedcba9876543210
+ *
+ * The bottom 7 bits are reserved for protection and status bits, especially
+ * PRESENT.
+ */
 #define SRMMU_SWP_TYPE_MASK	0x1f
 #define SRMMU_SWP_TYPE_SHIFT	7
 #define SRMMU_SWP_OFF_MASK	0xfffff
 #define SRMMU_SWP_OFF_SHIFT	(SRMMU_SWP_TYPE_SHIFT + 5)
-/* We borrow bit 6 to store the exclusive marker in swap PTEs. */
-#define SRMMU_SWP_EXCLUSIVE	SRMMU_DIRTY
 
 /* Some day I will implement true fine grained access bits for
  * user pages because the SRMMU gives us the capabilities to
@@ -97,7 +105,7 @@
 	bne	99b;							\
 	 restore %g0, %g0, %g0;
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 extern unsigned long last_valid_pfn;
 
 /* This makes sense. Honest it does - Anton */
@@ -105,7 +113,7 @@ extern unsigned long last_valid_pfn;
 extern void *srmmu_nocache_pool;
 #define __nocache_pa(VADDR) (((unsigned long)VADDR) - SRMMU_NOCACHE_VADDR + __pa((unsigned long)srmmu_nocache_pool))
 #define __nocache_va(PADDR) (__va((unsigned long)PADDR) - (unsigned long)srmmu_nocache_pool + SRMMU_NOCACHE_VADDR)
-#define __nocache_fix(VADDR) ((__typeof__(VADDR))__va(__nocache_pa(VADDR)))
+#define __nocache_fix(VADDR) __va(__nocache_pa(VADDR))
 
 /* Accessing the MMU control register. */
 unsigned int srmmu_get_mmureg(void);
@@ -136,6 +144,6 @@ srmmu_get_pte (unsigned long addr)
 	return entry;
 }
 
-#endif /* !(__ASSEMBLER__) */
+#endif /* !(__ASSEMBLY__) */
 
 #endif /* !(_SPARC_PGTSRMMU_H) */

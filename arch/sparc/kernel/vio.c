@@ -46,7 +46,7 @@ static const struct vio_device_id *vio_match_device(
 	return NULL;
 }
 
-static int vio_hotplug(const struct device *dev, struct kobj_uevent_env *env)
+static int vio_hotplug(struct device *dev, struct kobj_uevent_env *env)
 {
 	const struct vio_dev *vio_dev = to_vio_dev(dev);
 
@@ -54,10 +54,10 @@ static int vio_hotplug(const struct device *dev, struct kobj_uevent_env *env)
 	return 0;
 }
 
-static int vio_bus_match(struct device *dev, const struct device_driver *drv)
+static int vio_bus_match(struct device *dev, struct device_driver *drv)
 {
 	struct vio_dev *vio_dev = to_vio_dev(dev);
-	const struct vio_driver *vio_drv = to_vio_driver(drv);
+	struct vio_driver *vio_drv = to_vio_driver(drv);
 	const struct vio_device_id *matches = vio_drv->id_table;
 
 	if (!matches)
@@ -93,7 +93,7 @@ static int vio_device_probe(struct device *dev)
 	return drv->probe(vdev, id);
 }
 
-static void vio_device_remove(struct device *dev)
+static int vio_device_remove(struct device *dev)
 {
 	struct vio_dev *vdev = to_vio_dev(dev);
 	struct vio_driver *drv = to_vio_driver(dev->driver);
@@ -105,8 +105,10 @@ static void vio_device_remove(struct device *dev)
 		 * routines to do so at the moment. TBD
 		 */
 
-		drv->remove(vdev);
+		return drv->remove(vdev);
 	}
+
+	return 1;
 }
 
 static ssize_t devspec_show(struct device *dev,
@@ -149,7 +151,7 @@ static struct attribute *vio_dev_attrs[] = {
  };
 ATTRIBUTE_GROUPS(vio_dev);
 
-static const struct bus_type vio_bus_type = {
+static struct bus_type vio_bus_type = {
 	.name		= "vio",
 	.dev_groups	= vio_dev_groups,
 	.uevent         = vio_hotplug,
@@ -419,13 +421,13 @@ struct vio_remove_node_data {
 	u64 node;
 };
 
-static int vio_md_node_match(struct device *dev, const void *arg)
+static int vio_md_node_match(struct device *dev, void *arg)
 {
 	struct vio_dev *vdev = to_vio_dev(dev);
-	const struct vio_remove_node_data *node_data;
+	struct vio_remove_node_data *node_data;
 	u64 node;
 
-	node_data = (const struct vio_remove_node_data *)arg;
+	node_data = (struct vio_remove_node_data *)arg;
 
 	node = vio_vdev_node(node_data->hp, vdev);
 

@@ -10,6 +10,9 @@
  *  by Justin Cormack
  */
 
+/*
+ */
+
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/input.h>
@@ -72,7 +75,7 @@ static int skbd_connect(struct serio *serio, struct serio_driver *drv)
 	int err = -ENOMEM;
 	int i;
 
-	skbd = kzalloc(sizeof(*skbd), GFP_KERNEL);
+	skbd = kzalloc(sizeof(struct skbd), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!skbd || !input_dev)
 		goto fail1;

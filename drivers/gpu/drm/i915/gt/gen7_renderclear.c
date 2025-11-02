@@ -6,7 +6,6 @@
 #include "gen7_renderclear.h"
 #include "i915_drv.h"
 #include "intel_gpu_commands.h"
-#include "intel_gt_regs.h"
 
 #define GT3_INLINE_DATA_DELAYS 0x1E00
 #define batch_advance(Y, CS) GEM_BUG_ON((Y)->end != (CS))
@@ -41,7 +40,7 @@ struct batch_vals {
 	u32 size;
 };
 
-static int num_primitives(const struct batch_vals *bv)
+static inline int num_primitives(const struct batch_vals *bv)
 {
 	/*
 	 * We need to saturate the GPU with work in order to dispatch
@@ -106,7 +105,7 @@ static u32 batch_offset(const struct batch_chunk *bc, u32 *cs)
 
 static u32 batch_addr(const struct batch_chunk *bc)
 {
-	return i915_vma_offset(bc->vma);
+	return bc->vma->node.start;
 }
 
 static void batch_add(struct batch_chunk *bc, const u32 d)
@@ -399,8 +398,7 @@ static void emit_batch(struct i915_vma * const vma,
 	batch_add(&cmds, MI_LOAD_REGISTER_IMM(2));
 	batch_add(&cmds, i915_mmio_reg_offset(CACHE_MODE_0_GEN7));
 	batch_add(&cmds, 0xffff0000 |
-			(((IS_IVYBRIDGE(i915) && INTEL_INFO(i915)->gt == 1) ||
-			  IS_VALLEYVIEW(i915)) ?
+			((IS_IVB_GT1(i915) || IS_VALLEYVIEW(i915)) ?
 			 HIZ_RAW_STALL_OPT_DISABLE :
 			 0));
 	batch_add(&cmds, i915_mmio_reg_offset(CACHE_MODE_1));

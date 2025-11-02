@@ -335,7 +335,7 @@ static void r852_cmdctl(struct nand_chip *chip, int dat, unsigned int ctrl)
 		else
 			dev->ctlreg &= ~R852_CTL_WRITE;
 
-		/* when write is started, enable write access */
+		/* when write is stareted, enable write access */
 		if (dat == NAND_CMD_ERASE1)
 			dev->ctlreg |= R852_CTL_WRITE;
 
@@ -372,7 +372,7 @@ static int r852_wait(struct nand_chip *chip)
 
 	nand_status_op(chip, &status);
 
-	/* Unfortunately, no way to send detailed error status... */
+	/* Unfortunelly, no way to send detailed error status... */
 	if (dev->dma_error) {
 		status |= NAND_STATUS_FAIL;
 		dev->dma_error = 0;
@@ -387,9 +387,6 @@ static int r852_wait(struct nand_chip *chip)
 static int r852_ready(struct nand_chip *chip)
 {
 	struct r852_device *dev = r852_get_dev(nand_to_mtd(chip));
-	if (dev->card_unstable)
-		return 0;
-
 	return !(r852_read_reg(dev, R852_CARD_STA) & R852_CARD_STA_BUSY);
 }
 
@@ -586,8 +583,8 @@ static void r852_update_card_detect(struct r852_device *dev)
 	r852_write_reg(dev, R852_CARD_IRQ_ENABLE, card_detect_reg);
 }
 
-static ssize_t media_type_show(struct device *sys_dev,
-			       struct device_attribute *attr, char *buf)
+static ssize_t r852_media_type_show(struct device *sys_dev,
+			struct device_attribute *attr, char *buf)
 {
 	struct mtd_info *mtd = container_of(sys_dev, struct mtd_info, dev);
 	struct r852_device *dev = r852_get_dev(mtd);
@@ -596,7 +593,8 @@ static ssize_t media_type_show(struct device *sys_dev,
 	strcpy(buf, data);
 	return strlen(data);
 }
-static DEVICE_ATTR_RO(media_type);
+
+static DEVICE_ATTR(media_type, S_IRUGO, r852_media_type_show, NULL);
 
 
 /* Detect properties of card in slot */
@@ -726,9 +724,10 @@ static irqreturn_t r852_irq(int irq, void *data)
 	struct r852_device *dev = (struct r852_device *)data;
 
 	uint8_t card_status, dma_status;
+	unsigned long flags;
 	irqreturn_t ret = IRQ_NONE;
 
-	spin_lock(&dev->irqlock);
+	spin_lock_irqsave(&dev->irqlock, flags);
 
 	/* handle card detection interrupts first */
 	card_status = r852_read_reg(dev, R852_CARD_IRQ_STA);
@@ -814,7 +813,7 @@ static irqreturn_t r852_irq(int irq, void *data)
 		dbg("strange card status = %x", card_status);
 
 out:
-	spin_unlock(&dev->irqlock);
+	spin_unlock_irqrestore(&dev->irqlock, flags);
 	return ret;
 }
 

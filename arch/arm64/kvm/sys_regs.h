@@ -11,12 +11,6 @@
 #ifndef __ARM64_KVM_SYS_REGS_LOCAL_H__
 #define __ARM64_KVM_SYS_REGS_LOCAL_H__
 
-#include <linux/bsearch.h>
-
-#define reg_to_encoding(x)						\
-	sys_reg((u32)(x)->Op0, (u32)(x)->Op1,				\
-		(u32)(x)->CRn, (u32)(x)->CRm, (u32)(x)->Op2)
-
 struct sys_reg_params {
 	u8	Op0;
 	u8	Op1;
@@ -27,34 +21,12 @@ struct sys_reg_params {
 	bool	is_write;
 };
 
-#define encoding_to_params(reg)						\
-	((struct sys_reg_params){ .Op0 = sys_reg_Op0(reg),		\
-				  .Op1 = sys_reg_Op1(reg),		\
-				  .CRn = sys_reg_CRn(reg),		\
-				  .CRm = sys_reg_CRm(reg),		\
-				  .Op2 = sys_reg_Op2(reg) })
-
-#define esr_sys64_to_params(esr)                                               \
-	((struct sys_reg_params){ .Op0 = ((esr) >> 20) & 3,                    \
-				  .Op1 = ((esr) >> 14) & 0x7,                  \
-				  .CRn = ((esr) >> 10) & 0xf,                  \
-				  .CRm = ((esr) >> 1) & 0xf,                   \
-				  .Op2 = ((esr) >> 17) & 0x7,                  \
-				  .is_write = !((esr) & 1) })
-
-#define esr_cp1x_32_to_params(esr)						\
-	((struct sys_reg_params){ .Op1 = ((esr) >> 14) & 0x7,			\
-				  .CRn = ((esr) >> 10) & 0xf,			\
-				  .CRm = ((esr) >> 1) & 0xf,			\
-				  .Op2 = ((esr) >> 17) & 0x7,			\
-				  .is_write = !((esr) & 1) })
-
 struct sys_reg_desc {
 	/* Sysreg string for debug */
 	const char *name;
 
 	enum {
-		AA32_DIRECT,
+		AA32_ZEROHIGH,
 		AA32_LO,
 		AA32_HI,
 	} aarch32_map;
@@ -71,23 +43,20 @@ struct sys_reg_desc {
 		       struct sys_reg_params *,
 		       const struct sys_reg_desc *);
 
-	/*
-	 * Initialization for vcpu. Return initialized value, or KVM
-	 * sanitized value for ID registers.
-	 */
-	u64 (*reset)(struct kvm_vcpu *, const struct sys_reg_desc *);
+	/* Initialization for vcpu. */
+	void (*reset)(struct kvm_vcpu *, const struct sys_reg_desc *);
 
 	/* Index into sys_reg[], or 0 if we don't need to save it. */
 	int reg;
 
-	/* Value (usually reset value), or write mask for idregs */
+	/* Value (usually reset value) */
 	u64 val;
 
 	/* Custom get/set_user functions, fallback to generic if NULL */
 	int (*get_user)(struct kvm_vcpu *vcpu, const struct sys_reg_desc *rd,
-			u64 *val);
+			const struct kvm_one_reg *reg, void __user *uaddr);
 	int (*set_user)(struct kvm_vcpu *vcpu, const struct sys_reg_desc *rd,
-			u64 val);
+			const struct kvm_one_reg *reg, void __user *uaddr);
 
 	/* Return mask of REG_* runtime visibility overrides */
 	unsigned int (*visibility)(const struct kvm_vcpu *vcpu,
@@ -96,7 +65,6 @@ struct sys_reg_desc {
 
 #define REG_HIDDEN		(1 << 0) /* hidden from userspace and guest */
 #define REG_RAZ			(1 << 1) /* RAZ from userspace and guest */
-#define REG_USER_WI		(1 << 2) /* WI from userspace only */
 
 static __printf(2, 3)
 inline void print_sys_reg_msg(const struct sys_reg_params *p,
@@ -108,7 +76,7 @@ inline void print_sys_reg_msg(const struct sys_reg_params *p,
 	/* Look, we even formatted it for you to paste into the table! */
 	kvm_pr_unimpl("%pV { Op0(%2u), Op1(%2u), CRn(%2u), CRm(%2u), Op2(%2u), func_%s },\n",
 		      &(struct va_format){ fmt, &va },
-		      p->Op0, p->Op1, p->CRn, p->CRm, p->Op2, str_write_read(p->is_write));
+		      p->Op0, p->Op1, p->CRn, p->CRm, p->Op2, p->is_write ? "write" : "read");
 	va_end(va);
 }
 
@@ -132,48 +100,37 @@ static inline bool read_zero(struct kvm_vcpu *vcpu,
 }
 
 /* Reset functions */
-static inline u64 reset_unknown(struct kvm_vcpu *vcpu,
+static inline void reset_unknown(struct kvm_vcpu *vcpu,
 				 const struct sys_reg_desc *r)
 {
 	BUG_ON(!r->reg);
 	BUG_ON(r->reg >= NR_SYS_REGS);
-	__vcpu_assign_sys_reg(vcpu, r->reg, 0x1de7ec7edbadc0deULL);
-	return __vcpu_sys_reg(vcpu, r->reg);
+	__vcpu_sys_reg(vcpu, r->reg) = 0x1de7ec7edbadc0deULL;
 }
 
-static inline u64 reset_val(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+static inline void reset_val(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
 {
 	BUG_ON(!r->reg);
 	BUG_ON(r->reg >= NR_SYS_REGS);
-	__vcpu_assign_sys_reg(vcpu, r->reg, r->val);
-	return __vcpu_sys_reg(vcpu, r->reg);
-}
-
-static inline unsigned int sysreg_visibility(const struct kvm_vcpu *vcpu,
-					     const struct sys_reg_desc *r)
-{
-	if (likely(!r->visibility))
-		return 0;
-
-	return r->visibility(vcpu, r);
+	__vcpu_sys_reg(vcpu, r->reg) = r->val;
 }
 
 static inline bool sysreg_hidden(const struct kvm_vcpu *vcpu,
 				 const struct sys_reg_desc *r)
 {
-	return sysreg_visibility(vcpu, r) & REG_HIDDEN;
+	if (likely(!r->visibility))
+		return false;
+
+	return r->visibility(vcpu, r) & REG_HIDDEN;
 }
 
 static inline bool sysreg_visible_as_raz(const struct kvm_vcpu *vcpu,
 					 const struct sys_reg_desc *r)
 {
-	return sysreg_visibility(vcpu, r) & REG_RAZ;
-}
+	if (likely(!r->visibility))
+		return false;
 
-static inline bool sysreg_user_write_ignore(const struct kvm_vcpu *vcpu,
-					    const struct sys_reg_desc *r)
-{
-	return sysreg_visibility(vcpu, r) & REG_USER_WI;
+	return r->visibility(vcpu, r) & REG_RAZ;
 }
 
 static inline int cmp_sys_reg(const struct sys_reg_desc *i1,
@@ -195,37 +152,10 @@ static inline int cmp_sys_reg(const struct sys_reg_desc *i1,
 	return i1->Op2 - i2->Op2;
 }
 
-static inline int match_sys_reg(const void *key, const void *elt)
-{
-	const unsigned long pval = (unsigned long)key;
-	const struct sys_reg_desc *r = elt;
-
-	return pval - reg_to_encoding(r);
-}
-
-static inline const struct sys_reg_desc *
-find_reg(const struct sys_reg_params *params, const struct sys_reg_desc table[],
-	 unsigned int num)
-{
-	unsigned long pval = reg_to_encoding(params);
-
-	return __inline_bsearch((void *)pval, table, num, sizeof(table[0]), match_sys_reg);
-}
-
-const struct sys_reg_desc *get_reg_by_id(u64 id,
-					 const struct sys_reg_desc table[],
-					 unsigned int num);
-
-int kvm_arm_sys_reg_get_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *);
-int kvm_arm_sys_reg_set_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *);
-int kvm_sys_reg_get_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
-			 const struct sys_reg_desc table[], unsigned int num);
-int kvm_sys_reg_set_user(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg,
-			 const struct sys_reg_desc table[], unsigned int num);
-
-bool triage_sysreg_trap(struct kvm_vcpu *vcpu, int *sr_index);
-
-int kvm_finalize_sys_regs(struct kvm_vcpu *vcpu);
+const struct sys_reg_desc *find_reg_by_id(u64 id,
+					  struct sys_reg_params *params,
+					  const struct sys_reg_desc table[],
+					  unsigned int num);
 
 #define AA32(_x)	.aarch32_map = AA32_##_x
 #define Op0(_x) 	.Op0 = _x
@@ -239,28 +169,5 @@ int kvm_finalize_sys_regs(struct kvm_vcpu *vcpu);
 	Op0(sys_reg_Op0(reg)), Op1(sys_reg_Op1(reg)),	\
 	CRn(sys_reg_CRn(reg)), CRm(sys_reg_CRm(reg)),	\
 	Op2(sys_reg_Op2(reg))
-
-#define CP15_SYS_DESC(reg)				\
-	.name = #reg,					\
-	.aarch32_map = AA32_DIRECT,			\
-	Op0(0), Op1(sys_reg_Op1(reg)),			\
-	CRn(sys_reg_CRn(reg)), CRm(sys_reg_CRm(reg)),	\
-	Op2(sys_reg_Op2(reg))
-
-#define ID_REG_LIMIT_FIELD_ENUM(val, reg, field, limit)			       \
-({									       \
-	u64 __f_val = FIELD_GET(reg##_##field##_MASK, val);		       \
-	(val) &= ~reg##_##field##_MASK;					       \
-	(val) |= FIELD_PREP(reg##_##field##_MASK,			       \
-			    min(__f_val,				       \
-				(u64)SYS_FIELD_VALUE(reg, field, limit)));     \
-	(val);								       \
-})
-
-#define TO_ARM64_SYS_REG(r)	ARM64_SYS_REG(sys_reg_Op0(SYS_ ## r),	\
-					      sys_reg_Op1(SYS_ ## r),	\
-					      sys_reg_CRn(SYS_ ## r),	\
-					      sys_reg_CRm(SYS_ ## r),	\
-					      sys_reg_Op2(SYS_ ## r))
 
 #endif /* __ARM64_KVM_SYS_REGS_LOCAL_H__ */

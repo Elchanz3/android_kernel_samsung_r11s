@@ -11,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 
 #include "usbip_common.h"
 #include "vhci.h"
@@ -373,7 +372,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		}
 		switch (wValue) {
 		case USB_PORT_FEAT_SUSPEND:
-			if (hcd->speed >= HCD_USB3) {
+			if (hcd->speed == HCD_USB3) {
 				pr_err(" ClearPortFeature: USB_PORT_FEAT_SUSPEND req not "
 				       "supported for USB 3.0 roothub\n");
 				goto error;
@@ -389,7 +388,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		case USB_PORT_FEAT_POWER:
 			usbip_dbg_vhci_rh(
 				" ClearPortFeature: USB_PORT_FEAT_POWER\n");
-			if (hcd->speed >= HCD_USB3)
+			if (hcd->speed == HCD_USB3)
 				vhci_hcd->port_status[rhport] &= ~USB_SS_PORT_STAT_POWER;
 			else
 				vhci_hcd->port_status[rhport] &= ~USB_PORT_STAT_POWER;
@@ -405,19 +404,19 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		break;
 	case GetHubDescriptor:
 		usbip_dbg_vhci_rh(" GetHubDescriptor\n");
-		if (hcd->speed >= HCD_USB3 &&
+		if (hcd->speed == HCD_USB3 &&
 				(wLength < USB_DT_SS_HUB_SIZE ||
 				 wValue != (USB_DT_SS_HUB << 8))) {
 			pr_err("Wrong hub descriptor type for USB 3.0 roothub.\n");
 			goto error;
 		}
-		if (hcd->speed >= HCD_USB3)
+		if (hcd->speed == HCD_USB3)
 			ss_hub_descriptor((struct usb_hub_descriptor *) buf);
 		else
 			hub_descriptor((struct usb_hub_descriptor *) buf);
 		break;
 	case DeviceRequest | USB_REQ_GET_DESCRIPTOR:
-		if (hcd->speed < HCD_USB3)
+		if (hcd->speed != HCD_USB3)
 			goto error;
 
 		if ((wValue >> 8) != USB_DT_BOS)
@@ -504,7 +503,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		case USB_PORT_FEAT_LINK_STATE:
 			usbip_dbg_vhci_rh(
 				" SetPortFeature: USB_PORT_FEAT_LINK_STATE\n");
-			if (hcd->speed < HCD_USB3) {
+			if (hcd->speed != HCD_USB3) {
 				pr_err("USB_PORT_FEAT_LINK_STATE req not "
 				       "supported for USB 2.0 roothub\n");
 				goto error;
@@ -522,7 +521,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			usbip_dbg_vhci_rh(
 				" SetPortFeature: USB_PORT_FEAT_U2_TIMEOUT\n");
 			/* TODO: add suspend/resume support! */
-			if (hcd->speed < HCD_USB3) {
+			if (hcd->speed != HCD_USB3) {
 				pr_err("USB_PORT_FEAT_U1/2_TIMEOUT req not "
 				       "supported for USB 2.0 roothub\n");
 				goto error;
@@ -532,7 +531,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			usbip_dbg_vhci_rh(
 				" SetPortFeature: USB_PORT_FEAT_SUSPEND\n");
 			/* Applicable only for USB2.0 hub */
-			if (hcd->speed >= HCD_USB3) {
+			if (hcd->speed == HCD_USB3) {
 				pr_err("USB_PORT_FEAT_SUSPEND req not "
 				       "supported for USB 3.0 roothub\n");
 				goto error;
@@ -552,7 +551,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				pr_err("invalid port number %d\n", wIndex);
 				goto error;
 			}
-			if (hcd->speed >= HCD_USB3)
+			if (hcd->speed == HCD_USB3)
 				vhci_hcd->port_status[rhport] |= USB_SS_PORT_STAT_POWER;
 			else
 				vhci_hcd->port_status[rhport] |= USB_PORT_STAT_POWER;
@@ -565,7 +564,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				goto error;
 			}
 			/* Applicable only for USB3.0 hub */
-			if (hcd->speed < HCD_USB3) {
+			if (hcd->speed != HCD_USB3) {
 				pr_err("USB_PORT_FEAT_BH_PORT_RESET req not "
 				       "supported for USB 2.0 roothub\n");
 				goto error;
@@ -579,7 +578,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				goto error;
 			}
 			/* if it's already enabled, disable */
-			if (hcd->speed >= HCD_USB3) {
+			if (hcd->speed == HCD_USB3) {
 				vhci_hcd->port_status[rhport] = 0;
 				vhci_hcd->port_status[rhport] =
 					(USB_SS_PORT_STAT_POWER |
@@ -603,7 +602,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			}
 			if (wValue >= 32)
 				goto error;
-			if (hcd->speed >= HCD_USB3) {
+			if (hcd->speed == HCD_USB3) {
 				if ((vhci_hcd->port_status[rhport] &
 				     USB_SS_PORT_STAT_POWER) != 0) {
 					vhci_hcd->port_status[rhport] |= (1 << wValue);
@@ -617,7 +616,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		break;
 	case GetPortErrorCount:
 		usbip_dbg_vhci_rh(" GetPortErrorCount\n");
-		if (hcd->speed < HCD_USB3) {
+		if (hcd->speed != HCD_USB3) {
 			pr_err("GetPortErrorCount req not "
 			       "supported for USB 2.0 roothub\n");
 			goto error;
@@ -627,7 +626,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		break;
 	case SetHubDepth:
 		usbip_dbg_vhci_rh(" SetHubDepth\n");
-		if (hcd->speed < HCD_USB3) {
+		if (hcd->speed != HCD_USB3) {
 			pr_err("SetHubDepth req not supported for "
 			       "USB 2.0 roothub\n");
 			goto error;
@@ -647,7 +646,7 @@ error:
 		if (!invalid_rhport) {
 			dump_port_status_diff(prev_port_status[rhport],
 					      vhci_hcd->port_status[rhport],
-					      hcd->speed >= HCD_USB3);
+					      hcd->speed == HCD_USB3);
 		}
 	}
 	usbip_dbg_vhci_rh(" bye\n");
@@ -676,7 +675,7 @@ static void vhci_tx_urb(struct urb *urb, struct vhci_device *vdev)
 
 	spin_lock_irqsave(&vdev->priv_lock, flags);
 
-	priv->seqnum = (u32)atomic_inc_return(&vhci_hcd->seqnum);
+	priv->seqnum = atomic_inc_return(&vhci_hcd->seqnum);
 	if (priv->seqnum == 0xffff)
 		dev_info(&urb->dev->dev, "seqnum max\n");
 
@@ -746,7 +745,6 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	 *
 	 */
 	if (usb_pipedevice(urb->pipe) == 0) {
-		struct usb_device *old;
 		__u8 type = usb_pipetype(urb->pipe);
 		struct usb_ctrlrequest *ctrlreq =
 			(struct usb_ctrlrequest *) urb->setup_packet;
@@ -757,26 +755,14 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 			goto no_need_xmit;
 		}
 
-		old = vdev->udev;
 		switch (ctrlreq->bRequest) {
 		case USB_REQ_SET_ADDRESS:
 			/* set_address may come when a device is reset */
 			dev_info(dev, "SetAddress Request (%d) to port %d\n",
 				 ctrlreq->wValue, vdev->rhport);
 
+			usb_put_dev(vdev->udev);
 			vdev->udev = usb_get_dev(urb->dev);
-			/*
-			 * NOTE: A similar operation has been done via
-			 * USB_REQ_GET_DESCRIPTOR handler below, which is
-			 * supposed to always precede USB_REQ_SET_ADDRESS.
-			 *
-			 * It's not entirely clear if operating on a different
-			 * usb_device instance here is a real possibility,
-			 * otherwise this call and vdev->udev assignment above
-			 * should be dropped.
-			 */
-			dev_pm_syscore_device(&vdev->udev->dev, true);
-			usb_put_dev(old);
 
 			spin_lock(&vdev->ud.lock);
 			vdev->ud.status = VDEV_ST_USED;
@@ -795,19 +781,8 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 				usbip_dbg_vhci_hc(
 					"Not yet?:Get_Descriptor to device 0 (get max pipe size)\n");
 
+			usb_put_dev(vdev->udev);
 			vdev->udev = usb_get_dev(urb->dev);
-			/*
-			 * Set syscore PM flag for the virtually attached
-			 * devices to ensure they will not enter suspend on
-			 * the client side.
-			 *
-			 * Note this doesn't have any impact on the physical
-			 * devices attached to the host system on the server
-			 * side, hence there is no need to undo the operation
-			 * on disconnect.
-			 */
-			dev_pm_syscore_device(&vdev->udev->dev, true);
-			usb_put_dev(old);
 			goto out;
 
 		default:
@@ -976,8 +951,7 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	return 0;
 }
 
-static void vhci_cleanup_unlink_list(struct vhci_device *vdev,
-		struct list_head *unlink_list)
+static void vhci_device_unlink_cleanup(struct vhci_device *vdev)
 {
 	struct vhci_hcd *vhci_hcd = vdev_to_vhci_hcd(vdev);
 	struct usb_hcd *hcd = vhci_hcd_to_hcd(vhci_hcd);
@@ -988,8 +962,11 @@ static void vhci_cleanup_unlink_list(struct vhci_device *vdev,
 	spin_lock_irqsave(&vhci->lock, flags);
 	spin_lock(&vdev->priv_lock);
 
-	list_for_each_entry_safe(unlink, tmp, unlink_list, list) {
+	list_for_each_entry_safe(unlink, tmp, &vdev->unlink_tx, list) {
 		struct urb *urb;
+
+		/* give back urb of unsent unlink request */
+		pr_info("unlink cleanup tx %lu\n", unlink->unlink_seqnum);
 
 		urb = pickup_urb_and_free_priv(vdev, unlink->unlink_seqnum);
 		if (!urb) {
@@ -1015,17 +992,43 @@ static void vhci_cleanup_unlink_list(struct vhci_device *vdev,
 		kfree(unlink);
 	}
 
+	while (!list_empty(&vdev->unlink_rx)) {
+		struct urb *urb;
+
+		unlink = list_first_entry(&vdev->unlink_rx, struct vhci_unlink,
+			list);
+
+		/* give back URB of unanswered unlink request */
+		pr_info("unlink cleanup rx %lu\n", unlink->unlink_seqnum);
+
+		urb = pickup_urb_and_free_priv(vdev, unlink->unlink_seqnum);
+		if (!urb) {
+			pr_info("the urb (seqnum %lu) was already given back\n",
+				unlink->unlink_seqnum);
+			list_del(&unlink->list);
+			kfree(unlink);
+			continue;
+		}
+
+		urb->status = -ENODEV;
+
+		usb_hcd_unlink_urb_from_ep(hcd, urb);
+
+		list_del(&unlink->list);
+
+		spin_unlock(&vdev->priv_lock);
+		spin_unlock_irqrestore(&vhci->lock, flags);
+
+		usb_hcd_giveback_urb(hcd, urb, urb->status);
+
+		spin_lock_irqsave(&vhci->lock, flags);
+		spin_lock(&vdev->priv_lock);
+
+		kfree(unlink);
+	}
+
 	spin_unlock(&vdev->priv_lock);
 	spin_unlock_irqrestore(&vhci->lock, flags);
-}
-
-static void vhci_device_unlink_cleanup(struct vhci_device *vdev)
-{
-	/* give back URB of unsent unlink request */
-	vhci_cleanup_unlink_list(vdev, &vdev->unlink_tx);
-
-	/* give back URB of unanswered unlink request */
-	vhci_cleanup_unlink_list(vdev, &vdev->unlink_rx);
 }
 
 /*
@@ -1092,7 +1095,6 @@ static void vhci_shutdown_connection(struct usbip_device *ud)
 static void vhci_device_reset(struct usbip_device *ud)
 {
 	struct vhci_device *vdev = container_of(ud, struct vhci_device, ud);
-	struct usb_device *old = vdev->udev;
 	unsigned long flags;
 
 	spin_lock_irqsave(&ud->lock, flags);
@@ -1100,8 +1102,8 @@ static void vhci_device_reset(struct usbip_device *ud)
 	vdev->speed  = 0;
 	vdev->devid  = 0;
 
+	usb_put_dev(vdev->udev);
 	vdev->udev = NULL;
-	usb_put_dev(old);
 
 	if (ud->tcp_socket) {
 		sockfd_put(ud->tcp_socket);
@@ -1166,7 +1168,6 @@ static int hcd_name_to_id(const char *name)
 static int vhci_setup(struct usb_hcd *hcd)
 {
 	struct vhci *vhci = *((void **)dev_get_platdata(hcd->self.controller));
-
 	if (usb_hcd_is_primary_hcd(hcd)) {
 		vhci->vhci_hcd_hs = hcd_to_vhci_hcd(hcd);
 		vhci->vhci_hcd_hs->vhci = vhci;
@@ -1180,12 +1181,16 @@ static int vhci_setup(struct usb_hcd *hcd)
 	} else {
 		vhci->vhci_hcd_ss = hcd_to_vhci_hcd(hcd);
 		vhci->vhci_hcd_ss->vhci = vhci;
-		hcd->speed = HCD_USB31;
-		hcd->self.root_hub->speed = USB_SPEED_SUPER_PLUS;
+		hcd->speed = HCD_USB3;
+		hcd->self.root_hub->speed = USB_SPEED_SUPER;
 	}
 
-	/* accept arbitrarily long scatter-gather lists */
-	hcd->self.sg_tablesize = ~0;
+	/*
+	 * Support SG.
+	 * sg_tablesize is an arbitrary value to alleviate memory pressure
+	 * on the host.
+	 */
+	hcd->self.sg_tablesize = 32;
 	hcd->self.no_sg_constraint = 1;
 
 	return 0;
@@ -1338,7 +1343,7 @@ static const struct hc_driver vhci_hc_driver = {
 	.product_desc	= driver_desc,
 	.hcd_priv_size	= sizeof(struct vhci_hcd),
 
-	.flags		= HCD_USB31 | HCD_SHARED,
+	.flags		= HCD_USB3 | HCD_SHARED,
 
 	.reset		= vhci_setup,
 	.start		= vhci_start,
@@ -1416,7 +1421,7 @@ put_usb2_hcd:
 	return ret;
 }
 
-static void vhci_hcd_remove(struct platform_device *pdev)
+static int vhci_hcd_remove(struct platform_device *pdev)
 {
 	struct vhci *vhci = *((void **)dev_get_platdata(&pdev->dev));
 
@@ -1433,6 +1438,8 @@ static void vhci_hcd_remove(struct platform_device *pdev)
 
 	vhci->vhci_hcd_hs = NULL;
 	vhci->vhci_hcd_ss = NULL;
+
+	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -1472,7 +1479,7 @@ static int vhci_hcd_suspend(struct platform_device *pdev, pm_message_t state)
 	if (connected > 0) {
 		dev_info(&pdev->dev,
 			 "We have %d active connection%s. Do not suspend.\n",
-			 connected, str_plural(connected));
+			 connected, (connected == 1 ? "" : "s"));
 		ret =  -EBUSY;
 	} else {
 		dev_info(&pdev->dev, "suspend vhci_hcd");
@@ -1506,7 +1513,7 @@ static int vhci_hcd_resume(struct platform_device *pdev)
 
 static struct platform_driver vhci_driver = {
 	.probe	= vhci_hcd_probe,
-	.remove = vhci_hcd_remove,
+	.remove	= vhci_hcd_remove,
 	.suspend = vhci_hcd_suspend,
 	.resume	= vhci_hcd_resume,
 	.driver	= {
@@ -1516,10 +1523,13 @@ static struct platform_driver vhci_driver = {
 
 static void del_platform_devices(void)
 {
+	struct platform_device *pdev;
 	int i;
 
 	for (i = 0; i < vhci_num_controllers; i++) {
-		platform_device_unregister(vhcis[i].pdev);
+		pdev = vhcis[i].pdev;
+		if (pdev != NULL)
+			platform_device_unregister(pdev);
 		vhcis[i].pdev = NULL;
 	}
 	sysfs_remove_link(&platform_bus.kobj, driver_name);
@@ -1539,33 +1549,45 @@ static int __init vhci_hcd_init(void)
 	if (vhcis == NULL)
 		return -ENOMEM;
 
+	for (i = 0; i < vhci_num_controllers; i++) {
+		vhcis[i].pdev = platform_device_alloc(driver_name, i);
+		if (!vhcis[i].pdev) {
+			i--;
+			while (i >= 0)
+				platform_device_put(vhcis[i--].pdev);
+			ret = -ENOMEM;
+			goto err_device_alloc;
+		}
+	}
+	for (i = 0; i < vhci_num_controllers; i++) {
+		void *vhci = &vhcis[i];
+		ret = platform_device_add_data(vhcis[i].pdev, &vhci, sizeof(void *));
+		if (ret)
+			goto err_driver_register;
+	}
+
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
 		goto err_driver_register;
 
 	for (i = 0; i < vhci_num_controllers; i++) {
-		void *vhci = &vhcis[i];
-		struct platform_device_info pdevinfo = {
-			.name = driver_name,
-			.id = i,
-			.data = &vhci,
-			.size_data = sizeof(void *),
-		};
-
-		vhcis[i].pdev = platform_device_register_full(&pdevinfo);
-		ret = PTR_ERR_OR_ZERO(vhcis[i].pdev);
+		ret = platform_device_add(vhcis[i].pdev);
 		if (ret < 0) {
-			while (i--)
-				platform_device_unregister(vhcis[i].pdev);
+			i--;
+			while (i >= 0)
+				platform_device_del(vhcis[i--].pdev);
 			goto err_add_hcd;
 		}
 	}
 
-	return 0;
+	return ret;
 
 err_add_hcd:
 	platform_driver_unregister(&vhci_driver);
 err_driver_register:
+	for (i = 0; i < vhci_num_controllers; i++)
+		platform_device_put(vhcis[i].pdev);
+err_device_alloc:
 	kfree(vhcis);
 	return ret;
 }

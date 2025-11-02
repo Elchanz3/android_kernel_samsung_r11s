@@ -31,6 +31,13 @@
 #define CHECK_BINSEARCH__
 
 /*
+ * If EXT_STATS is defined then stats numbers are collected.
+ * These number will be displayed at umount time.
+ */
+#define EXT_STATS_
+
+
+/*
  * ext4_inode has i_block array (60 bytes total).
  * The first 12 bytes store ext4_extent_header;
  * the remainder stores an array of ext4_extent.
@@ -166,11 +173,10 @@ struct partial_cluster {
 #define EXT_MAX_EXTENT(__hdr__)	\
 	((le16_to_cpu((__hdr__)->eh_max)) ? \
 	((EXT_FIRST_EXTENT((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) \
-					: NULL)
+					: 0)
 #define EXT_MAX_INDEX(__hdr__) \
 	((le16_to_cpu((__hdr__)->eh_max)) ? \
-	((EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) \
-					: NULL)
+	((EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) : 0)
 
 static inline struct ext4_extent_header *ext_inode_hdr(struct inode *inode)
 {

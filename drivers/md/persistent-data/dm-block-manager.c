@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 Red Hat, Inc.
  *
@@ -58,10 +57,10 @@ struct waiter {
 	int wants_write;
 };
 
-static unsigned int __find_holder(struct block_lock *lock,
+static unsigned __find_holder(struct block_lock *lock,
 			      struct task_struct *task)
 {
-	unsigned int i;
+	unsigned i;
 
 	for (i = 0; i < MAX_HOLDERS; i++)
 		if (lock->holders[i] == task)
@@ -74,7 +73,7 @@ static unsigned int __find_holder(struct block_lock *lock,
 /* call this *after* you increment lock->count */
 static void __add_holder(struct block_lock *lock, struct task_struct *task)
 {
-	unsigned int h = __find_holder(lock, NULL);
+	unsigned h = __find_holder(lock, NULL);
 #ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
 	struct stack_store *t;
 #endif
@@ -91,15 +90,14 @@ static void __add_holder(struct block_lock *lock, struct task_struct *task)
 /* call this *before* you decrement lock->count */
 static void __del_holder(struct block_lock *lock, struct task_struct *task)
 {
-	unsigned int h = __find_holder(lock, task);
-
+	unsigned h = __find_holder(lock, task);
 	lock->holders[h] = NULL;
 	put_task_struct(task);
 }
 
 static int __check_holder(struct block_lock *lock)
 {
-	unsigned int i;
+	unsigned i;
 
 	for (i = 0; i < MAX_HOLDERS; i++) {
 		if (lock->holders[i] == current) {
@@ -345,7 +343,7 @@ void *dm_block_data(struct dm_block *b)
 EXPORT_SYMBOL_GPL(dm_block_data);
 
 struct buffer_aux {
-	const struct dm_block_validator *validator;
+	struct dm_block_validator *validator;
 	int write_locked;
 
 #ifdef CONFIG_DM_DEBUG_BLOCK_MANAGER_LOCKING
@@ -356,7 +354,6 @@ struct buffer_aux {
 static void dm_block_manager_alloc_callback(struct dm_buffer *buf)
 {
 	struct buffer_aux *aux = dm_bufio_get_aux_data(buf);
-
 	aux->validator = NULL;
 	bl_init(&aux->lock);
 }
@@ -364,26 +361,23 @@ static void dm_block_manager_alloc_callback(struct dm_buffer *buf)
 static void dm_block_manager_write_callback(struct dm_buffer *buf)
 {
 	struct buffer_aux *aux = dm_bufio_get_aux_data(buf);
-
 	if (aux->validator) {
 		aux->validator->prepare_for_write(aux->validator, (struct dm_block *) buf,
 			 dm_bufio_get_block_size(dm_bufio_get_client(buf)));
 	}
 }
 
-/*
- * -------------------------------------------------------------
+/*----------------------------------------------------------------
  * Public interface
- *--------------------------------------------------------------
- */
+ *--------------------------------------------------------------*/
 struct dm_block_manager {
 	struct dm_bufio_client *bufio;
 	bool read_only:1;
 };
 
 struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
-						 unsigned int block_size,
-						 unsigned int max_held_per_thread)
+						 unsigned block_size,
+						 unsigned max_held_per_thread)
 {
 	int r;
 	struct dm_block_manager *bm;
@@ -397,8 +391,7 @@ struct dm_block_manager *dm_block_manager_create(struct block_device *bdev,
 	bm->bufio = dm_bufio_client_create(bdev, block_size, max_held_per_thread,
 					   sizeof(struct buffer_aux),
 					   dm_block_manager_alloc_callback,
-					   dm_block_manager_write_callback,
-					   0);
+					   dm_block_manager_write_callback);
 	if (IS_ERR(bm->bufio)) {
 		r = PTR_ERR(bm->bufio);
 		kfree(bm);
@@ -421,13 +414,7 @@ void dm_block_manager_destroy(struct dm_block_manager *bm)
 }
 EXPORT_SYMBOL_GPL(dm_block_manager_destroy);
 
-void dm_block_manager_reset(struct dm_block_manager *bm)
-{
-	dm_bufio_client_reset(bm->bufio);
-}
-EXPORT_SYMBOL_GPL(dm_block_manager_reset);
-
-unsigned int dm_bm_block_size(struct dm_block_manager *bm)
+unsigned dm_bm_block_size(struct dm_block_manager *bm)
 {
 	return dm_bufio_get_block_size(bm->bufio);
 }
@@ -441,11 +428,10 @@ dm_block_t dm_bm_nr_blocks(struct dm_block_manager *bm)
 static int dm_bm_validate_buffer(struct dm_block_manager *bm,
 				 struct dm_buffer *buf,
 				 struct buffer_aux *aux,
-				 const struct dm_block_validator *v)
+				 struct dm_block_validator *v)
 {
 	if (unlikely(!aux->validator)) {
 		int r;
-
 		if (!v)
 			return 0;
 		r = v->check(v, (struct dm_block *) buf, dm_bufio_get_block_size(bm->bufio));
@@ -467,7 +453,7 @@ static int dm_bm_validate_buffer(struct dm_block_manager *bm,
 	return 0;
 }
 int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
-		    const struct dm_block_validator *v,
+		    struct dm_block_validator *v,
 		    struct dm_block **result)
 {
 	struct buffer_aux *aux;
@@ -500,7 +486,7 @@ int dm_bm_read_lock(struct dm_block_manager *bm, dm_block_t b,
 EXPORT_SYMBOL_GPL(dm_bm_read_lock);
 
 int dm_bm_write_lock(struct dm_block_manager *bm,
-		     dm_block_t b, const struct dm_block_validator *v,
+		     dm_block_t b, struct dm_block_validator *v,
 		     struct dm_block **result)
 {
 	struct buffer_aux *aux;
@@ -536,7 +522,7 @@ int dm_bm_write_lock(struct dm_block_manager *bm,
 EXPORT_SYMBOL_GPL(dm_bm_write_lock);
 
 int dm_bm_read_try_lock(struct dm_block_manager *bm,
-			dm_block_t b, const struct dm_block_validator *v,
+			dm_block_t b, struct dm_block_validator *v,
 			struct dm_block **result)
 {
 	struct buffer_aux *aux;
@@ -569,7 +555,7 @@ int dm_bm_read_try_lock(struct dm_block_manager *bm,
 }
 
 int dm_bm_write_lock_zero(struct dm_block_manager *bm,
-			  dm_block_t b, const struct dm_block_validator *v,
+			  dm_block_t b, struct dm_block_validator *v,
 			  struct dm_block **result)
 {
 	int r;
@@ -601,7 +587,8 @@ EXPORT_SYMBOL_GPL(dm_bm_write_lock_zero);
 
 void dm_bm_unlock(struct dm_block *b)
 {
-	struct buffer_aux *aux = dm_bufio_get_aux_data(to_buffer(b));
+	struct buffer_aux *aux;
+	aux = dm_bufio_get_aux_data(to_buffer(b));
 
 	if (aux->write_locked) {
 		dm_bufio_mark_buffer_dirty(to_buffer(b));
@@ -629,7 +616,7 @@ void dm_bm_prefetch(struct dm_block_manager *bm, dm_block_t b)
 
 bool dm_bm_is_read_only(struct dm_block_manager *bm)
 {
-	return bm ? bm->read_only : true;
+	return (bm ? bm->read_only : true);
 }
 EXPORT_SYMBOL_GPL(dm_bm_is_read_only);
 
@@ -656,7 +643,7 @@ EXPORT_SYMBOL_GPL(dm_bm_checksum);
 /*----------------------------------------------------------------*/
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Joe Thornber <dm-devel@lists.linux.dev>");
+MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
 MODULE_DESCRIPTION("Immutable metadata library for dm");
 
 /*----------------------------------------------------------------*/

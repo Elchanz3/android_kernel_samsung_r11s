@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2020 Intel Corporation
+// Copyright(c) 2020 Intel Corporation. All rights reserved.
 //
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
@@ -19,16 +19,16 @@
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <sound/intel-dsp-config.h>
 #include <sound/soc.h>
 #include <sound/soc-acpi.h>
+#include <sound/soc-acpi-intel-match.h>
 #include "core.h"
 #include "registers.h"
 
 #define CREATE_TRACE_POINTS
 #include "trace.h"
 
-static int catpt_suspend(struct device *dev)
+static int __maybe_unused catpt_suspend(struct device *dev)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(dev);
 	struct dma_chan *chan;
@@ -69,15 +69,15 @@ release_dma_chan:
 	dma_release_channel(chan);
 	if (ret)
 		return ret;
-	return catpt_dsp_power_down(cdev);
+	return cdev->spec->power_down(cdev);
 }
 
-static int catpt_resume(struct device *dev)
+static int __maybe_unused catpt_resume(struct device *dev)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(dev);
 	int ret, i;
 
-	ret = catpt_dsp_power_up(cdev);
+	ret = cdev->spec->power_up(cdev);
 	if (ret)
 		return ret;
 
@@ -106,7 +106,7 @@ static int catpt_resume(struct device *dev)
 	return 0;
 }
 
-static int catpt_runtime_suspend(struct device *dev)
+static int __maybe_unused catpt_runtime_suspend(struct device *dev)
 {
 	if (!try_module_get(dev->driver->owner)) {
 		dev_info(dev, "module unloading, skipping suspend\n");
@@ -117,14 +117,14 @@ static int catpt_runtime_suspend(struct device *dev)
 	return catpt_suspend(dev);
 }
 
-static int catpt_runtime_resume(struct device *dev)
+static int __maybe_unused catpt_runtime_resume(struct device *dev)
 {
 	return catpt_resume(dev);
 }
 
 static const struct dev_pm_ops catpt_dev_pm = {
-	SYSTEM_SLEEP_PM_OPS(catpt_suspend, catpt_resume)
-	RUNTIME_PM_OPS(catpt_runtime_suspend, catpt_runtime_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(catpt_suspend, catpt_resume)
+	SET_RUNTIME_PM_OPS(catpt_runtime_suspend, catpt_runtime_resume, NULL)
 };
 
 /* machine board owned by CATPT is removed with this hook */
@@ -162,7 +162,7 @@ static int catpt_probe_components(struct catpt_dev *cdev)
 {
 	int ret;
 
-	ret = catpt_dsp_power_up(cdev);
+	ret = cdev->spec->power_up(cdev);
 	if (ret)
 		return ret;
 
@@ -204,7 +204,7 @@ err_reg_board:
 err_boot_fw:
 	catpt_dmac_remove(cdev);
 err_dmac_probe:
-	catpt_dsp_power_down(cdev);
+	cdev->spec->power_down(cdev);
 
 	return ret;
 }
@@ -239,25 +239,17 @@ static int catpt_acpi_probe(struct platform_device *pdev)
 	const struct catpt_spec *spec;
 	struct catpt_dev *cdev;
 	struct device *dev = &pdev->dev;
-	const struct acpi_device_id *id;
 	struct resource *res;
 	int ret;
 
-	id = acpi_match_device(dev->driver->acpi_match_table, dev);
-	if (!id)
+	spec = device_get_match_data(dev);
+	if (!spec)
 		return -ENODEV;
-
-	ret = snd_intel_acpi_dsp_driver_probe(dev, id->id);
-	if (ret != SND_INTEL_DSP_DRIVER_ANY && ret != SND_INTEL_DSP_DRIVER_SST) {
-		dev_dbg(dev, "CATPT ACPI driver not selected, aborting probe\n");
-		return -ENODEV;
-	}
 
 	cdev = devm_kzalloc(dev, sizeof(*cdev), GFP_KERNEL);
 	if (!cdev)
 		return -ENOMEM;
 
-	spec = (const struct catpt_spec *)id->driver_data;
 	catpt_dev_init(cdev, dev, spec);
 
 	/* map DSP bar address */
@@ -293,7 +285,7 @@ static int catpt_acpi_probe(struct platform_device *pdev)
 	return catpt_probe_components(cdev);
 }
 
-static void catpt_acpi_remove(struct platform_device *pdev)
+static int catpt_acpi_remove(struct platform_device *pdev)
 {
 	struct catpt_dev *cdev = platform_get_drvdata(pdev);
 
@@ -301,42 +293,16 @@ static void catpt_acpi_remove(struct platform_device *pdev)
 
 	snd_soc_unregister_component(cdev->dev);
 	catpt_dmac_remove(cdev);
-	catpt_dsp_power_down(cdev);
+	cdev->spec->power_down(cdev);
 
 	catpt_sram_free(&cdev->iram);
 	catpt_sram_free(&cdev->dram);
+
+	return 0;
 }
 
-static struct snd_soc_acpi_mach lpt_machines[] = {
-	{
-		.id = "INT33CA",
-		.drv_name = "hsw_rt5640",
-	},
-	{}
-};
-
-static struct snd_soc_acpi_mach wpt_machines[] = {
-	{
-		.id = "INT33CA",
-		.drv_name = "hsw_rt5640",
-	},
-	{
-		.id = "INT343A",
-		.drv_name = "bdw_rt286",
-	},
-	{
-		.id = "10EC5650",
-		.drv_name = "bdw-rt5650",
-	},
-	{
-		.id = "RT5677CE",
-		.drv_name = "bdw-rt5677",
-	},
-	{}
-};
-
 static struct catpt_spec lpt_desc = {
-	.machines = lpt_machines,
+	.machines = snd_soc_acpi_intel_haswell_machines,
 	.core_id = 0x01,
 	.host_dram_offset = 0x000000,
 	.host_iram_offset = 0x080000,
@@ -345,13 +311,13 @@ static struct catpt_spec lpt_desc = {
 	.host_ssp_offset = { 0x0E8000, 0x0E9000 },
 	.dram_mask = LPT_VDRTCTL0_DSRAMPGE_MASK,
 	.iram_mask = LPT_VDRTCTL0_ISRAMPGE_MASK,
-	.d3srampgd_bit = LPT_VDRTCTL0_D3SRAMPGD,
-	.d3pgd_bit = LPT_VDRTCTL0_D3PGD,
 	.pll_shutdown = lpt_dsp_pll_shutdown,
+	.power_up = lpt_dsp_power_up,
+	.power_down = lpt_dsp_power_down,
 };
 
 static struct catpt_spec wpt_desc = {
-	.machines = wpt_machines,
+	.machines = snd_soc_acpi_intel_broadwell_machines,
 	.core_id = 0x02,
 	.host_dram_offset = 0x000000,
 	.host_iram_offset = 0x0A0000,
@@ -360,9 +326,9 @@ static struct catpt_spec wpt_desc = {
 	.host_ssp_offset = { 0x0FC000, 0x0FD000 },
 	.dram_mask = WPT_VDRTCTL0_DSRAMPGE_MASK,
 	.iram_mask = WPT_VDRTCTL0_ISRAMPGE_MASK,
-	.d3srampgd_bit = WPT_VDRTCTL0_D3SRAMPGD,
-	.d3pgd_bit = WPT_VDRTCTL0_D3PGD,
 	.pll_shutdown = wpt_dsp_pll_shutdown,
+	.power_up = wpt_dsp_power_up,
+	.power_down = wpt_dsp_power_down,
 };
 
 static const struct acpi_device_id catpt_ids[] = {
@@ -378,7 +344,7 @@ static struct platform_driver catpt_acpi_driver = {
 	.driver = {
 		.name = "intel_catpt",
 		.acpi_match_table = catpt_ids,
-		.pm = pm_ptr(&catpt_dev_pm),
+		.pm = &catpt_dev_pm,
 		.dev_groups = catpt_attr_groups,
 	},
 };

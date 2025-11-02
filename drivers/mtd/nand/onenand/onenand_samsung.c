@@ -396,7 +396,6 @@ static int s3c_onenand_command(struct mtd_info *mtd, int cmd, loff_t addr,
 	case ONENAND_CMD_READOOB:
 	case ONENAND_CMD_BUFFERRAM:
 		ONENAND_SET_NEXT_BUFFERRAM(this);
-		break;
 	default:
 		break;
 	}
@@ -860,7 +859,8 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 
 	s3c_onenand_setup(mtd);
 
-	onenand->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
+	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	onenand->base = devm_ioremap_resource(&pdev->dev, r);
 	if (IS_ERR(onenand->base))
 		return PTR_ERR(onenand->base);
 
@@ -873,7 +873,8 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 	this->options |= ONENAND_SKIP_UNLOCK_CHECK;
 
 	if (onenand->type != TYPE_S5PC110) {
-		onenand->ahb_addr = devm_platform_ioremap_resource(pdev, 1);
+		r = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+		onenand->ahb_addr = devm_ioremap_resource(&pdev->dev, r);
 		if (IS_ERR(onenand->ahb_addr))
 			return PTR_ERR(onenand->ahb_addr);
 
@@ -893,7 +894,8 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 		this->subpagesize = mtd->writesize;
 
 	} else { /* S5PC110 */
-		onenand->dma_addr = devm_platform_ioremap_resource(pdev, 1);
+		r = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+		onenand->dma_addr = devm_ioremap_resource(&pdev->dev, r);
 		if (IS_ERR(onenand->dma_addr))
 			return PTR_ERR(onenand->dma_addr);
 
@@ -940,11 +942,13 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void s3c_onenand_remove(struct platform_device *pdev)
+static int s3c_onenand_remove(struct platform_device *pdev)
 {
 	struct mtd_info *mtd = platform_get_drvdata(pdev);
 
 	onenand_release(mtd);
+
+	return 0;
 }
 
 static int s3c_pm_ops_suspend(struct device *dev)

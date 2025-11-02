@@ -46,18 +46,6 @@ static inline int membuf_write(struct membuf *s, const void *v, size_t size)
 	return s->left;
 }
 
-static inline struct membuf membuf_at(const struct membuf *s, size_t offs)
-{
-	struct membuf n = *s;
-
-	if (offs > n.left)
-		offs = n.left;
-	n.p += offs;
-	n.left -= offs;
-
-	return n;
-}
-
 /* current s->p must be aligned for v; v must be a scalar */
 #define membuf_store(s, v)				\
 ({							\
@@ -151,8 +139,7 @@ typedef int user_regset_writeback_fn(struct task_struct *target,
  * @align:		Required alignment, in bytes.
  * @bias:		Bias from natural indexing.
  * @core_note_type:	ELF note @n_type value used in core dumps.
- * @core_note_name:	ELF note name to qualify the note type.
- * @regset_get:		Function to fetch values.
+ * @get:		Function to fetch values.
  * @set:		Function to store values.
  * @active:		Function to report if regset is active, or %NULL.
  * @writeback:		Function to write data back to user memory, or %NULL.
@@ -191,10 +178,6 @@ typedef int user_regset_writeback_fn(struct task_struct *target,
  *
  * If nonzero, @core_note_type gives the n_type field (NT_* value)
  * of the core file note in which this regset's data appears.
- * @core_note_name specifies the note name.  The preferred way to
- * specify these two fields is to use the @USER_REGSET_NOTE_TYPE()
- * macro.
- *
  * NT_PRSTATUS is a special case in that the regset data starts at
  * offsetof(struct elf_prstatus, pr_reg) into the note data; that is
  * part of the per-machine ELF formats userland knows about.  In
@@ -212,12 +195,7 @@ struct user_regset {
 	unsigned int 			align;
 	unsigned int 			bias;
 	unsigned int 			core_note_type;
-	const char			*core_note_name;
 };
-
-#define USER_REGSET_NOTE_TYPE(type) \
-	.core_note_type			= (NT_ ## type), \
-	.core_note_name			= (NN_ ## type)
 
 /**
  * struct user_regset_view - available regsets
@@ -285,15 +263,15 @@ static inline int user_regset_copyin(unsigned int *pos, unsigned int *count,
 	return 0;
 }
 
-static inline void user_regset_copyin_ignore(unsigned int *pos,
-					     unsigned int *count,
-					     const void **kbuf,
-					     const void __user **ubuf,
-					     const int start_pos,
-					     const int end_pos)
+static inline int user_regset_copyin_ignore(unsigned int *pos,
+					    unsigned int *count,
+					    const void **kbuf,
+					    const void __user **ubuf,
+					    const int start_pos,
+					    const int end_pos)
 {
 	if (*count == 0)
-		return;
+		return 0;
 	BUG_ON(*pos < start_pos);
 	if (end_pos < 0 || *pos < end_pos) {
 		unsigned int copy = (end_pos < 0 ? *count
@@ -305,6 +283,7 @@ static inline void user_regset_copyin_ignore(unsigned int *pos,
 		*pos += copy;
 		*count -= copy;
 	}
+	return 0;
 }
 
 extern int regset_get(struct task_struct *target,

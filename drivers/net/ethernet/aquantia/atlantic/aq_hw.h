@@ -104,7 +104,7 @@ struct aq_stats_s {
 };
 
 #define AQ_HW_IRQ_INVALID 0U
-#define AQ_HW_IRQ_INTX	  1U
+#define AQ_HW_IRQ_LEGACY  1U
 #define AQ_HW_IRQ_MSI     2U
 #define AQ_HW_IRQ_MSIX    3U
 
@@ -112,8 +112,6 @@ struct aq_stats_s {
 
 #define AQ_HW_POWER_STATE_D0   0U
 #define AQ_HW_POWER_STATE_D3   3U
-
-#define	AQ_FW_WAKE_ON_LINK_RTPM BIT(10)
 
 #define AQ_HW_FLAG_STARTED     0x00000004U
 #define AQ_HW_FLAG_STOPPING    0x00000008U
@@ -221,7 +219,7 @@ struct aq_hw_ops {
 	int (*hw_ring_tx_head_update)(struct aq_hw_s *self,
 				      struct aq_ring_s *aq_ring);
 
-	int (*hw_set_mac_address)(struct aq_hw_s *self, const u8 *mac_addr);
+	int (*hw_set_mac_address)(struct aq_hw_s *self, u8 *mac_addr);
 
 	int (*hw_soft_reset)(struct aq_hw_s *self);
 
@@ -230,7 +228,7 @@ struct aq_hw_ops {
 
 	int (*hw_reset)(struct aq_hw_s *self);
 
-	int (*hw_init)(struct aq_hw_s *self, const u8 *mac_addr);
+	int (*hw_init)(struct aq_hw_s *self, u8 *mac_addr);
 
 	int (*hw_start)(struct aq_hw_s *self);
 
@@ -342,9 +340,6 @@ struct aq_hw_ops {
 	int (*hw_set_loopback)(struct aq_hw_s *self, u32 mode, bool enable);
 
 	int (*hw_get_mac_temp)(struct aq_hw_s *self, u32 *temp);
-
-	int (*hw_read_module_eeprom)(struct aq_hw_s *self, u8 dev_addr,
-				     u8 reg_start_addr, int len, u8 *data);
 };
 
 struct aq_fw_ops {
@@ -380,7 +375,7 @@ struct aq_fw_ops {
 	int (*set_phyloopback)(struct aq_hw_s *self, u32 mode, bool enable);
 
 	int (*set_power)(struct aq_hw_s *self, unsigned int power_state,
-			 const u8 *mac);
+			 u8 *mac);
 
 	int (*send_fw_request)(struct aq_hw_s *self,
 			       const struct hw_fw_request_iface *fw_req,

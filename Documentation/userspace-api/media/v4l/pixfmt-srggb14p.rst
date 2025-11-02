@@ -24,7 +24,7 @@ These four pixel formats are packed raw sRGB / Bayer formats with 14
 bits per colour. Every four consecutive samples are packed into seven
 bytes. Each of the first four bytes contain the eight high order bits
 of the pixels, and the three following bytes contains the six least
-significant bits of each pixel, in the same order.
+significants bits of each pixel, in the same order.
 
 Each n-pixel row contains n/2 green samples and n/2 blue or red samples,
 with alternating green-red and green-blue rows. They are conventionally
@@ -36,11 +36,9 @@ Each cell is one byte.
 
 .. raw:: latex
 
-    \begingroup
     \footnotesize
-    \setlength{\tabcolsep}{2pt}
 
-.. tabularcolumns:: |p{1.6cm}|p{1.0cm}|p{1.0cm}|p{1.0cm}|p{1.0cm}|p{3.5cm}|p{3.5cm}|p{3.5cm}|
+.. tabularcolumns:: |p{1.8cm}|p{1.0cm}|p{1.0cm}|p{1.0cm}|p{1.1cm}|p{3.3cm}|p{3.3cm}|p{3.3cm}|
 
 .. flat-table::
     :header-rows:  0
@@ -143,5 +141,5 @@ Each cell is one byte.
 
 .. raw:: latex
 
-    \endgroup
+    \normalsize
 

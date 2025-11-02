@@ -98,9 +98,6 @@ static struct sctp_association *sctp_association_init(
 	 * sock configured value.
 	 */
 	asoc->hbinterval = msecs_to_jiffies(sp->hbinterval);
-	asoc->probe_interval = msecs_to_jiffies(sp->probe_interval);
-
-	asoc->encap_port = sp->encap_port;
 
 	/* Initialize path max retrans value. */
 	asoc->pathmaxrxt = sp->pathmaxrxt;
@@ -137,8 +134,7 @@ static struct sctp_association *sctp_association_init(
 		= 5 * asoc->rto_max;
 
 	asoc->timeouts[SCTP_EVENT_TIMEOUT_SACK] = asoc->sackdelay;
-	asoc->timeouts[SCTP_EVENT_TIMEOUT_AUTOCLOSE] =
-		(unsigned long)sp->autoclose * HZ;
+	asoc->timeouts[SCTP_EVENT_TIMEOUT_AUTOCLOSE] = sp->autoclose * HZ;
 
 	/* Initializes the timers */
 	for (i = SCTP_EVENT_TIMEOUT_NONE; i < SCTP_NUM_TIMEOUT_TYPES; ++i)
@@ -227,7 +223,8 @@ static struct sctp_association *sctp_association_init(
 	/* Create an output queue.  */
 	sctp_outq_init(asoc, &asoc->outqueue);
 
-	sctp_ulpq_init(&asoc->ulpq, asoc);
+	if (!sctp_ulpq_init(&asoc->ulpq, asoc))
+		goto fail_init;
 
 	if (sctp_stream_init(&asoc->stream, asoc->c.sinit_num_ostreams, 0, gfp))
 		goto stream_free;
@@ -277,6 +274,7 @@ static struct sctp_association *sctp_association_init(
 
 stream_free:
 	sctp_stream_free(&asoc->stream);
+fail_init:
 	sock_put(asoc->base.sk);
 	sctp_endpoint_put(asoc->ep);
 	return NULL;
@@ -362,7 +360,7 @@ void sctp_association_free(struct sctp_association *asoc)
 	 * on our state.
 	 */
 	for (i = SCTP_EVENT_TIMEOUT_NONE; i < SCTP_NUM_TIMEOUT_TYPES; ++i) {
-		if (timer_delete(&asoc->timers[i]))
+		if (del_timer(&asoc->timers[i]))
 			sctp_association_put(asoc);
 	}
 
@@ -624,9 +622,6 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	 * association configured value.
 	 */
 	peer->hbinterval = asoc->hbinterval;
-	peer->probe_interval = asoc->probe_interval;
-
-	peer->encap_port = asoc->encap_port;
 
 	/* Set the path max_retrans.  */
 	peer->pathmaxrxt = asoc->pathmaxrxt;
@@ -714,8 +709,6 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 		return NULL;
 	}
 
-	sctp_transport_pl_reset(peer);
-
 	/* Attach the remote transport to our asoc.  */
 	list_add_tail_rcu(&peer->transports, &asoc->peer.transport_addr_list);
 	asoc->peer.transport_count++;
@@ -734,6 +727,24 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	}
 
 	return peer;
+}
+
+/* Delete a transport address from an association.  */
+void sctp_assoc_del_peer(struct sctp_association *asoc,
+			 const union sctp_addr *addr)
+{
+	struct list_head	*pos;
+	struct list_head	*temp;
+	struct sctp_transport	*transport;
+
+	list_for_each_safe(pos, temp, &asoc->peer.transport_addr_list) {
+		transport = list_entry(pos, struct sctp_transport, transports);
+		if (sctp_cmp_addr_exact(addr, &transport->ipaddr)) {
+			/* Do book keeping for removing the peer and free it. */
+			sctp_assoc_rm_peer(asoc, transport);
+			break;
+		}
+	}
 }
 
 /* Lookup a transport by address. */
@@ -796,7 +807,6 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 			spc_state = SCTP_ADDR_CONFIRMED;
 
 		transport->state = SCTP_ACTIVE;
-		sctp_transport_pl_reset(transport);
 		break;
 
 	case SCTP_TRANSPORT_DOWN:
@@ -806,7 +816,6 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 		 */
 		if (transport->state != SCTP_UNCONFIRMED) {
 			transport->state = SCTP_INACTIVE;
-			sctp_transport_pl_reset(transport);
 			spc_state = SCTP_ADDR_UNREACHABLE;
 		} else {
 			sctp_transport_dst_release(transport);
@@ -1503,7 +1512,7 @@ void sctp_assoc_rwnd_increase(struct sctp_association *asoc, unsigned int len)
 
 		/* Stop the SACK timer.  */
 		timer = &asoc->timers[SCTP_EVENT_TIMEOUT_SACK];
-		if (timer_delete(timer))
+		if (del_timer(timer))
 			sctp_association_put(asoc);
 	}
 }
@@ -1579,10 +1588,9 @@ int sctp_assoc_set_bind_addr_from_cookie(struct sctp_association *asoc,
 					 struct sctp_cookie *cookie,
 					 gfp_t gfp)
 {
-	struct sctp_init_chunk *peer_init = (struct sctp_init_chunk *)(cookie + 1);
-	int var_size2 = ntohs(peer_init->chunk_hdr.length);
+	int var_size2 = ntohs(cookie->peer_init->chunk_hdr.length);
 	int var_size3 = cookie->raw_addr_list_len;
-	__u8 *raw = (__u8 *)peer_init + var_size2;
+	__u8 *raw = (__u8 *)cookie->peer_init + var_size2;
 
 	return sctp_raw_to_bind_addrs(&asoc->base.bind_addr, raw, var_size3,
 				      asoc->ep->base.bind_addr.port, gfp);

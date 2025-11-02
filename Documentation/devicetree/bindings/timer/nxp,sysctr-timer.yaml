@@ -18,14 +18,7 @@ description: |
 
 properties:
   compatible:
-    oneOf:
-      - enum:
-          - nxp,imx95-sysctr-timer
-          - nxp,sysctr-timer
-      - items:
-          - enum:
-              - nxp,imx94-sysctr-timer
-          - const: nxp,imx95-sysctr-timer
+    const: nxp,sysctr-timer
 
   reg:
     maxItems: 1
@@ -38,10 +31,6 @@ properties:
 
   clock-names:
     const: per
-
-  nxp,no-divider:
-    description: if present, means there is no internal base clk divider.
-    type: boolean
 
 required:
   - compatible

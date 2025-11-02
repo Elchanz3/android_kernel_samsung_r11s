@@ -7,7 +7,7 @@
 
 #include <linux/io.h>
 #include <linux/bitops.h>
-#include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/irqdomain.h>
@@ -15,7 +15,6 @@
 
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
-#include <asm/time.h>
 
 #include "common.h"
 
@@ -101,7 +100,7 @@ static void ralink_intc_irq_handler(struct irq_desc *desc)
 
 	if (pending) {
 		struct irq_domain *domain = irq_desc_get_handler_data(desc);
-		generic_handle_domain_irq(domain, __ffs(pending));
+		generic_handle_irq(irq_find_mapping(domain, __ffs(pending)));
 	} else {
 		spurious_interrupt();
 	}
@@ -177,7 +176,7 @@ static int __init intc_of_init(struct device_node *node,
 	/* route all INTC interrupts to MIPS HW0 interrupt */
 	rt_intc_w32(0, INTC_REG_TYPE);
 
-	domain = irq_domain_create_legacy(of_fwnode_handle(node), RALINK_INTC_IRQ_COUNT,
+	domain = irq_domain_add_legacy(node, RALINK_INTC_IRQ_COUNT,
 			RALINK_INTC_IRQ_BASE, 0, &irq_domain_ops, NULL);
 	if (!domain)
 		panic("Failed to add irqdomain");

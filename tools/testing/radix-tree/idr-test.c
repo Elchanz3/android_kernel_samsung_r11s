@@ -296,10 +296,6 @@ static void *idr_throbber(void *arg)
 	return NULL;
 }
 
-/*
- * There are always either 1 or 2 objects in the IDR.  If we find nothing,
- * or we find something at an ID we didn't expect, that's a bug.
- */
 void idr_find_test_1(int anchor_id, int throbber_id)
 {
 	pthread_t throbber;
@@ -315,12 +311,7 @@ void idr_find_test_1(int anchor_id, int throbber_id)
 		int id = 0;
 		void *entry = idr_get_next(&find_idr, &id);
 		rcu_read_unlock();
-		if ((id != anchor_id && id != throbber_id) ||
-		    entry != xa_mk_value(id)) {
-			printf("%s(%d, %d): %p at %d\n", __func__, anchor_id,
-				throbber_id, entry, id);
-			abort();
-		}
+		BUG_ON(entry != xa_mk_value(id));
 		rcu_read_lock();
 	} while (time(NULL) < start + 11);
 	rcu_read_unlock();
@@ -424,7 +415,6 @@ void idr_checks(void)
 #define module_init(x)
 #define module_exit(x)
 #define MODULE_AUTHOR(x)
-#define MODULE_DESCRIPTION(X)
 #define MODULE_LICENSE(x)
 #define dump_stack()    assert(0)
 void ida_dump(struct ida *);
@@ -499,17 +489,19 @@ void ida_check_random(void)
 		goto repeat;
 }
 
-void ida_alloc_free_test(void)
+void ida_simple_get_remove_test(void)
 {
 	DEFINE_IDA(ida);
 	unsigned long i;
 
-	for (i = 0; i < 10000; i++)
-		assert(ida_alloc_max(&ida, 20000, GFP_KERNEL) == i);
-	assert(ida_alloc_range(&ida, 5, 30, GFP_KERNEL) < 0);
+	for (i = 0; i < 10000; i++) {
+		assert(ida_simple_get(&ida, 0, 20000, GFP_KERNEL) == i);
+	}
+	assert(ida_simple_get(&ida, 5, 30, GFP_KERNEL) < 0);
 
-	for (i = 0; i < 10000; i++)
-		ida_free(&ida, i);
+	for (i = 0; i < 10000; i++) {
+		ida_simple_remove(&ida, i);
+	}
 	assert(ida_is_empty(&ida));
 
 	ida_destroy(&ida);
@@ -522,7 +514,7 @@ void user_ida_checks(void)
 	ida_check_nomem();
 	ida_check_conv_user();
 	ida_check_random();
-	ida_alloc_free_test();
+	ida_simple_get_remove_test();
 
 	radix_tree_cpu_dead(1);
 }

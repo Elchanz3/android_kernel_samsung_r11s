@@ -6,6 +6,7 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/string.h>
+#include "../core/fb_draw.h"
 
 #include <asm/io.h>
 
@@ -45,7 +46,7 @@
  * The Screen position of the top left corner of the displayed
  * cursor is specificed by CURS_HORZ_VERT_POSN. Care must be taken
  * when the cursor hot spot is not the top left corner and the
- * physical cursor position becomes negative. It will be displayed
+ * physical cursor position becomes negative. It will be be displayed
  * if either the horizontal or vertical cursor position is negative
  *
  * If x becomes negative the cursor manager must adjust the CURS_HORZ_OFFSET
@@ -55,12 +56,6 @@
  * CUR_OFFSET must be adjusted to a point to the appropriate line in the cursor
  * definitation and CUR_VERT_POSN must be saturated to zero.
  */
-
-/* compose pixels based on mask */
-static inline unsigned long comp(unsigned long set, unsigned long unset, unsigned long mask)
-{
-	return ((set ^ unset) & mask) ^ unset;
-}
 
     /*
      *  Hardware Cursor support.
@@ -158,7 +153,7 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 	    u8 m, b;
 
 	    // Clear cursor image with 1010101010...
-	    fb_memset_io(dst, 0xaa, 1024);
+	    fb_memset(dst, 0xaa, 1024);
 
 	    offset = align - width*2;
 

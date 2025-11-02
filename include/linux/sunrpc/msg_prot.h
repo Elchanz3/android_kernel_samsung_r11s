@@ -10,6 +10,9 @@
 
 #define RPC_VERSION 2
 
+/* size of an XDR encoding unit in bytes, i.e. 32bit */
+#define XDR_UNIT	(4)
+
 /* spec defines authentication flavor as an unsigned 32 bit integer */
 typedef u32	rpc_authflavor_t;
 
@@ -20,7 +23,6 @@ enum rpc_auth_flavors {
 	RPC_AUTH_DES   = 3,
 	RPC_AUTH_KRB   = 4,
 	RPC_AUTH_GSS   = 6,
-	RPC_AUTH_TLS   = 7,
 	RPC_AUTH_MAXFLAVOR = 8,
 	/* pseudoflavors: */
 	RPC_AUTH_GSS_KRB5  = 390003,
@@ -33,11 +35,6 @@ enum rpc_auth_flavors {
 	RPC_AUTH_GSS_SPKMI = 390010,
 	RPC_AUTH_GSS_SPKMP = 390011,
 };
-
-/* Maximum size (in octets) of the machinename in an AUTH_UNIX
- * credential (per RFC 5531 Appendix A)
- */
-#define RPC_MAX_MACHINENAME	(255)
 
 /* Maximum size (in bytes) of an rpc credential or verifier */
 #define RPC_MAX_AUTH_SIZE (400)
@@ -69,17 +66,15 @@ enum rpc_reject_stat {
 };
 
 enum rpc_auth_stat {
-	RPC_AUTH_OK = 0,		/* success */
-	RPC_AUTH_BADCRED = 1,		/* bad credential (seal broken) */
-	RPC_AUTH_REJECTEDCRED = 2,	/* client must begin new session */
-	RPC_AUTH_BADVERF = 3,		/* bad verifier (seal broken) */
-	RPC_AUTH_REJECTEDVERF = 4,	/* verifier expired or replayed */
-	RPC_AUTH_TOOWEAK = 5,		/* rejected for security reasons */
-	RPC_AUTH_INVALIDRESP = 6,	/* bogus response verifier */
-	RPC_AUTH_FAILED = 7,		/* reason unknown */
+	RPC_AUTH_OK = 0,
+	RPC_AUTH_BADCRED = 1,
+	RPC_AUTH_REJECTEDCRED = 2,
+	RPC_AUTH_BADVERF = 3,
+	RPC_AUTH_REJECTEDVERF = 4,
+	RPC_AUTH_TOOWEAK = 5,
 	/* RPCSEC_GSS errors */
-	RPCSEC_GSS_CREDPROBLEM = 13,	/* no credentials for user */
-	RPCSEC_GSS_CTXPROBLEM = 14	/* problem with context */
+	RPCSEC_GSS_CREDPROBLEM = 13,
+	RPCSEC_GSS_CTXPROBLEM = 14
 };
 
 #define RPC_MAXNETNAMELEN	256

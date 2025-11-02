@@ -21,7 +21,7 @@
 
 #include <linux/kernel.h>
 #include <linux/mutex.h>
-#include <linux/phylink.h>
+#include <linux/phy.h>
 #include <linux/etherdevice.h>
 #include <net/dsa.h>
 
@@ -29,6 +29,7 @@
 
 struct b53_device;
 struct net_device;
+struct phylink_link_state;
 
 struct b53_io_ops {
 	int (*read8)(struct b53_device *dev, u8 page, u8 reg, u8 *value);
@@ -45,39 +46,34 @@ struct b53_io_ops {
 	int (*phy_write16)(struct b53_device *dev, int addr, int reg, u16 value);
 	int (*irq_enable)(struct b53_device *dev, int port);
 	void (*irq_disable)(struct b53_device *dev, int port);
-	void (*phy_enable)(struct b53_device *dev, int port);
-	void (*phy_disable)(struct b53_device *dev, int port);
-	void (*phylink_get_caps)(struct b53_device *dev, int port,
-				 struct phylink_config *config);
-	struct phylink_pcs *(*phylink_mac_select_pcs)(struct b53_device *dev,
-						      int port,
-						      phy_interface_t interface);
 	u8 (*serdes_map_lane)(struct b53_device *dev, int port);
+	int (*serdes_link_state)(struct b53_device *dev, int port,
+				 struct phylink_link_state *state);
+	void (*serdes_config)(struct b53_device *dev, int port,
+			      unsigned int mode,
+			      const struct phylink_link_state *state);
+	void (*serdes_an_restart)(struct b53_device *dev, int port);
 	void (*serdes_link_set)(struct b53_device *dev, int port,
 				unsigned int mode, phy_interface_t interface,
 				bool link_up);
+	void (*serdes_phylink_validate)(struct b53_device *dev, int port,
+					unsigned long *supported,
+					struct phylink_link_state *state);
 };
 
 #define B53_INVALID_LANE	0xff
 
 enum {
-	BCM4908_DEVICE_ID = 0x4908,
 	BCM5325_DEVICE_ID = 0x25,
 	BCM5365_DEVICE_ID = 0x65,
 	BCM5389_DEVICE_ID = 0x89,
 	BCM5395_DEVICE_ID = 0x95,
 	BCM5397_DEVICE_ID = 0x97,
 	BCM5398_DEVICE_ID = 0x98,
-	BCM53101_DEVICE_ID = 0x53101,
 	BCM53115_DEVICE_ID = 0x53115,
 	BCM53125_DEVICE_ID = 0x53125,
 	BCM53128_DEVICE_ID = 0x53128,
 	BCM63XX_DEVICE_ID = 0x6300,
-	BCM6318_DEVICE_ID = 0x6318,
-	BCM6328_DEVICE_ID = 0x6328,
-	BCM6362_DEVICE_ID = 0x6362,
-	BCM6368_DEVICE_ID = 0x6368,
-	BCM63268_DEVICE_ID = 0x63268,
 	BCM53010_DEVICE_ID = 0x53010,
 	BCM53011_DEVICE_ID = 0x53011,
 	BCM53012_DEVICE_ID = 0x53012,
@@ -87,29 +83,14 @@ enum {
 	BCM583XX_DEVICE_ID = 0x58300,
 	BCM7445_DEVICE_ID = 0x7445,
 	BCM7278_DEVICE_ID = 0x7278,
-	BCM53134_DEVICE_ID = 0x5075,
-};
-
-enum b53_variant_id {
-	B53_VARIANT_NONE = 0,
-	B53_VARIANT_5325E,
-	B53_VARIANT_5325M,
-};
-
-struct b53_pcs {
-	struct phylink_pcs pcs;
-	struct b53_device *dev;
-	u8 lane;
 };
 
 #define B53_N_PORTS	9
 #define B53_N_PORTS_25	6
-#define B53_N_PCS	2
 
 struct b53_port {
 	u16		vlan_ctl_mask;
-	u16		pvid;
-	struct ethtool_keee eee;
+	struct ethtool_eee eee;
 };
 
 struct b53_vlan {
@@ -125,12 +106,10 @@ struct b53_device {
 
 	struct mutex reg_mutex;
 	struct mutex stats_mutex;
-	struct mutex arl_mutex;
 	const struct b53_io_ops *ops;
 
 	/* chip specific data */
 	u32 chip_id;
-	enum b53_variant_id variant_id;
 	u8 core_rev;
 	u8 vta_regs[3];
 	u8 duplex_reg;
@@ -144,6 +123,7 @@ struct b53_device {
 	/* used ports mask */
 	u16 enabled_ports;
 	unsigned int imp_port;
+	unsigned int cpu_port;
 
 	/* connect specific data */
 	u8 current_page;
@@ -161,11 +141,8 @@ struct b53_device {
 	unsigned int num_vlans;
 	struct b53_vlan *vlans;
 	bool vlan_enabled;
-	bool vlan_filtering;
 	unsigned int num_ports;
 	struct b53_port *ports;
-
-	struct b53_pcs pcs[B53_N_PCS];
 };
 
 #define b53_for_each_port(dev, i) \
@@ -176,18 +153,6 @@ struct b53_device {
 static inline int is5325(struct b53_device *dev)
 {
 	return dev->chip_id == BCM5325_DEVICE_ID;
-}
-
-static inline int is5325e(struct b53_device *dev)
-{
-	return is5325(dev) &&
-		dev->variant_id == B53_VARIANT_5325E;
-}
-
-static inline int is5325m(struct b53_device *dev)
-{
-	return is5325(dev) &&
-		dev->variant_id == B53_VARIANT_5325M;
 }
 
 static inline int is5365(struct b53_device *dev)
@@ -216,25 +181,16 @@ static inline int is531x5(struct b53_device *dev)
 {
 	return dev->chip_id == BCM53115_DEVICE_ID ||
 		dev->chip_id == BCM53125_DEVICE_ID ||
-		dev->chip_id == BCM53101_DEVICE_ID ||
-		dev->chip_id == BCM53128_DEVICE_ID ||
-		dev->chip_id == BCM53134_DEVICE_ID;
+		dev->chip_id == BCM53128_DEVICE_ID;
 }
 
 static inline int is63xx(struct b53_device *dev)
 {
-	return dev->chip_id == BCM63XX_DEVICE_ID ||
-		dev->chip_id == BCM6318_DEVICE_ID ||
-		dev->chip_id == BCM6328_DEVICE_ID ||
-		dev->chip_id == BCM6362_DEVICE_ID ||
-		dev->chip_id == BCM6368_DEVICE_ID ||
-		dev->chip_id == BCM63268_DEVICE_ID;
-}
-
-static inline int is6318_268(struct b53_device *dev)
-{
-	return dev->chip_id == BCM6318_DEVICE_ID ||
-		dev->chip_id == BCM63268_DEVICE_ID;
+#ifdef CONFIG_BCM63XX
+	return dev->chip_id == BCM63XX_DEVICE_ID;
+#else
+	return 0;
+#endif
 }
 
 static inline int is5301x(struct b53_device *dev)
@@ -251,11 +207,9 @@ static inline int is58xx(struct b53_device *dev)
 	return dev->chip_id == BCM58XX_DEVICE_ID ||
 		dev->chip_id == BCM583XX_DEVICE_ID ||
 		dev->chip_id == BCM7445_DEVICE_ID ||
-		dev->chip_id == BCM7278_DEVICE_ID ||
-		dev->chip_id == BCM53134_DEVICE_ID;
+		dev->chip_id == BCM7278_DEVICE_ID;
 }
 
-#define B53_63XX_RGMII0	4
 #define B53_CPU_PORT_25	5
 #define B53_CPU_PORT	8
 
@@ -275,11 +229,6 @@ int b53_switch_register(struct b53_device *dev);
 static inline void b53_switch_remove(struct b53_device *dev)
 {
 	dsa_unregister_switch(dev->ds);
-}
-
-static inline void b53_switch_shutdown(struct b53_device *dev)
-{
-	dsa_switch_shutdown(dev->ds);
 }
 
 #define b53_build_op(type_op_size, val_type)				\
@@ -328,19 +277,6 @@ static inline void b53_arl_to_entry(struct b53_arl_entry *ent,
 	ent->vid = mac_vid >> ARLTBL_VID_S;
 }
 
-static inline void b53_arl_to_entry_25(struct b53_arl_entry *ent,
-				       u64 mac_vid)
-{
-	memset(ent, 0, sizeof(*ent));
-	ent->port = (mac_vid >> ARLTBL_DATA_PORT_ID_S_25) &
-		     ARLTBL_DATA_PORT_ID_MASK_25;
-	ent->is_valid = !!(mac_vid & ARLTBL_VALID_25);
-	ent->is_age = !!(mac_vid & ARLTBL_AGE_25);
-	ent->is_static = !!(mac_vid & ARLTBL_STATIC_25);
-	u64_to_ether_addr(mac_vid, ent->mac);
-	ent->vid = mac_vid >> ARLTBL_VID_S_65;
-}
-
 static inline void b53_arl_from_entry(u64 *mac_vid, u32 *fwd_entry,
 				      const struct b53_arl_entry *ent)
 {
@@ -353,22 +289,6 @@ static inline void b53_arl_from_entry(u64 *mac_vid, u32 *fwd_entry,
 		*fwd_entry |= ARLTBL_STATIC;
 	if (ent->is_age)
 		*fwd_entry |= ARLTBL_AGE;
-}
-
-static inline void b53_arl_from_entry_25(u64 *mac_vid,
-					 const struct b53_arl_entry *ent)
-{
-	*mac_vid = ether_addr_to_u64(ent->mac);
-	*mac_vid |= (u64)(ent->port & ARLTBL_DATA_PORT_ID_MASK_25) <<
-			  ARLTBL_DATA_PORT_ID_S_25;
-	*mac_vid |= (u64)(ent->vid & ARLTBL_VID_MASK_25) <<
-			  ARLTBL_VID_S_65;
-	if (ent->is_valid)
-		*mac_vid |= ARLTBL_VALID_25;
-	if (ent->is_static)
-		*mac_vid |= ARLTBL_STATIC_25;
-	if (ent->is_age)
-		*mac_vid |= ARLTBL_AGE_25;
 }
 
 #ifdef CONFIG_BCM47XX
@@ -402,54 +322,64 @@ void b53_get_strings(struct dsa_switch *ds, int port, u32 stringset,
 void b53_get_ethtool_stats(struct dsa_switch *ds, int port, uint64_t *data);
 int b53_get_sset_count(struct dsa_switch *ds, int port, int sset);
 void b53_get_ethtool_phy_stats(struct dsa_switch *ds, int port, uint64_t *data);
-int b53_set_ageing_time(struct dsa_switch *ds, unsigned int msecs);
-int b53_br_join(struct dsa_switch *ds, int port, struct dsa_bridge bridge,
-		bool *tx_fwd_offload, struct netlink_ext_ack *extack);
-void b53_br_leave(struct dsa_switch *ds, int port, struct dsa_bridge bridge);
+int b53_br_join(struct dsa_switch *ds, int port, struct net_device *bridge);
+void b53_br_leave(struct dsa_switch *ds, int port, struct net_device *bridge);
 void b53_br_set_stp_state(struct dsa_switch *ds, int port, u8 state);
 void b53_br_fast_age(struct dsa_switch *ds, int port);
-int b53_br_flags_pre(struct dsa_switch *ds, int port,
-		     struct switchdev_brport_flags flags,
-		     struct netlink_ext_ack *extack);
-int b53_br_flags(struct dsa_switch *ds, int port,
-		 struct switchdev_brport_flags flags,
-		 struct netlink_ext_ack *extack);
+int b53_br_egress_floods(struct dsa_switch *ds, int port,
+			 bool unicast, bool multicast);
 int b53_setup_devlink_resources(struct dsa_switch *ds);
 void b53_port_event(struct dsa_switch *ds, int port);
+void b53_phylink_validate(struct dsa_switch *ds, int port,
+			  unsigned long *supported,
+			  struct phylink_link_state *state);
+int b53_phylink_mac_link_state(struct dsa_switch *ds, int port,
+			       struct phylink_link_state *state);
+void b53_phylink_mac_config(struct dsa_switch *ds, int port,
+			    unsigned int mode,
+			    const struct phylink_link_state *state);
+void b53_phylink_mac_an_restart(struct dsa_switch *ds, int port);
+void b53_phylink_mac_link_down(struct dsa_switch *ds, int port,
+			       unsigned int mode,
+			       phy_interface_t interface);
+void b53_phylink_mac_link_up(struct dsa_switch *ds, int port,
+			     unsigned int mode,
+			     phy_interface_t interface,
+			     struct phy_device *phydev,
+			     int speed, int duplex,
+			     bool tx_pause, bool rx_pause);
 int b53_vlan_filtering(struct dsa_switch *ds, int port, bool vlan_filtering,
-		       struct netlink_ext_ack *extack);
-int b53_vlan_add(struct dsa_switch *ds, int port,
-		 const struct switchdev_obj_port_vlan *vlan,
-		 struct netlink_ext_ack *extack);
+		       struct switchdev_trans *trans);
+int b53_vlan_prepare(struct dsa_switch *ds, int port,
+		     const struct switchdev_obj_port_vlan *vlan);
+void b53_vlan_add(struct dsa_switch *ds, int port,
+		  const struct switchdev_obj_port_vlan *vlan);
 int b53_vlan_del(struct dsa_switch *ds, int port,
 		 const struct switchdev_obj_port_vlan *vlan);
 int b53_fdb_add(struct dsa_switch *ds, int port,
-		const unsigned char *addr, u16 vid,
-		struct dsa_db db);
+		const unsigned char *addr, u16 vid);
 int b53_fdb_del(struct dsa_switch *ds, int port,
-		const unsigned char *addr, u16 vid,
-		struct dsa_db db);
+		const unsigned char *addr, u16 vid);
 int b53_fdb_dump(struct dsa_switch *ds, int port,
 		 dsa_fdb_dump_cb_t *cb, void *data);
-int b53_mdb_add(struct dsa_switch *ds, int port,
-		const struct switchdev_obj_port_mdb *mdb,
-		struct dsa_db db);
+int b53_mdb_prepare(struct dsa_switch *ds, int port,
+		    const struct switchdev_obj_port_mdb *mdb);
+void b53_mdb_add(struct dsa_switch *ds, int port,
+		 const struct switchdev_obj_port_mdb *mdb);
 int b53_mdb_del(struct dsa_switch *ds, int port,
-		const struct switchdev_obj_port_mdb *mdb,
-		struct dsa_db db);
+		const struct switchdev_obj_port_mdb *mdb);
 int b53_mirror_add(struct dsa_switch *ds, int port,
-		   struct dsa_mall_mirror_tc_entry *mirror, bool ingress,
-		   struct netlink_ext_ack *extack);
+		   struct dsa_mall_mirror_tc_entry *mirror, bool ingress);
 enum dsa_tag_protocol b53_get_tag_protocol(struct dsa_switch *ds, int port,
 					   enum dsa_tag_protocol mprot);
 void b53_mirror_del(struct dsa_switch *ds, int port,
 		    struct dsa_mall_mirror_tc_entry *mirror);
-int b53_setup_port(struct dsa_switch *ds, int port);
 int b53_enable_port(struct dsa_switch *ds, int port, struct phy_device *phy);
 void b53_disable_port(struct dsa_switch *ds, int port);
 void b53_brcm_hdr_setup(struct dsa_switch *ds, int port);
+void b53_eee_enable_set(struct dsa_switch *ds, int port, bool enable);
 int b53_eee_init(struct dsa_switch *ds, int port, struct phy_device *phy);
-bool b53_support_eee(struct dsa_switch *ds, int port);
-int b53_set_mac_eee(struct dsa_switch *ds, int port, struct ethtool_keee *e);
+int b53_get_mac_eee(struct dsa_switch *ds, int port, struct ethtool_eee *e);
+int b53_set_mac_eee(struct dsa_switch *ds, int port, struct ethtool_eee *e);
 
 #endif

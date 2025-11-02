@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// Melfas MMS114/MMS136/MMS152 touchscreen device driver
+// Melfas MMS114/MMS152 touchscreen device driver
 //
 // Copyright (c) 2012 Samsung Electronics Co., Ltd.
 // Author: Joonyoung Shim <jy0922.shim@samsung.com>
@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/i2c.h>
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
@@ -42,10 +43,8 @@
 /* Touchscreen absolute values */
 #define MMS114_MAX_AREA			0xff
 
-#define MMS114_MAX_TOUCHKEYS		15
 #define MMS114_MAX_TOUCH		10
-#define MMS114_EVENT_SIZE		8
-#define MMS136_EVENT_SIZE		6
+#define MMS114_PACKET_NUM		8
 
 /* Touch type */
 #define MMS114_TYPE_NONE		0
@@ -54,8 +53,6 @@
 
 enum mms_type {
 	TYPE_MMS114	= 114,
-	TYPE_MMS134S	= 134,
-	TYPE_MMS136	= 136,
 	TYPE_MMS152	= 152,
 	TYPE_MMS345L	= 345,
 };
@@ -69,9 +66,6 @@ struct mms114_data {
 	enum mms_type		type;
 	unsigned int		contact_threshold;
 	unsigned int		moving_threshold;
-
-	u32 keycodes[MMS114_MAX_TOUCHKEYS];
-	int num_keycodes;
 
 	/* Use cache data for mode control register(write only) */
 	u8			cache_mode_control;
@@ -170,6 +164,11 @@ static void mms114_process_mt(struct mms114_data *data, struct mms114_touch *tou
 		return;
 	}
 
+	if (touch->type != MMS114_TYPE_TOUCHSCREEN) {
+		dev_err(&client->dev, "Wrong touch type (%d)\n", touch->type);
+		return;
+	}
+
 	id = touch->id - 1;
 	x = touch->x_lo | touch->x_hi << 8;
 	y = touch->y_lo | touch->y_hi << 8;
@@ -189,33 +188,9 @@ static void mms114_process_mt(struct mms114_data *data, struct mms114_touch *tou
 	}
 }
 
-static void mms114_process_touchkey(struct mms114_data *data,
-				    struct mms114_touch *touch)
-{
-	struct i2c_client *client = data->client;
-	struct input_dev *input_dev = data->input_dev;
-	unsigned int keycode_id;
-
-	if (touch->id == 0)
-		return;
-
-	if (touch->id > data->num_keycodes) {
-		dev_err(&client->dev, "Wrong touch id for touchkey (%d)\n",
-			touch->id);
-		return;
-	}
-
-	keycode_id = touch->id - 1;
-	dev_dbg(&client->dev, "keycode id: %d, pressed: %d\n", keycode_id,
-		touch->pressed);
-
-	input_report_key(input_dev, data->keycodes[keycode_id], touch->pressed);
-}
-
 static irqreturn_t mms114_interrupt(int irq, void *dev_id)
 {
 	struct mms114_data *data = dev_id;
-	struct i2c_client *client = data->client;
 	struct input_dev *input_dev = data->input_dev;
 	struct mms114_touch touch[MMS114_MAX_TOUCH];
 	int packet_size;
@@ -224,7 +199,7 @@ static irqreturn_t mms114_interrupt(int irq, void *dev_id)
 	int error;
 
 	mutex_lock(&input_dev->mutex);
-	if (!input_device_enabled(input_dev)) {
+	if (!input_dev->users) {
 		mutex_unlock(&input_dev->mutex);
 		goto out;
 	}
@@ -234,33 +209,15 @@ static irqreturn_t mms114_interrupt(int irq, void *dev_id)
 	if (packet_size <= 0)
 		goto out;
 
-	/* MMS136 has slightly different event size */
-	if (data->type == TYPE_MMS134S || data->type == TYPE_MMS136)
-		touch_size = packet_size / MMS136_EVENT_SIZE;
-	else
-		touch_size = packet_size / MMS114_EVENT_SIZE;
+	touch_size = packet_size / MMS114_PACKET_NUM;
 
 	error = __mms114_read_reg(data, MMS114_INFORMATION, packet_size,
 			(u8 *)touch);
 	if (error < 0)
 		goto out;
 
-	for (index = 0; index < touch_size; index++) {
-		switch (touch[index].type) {
-		case MMS114_TYPE_TOUCHSCREEN:
-			mms114_process_mt(data, touch + index);
-			break;
-
-		case MMS114_TYPE_TOUCHKEY:
-			mms114_process_touchkey(data, touch + index);
-			break;
-
-		default:
-			dev_err(&client->dev, "Wrong touch type (%d)\n",
-				touch[index].type);
-			break;
-		}
-	}
+	for (index = 0; index < touch_size; index++)
+		mms114_process_mt(data, touch + index);
 
 	input_mt_report_pointer_emulation(data->input_dev, true);
 	input_sync(data->input_dev);
@@ -318,8 +275,6 @@ static int mms114_get_version(struct mms114_data *data)
 		break;
 
 	case TYPE_MMS114:
-	case TYPE_MMS134S:
-	case TYPE_MMS136:
 		error = __mms114_read_reg(data, MMS114_TSP_REV, 6, buf);
 		if (error)
 			return error;
@@ -342,9 +297,8 @@ static int mms114_setup_regs(struct mms114_data *data)
 	if (error < 0)
 		return error;
 
-	/* MMS114, MMS134S and MMS136 have configuration and power on registers */
-	if (data->type != TYPE_MMS114 && data->type != TYPE_MMS134S &&
-	    data->type != TYPE_MMS136)
+	/* Only MMS114 has configuration and power on registers */
+	if (data->type != TYPE_MMS114)
 		return 0;
 
 	error = mms114_set_active(data, true);
@@ -476,13 +430,13 @@ static int mms114_parse_legacy_bindings(struct mms114_data *data)
 	return 0;
 }
 
-static int mms114_probe(struct i2c_client *client)
+static int mms114_probe(struct i2c_client *client,
+				  const struct i2c_device_id *id)
 {
 	struct mms114_data *data;
 	struct input_dev *input_dev;
 	const void *match_data;
 	int error;
-	int i;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		dev_err(&client->dev, "Not supported I2C adapter\n");
@@ -506,42 +460,6 @@ static int mms114_probe(struct i2c_client *client)
 
 	data->type = (enum mms_type)match_data;
 
-	data->num_keycodes = device_property_count_u32(&client->dev,
-						       "linux,keycodes");
-	if (data->num_keycodes == -EINVAL) {
-		data->num_keycodes = 0;
-	} else if (data->num_keycodes < 0) {
-		dev_err(&client->dev,
-			"Unable to parse linux,keycodes property: %d\n",
-			data->num_keycodes);
-		return data->num_keycodes;
-	} else if (data->num_keycodes > MMS114_MAX_TOUCHKEYS) {
-		dev_warn(&client->dev,
-			"Found %d linux,keycodes but max is %d, ignoring the rest\n",
-			 data->num_keycodes, MMS114_MAX_TOUCHKEYS);
-		data->num_keycodes = MMS114_MAX_TOUCHKEYS;
-	}
-
-	if (data->num_keycodes > 0) {
-		error = device_property_read_u32_array(&client->dev,
-						       "linux,keycodes",
-						       data->keycodes,
-						       data->num_keycodes);
-		if (error) {
-			dev_err(&client->dev,
-				"Unable to read linux,keycodes values: %d\n",
-				error);
-			return error;
-		}
-
-		input_dev->keycode = data->keycodes;
-		input_dev->keycodemax = data->num_keycodes;
-		input_dev->keycodesize = sizeof(data->keycodes[0]);
-		for (i = 0; i < data->num_keycodes; i++)
-			input_set_capability(input_dev,
-					     EV_KEY, data->keycodes[i]);
-	}
-
 	input_set_capability(input_dev, EV_ABS, ABS_MT_POSITION_X);
 	input_set_capability(input_dev, EV_ABS, ABS_MT_POSITION_Y);
 	input_set_abs_params(input_dev, ABS_MT_PRESSURE, 0, 255, 0, 0);
@@ -562,8 +480,7 @@ static int mms114_probe(struct i2c_client *client)
 				     0, data->props.max_y, 0, 0);
 	}
 
-	if (data->type == TYPE_MMS114 || data->type == TYPE_MMS134S ||
-	    data->type == TYPE_MMS136) {
+	if (data->type == TYPE_MMS114) {
 		/*
 		 * The firmware handles movement and pressure fuzz, so
 		 * don't duplicate that in software.
@@ -613,13 +530,13 @@ static int mms114_probe(struct i2c_client *client)
 	}
 
 	error = devm_request_threaded_irq(&client->dev, client->irq,
-					  NULL, mms114_interrupt,
-					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					  NULL, mms114_interrupt, IRQF_ONESHOT,
 					  dev_name(&client->dev), data);
 	if (error) {
 		dev_err(&client->dev, "Failed to register interrupt\n");
 		return error;
 	}
+	disable_irq(client->irq);
 
 	error = input_register_device(data->input_dev);
 	if (error) {
@@ -630,7 +547,7 @@ static int mms114_probe(struct i2c_client *client)
 	return 0;
 }
 
-static int mms114_suspend(struct device *dev)
+static int __maybe_unused mms114_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct mms114_data *data = i2c_get_clientdata(client);
@@ -647,14 +564,14 @@ static int mms114_suspend(struct device *dev)
 	input_sync(input_dev);
 
 	mutex_lock(&input_dev->mutex);
-	if (input_device_enabled(input_dev))
+	if (input_dev->users)
 		mms114_stop(data);
 	mutex_unlock(&input_dev->mutex);
 
 	return 0;
 }
 
-static int mms114_resume(struct device *dev)
+static int __maybe_unused mms114_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct mms114_data *data = i2c_get_clientdata(client);
@@ -662,7 +579,7 @@ static int mms114_resume(struct device *dev)
 	int error;
 
 	mutex_lock(&input_dev->mutex);
-	if (input_device_enabled(input_dev)) {
+	if (input_dev->users) {
 		error = mms114_start(data);
 		if (error < 0) {
 			mutex_unlock(&input_dev->mutex);
@@ -674,10 +591,10 @@ static int mms114_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(mms114_pm_ops, mms114_suspend, mms114_resume);
+static SIMPLE_DEV_PM_OPS(mms114_pm_ops, mms114_suspend, mms114_resume);
 
 static const struct i2c_device_id mms114_id[] = {
-	{ "mms114" },
+	{ "mms114", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mms114_id);
@@ -687,12 +604,6 @@ static const struct of_device_id mms114_dt_match[] = {
 	{
 		.compatible = "melfas,mms114",
 		.data = (void *)TYPE_MMS114,
-	}, {
-		.compatible = "melfas,mms134s",
-		.data = (void *)TYPE_MMS134S,
-	}, {
-		.compatible = "melfas,mms136",
-		.data = (void *)TYPE_MMS136,
 	}, {
 		.compatible = "melfas,mms152",
 		.data = (void *)TYPE_MMS152,
@@ -708,7 +619,7 @@ MODULE_DEVICE_TABLE(of, mms114_dt_match);
 static struct i2c_driver mms114_driver = {
 	.driver = {
 		.name	= "mms114",
-		.pm	= pm_sleep_ptr(&mms114_pm_ops),
+		.pm	= &mms114_pm_ops,
 		.of_match_table = of_match_ptr(mms114_dt_match),
 	},
 	.probe		= mms114_probe,

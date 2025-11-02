@@ -24,6 +24,7 @@
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/phy.h>
 #include <linux/phylink.h>
 #include <linux/phy/phy.h>
@@ -35,7 +36,6 @@
 #include <uapi/linux/ppp_defs.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
-#include <net/page_pool/helpers.h>
 #include <net/tso.h>
 #include <linux/bpf_trace.h>
 
@@ -89,16 +89,6 @@ static u32 mvpp2_read_relaxed(struct mvpp2 *priv, u32 offset)
 static inline u32 mvpp2_cpu_to_thread(struct mvpp2 *priv, int cpu)
 {
 	return cpu % priv->nthreads;
-}
-
-static void mvpp2_cm3_write(struct mvpp2 *priv, u32 offset, u32 data)
-{
-	writel(data, priv->cm3_base + offset);
-}
-
-static u32 mvpp2_cm3_read(struct mvpp2 *priv, u32 offset)
-{
-	return readl(priv->cm3_base + offset);
 }
 
 static struct page_pool *
@@ -329,7 +319,7 @@ static int mvpp2_get_nrxqs(struct mvpp2 *priv)
 {
 	unsigned int nrxqs;
 
-	if (priv->hw_version >= MVPP22 && queue_mode == MVPP2_QDIST_SINGLE_MODE)
+	if (priv->hw_version == MVPP22 && queue_mode == MVPP2_QDIST_SINGLE_MODE)
 		return 1;
 
 	/* According to the PPv2.2 datasheet and our experiments on
@@ -394,7 +384,7 @@ static int mvpp2_bm_pool_create(struct device *dev, struct mvpp2 *priv,
 	if (!IS_ALIGNED(size, 16))
 		return -EINVAL;
 
-	/* PPv2.1 needs 8 bytes per buffer pointer, PPv2.2 and PPv2.3 needs 16
+	/* PPv2.1 needs 8 bytes per buffer pointer, PPv2.2 needs 16
 	 * bytes per buffer pointer
 	 */
 	if (priv->hw_version == MVPP21)
@@ -423,19 +413,6 @@ static int mvpp2_bm_pool_create(struct device *dev, struct mvpp2 *priv,
 
 	val = mvpp2_read(priv, MVPP2_BM_POOL_CTRL_REG(bm_pool->id));
 	val |= MVPP2_BM_START_MASK;
-
-	val &= ~MVPP2_BM_LOW_THRESH_MASK;
-	val &= ~MVPP2_BM_HIGH_THRESH_MASK;
-
-	/* Set 8 Pools BPPI threshold for MVPP23 */
-	if (priv->hw_version == MVPP23) {
-		val |= MVPP2_BM_LOW_THRESH_VALUE(MVPP23_BM_BPPI_LOW_THRESH);
-		val |= MVPP2_BM_HIGH_THRESH_VALUE(MVPP23_BM_BPPI_HIGH_THRESH);
-	} else {
-		val |= MVPP2_BM_LOW_THRESH_VALUE(MVPP2_BM_BPPI_LOW_THRESH);
-		val |= MVPP2_BM_HIGH_THRESH_VALUE(MVPP2_BM_BPPI_HIGH_THRESH);
-	}
-
 	mvpp2_write(priv, MVPP2_BM_POOL_CTRL_REG(bm_pool->id), val);
 
 	bm_pool->size = size;
@@ -469,7 +446,7 @@ static void mvpp2_bm_bufs_get_addrs(struct device *dev, struct mvpp2 *priv,
 				      MVPP2_BM_PHY_ALLOC_REG(bm_pool->id));
 	*phys_addr = mvpp2_thread_read(priv, thread, MVPP2_BM_VIRT_ALLOC_REG);
 
-	if (priv->hw_version >= MVPP22) {
+	if (priv->hw_version == MVPP22) {
 		u32 val;
 		u32 dma_addr_highbits, phys_addr_highbits;
 
@@ -604,16 +581,6 @@ err_unroll_pools:
 	return err;
 }
 
-/* Routine enable PPv23 8 pool mode */
-static void mvpp23_bm_set_8pool_mode(struct mvpp2 *priv)
-{
-	int val;
-
-	val = mvpp2_read(priv, MVPP22_BM_POOL_BASE_ADDR_HIGH_REG);
-	val |= MVPP23_BM_8POOL_MODE;
-	mvpp2_write(priv, MVPP22_BM_POOL_BASE_ADDR_HIGH_REG, val);
-}
-
 /* Cleanup pool before actual initialization in the OS */
 static void mvpp2_bm_pool_cleanup(struct mvpp2 *priv, int pool_id)
 {
@@ -691,9 +658,6 @@ static int mvpp2_bm_init(struct device *dev, struct mvpp2 *priv)
 				      sizeof(*priv->bm_pools), GFP_KERNEL);
 	if (!priv->bm_pools)
 		return -ENOMEM;
-
-	if (priv->hw_version == MVPP23)
-		mvpp23_bm_set_8pool_mode(priv);
 
 	err = mvpp2_bm_pools_init(dev, priv);
 	if (err < 0)
@@ -792,210 +756,6 @@ static void *mvpp2_buf_alloc(struct mvpp2_port *port,
 	return data;
 }
 
-/* Routine enable flow control for RXQs condition */
-static void mvpp2_rxq_enable_fc(struct mvpp2_port *port)
-{
-	int val, cm3_state, host_id, q;
-	int fq = port->first_rxq;
-	unsigned long flags;
-
-	spin_lock_irqsave(&port->priv->mss_spinlock, flags);
-
-	/* Remove Flow control enable bit to prevent race between FW and Kernel
-	 * If Flow control was enabled, it would be re-enabled.
-	 */
-	val = mvpp2_cm3_read(port->priv, MSS_FC_COM_REG);
-	cm3_state = (val & FLOW_CONTROL_ENABLE_BIT);
-	val &= ~FLOW_CONTROL_ENABLE_BIT;
-	mvpp2_cm3_write(port->priv, MSS_FC_COM_REG, val);
-
-	/* Set same Flow control for all RXQs */
-	for (q = 0; q < port->nrxqs; q++) {
-		/* Set stop and start Flow control RXQ thresholds */
-		val = MSS_THRESHOLD_START;
-		val |= (MSS_THRESHOLD_STOP << MSS_RXQ_TRESH_STOP_OFFS);
-		mvpp2_cm3_write(port->priv, MSS_RXQ_TRESH_REG(q, fq), val);
-
-		val = mvpp2_cm3_read(port->priv, MSS_RXQ_ASS_REG(q, fq));
-		/* Set RXQ port ID */
-		val &= ~(MSS_RXQ_ASS_PORTID_MASK << MSS_RXQ_ASS_Q_BASE(q, fq));
-		val |= (port->id << MSS_RXQ_ASS_Q_BASE(q, fq));
-		val &= ~(MSS_RXQ_ASS_HOSTID_MASK << (MSS_RXQ_ASS_Q_BASE(q, fq)
-			+ MSS_RXQ_ASS_HOSTID_OFFS));
-
-		/* Calculate RXQ host ID:
-		 * In Single queue mode: Host ID equal to Host ID used for
-		 *			 shared RX interrupt
-		 * In Multi queue mode: Host ID equal to number of
-		 *			RXQ ID / number of CoS queues
-		 * In Single resource mode: Host ID always equal to 0
-		 */
-		if (queue_mode == MVPP2_QDIST_SINGLE_MODE)
-			host_id = port->nqvecs;
-		else if (queue_mode == MVPP2_QDIST_MULTI_MODE)
-			host_id = q;
-		else
-			host_id = 0;
-
-		/* Set RXQ host ID */
-		val |= (host_id << (MSS_RXQ_ASS_Q_BASE(q, fq)
-			+ MSS_RXQ_ASS_HOSTID_OFFS));
-
-		mvpp2_cm3_write(port->priv, MSS_RXQ_ASS_REG(q, fq), val);
-	}
-
-	/* Notify Firmware that Flow control config space ready for update */
-	val = mvpp2_cm3_read(port->priv, MSS_FC_COM_REG);
-	val |= FLOW_CONTROL_UPDATE_COMMAND_BIT;
-	val |= cm3_state;
-	mvpp2_cm3_write(port->priv, MSS_FC_COM_REG, val);
-
-	spin_unlock_irqrestore(&port->priv->mss_spinlock, flags);
-}
-
-/* Routine disable flow control for RXQs condition */
-static void mvpp2_rxq_disable_fc(struct mvpp2_port *port)
-{
-	int val, cm3_state, q;
-	unsigned long flags;
-	int fq = port->first_rxq;
-
-	spin_lock_irqsave(&port->priv->mss_spinlock, flags);
-
-	/* Remove Flow control enable bit to prevent race between FW and Kernel
-	 * If Flow control was enabled, it would be re-enabled.
-	 */
-	val = mvpp2_cm3_read(port->priv, MSS_FC_COM_REG);
-	cm3_state = (val & FLOW_CONTROL_ENABLE_BIT);
-	val &= ~FLOW_CONTROL_ENABLE_BIT;
-	mvpp2_cm3_write(port->priv, MSS_FC_COM_REG, val);
-
-	/* Disable Flow control for all RXQs */
-	for (q = 0; q < port->nrxqs; q++) {
-		/* Set threshold 0 to disable Flow control */
-		val = 0;
-		val |= (0 << MSS_RXQ_TRESH_STOP_OFFS);
-		mvpp2_cm3_write(port->priv, MSS_RXQ_TRESH_REG(q, fq), val);
-
-		val = mvpp2_cm3_read(port->priv, MSS_RXQ_ASS_REG(q, fq));
-
-		val &= ~(MSS_RXQ_ASS_PORTID_MASK << MSS_RXQ_ASS_Q_BASE(q, fq));
-
-		val &= ~(MSS_RXQ_ASS_HOSTID_MASK << (MSS_RXQ_ASS_Q_BASE(q, fq)
-			+ MSS_RXQ_ASS_HOSTID_OFFS));
-
-		mvpp2_cm3_write(port->priv, MSS_RXQ_ASS_REG(q, fq), val);
-	}
-
-	/* Notify Firmware that Flow control config space ready for update */
-	val = mvpp2_cm3_read(port->priv, MSS_FC_COM_REG);
-	val |= FLOW_CONTROL_UPDATE_COMMAND_BIT;
-	val |= cm3_state;
-	mvpp2_cm3_write(port->priv, MSS_FC_COM_REG, val);
-
-	spin_unlock_irqrestore(&port->priv->mss_spinlock, flags);
-}
-
-/* Routine disable/enable flow control for BM pool condition */
-static void mvpp2_bm_pool_update_fc(struct mvpp2_port *port,
-				    struct mvpp2_bm_pool *pool,
-				    bool en)
-{
-	int val, cm3_state;
-	unsigned long flags;
-
-	spin_lock_irqsave(&port->priv->mss_spinlock, flags);
-
-	/* Remove Flow control enable bit to prevent race between FW and Kernel
-	 * If Flow control were enabled, it would be re-enabled.
-	 */
-	val = mvpp2_cm3_read(port->priv, MSS_FC_COM_REG);
-	cm3_state = (val & FLOW_CONTROL_ENABLE_BIT);
-	val &= ~FLOW_CONTROL_ENABLE_BIT;
-	mvpp2_cm3_write(port->priv, MSS_FC_COM_REG, val);
-
-	/* Check if BM pool should be enabled/disable */
-	if (en) {
-		/* Set BM pool start and stop thresholds per port */
-		val = mvpp2_cm3_read(port->priv, MSS_BUF_POOL_REG(pool->id));
-		val |= MSS_BUF_POOL_PORT_OFFS(port->id);
-		val &= ~MSS_BUF_POOL_START_MASK;
-		val |= (MSS_THRESHOLD_START << MSS_BUF_POOL_START_OFFS);
-		val &= ~MSS_BUF_POOL_STOP_MASK;
-		val |= MSS_THRESHOLD_STOP;
-		mvpp2_cm3_write(port->priv, MSS_BUF_POOL_REG(pool->id), val);
-	} else {
-		/* Remove BM pool from the port */
-		val = mvpp2_cm3_read(port->priv, MSS_BUF_POOL_REG(pool->id));
-		val &= ~MSS_BUF_POOL_PORT_OFFS(port->id);
-
-		/* Zero BM pool start and stop thresholds to disable pool
-		 * flow control if pool empty (not used by any port)
-		 */
-		if (!pool->buf_num) {
-			val &= ~MSS_BUF_POOL_START_MASK;
-			val &= ~MSS_BUF_POOL_STOP_MASK;
-		}
-
-		mvpp2_cm3_write(port->priv, MSS_BUF_POOL_REG(pool->id), val);
-	}
-
-	/* Notify Firmware that Flow control config space ready for update */
-	val = mvpp2_cm3_read(port->priv, MSS_FC_COM_REG);
-	val |= FLOW_CONTROL_UPDATE_COMMAND_BIT;
-	val |= cm3_state;
-	mvpp2_cm3_write(port->priv, MSS_FC_COM_REG, val);
-
-	spin_unlock_irqrestore(&port->priv->mss_spinlock, flags);
-}
-
-/* disable/enable flow control for BM pool on all ports */
-static void mvpp2_bm_pool_update_priv_fc(struct mvpp2 *priv, bool en)
-{
-	struct mvpp2_port *port;
-	int i, j;
-
-	for (i = 0; i < priv->port_count; i++) {
-		port = priv->port_list[i];
-		if (port->priv->percpu_pools) {
-			for (j = 0; j < port->nrxqs; j++)
-				mvpp2_bm_pool_update_fc(port, &port->priv->bm_pools[j],
-							port->tx_fc & en);
-		} else {
-			mvpp2_bm_pool_update_fc(port, port->pool_long, port->tx_fc & en);
-			mvpp2_bm_pool_update_fc(port, port->pool_short, port->tx_fc & en);
-		}
-	}
-}
-
-static int mvpp2_enable_global_fc(struct mvpp2 *priv)
-{
-	int val, timeout = 0;
-
-	/* Enable global flow control. In this stage global
-	 * flow control enabled, but still disabled per port.
-	 */
-	val = mvpp2_cm3_read(priv, MSS_FC_COM_REG);
-	val |= FLOW_CONTROL_ENABLE_BIT;
-	mvpp2_cm3_write(priv, MSS_FC_COM_REG, val);
-
-	/* Check if Firmware running and disable FC if not*/
-	val |= FLOW_CONTROL_UPDATE_COMMAND_BIT;
-	mvpp2_cm3_write(priv, MSS_FC_COM_REG, val);
-
-	while (timeout < MSS_FC_MAX_TIMEOUT) {
-		val = mvpp2_cm3_read(priv, MSS_FC_COM_REG);
-
-		if (!(val & FLOW_CONTROL_UPDATE_COMMAND_BIT))
-			return 0;
-		usleep_range(10, 20);
-		timeout++;
-	}
-
-	priv->global_tx_fc = false;
-	return -EOPNOTSUPP;
-}
-
 /* Release buffer to BM */
 static inline void mvpp2_bm_pool_put(struct mvpp2_port *port, int pool,
 				     dma_addr_t buf_dma_addr,
@@ -1007,7 +767,7 @@ static inline void mvpp2_bm_pool_put(struct mvpp2_port *port, int pool,
 	if (test_bit(thread, &port->priv->lock_map))
 		spin_lock_irqsave(&port->bm_lock[thread], flags);
 
-	if (port->priv->hw_version >= MVPP22) {
+	if (port->priv->hw_version == MVPP22) {
 		u32 val = 0;
 
 		if (sizeof(dma_addr_t) == 8)
@@ -1326,16 +1086,6 @@ static int mvpp2_bm_update_mtu(struct net_device *dev, int mtu)
 		new_long_pool = MVPP2_BM_LONG;
 
 	if (new_long_pool != port->pool_long->id) {
-		if (port->tx_fc) {
-			if (pkt_size > MVPP2_BM_LONG_PKT_SIZE)
-				mvpp2_bm_pool_update_fc(port,
-							port->pool_short,
-							false);
-			else
-				mvpp2_bm_pool_update_fc(port, port->pool_long,
-							false);
-		}
-
 		/* Remove port from old short & long pool */
 		port->pool_long = mvpp2_bm_pool_use(port, port->pool_long->id,
 						    port->pool_long->pkt_size);
@@ -1353,29 +1103,10 @@ static int mvpp2_bm_update_mtu(struct net_device *dev, int mtu)
 		mvpp2_swf_bm_pool_init(port);
 
 		mvpp2_set_hw_csum(port, new_long_pool);
-
-		if (port->tx_fc) {
-			if (pkt_size > MVPP2_BM_LONG_PKT_SIZE)
-				mvpp2_bm_pool_update_fc(port, port->pool_long,
-							true);
-			else
-				mvpp2_bm_pool_update_fc(port, port->pool_short,
-							true);
-		}
-
-		/* Update L4 checksum when jumbo enable/disable on port */
-		if (new_long_pool == MVPP2_BM_JUMBO && port->id != 0) {
-			dev->features &= ~(NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM);
-			dev->hw_features &= ~(NETIF_F_IP_CSUM |
-					      NETIF_F_IPV6_CSUM);
-		} else {
-			dev->features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
-			dev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
-		}
 	}
 
 out_set:
-	WRITE_ONCE(dev->mtu, mtu);
+	dev->mtu = mtu;
 	dev->wanted_features = dev->features;
 
 	netdev_update_features(dev);
@@ -1427,19 +1158,14 @@ static inline void mvpp2_qvec_interrupt_disable(struct mvpp2_queue_vector *qvec)
 static void mvpp2_interrupts_mask(void *arg)
 {
 	struct mvpp2_port *port = arg;
-	int cpu = smp_processor_id();
-	u32 thread;
 
 	/* If the thread isn't used, don't do anything */
-	if (cpu > port->priv->nthreads)
+	if (smp_processor_id() > port->priv->nthreads)
 		return;
 
-	thread = mvpp2_cpu_to_thread(port->priv, cpu);
-
-	mvpp2_thread_write(port->priv, thread,
+	mvpp2_thread_write(port->priv,
+			   mvpp2_cpu_to_thread(port->priv, smp_processor_id()),
 			   MVPP2_ISR_RX_TX_MASK_REG(port->id), 0);
-	mvpp2_thread_write(port->priv, thread,
-			   MVPP2_ISR_RX_ERR_CAUSE_REG(port->id), 0);
 }
 
 /* Unmask the current thread's Rx/Tx interrupts.
@@ -1449,25 +1175,20 @@ static void mvpp2_interrupts_mask(void *arg)
 static void mvpp2_interrupts_unmask(void *arg)
 {
 	struct mvpp2_port *port = arg;
-	int cpu = smp_processor_id();
-	u32 val, thread;
+	u32 val;
 
 	/* If the thread isn't used, don't do anything */
-	if (cpu >= port->priv->nthreads)
+	if (smp_processor_id() >= port->priv->nthreads)
 		return;
-
-	thread = mvpp2_cpu_to_thread(port->priv, cpu);
 
 	val = MVPP2_CAUSE_MISC_SUM_MASK |
 		MVPP2_CAUSE_RXQ_OCCUP_DESC_ALL_MASK(port->priv->hw_version);
 	if (port->has_tx_irqs)
 		val |= MVPP2_CAUSE_TXQ_OCCUP_DESC_ALL_MASK;
 
-	mvpp2_thread_write(port->priv, thread,
+	mvpp2_thread_write(port->priv,
+			   mvpp2_cpu_to_thread(port->priv, smp_processor_id()),
 			   MVPP2_ISR_RX_TX_MASK_REG(port->id), val);
-	mvpp2_thread_write(port->priv, thread,
-			   MVPP2_ISR_RX_ERR_CAUSE_REG(port->id),
-			   MVPP2_ISR_RX_ERR_CAUSE_NONOCC_MASK);
 }
 
 static void
@@ -1476,7 +1197,7 @@ mvpp2_shared_interrupt_mask_unmask(struct mvpp2_port *port, bool mask)
 	u32 val;
 	int i;
 
-	if (port->priv->hw_version == MVPP21)
+	if (port->priv->hw_version != MVPP22)
 		return;
 
 	if (mask)
@@ -1492,9 +1213,6 @@ mvpp2_shared_interrupt_mask_unmask(struct mvpp2_port *port, bool mask)
 
 		mvpp2_thread_write(port->priv, v->sw_thread_id,
 				   MVPP2_ISR_RX_TX_MASK_REG(port->id), val);
-		mvpp2_thread_write(port->priv, v->sw_thread_id,
-				   MVPP2_ISR_RX_ERR_CAUSE_REG(port->id),
-				   MVPP2_ISR_RX_ERR_CAUSE_NONOCC_MASK);
 	}
 }
 
@@ -1506,14 +1224,13 @@ static bool mvpp2_port_supports_xlg(struct mvpp2_port *port)
 
 static bool mvpp2_port_supports_rgmii(struct mvpp2_port *port)
 {
-	return !(port->priv->hw_version >= MVPP22 && port->gop_id == 0);
+	return !(port->priv->hw_version == MVPP22 && port->gop_id == 0);
 }
 
 /* Port configuration routines */
 static bool mvpp2_is_xlg(phy_interface_t interface)
 {
 	return interface == PHY_INTERFACE_MODE_10GBASER ||
-	       interface == PHY_INTERFACE_MODE_5GBASER ||
 	       interface == PHY_INTERFACE_MODE_XAUI;
 }
 
@@ -1538,21 +1255,10 @@ static void mvpp22_gop_init_rgmii(struct mvpp2_port *port)
 	regmap_write(priv->sysctrl_base, GENCONF_PORT_CTRL0, val);
 
 	regmap_read(priv->sysctrl_base, GENCONF_CTRL0, &val);
-	if (port->gop_id == 2) {
-		val |= GENCONF_CTRL0_PORT2_RGMII;
-	} else if (port->gop_id == 3) {
-		val |= GENCONF_CTRL0_PORT3_RGMII_MII;
-
-		/* According to the specification, GENCONF_CTRL0_PORT3_RGMII
-		 * should be set to 1 for RGMII and 0 for MII. However, tests
-		 * show that it is the other way around. This is also what
-		 * U-Boot does for mvpp2, so it is assumed to be correct.
-		 */
-		if (port->phy_interface == PHY_INTERFACE_MODE_MII)
-			val |= GENCONF_CTRL0_PORT3_RGMII;
-		else
-			val &= ~GENCONF_CTRL0_PORT3_RGMII;
-	}
+	if (port->gop_id == 2)
+		val |= GENCONF_CTRL0_PORT0_RGMII;
+	else if (port->gop_id == 3)
+		val |= GENCONF_CTRL0_PORT1_RGMII_MII;
 	regmap_write(priv->sysctrl_base, GENCONF_CTRL0, val);
 }
 
@@ -1569,9 +1275,9 @@ static void mvpp22_gop_init_sgmii(struct mvpp2_port *port)
 	if (port->gop_id > 1) {
 		regmap_read(priv->sysctrl_base, GENCONF_CTRL0, &val);
 		if (port->gop_id == 2)
-			val &= ~GENCONF_CTRL0_PORT2_RGMII;
+			val &= ~GENCONF_CTRL0_PORT0_RGMII;
 		else if (port->gop_id == 3)
-			val &= ~GENCONF_CTRL0_PORT3_RGMII_MII;
+			val &= ~GENCONF_CTRL0_PORT1_RGMII_MII;
 		regmap_write(priv->sysctrl_base, GENCONF_CTRL0, val);
 	}
 }
@@ -1599,50 +1305,7 @@ static void mvpp22_gop_init_10gkr(struct mvpp2_port *port)
 	writel(val, mpcs + MVPP22_MPCS_CLK_RESET);
 }
 
-static void mvpp22_gop_fca_enable_periodic(struct mvpp2_port *port, bool en)
-{
-	struct mvpp2 *priv = port->priv;
-	void __iomem *fca = priv->iface_base + MVPP22_FCA_BASE(port->gop_id);
-	u32 val;
-
-	val = readl(fca + MVPP22_FCA_CONTROL_REG);
-	val &= ~MVPP22_FCA_ENABLE_PERIODIC;
-	if (en)
-		val |= MVPP22_FCA_ENABLE_PERIODIC;
-	writel(val, fca + MVPP22_FCA_CONTROL_REG);
-}
-
-static void mvpp22_gop_fca_set_timer(struct mvpp2_port *port, u32 timer)
-{
-	struct mvpp2 *priv = port->priv;
-	void __iomem *fca = priv->iface_base + MVPP22_FCA_BASE(port->gop_id);
-	u32 lsb, msb;
-
-	lsb = timer & MVPP22_FCA_REG_MASK;
-	msb = timer >> MVPP22_FCA_REG_SIZE;
-
-	writel(lsb, fca + MVPP22_PERIODIC_COUNTER_LSB_REG);
-	writel(msb, fca + MVPP22_PERIODIC_COUNTER_MSB_REG);
-}
-
-/* Set Flow Control timer x100 faster than pause quanta to ensure that link
- * partner won't send traffic if port is in XOFF mode.
- */
-static void mvpp22_gop_fca_set_periodic_timer(struct mvpp2_port *port)
-{
-	u32 timer;
-
-	timer = (port->priv->tclk / (USEC_PER_SEC * FC_CLK_DIVIDER))
-		* FC_QUANTA;
-
-	mvpp22_gop_fca_enable_periodic(port, false);
-
-	mvpp22_gop_fca_set_timer(port, timer);
-
-	mvpp22_gop_fca_enable_periodic(port, true);
-}
-
-static int mvpp22_gop_init(struct mvpp2_port *port, phy_interface_t interface)
+static int mvpp22_gop_init(struct mvpp2_port *port)
 {
 	struct mvpp2 *priv = port->priv;
 	u32 val;
@@ -1650,8 +1313,7 @@ static int mvpp22_gop_init(struct mvpp2_port *port, phy_interface_t interface)
 	if (!priv->sysctrl_base)
 		return 0;
 
-	switch (interface) {
-	case PHY_INTERFACE_MODE_MII:
+	switch (port->phy_interface) {
 	case PHY_INTERFACE_MODE_RGMII:
 	case PHY_INTERFACE_MODE_RGMII_ID:
 	case PHY_INTERFACE_MODE_RGMII_RXID:
@@ -1665,7 +1327,6 @@ static int mvpp22_gop_init(struct mvpp2_port *port, phy_interface_t interface)
 	case PHY_INTERFACE_MODE_2500BASEX:
 		mvpp22_gop_init_sgmii(port);
 		break;
-	case PHY_INTERFACE_MODE_5GBASER:
 	case PHY_INTERFACE_MODE_10GBASER:
 		if (!mvpp2_port_supports_xlg(port))
 			goto invalid_conf;
@@ -1687,8 +1348,6 @@ static int mvpp22_gop_init(struct mvpp2_port *port, phy_interface_t interface)
 	regmap_read(priv->sysctrl_base, GENCONF_SOFT_RESET1, &val);
 	val |= GENCONF_SOFT_RESET1_GOP;
 	regmap_write(priv->sysctrl_base, GENCONF_SOFT_RESET1, val);
-
-	mvpp22_gop_fca_set_periodic_timer(port);
 
 unsupported_conf:
 	return 0;
@@ -1782,15 +1441,15 @@ static void mvpp22_gop_setup_irq(struct mvpp2_port *port)
  * lanes by the physical layer. This is why configurations like
  * "PPv2 (2500BaseX) - COMPHY (2500SGMII)" are valid.
  */
-static int mvpp22_comphy_init(struct mvpp2_port *port,
-			      phy_interface_t interface)
+static int mvpp22_comphy_init(struct mvpp2_port *port)
 {
 	int ret;
 
 	if (!port->comphy)
 		return 0;
 
-	ret = phy_set_mode_ext(port->comphy, PHY_MODE_ETHERNET, interface);
+	ret = phy_set_mode_ext(port->comphy, PHY_MODE_ETHERNET,
+			       port->phy_interface);
 	if (ret)
 		return ret;
 
@@ -1906,7 +1565,7 @@ static u32 mvpp2_read_index(struct mvpp2 *priv, u32 index, u32 reg)
  * design, incremented at different moments in the chain of packet processing,
  * it is very likely that incoming packets could have been dropped after being
  * counted by hardware but before reaching software statistics (most probably
- * multicast packets), and in the opposite way, during transmission, FCS bytes
+ * multicast packets), and in the oppposite way, during transmission, FCS bytes
  * are added in between as well as TSO skb will be split and header bytes added.
  * Hence, statistics gathered from userspace with ifconfig (software) and
  * ethtool (hardware) cannot be compared.
@@ -1985,32 +1644,45 @@ static void mvpp2_ethtool_get_strings(struct net_device *netdev, u32 sset,
 				      u8 *data)
 {
 	struct mvpp2_port *port = netdev_priv(netdev);
-	const char *str;
 	int i, q;
 
 	if (sset != ETH_SS_STATS)
 		return;
 
-	for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_mib_regs); i++)
-		ethtool_puts(&data, mvpp2_ethtool_mib_regs[i].string);
+	for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_mib_regs); i++) {
+		strscpy(data, mvpp2_ethtool_mib_regs[i].string,
+			ETH_GSTRING_LEN);
+		data += ETH_GSTRING_LEN;
+	}
 
-	for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_port_regs); i++)
-		ethtool_puts(&data, mvpp2_ethtool_port_regs[i].string);
+	for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_port_regs); i++) {
+		strscpy(data, mvpp2_ethtool_port_regs[i].string,
+			ETH_GSTRING_LEN);
+		data += ETH_GSTRING_LEN;
+	}
 
-	for (q = 0; q < port->ntxqs; q++)
+	for (q = 0; q < port->ntxqs; q++) {
 		for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_txq_regs); i++) {
-			str = mvpp2_ethtool_txq_regs[i].string;
-			ethtool_sprintf(&data, str, q);
+			snprintf(data, ETH_GSTRING_LEN,
+				 mvpp2_ethtool_txq_regs[i].string, q);
+			data += ETH_GSTRING_LEN;
 		}
+	}
 
-	for (q = 0; q < port->nrxqs; q++)
+	for (q = 0; q < port->nrxqs; q++) {
 		for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_rxq_regs); i++) {
-			str = mvpp2_ethtool_rxq_regs[i].string;
-			ethtool_sprintf(&data, str, q);
+			snprintf(data, ETH_GSTRING_LEN,
+				 mvpp2_ethtool_rxq_regs[i].string,
+				 q);
+			data += ETH_GSTRING_LEN;
 		}
+	}
 
-	for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_xdp); i++)
-		ethtool_puts(&data, mvpp2_ethtool_xdp[i].string);
+	for (i = 0; i < ARRAY_SIZE(mvpp2_ethtool_xdp); i++) {
+		strscpy(data, mvpp2_ethtool_xdp[i].string,
+			ETH_GSTRING_LEN);
+		data += ETH_GSTRING_LEN;
+	}
 }
 
 static void
@@ -2032,7 +1704,7 @@ mvpp2_get_xdp_stats(struct mvpp2_port *port, struct mvpp2_pcpu_stats *xdp_stats)
 
 		cpu_stats = per_cpu_ptr(port->stats, cpu);
 		do {
-			start = u64_stats_fetch_begin(&cpu_stats->syncp);
+			start = u64_stats_fetch_begin_irq(&cpu_stats->syncp);
 			xdp_redirect = cpu_stats->xdp_redirect;
 			xdp_pass   = cpu_stats->xdp_pass;
 			xdp_drop = cpu_stats->xdp_drop;
@@ -2040,7 +1712,7 @@ mvpp2_get_xdp_stats(struct mvpp2_port *port, struct mvpp2_pcpu_stats *xdp_stats)
 			xdp_xmit_err   = cpu_stats->xdp_xmit_err;
 			xdp_tx   = cpu_stats->xdp_tx;
 			xdp_tx_err   = cpu_stats->xdp_tx_err;
-		} while (u64_stats_fetch_retry(&cpu_stats->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&cpu_stats->syncp, start));
 
 		xdp_stats->xdp_redirect += xdp_redirect;
 		xdp_stats->xdp_pass   += xdp_pass;
@@ -2170,7 +1842,7 @@ static void mvpp2_mac_reset_assert(struct mvpp2_port *port)
 	      MVPP2_GMAC_PORT_RESET_MASK;
 	writel(val, port->base + MVPP2_GMAC_CTRL_2_REG);
 
-	if (port->priv->hw_version >= MVPP22 && port->gop_id == 0) {
+	if (port->priv->hw_version == MVPP22 && port->gop_id == 0) {
 		val = readl(port->base + MVPP22_XLG_CTRL0_REG) &
 		      ~MVPP22_XLG_CTRL0_MAC_RESET_DIS;
 		writel(val, port->base + MVPP22_XLG_CTRL0_REG);
@@ -2183,7 +1855,7 @@ static void mvpp22_pcs_reset_assert(struct mvpp2_port *port)
 	void __iomem *mpcs, *xpcs;
 	u32 val;
 
-	if (port->priv->hw_version == MVPP21 || port->gop_id != 0)
+	if (port->priv->hw_version != MVPP22 || port->gop_id != 0)
 		return;
 
 	mpcs = priv->iface_base + MVPP22_MPCS_BASE(port->gop_id);
@@ -2198,21 +1870,19 @@ static void mvpp22_pcs_reset_assert(struct mvpp2_port *port)
 	writel(val & ~MVPP22_XPCS_CFG0_RESET_DIS, xpcs + MVPP22_XPCS_CFG0);
 }
 
-static void mvpp22_pcs_reset_deassert(struct mvpp2_port *port,
-				      phy_interface_t interface)
+static void mvpp22_pcs_reset_deassert(struct mvpp2_port *port)
 {
 	struct mvpp2 *priv = port->priv;
 	void __iomem *mpcs, *xpcs;
 	u32 val;
 
-	if (port->priv->hw_version == MVPP21 || port->gop_id != 0)
+	if (port->priv->hw_version != MVPP22 || port->gop_id != 0)
 		return;
 
 	mpcs = priv->iface_base + MVPP22_MPCS_BASE(port->gop_id);
 	xpcs = priv->iface_base + MVPP22_XPCS_BASE(port->gop_id);
 
-	switch (interface) {
-	case PHY_INTERFACE_MODE_5GBASER:
+	switch (port->phy_interface) {
 	case PHY_INTERFACE_MODE_10GBASER:
 		val = readl(mpcs + MVPP22_MPCS_CLK_RESET);
 		val |= MAC_CLK_RESET_MAC | MAC_CLK_RESET_SD_RX |
@@ -2703,20 +2373,6 @@ static void mvpp2_txp_max_tx_size_set(struct mvpp2_port *port)
 	}
 }
 
-/* Set the number of non-occupied descriptors threshold */
-static void mvpp2_set_rxq_free_tresh(struct mvpp2_port *port,
-				     struct mvpp2_rx_queue *rxq)
-{
-	u32 val;
-
-	mvpp2_write(port->priv, MVPP2_RXQ_NUM_REG, rxq->id);
-
-	val = mvpp2_read(port->priv, MVPP2_RXQ_THRESH_REG);
-	val &= ~MVPP2_RXQ_NON_OCCUPIED_MASK;
-	val |= MSS_THRESHOLD_STOP << MVPP2_RXQ_NON_OCCUPIED_OFFSET;
-	mvpp2_write(port->priv, MVPP2_RXQ_THRESH_REG, val);
-}
-
 /* Set the number of packets that will be received before Rx interrupt
  * will be generated by HW.
  */
@@ -2810,12 +2466,7 @@ static void mvpp2_txq_bufs_free(struct mvpp2_port *port,
 				struct mvpp2_tx_queue *txq,
 				struct mvpp2_txq_pcpu *txq_pcpu, int num)
 {
-	struct xdp_frame_bulk bq;
 	int i;
-
-	xdp_frame_bulk_init(&bq);
-
-	rcu_read_lock(); /* need for xdp_return_frame_bulk */
 
 	for (i = 0; i < num; i++) {
 		struct mvpp2_txq_pcpu_buf *tx_buf =
@@ -2829,13 +2480,10 @@ static void mvpp2_txq_bufs_free(struct mvpp2_port *port,
 			dev_kfree_skb_any(tx_buf->skb);
 		else if (tx_buf->type == MVPP2_TYPE_XDP_TX ||
 			 tx_buf->type == MVPP2_TYPE_XDP_NDO)
-			xdp_return_frame_bulk(tx_buf->xdpf, &bq);
+			xdp_return_frame(tx_buf->xdpf);
 
 		mvpp2_txq_inc_get(txq_pcpu);
 	}
-	xdp_flush_frame_bulk(&bq);
-
-	rcu_read_unlock();
 }
 
 static inline struct mvpp2_rx_queue *mvpp2_get_rx_queue(struct mvpp2_port *port,
@@ -2980,18 +2628,15 @@ static int mvpp2_rxq_init(struct mvpp2_port *port,
 	mvpp2_rx_pkts_coal_set(port, rxq);
 	mvpp2_rx_time_coal_set(port, rxq);
 
-	/* Set the number of non occupied descriptors threshold */
-	mvpp2_set_rxq_free_tresh(port, rxq);
-
 	/* Add number of descriptors ready for receiving packets */
 	mvpp2_rxq_status_update(port, rxq->id, 0, rxq->size);
 
 	if (priv->percpu_pools) {
-		err = xdp_rxq_info_reg(&rxq->xdp_rxq_short, port->dev, rxq->logic_rxq, 0);
+		err = xdp_rxq_info_reg(&rxq->xdp_rxq_short, port->dev, rxq->logic_rxq);
 		if (err < 0)
 			goto err_free_dma;
 
-		err = xdp_rxq_info_reg(&rxq->xdp_rxq_long, port->dev, rxq->logic_rxq, 0);
+		err = xdp_rxq_info_reg(&rxq->xdp_rxq_long, port->dev, rxq->logic_rxq);
 		if (err < 0)
 			goto err_unregister_rxq_short;
 
@@ -3300,9 +2945,6 @@ static void mvpp2_cleanup_rxqs(struct mvpp2_port *port)
 
 	for (queue = 0; queue < port->nrxqs; queue++)
 		mvpp2_rxq_deinit(port, port->rxqs[queue]);
-
-	if (port->tx_fc)
-		mvpp2_rxq_disable_fc(port);
 }
 
 /* Init all Rx queues for port */
@@ -3315,10 +2957,6 @@ static int mvpp2_setup_rxqs(struct mvpp2_port *port)
 		if (err)
 			goto err_cleanup;
 	}
-
-	if (port->tx_fc)
-		mvpp2_rxq_enable_fc(port);
-
 	return 0;
 
 err_cleanup:
@@ -3421,13 +3059,12 @@ static void mvpp2_isr_handle_ptp(struct mvpp2_port *port)
 		mvpp2_isr_handle_ptp_queue(port, 1);
 }
 
-static void mvpp2_isr_handle_link(struct mvpp2_port *port,
-				  struct phylink_pcs *pcs, bool link)
+static void mvpp2_isr_handle_link(struct mvpp2_port *port, bool link)
 {
 	struct net_device *dev = port->dev;
 
 	if (port->phylink) {
-		phylink_pcs_change(pcs, link);
+		phylink_mac_change(port->phylink, link);
 		return;
 	}
 
@@ -3460,7 +3097,7 @@ static void mvpp2_isr_handle_xlg(struct mvpp2_port *port)
 	if (val & MVPP22_XLG_INT_STAT_LINK) {
 		val = readl(port->base + MVPP22_XLG_STATUS);
 		link = (val & MVPP22_XLG_STATUS_LINK_UP);
-		mvpp2_isr_handle_link(port, &port->pcs_xlg, link);
+		mvpp2_isr_handle_link(port, link);
 	}
 }
 
@@ -3476,7 +3113,7 @@ static void mvpp2_isr_handle_gmac_internal(struct mvpp2_port *port)
 		if (val & MVPP22_GMAC_INT_STAT_LINK) {
 			val = readl(port->base + MVPP2_GMAC_STATUS0);
 			link = (val & MVPP2_GMAC_STATUS0_LINK_UP);
-			mvpp2_isr_handle_link(port, &port->pcs_gmac, link);
+			mvpp2_isr_handle_link(port, link);
 		}
 	}
 }
@@ -3572,17 +3209,21 @@ static void mvpp2_rx_error(struct mvpp2_port *port,
 }
 
 /* Handle RX checksum offload */
-static int mvpp2_rx_csum(struct mvpp2_port *port, u32 status)
+static void mvpp2_rx_csum(struct mvpp2_port *port, u32 status,
+			  struct sk_buff *skb)
 {
 	if (((status & MVPP2_RXD_L3_IP4) &&
 	     !(status & MVPP2_RXD_IP4_HEADER_ERR)) ||
 	    (status & MVPP2_RXD_L3_IP6))
 		if (((status & MVPP2_RXD_L4_UDP) ||
 		     (status & MVPP2_RXD_L4_TCP)) &&
-		     (status & MVPP2_RXD_L4_CSUM_OK))
-			return CHECKSUM_UNNECESSARY;
+		     (status & MVPP2_RXD_L4_CSUM_OK)) {
+			skb->csum = 0;
+			skb->ip_summed = CHECKSUM_UNNECESSARY;
+			return;
+		}
 
-	return CHECKSUM_NONE;
+	skb->ip_summed = CHECKSUM_NONE;
 }
 
 /* Allocate a new skb and add it to BM pool */
@@ -3769,7 +3410,7 @@ mvpp2_xdp_xmit(struct net_device *dev, int num_frame,
 	       struct xdp_frame **frames, u32 flags)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
-	int i, nxmit_byte = 0, nxmit = 0;
+	int i, nxmit_byte = 0, nxmit = num_frame;
 	struct mvpp2_pcpu_stats *stats;
 	u16 txq_id;
 	u32 ret;
@@ -3787,11 +3428,12 @@ mvpp2_xdp_xmit(struct net_device *dev, int num_frame,
 
 	for (i = 0; i < num_frame; i++) {
 		ret = mvpp2_xdp_submit_frame(port, txq_id, frames[i], true);
-		if (ret != MVPP2_XDP_TX)
-			break;
-
-		nxmit_byte += frames[i]->len;
-		nxmit++;
+		if (ret == MVPP2_XDP_TX) {
+			nxmit_byte += frames[i]->len;
+		} else {
+			xdp_return_frame_rx_napi(frames[i]);
+			nxmit--;
+		}
 	}
 
 	if (likely(nxmit > 0))
@@ -3809,9 +3451,9 @@ mvpp2_xdp_xmit(struct net_device *dev, int num_frame,
 }
 
 static int
-mvpp2_run_xdp(struct mvpp2_port *port, struct bpf_prog *prog,
-	      struct xdp_buff *xdp, struct page_pool *pp,
-	      struct mvpp2_pcpu_stats *stats)
+mvpp2_run_xdp(struct mvpp2_port *port, struct mvpp2_rx_queue *rxq,
+	      struct bpf_prog *prog, struct xdp_buff *xdp,
+	      struct page_pool *pp, struct mvpp2_pcpu_stats *stats)
 {
 	unsigned int len, sync, err;
 	struct page *page;
@@ -3848,7 +3490,7 @@ mvpp2_run_xdp(struct mvpp2_port *port, struct bpf_prog *prog,
 		}
 		break;
 	default:
-		bpf_warn_invalid_xdp_action(port->dev, prog, act);
+		bpf_warn_invalid_xdp_action(act);
 		fallthrough;
 	case XDP_ABORTED:
 		trace_xdp_exception(port->dev, prog, act);
@@ -3906,6 +3548,8 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 	int rx_done = 0;
 	u32 xdp_ret = 0;
 
+	rcu_read_lock();
+
 	xdp_prog = READ_ONCE(port->xdp_prog);
 
 	/* Get number of received packets and clamp the to-do */
@@ -3915,27 +3559,23 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 
 	while (rx_done < rx_todo) {
 		struct mvpp2_rx_desc *rx_desc = mvpp2_rxq_next_desc_get(rxq);
-		u32 rx_status, timestamp, metasize = 0;
 		struct mvpp2_bm_pool *bm_pool;
 		struct page_pool *pp = NULL;
 		struct sk_buff *skb;
 		unsigned int frag_size;
 		dma_addr_t dma_addr;
 		phys_addr_t phys_addr;
+		u32 rx_status, timestamp;
 		int pool, rx_bytes, err, ret;
-		struct page *page;
 		void *data;
-
-		phys_addr = mvpp2_rxdesc_cookie_get(port, rx_desc);
-		data = (void *)phys_to_virt(phys_addr);
-		page = virt_to_page(data);
-		prefetch(page);
 
 		rx_done++;
 		rx_status = mvpp2_rxdesc_status_get(port, rx_desc);
 		rx_bytes = mvpp2_rxdesc_size_get(port, rx_desc);
 		rx_bytes -= MVPP2_MH_SIZE;
 		dma_addr = mvpp2_rxdesc_dma_addr_get(port, rx_desc);
+		phys_addr = mvpp2_rxdesc_cookie_get(port, rx_desc);
+		data = (void *)phys_to_virt(phys_addr);
 
 		pool = (rx_status & MVPP2_RXD_BM_POOL_ID_MASK) >>
 			MVPP2_RXD_BM_POOL_ID_OFFS;
@@ -3965,7 +3605,7 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 			goto err_drop_frame;
 
 		/* Prefetch header */
-		prefetch(data + MVPP2_MH_SIZE + MVPP2_SKB_HEADROOM);
+		prefetch(data);
 
 		if (bm_pool->frag_size > PAGE_SIZE)
 			frag_size = 0;
@@ -3973,19 +3613,19 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 			frag_size = bm_pool->frag_size;
 
 		if (xdp_prog) {
-			struct xdp_rxq_info *xdp_rxq;
+			xdp.data_hard_start = data;
+			xdp.data = data + MVPP2_MH_SIZE + MVPP2_SKB_HEADROOM;
+			xdp.data_end = xdp.data + rx_bytes;
+			xdp.frame_sz = PAGE_SIZE;
 
 			if (bm_pool->pkt_size == MVPP2_BM_SHORT_PKT_SIZE)
-				xdp_rxq = &rxq->xdp_rxq_short;
+				xdp.rxq = &rxq->xdp_rxq_short;
 			else
-				xdp_rxq = &rxq->xdp_rxq_long;
+				xdp.rxq = &rxq->xdp_rxq_long;
 
-			xdp_init_buff(&xdp, PAGE_SIZE, xdp_rxq);
-			xdp_prepare_buff(&xdp, data,
-					 MVPP2_MH_SIZE + MVPP2_SKB_HEADROOM,
-					 rx_bytes, true);
+			xdp_set_data_meta_invalid(&xdp);
 
-			ret = mvpp2_run_xdp(port, xdp_prog, &xdp, pp, &ps);
+			ret = mvpp2_run_xdp(port, rxq, xdp_prog, &xdp, pp, &ps);
 
 			if (ret) {
 				xdp_ret |= ret;
@@ -3999,14 +3639,9 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 				ps.rx_bytes += rx_bytes;
 				continue;
 			}
-
-			metasize = xdp.data - xdp.data_meta;
 		}
 
-		if (frag_size)
-			skb = build_skb(data, frag_size);
-		else
-			skb = slab_build_skb(data);
+		skb = build_skb(data, frag_size);
 		if (!skb) {
 			netdev_warn(port->dev, "skb build failed\n");
 			goto err_drop_frame;
@@ -4029,7 +3664,7 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 		}
 
 		if (pp)
-			skb_mark_for_recycle(skb);
+			page_pool_release_page(pp, virt_to_page(data));
 		else
 			dma_unmap_single_attrs(dev->dev.parent, dma_addr,
 					       bm_pool->buf_size, DMA_FROM_DEVICE,
@@ -4040,10 +3675,8 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 
 		skb_reserve(skb, MVPP2_MH_SIZE + MVPP2_SKB_HEADROOM);
 		skb_put(skb, rx_bytes);
-		if (metasize)
-			skb_metadata_set(skb, metasize);
-		skb->ip_summed = mvpp2_rx_csum(port, rx_status);
 		skb->protocol = eth_type_trans(skb, dev);
+		mvpp2_rx_csum(port, rx_status, skb);
 
 		napi_gro_receive(napi, skb);
 		continue;
@@ -4058,8 +3691,10 @@ err_drop_frame:
 			mvpp2_bm_pool_put(port, pool, dma_addr, phys_addr);
 	}
 
+	rcu_read_unlock();
+
 	if (xdp_ret & MVPP2_XDP_REDIR)
-		xdp_do_flush();
+		xdp_do_flush_map();
 
 	if (ps.rx_packets) {
 		struct mvpp2_pcpu_stats *stats = this_cpu_ptr(port->stats);
@@ -4102,7 +3737,7 @@ static void mvpp2_txdesc_clear_ptp(struct mvpp2_port *port,
 				   struct mvpp2_tx_desc *desc)
 {
 	/* We only need to clear the low bits */
-	if (port->priv->hw_version >= MVPP22)
+	if (port->priv->hw_version != MVPP21)
 		desc->pp22.ptp_descriptor &=
 			cpu_to_le32(~MVPP22_PTP_DESC_MASK_LOW);
 }
@@ -4439,8 +4074,6 @@ out:
 		txq_pcpu->count += frags;
 		aggr_txq->count += frags;
 
-		skb_tx_timestamp(skb);
-
 		/* Enable transmit */
 		wmb();
 		mvpp2_aggr_txq_pend_desc_add(port, frags);
@@ -4567,8 +4200,7 @@ static int mvpp2_poll(struct napi_struct *napi, int budget)
 	return rx_done;
 }
 
-static void mvpp22_mode_reconfigure(struct mvpp2_port *port,
-				    phy_interface_t interface)
+static void mvpp22_mode_reconfigure(struct mvpp2_port *port)
 {
 	u32 ctrl3;
 
@@ -4579,18 +4211,18 @@ static void mvpp22_mode_reconfigure(struct mvpp2_port *port,
 	mvpp22_pcs_reset_assert(port);
 
 	/* comphy reconfiguration */
-	mvpp22_comphy_init(port, interface);
+	mvpp22_comphy_init(port);
 
 	/* gop reconfiguration */
-	mvpp22_gop_init(port, interface);
+	mvpp22_gop_init(port);
 
-	mvpp22_pcs_reset_deassert(port, interface);
+	mvpp22_pcs_reset_deassert(port);
 
 	if (mvpp2_port_supports_xlg(port)) {
 		ctrl3 = readl(port->base + MVPP22_XLG_CTRL3_REG);
 		ctrl3 &= ~MVPP22_XLG_CTRL3_MACMODESELECT_MASK;
 
-		if (mvpp2_is_xlg(interface))
+		if (mvpp2_is_xlg(port->phy_interface))
 			ctrl3 |= MVPP22_XLG_CTRL3_MACMODESELECT_10G;
 		else
 			ctrl3 |= MVPP22_XLG_CTRL3_MACMODESELECT_GMAC;
@@ -4598,7 +4230,7 @@ static void mvpp22_mode_reconfigure(struct mvpp2_port *port,
 		writel(ctrl3, port->base + MVPP22_XLG_CTRL3_REG);
 	}
 
-	if (mvpp2_port_supports_xlg(port) && mvpp2_is_xlg(interface))
+	if (mvpp2_port_supports_xlg(port) && mvpp2_is_xlg(port->phy_interface))
 		mvpp2_xlg_max_rx_size_set(port);
 	else
 		mvpp2_gmac_max_rx_size_set(port);
@@ -4617,8 +4249,8 @@ static void mvpp2_start_dev(struct mvpp2_port *port)
 	/* Enable interrupts on all threads */
 	mvpp2_interrupts_enable(port);
 
-	if (port->priv->hw_version >= MVPP22)
-		mvpp22_mode_reconfigure(port, port->phy_interface);
+	if (port->priv->hw_version == MVPP22)
+		mvpp22_mode_reconfigure(port);
 
 	if (port->phylink) {
 		phylink_start(port->phylink);
@@ -4660,8 +4292,6 @@ static int mvpp2_check_ringparam_valid(struct net_device *dev,
 
 	if (ring->rx_pending > MVPP2_MAX_RXD_MAX)
 		new_rx_pending = MVPP2_MAX_RXD_MAX;
-	else if (ring->rx_pending < MSS_THRESHOLD_START)
-		new_rx_pending = MSS_THRESHOLD_START;
 	else if (!IS_ALIGNED(ring->rx_pending, 16))
 		new_rx_pending = ALIGN(ring->rx_pending, 16);
 
@@ -4769,10 +4399,9 @@ static void mvpp2_irqs_deinit(struct mvpp2_port *port)
 	}
 }
 
-static bool mvpp22_rss_is_supported(struct mvpp2_port *port)
+static bool mvpp22_rss_is_supported(void)
 {
-	return (queue_mode == MVPP2_QDIST_MULTI_MODE) &&
-		!(port->flags & MVPP2_F_LOOPBACK);
+	return queue_mode == MVPP2_QDIST_MULTI_MODE;
 }
 
 static int mvpp2_open(struct net_device *dev)
@@ -4824,8 +4453,9 @@ static int mvpp2_open(struct net_device *dev)
 		goto err_cleanup_txqs;
 	}
 
-	if (port->phylink) {
-		err = phylink_fwnode_phy_connect(port->phylink, port->fwnode, 0);
+	/* Phylink isn't supported yet in ACPI mode */
+	if (port->of_node) {
+		err = phylink_of_phy_connect(port->phylink, port->of_node, 0);
 		if (err) {
 			netdev_err(port->dev, "could not attach PHY (%d)\n",
 				   err);
@@ -4835,7 +4465,7 @@ static int mvpp2_open(struct net_device *dev)
 		valid = true;
 	}
 
-	if (priv->hw_version >= MVPP22 && port->port_irq) {
+	if (priv->hw_version == MVPP22 && port->port_irq) {
 		err = request_irq(port->port_irq, mvpp2_port_isr, 0,
 				  dev->name, port);
 		if (err) {
@@ -5002,7 +4632,6 @@ static int mvpp2_set_mac_address(struct net_device *dev, void *p)
  */
 static int mvpp2_bm_switch_buffers(struct mvpp2 *priv, bool percpu)
 {
-	bool change_percpu = (percpu != priv->percpu_pools);
 	int numbufs = MVPP2_BM_POOLS_NUM, i;
 	struct mvpp2_port *port = NULL;
 	bool status[MVPP2_MAX_PORTS];
@@ -5018,9 +4647,6 @@ static int mvpp2_bm_switch_buffers(struct mvpp2 *priv, bool percpu)
 	if (priv->percpu_pools)
 		numbufs = port->nrxqs * 2;
 
-	if (change_percpu)
-		mvpp2_bm_pool_update_priv_fc(priv, false);
-
 	for (i = 0; i < numbufs; i++)
 		mvpp2_bm_pool_destroy(port->dev->dev.parent, priv, &priv->bm_pools[i]);
 
@@ -5030,21 +4656,10 @@ static int mvpp2_bm_switch_buffers(struct mvpp2 *priv, bool percpu)
 
 	for (i = 0; i < priv->port_count; i++) {
 		port = priv->port_list[i];
-		if (percpu && port->ntxqs >= num_possible_cpus() * 2)
-			xdp_set_features_flag(port->dev,
-					      NETDEV_XDP_ACT_BASIC |
-					      NETDEV_XDP_ACT_REDIRECT |
-					      NETDEV_XDP_ACT_NDO_XMIT);
-		else
-			xdp_clear_features_flag(port->dev);
-
 		mvpp2_swf_bm_pool_init(port);
 		if (status[i])
 			mvpp2_open(port->dev);
 	}
-
-	if (change_percpu)
-		mvpp2_bm_pool_update_priv_fc(priv, true);
 
 	return 0;
 }
@@ -5157,12 +4772,12 @@ mvpp2_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 
 		cpu_stats = per_cpu_ptr(port->stats, cpu);
 		do {
-			start = u64_stats_fetch_begin(&cpu_stats->syncp);
+			start = u64_stats_fetch_begin_irq(&cpu_stats->syncp);
 			rx_packets = cpu_stats->rx_packets;
 			rx_bytes   = cpu_stats->rx_bytes;
 			tx_packets = cpu_stats->tx_packets;
 			tx_bytes   = cpu_stats->tx_bytes;
-		} while (u64_stats_fetch_retry(&cpu_stats->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&cpu_stats->syncp, start));
 
 		stats->rx_packets += rx_packets;
 		stats->rx_bytes   += rx_bytes;
@@ -5175,40 +4790,41 @@ mvpp2_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 	stats->tx_dropped	= dev->stats.tx_dropped;
 }
 
-static int mvpp2_hwtstamp_set(struct net_device *dev,
-			      struct kernel_hwtstamp_config *config,
-			      struct netlink_ext_ack *extack)
+static int mvpp2_set_ts_config(struct mvpp2_port *port, struct ifreq *ifr)
 {
-	struct mvpp2_port *port = netdev_priv(dev);
+	struct hwtstamp_config config;
 	void __iomem *ptp;
 	u32 gcr, int_mask;
 
-	if (!port->hwtstamp)
-		return -EOPNOTSUPP;
+	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
+		return -EFAULT;
 
-	if (config->tx_type != HWTSTAMP_TX_OFF &&
-	    config->tx_type != HWTSTAMP_TX_ON)
+	if (config.flags)
+		return -EINVAL;
+
+	if (config.tx_type != HWTSTAMP_TX_OFF &&
+	    config.tx_type != HWTSTAMP_TX_ON)
 		return -ERANGE;
 
 	ptp = port->priv->iface_base + MVPP22_PTP_BASE(port->gop_id);
 
 	int_mask = gcr = 0;
-	if (config->tx_type != HWTSTAMP_TX_OFF) {
+	if (config.tx_type != HWTSTAMP_TX_OFF) {
 		gcr |= MVPP22_PTP_GCR_TSU_ENABLE | MVPP22_PTP_GCR_TX_RESET;
 		int_mask |= MVPP22_PTP_INT_MASK_QUEUE1 |
 			    MVPP22_PTP_INT_MASK_QUEUE0;
 	}
 
 	/* It seems we must also release the TX reset when enabling the TSU */
-	if (config->rx_filter != HWTSTAMP_FILTER_NONE)
+	if (config.rx_filter != HWTSTAMP_FILTER_NONE)
 		gcr |= MVPP22_PTP_GCR_TSU_ENABLE | MVPP22_PTP_GCR_RX_RESET |
 		       MVPP22_PTP_GCR_TX_RESET;
 
 	if (gcr & MVPP22_PTP_GCR_TSU_ENABLE)
 		mvpp22_tai_start(port->priv->tai);
 
-	if (config->rx_filter != HWTSTAMP_FILTER_NONE) {
-		config->rx_filter = HWTSTAMP_FILTER_ALL;
+	if (config.rx_filter != HWTSTAMP_FILTER_NONE) {
+		config.rx_filter = HWTSTAMP_FILTER_ALL;
 		mvpp2_modify(ptp + MVPP22_PTP_GCR,
 			     MVPP22_PTP_GCR_RX_RESET |
 			     MVPP22_PTP_GCR_TX_RESET |
@@ -5229,39 +4845,45 @@ static int mvpp2_hwtstamp_set(struct net_device *dev,
 	if (!(gcr & MVPP22_PTP_GCR_TSU_ENABLE))
 		mvpp22_tai_stop(port->priv->tai);
 
-	port->tx_hwtstamp_type = config->tx_type;
+	port->tx_hwtstamp_type = config.tx_type;
+
+	if (copy_to_user(ifr->ifr_data, &config, sizeof(config)))
+		return -EFAULT;
 
 	return 0;
 }
 
-static int mvpp2_hwtstamp_get(struct net_device *dev,
-			      struct kernel_hwtstamp_config *config)
+static int mvpp2_get_ts_config(struct mvpp2_port *port, struct ifreq *ifr)
+{
+	struct hwtstamp_config config;
+
+	memset(&config, 0, sizeof(config));
+
+	config.tx_type = port->tx_hwtstamp_type;
+	config.rx_filter = port->rx_hwtstamp ?
+		HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
+
+	if (copy_to_user(ifr->ifr_data, &config, sizeof(config)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int mvpp2_ethtool_get_ts_info(struct net_device *dev,
+				     struct ethtool_ts_info *info)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 
 	if (!port->hwtstamp)
 		return -EOPNOTSUPP;
 
-	config->tx_type = port->tx_hwtstamp_type;
-	config->rx_filter = port->rx_hwtstamp ? HWTSTAMP_FILTER_ALL :
-			    HWTSTAMP_FILTER_NONE;
-
-	return 0;
-}
-
-static int mvpp2_ethtool_get_ts_info(struct net_device *dev,
-				     struct kernel_ethtool_ts_info *info)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	ethtool_op_get_ts_info(dev, info);
-	if (!port->hwtstamp)
-		return 0;
-
 	info->phc_index = mvpp22_tai_ptp_clock_index(port->priv->tai);
-	info->so_timestamping |= SOF_TIMESTAMPING_TX_HARDWARE |
-				 SOF_TIMESTAMPING_RX_HARDWARE |
-				 SOF_TIMESTAMPING_RAW_HARDWARE;
+	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
+				SOF_TIMESTAMPING_RX_SOFTWARE |
+				SOF_TIMESTAMPING_SOFTWARE |
+				SOF_TIMESTAMPING_TX_HARDWARE |
+				SOF_TIMESTAMPING_RX_HARDWARE |
+				SOF_TIMESTAMPING_RAW_HARDWARE;
 	info->tx_types = BIT(HWTSTAMP_TX_OFF) |
 			 BIT(HWTSTAMP_TX_ON);
 	info->rx_filters = BIT(HWTSTAMP_FILTER_NONE) |
@@ -5273,6 +4895,18 @@ static int mvpp2_ethtool_get_ts_info(struct net_device *dev,
 static int mvpp2_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
+
+	switch (cmd) {
+	case SIOCSHWTSTAMP:
+		if (port->hwtstamp)
+			return mvpp2_set_ts_config(port, ifr);
+		break;
+
+	case SIOCGHWTSTAMP:
+		if (port->hwtstamp)
+			return mvpp2_get_ts_config(port, ifr);
+		break;
+	}
 
 	if (!port->phylink)
 		return -ENOTSUPP;
@@ -5397,11 +5031,8 @@ static int mvpp2_ethtool_nway_reset(struct net_device *dev)
 }
 
 /* Set interrupt coalescing for ethtools */
-static int
-mvpp2_ethtool_set_coalesce(struct net_device *dev,
-			   struct ethtool_coalesce *c,
-			   struct kernel_ethtool_coalesce *kernel_coal,
-			   struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_set_coalesce(struct net_device *dev,
+				      struct ethtool_coalesce *c)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 	int queue;
@@ -5433,11 +5064,8 @@ mvpp2_ethtool_set_coalesce(struct net_device *dev,
 }
 
 /* get coalescing for ethtools */
-static int
-mvpp2_ethtool_get_coalesce(struct net_device *dev,
-			   struct ethtool_coalesce *c,
-			   struct kernel_ethtool_coalesce *kernel_coal,
-			   struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_get_coalesce(struct net_device *dev,
+				      struct ethtool_coalesce *c)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 
@@ -5451,19 +5079,16 @@ mvpp2_ethtool_get_coalesce(struct net_device *dev,
 static void mvpp2_ethtool_get_drvinfo(struct net_device *dev,
 				      struct ethtool_drvinfo *drvinfo)
 {
-	strscpy(drvinfo->driver, MVPP2_DRIVER_NAME,
+	strlcpy(drvinfo->driver, MVPP2_DRIVER_NAME,
 		sizeof(drvinfo->driver));
-	strscpy(drvinfo->version, MVPP2_DRIVER_VERSION,
+	strlcpy(drvinfo->version, MVPP2_DRIVER_VERSION,
 		sizeof(drvinfo->version));
-	strscpy(drvinfo->bus_info, dev_name(&dev->dev),
+	strlcpy(drvinfo->bus_info, dev_name(&dev->dev),
 		sizeof(drvinfo->bus_info));
 }
 
-static void
-mvpp2_ethtool_get_ringparam(struct net_device *dev,
-			    struct ethtool_ringparam *ring,
-			    struct kernel_ethtool_ringparam *kernel_ring,
-			    struct netlink_ext_ack *extack)
+static void mvpp2_ethtool_get_ringparam(struct net_device *dev,
+					struct ethtool_ringparam *ring)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 
@@ -5473,11 +5098,8 @@ mvpp2_ethtool_get_ringparam(struct net_device *dev,
 	ring->tx_pending = port->tx_ring_size;
 }
 
-static int
-mvpp2_ethtool_set_ringparam(struct net_device *dev,
-			    struct ethtool_ringparam *ring,
-			    struct kernel_ethtool_ringparam *kernel_ring,
-			    struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_set_ringparam(struct net_device *dev,
+				       struct ethtool_ringparam *ring)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 	u16 prev_rx_ring_size = port->rx_ring_size;
@@ -5586,10 +5208,13 @@ static int mvpp2_ethtool_get_rxnfc(struct net_device *dev,
 	struct mvpp2_port *port = netdev_priv(dev);
 	int ret = 0, i, loc = 0;
 
-	if (!mvpp22_rss_is_supported(port))
+	if (!mvpp22_rss_is_supported())
 		return -EOPNOTSUPP;
 
 	switch (info->cmd) {
+	case ETHTOOL_GRXFH:
+		ret = mvpp2_ethtool_rxfh_get(port, info);
+		break;
 	case ETHTOOL_GRXRINGS:
 		info->data = port->nrxqs;
 		break;
@@ -5623,10 +5248,13 @@ static int mvpp2_ethtool_set_rxnfc(struct net_device *dev,
 	struct mvpp2_port *port = netdev_priv(dev);
 	int ret = 0;
 
-	if (!mvpp22_rss_is_supported(port))
+	if (!mvpp22_rss_is_supported())
 		return -EOPNOTSUPP;
 
 	switch (info->cmd) {
+	case ETHTOOL_SRXFH:
+		ret = mvpp2_ethtool_rxfh_set(port, info);
+		break;
 	case ETHTOOL_SRXCLSRLINS:
 		ret = mvpp2_ethtool_cls_rule_ins(port, info);
 		break;
@@ -5641,153 +5269,96 @@ static int mvpp2_ethtool_set_rxnfc(struct net_device *dev,
 
 static u32 mvpp2_ethtool_get_rxfh_indir_size(struct net_device *dev)
 {
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	return mvpp22_rss_is_supported(port) ? MVPP22_RSS_TABLE_ENTRIES : 0;
+	return mvpp22_rss_is_supported() ? MVPP22_RSS_TABLE_ENTRIES : 0;
 }
 
-static int mvpp2_ethtool_get_rxfh(struct net_device *dev,
-				  struct ethtool_rxfh_param *rxfh)
+static int mvpp2_ethtool_get_rxfh(struct net_device *dev, u32 *indir, u8 *key,
+				  u8 *hfunc)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
-	u32 rss_context = rxfh->rss_context;
 	int ret = 0;
 
-	if (!mvpp22_rss_is_supported(port))
+	if (!mvpp22_rss_is_supported())
+		return -EOPNOTSUPP;
+
+	if (indir)
+		ret = mvpp22_port_rss_ctx_indir_get(port, 0, indir);
+
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_CRC32;
+
+	return ret;
+}
+
+static int mvpp2_ethtool_set_rxfh(struct net_device *dev, const u32 *indir,
+				  const u8 *key, const u8 hfunc)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+	int ret = 0;
+
+	if (!mvpp22_rss_is_supported())
+		return -EOPNOTSUPP;
+
+	if (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_CRC32)
+		return -EOPNOTSUPP;
+
+	if (key)
+		return -EOPNOTSUPP;
+
+	if (indir)
+		ret = mvpp22_port_rss_ctx_indir_set(port, 0, indir);
+
+	return ret;
+}
+
+static int mvpp2_ethtool_get_rxfh_context(struct net_device *dev, u32 *indir,
+					  u8 *key, u8 *hfunc, u32 rss_context)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+	int ret = 0;
+
+	if (!mvpp22_rss_is_supported())
 		return -EOPNOTSUPP;
 	if (rss_context >= MVPP22_N_RSS_TABLES)
 		return -EINVAL;
 
-	rxfh->hfunc = ETH_RSS_HASH_CRC32;
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_CRC32;
 
-	if (rxfh->indir)
-		ret = mvpp22_port_rss_ctx_indir_get(port, rss_context,
-						    rxfh->indir);
+	if (indir)
+		ret = mvpp22_port_rss_ctx_indir_get(port, rss_context, indir);
 
 	return ret;
 }
 
-static bool mvpp2_ethtool_rxfh_okay(struct mvpp2_port *port,
-				    const struct ethtool_rxfh_param *rxfh)
-{
-	if (!mvpp22_rss_is_supported(port))
-		return false;
-
-	if (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE &&
-	    rxfh->hfunc != ETH_RSS_HASH_CRC32)
-		return false;
-
-	if (rxfh->key)
-		return false;
-
-	return true;
-}
-
-static int mvpp2_create_rxfh_context(struct net_device *dev,
-				     struct ethtool_rxfh_context *ctx,
-				     const struct ethtool_rxfh_param *rxfh,
-				     struct netlink_ext_ack *extack)
+static int mvpp2_ethtool_set_rxfh_context(struct net_device *dev,
+					  const u32 *indir, const u8 *key,
+					  const u8 hfunc, u32 *rss_context,
+					  bool delete)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
-	int ret = 0;
+	int ret;
 
-	if (!mvpp2_ethtool_rxfh_okay(port, rxfh))
+	if (!mvpp22_rss_is_supported())
 		return -EOPNOTSUPP;
 
-	ctx->hfunc = ETH_RSS_HASH_CRC32;
-
-	ret = mvpp22_port_rss_ctx_create(port, rxfh->rss_context);
-	if (ret)
-		return ret;
-
-	if (!rxfh->indir)
-		ret = mvpp22_port_rss_ctx_indir_get(port, rxfh->rss_context,
-						    ethtool_rxfh_context_indir(ctx));
-	else
-		ret = mvpp22_port_rss_ctx_indir_set(port, rxfh->rss_context,
-						    rxfh->indir);
-	return ret;
-}
-
-static int mvpp2_modify_rxfh_context(struct net_device *dev,
-				     struct ethtool_rxfh_context *ctx,
-				     const struct ethtool_rxfh_param *rxfh,
-				     struct netlink_ext_ack *extack)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-	int ret = 0;
-
-	if (!mvpp2_ethtool_rxfh_okay(port, rxfh))
+	if (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_CRC32)
 		return -EOPNOTSUPP;
 
-	if (rxfh->indir)
-		ret = mvpp22_port_rss_ctx_indir_set(port, rxfh->rss_context,
-						    rxfh->indir);
-	return ret;
-}
-
-static int mvpp2_remove_rxfh_context(struct net_device *dev,
-				     struct ethtool_rxfh_context *ctx,
-				     u32 rss_context,
-				     struct netlink_ext_ack *extack)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	return mvpp22_port_rss_ctx_delete(port, rss_context);
-}
-
-static int mvpp2_ethtool_set_rxfh(struct net_device *dev,
-				  struct ethtool_rxfh_param *rxfh,
-				  struct netlink_ext_ack *extack)
-{
-	return mvpp2_modify_rxfh_context(dev, NULL, rxfh, extack);
-}
-
-static int mvpp2_ethtool_get_rxfh_fields(struct net_device *dev,
-					 struct ethtool_rxfh_fields *info)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	if (!mvpp22_rss_is_supported(port))
+	if (key)
 		return -EOPNOTSUPP;
 
-	return mvpp2_ethtool_rxfh_get(port, info);
+	if (delete)
+		return mvpp22_port_rss_ctx_delete(port, *rss_context);
+
+	if (*rss_context == ETH_RXFH_CONTEXT_ALLOC) {
+		ret = mvpp22_port_rss_ctx_create(port, rss_context);
+		if (ret)
+			return ret;
+	}
+
+	return mvpp22_port_rss_ctx_indir_set(port, *rss_context, indir);
 }
-
-static int mvpp2_ethtool_set_rxfh_fields(struct net_device *dev,
-					 const struct ethtool_rxfh_fields *info,
-					 struct netlink_ext_ack *extack)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	if (!mvpp22_rss_is_supported(port))
-		return -EOPNOTSUPP;
-
-	return mvpp2_ethtool_rxfh_set(port, info);
-}
-
-static int mvpp2_ethtool_get_eee(struct net_device *dev,
-				 struct ethtool_keee *eee)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	if (!port->phylink)
-		return -EOPNOTSUPP;
-
-	return phylink_ethtool_get_eee(port->phylink, eee);
-}
-
-static int mvpp2_ethtool_set_eee(struct net_device *dev,
-				 struct ethtool_keee *eee)
-{
-	struct mvpp2_port *port = netdev_priv(dev);
-
-	if (!port->phylink)
-		return -EOPNOTSUPP;
-
-	return phylink_ethtool_set_eee(port->phylink, eee);
-}
-
 /* Device ops */
 
 static const struct net_device_ops mvpp2_netdev_ops = {
@@ -5798,18 +5369,15 @@ static const struct net_device_ops mvpp2_netdev_ops = {
 	.ndo_set_mac_address	= mvpp2_set_mac_address,
 	.ndo_change_mtu		= mvpp2_change_mtu,
 	.ndo_get_stats64	= mvpp2_get_stats64,
-	.ndo_eth_ioctl		= mvpp2_ioctl,
+	.ndo_do_ioctl		= mvpp2_ioctl,
 	.ndo_vlan_rx_add_vid	= mvpp2_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= mvpp2_vlan_rx_kill_vid,
 	.ndo_set_features	= mvpp2_set_features,
 	.ndo_bpf		= mvpp2_xdp,
 	.ndo_xdp_xmit		= mvpp2_xdp_xmit,
-	.ndo_hwtstamp_get	= mvpp2_hwtstamp_get,
-	.ndo_hwtstamp_set	= mvpp2_hwtstamp_set,
 };
 
 static const struct ethtool_ops mvpp2_eth_tool_ops = {
-	.rxfh_max_num_contexts	= MVPP22_N_RSS_TABLES,
 	.supported_coalesce_params = ETHTOOL_COALESCE_USECS |
 				     ETHTOOL_COALESCE_MAX_FRAMES,
 	.nway_reset		= mvpp2_ethtool_nway_reset,
@@ -5832,13 +5400,8 @@ static const struct ethtool_ops mvpp2_eth_tool_ops = {
 	.get_rxfh_indir_size	= mvpp2_ethtool_get_rxfh_indir_size,
 	.get_rxfh		= mvpp2_ethtool_get_rxfh,
 	.set_rxfh		= mvpp2_ethtool_set_rxfh,
-	.get_rxfh_fields	= mvpp2_ethtool_get_rxfh_fields,
-	.set_rxfh_fields	= mvpp2_ethtool_set_rxfh_fields,
-	.create_rxfh_context	= mvpp2_create_rxfh_context,
-	.modify_rxfh_context	= mvpp2_modify_rxfh_context,
-	.remove_rxfh_context	= mvpp2_remove_rxfh_context,
-	.get_eee		= mvpp2_ethtool_get_eee,
-	.set_eee		= mvpp2_ethtool_set_eee,
+	.get_rxfh_context	= mvpp2_ethtool_get_rxfh_context,
+	.set_rxfh_context	= mvpp2_ethtool_set_rxfh_context,
 };
 
 /* Used for PPv2.1, or PPv2.2 with the old Device Tree binding that
@@ -5858,7 +5421,8 @@ static int mvpp2_simple_queue_vectors_init(struct mvpp2_port *port,
 	v->irq = irq_of_parse_and_map(port_node, 0);
 	if (v->irq <= 0)
 		return -EINVAL;
-	netif_napi_add(port->dev, &v->napi, mvpp2_poll);
+	netif_napi_add(port->dev, &v->napi, mvpp2_poll,
+		       NAPI_POLL_WEIGHT);
 
 	port->nqvecs = 1;
 
@@ -5906,7 +5470,7 @@ static int mvpp2_multi_queue_vectors_init(struct mvpp2_port *port,
 			v->type = MVPP2_QUEUE_VECTOR_SHARED;
 
 			if (port->flags & MVPP2_F_DT_COMPAT)
-				strscpy(irqname, "rx-shared", sizeof(irqname));
+				strncpy(irqname, "rx-shared", sizeof(irqname));
 		}
 
 		if (port_node)
@@ -5918,7 +5482,8 @@ static int mvpp2_multi_queue_vectors_init(struct mvpp2_port *port,
 			goto err;
 		}
 
-		netif_napi_add(port->dev, &v->napi, mvpp2_poll);
+		netif_napi_add(port->dev, &v->napi, mvpp2_poll,
+			       NAPI_POLL_WEIGHT);
 	}
 
 	return 0;
@@ -5959,7 +5524,7 @@ static void mvpp2_rx_irqs_setup(struct mvpp2_port *port)
 		return;
 	}
 
-	/* Handle the more complicated PPv2.2 and PPv2.3 case */
+	/* Handle the more complicated PPv2.2 case */
 	for (i = 0; i < port->nqvecs; i++) {
 		struct mvpp2_queue_vector *qv = port->qvecs + i;
 
@@ -6091,7 +5656,7 @@ static int mvpp2_port_init(struct mvpp2_port *port)
 	mvpp2_cls_oversize_rxq_set(port);
 	mvpp2_cls_port_config(port);
 
-	if (mvpp22_rss_is_supported(port))
+	if (mvpp22_rss_is_supported())
 		mvpp22_port_rss_init(port);
 
 	/* Provide an initial Rx packet size */
@@ -6136,7 +5701,7 @@ static bool mvpp22_port_has_legacy_tx_irqs(struct device_node *port_node,
 
 /* Checks if the port dt description has the required Tx interrupts:
  * - PPv2.1: there are no such interrupts.
- * - PPv2.2 and PPv2.3:
+ * - PPv2.2:
  *   - The old DTs have: "rx-shared", "tx-cpuX" with X in [0...3]
  *   - The new ones have: "hifX" with X in [0..8]
  *
@@ -6169,44 +5734,31 @@ static bool mvpp2_port_has_irqs(struct mvpp2 *priv,
 	return true;
 }
 
-static int mvpp2_port_copy_mac_addr(struct net_device *dev, struct mvpp2 *priv,
-				    struct fwnode_handle *fwnode,
-				    char **mac_from)
+static void mvpp2_port_copy_mac_addr(struct net_device *dev, struct mvpp2 *priv,
+				     struct fwnode_handle *fwnode,
+				     char **mac_from)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
 	char hw_mac_addr[ETH_ALEN] = {0};
 	char fw_mac_addr[ETH_ALEN];
-	int ret;
 
-	if (!fwnode_get_mac_address(fwnode, fw_mac_addr)) {
+	if (fwnode_get_mac_address(fwnode, fw_mac_addr, ETH_ALEN)) {
 		*mac_from = "firmware node";
-		eth_hw_addr_set(dev, fw_mac_addr);
-		return 0;
+		ether_addr_copy(dev->dev_addr, fw_mac_addr);
+		return;
 	}
 
 	if (priv->hw_version == MVPP21) {
 		mvpp21_get_mac_address(port, hw_mac_addr);
 		if (is_valid_ether_addr(hw_mac_addr)) {
 			*mac_from = "hardware";
-			eth_hw_addr_set(dev, hw_mac_addr);
-			return 0;
+			ether_addr_copy(dev->dev_addr, hw_mac_addr);
+			return;
 		}
-	}
-
-	/* Only valid on OF enabled platforms */
-	ret = of_get_mac_address_nvmem(to_of_node(fwnode), fw_mac_addr);
-	if (ret == -EPROBE_DEFER)
-		return ret;
-	if (!ret) {
-		*mac_from = "nvmem cell";
-		eth_hw_addr_set(dev, fw_mac_addr);
-		return 0;
 	}
 
 	*mac_from = "random";
 	eth_hw_addr_random(dev);
-
-	return 0;
 }
 
 static struct mvpp2_port *mvpp2_phylink_to_port(struct phylink_config *config)
@@ -6214,33 +5766,18 @@ static struct mvpp2_port *mvpp2_phylink_to_port(struct phylink_config *config)
 	return container_of(config, struct mvpp2_port, phylink_config);
 }
 
-static struct mvpp2_port *mvpp2_pcs_xlg_to_port(struct phylink_pcs *pcs)
+static struct mvpp2_port *mvpp2_pcs_to_port(struct phylink_pcs *pcs)
 {
-	return container_of(pcs, struct mvpp2_port, pcs_xlg);
-}
-
-static struct mvpp2_port *mvpp2_pcs_gmac_to_port(struct phylink_pcs *pcs)
-{
-	return container_of(pcs, struct mvpp2_port, pcs_gmac);
-}
-
-static unsigned int mvpp2_xjg_pcs_inband_caps(struct phylink_pcs *pcs,
-					      phy_interface_t interface)
-{
-	return LINK_INBAND_DISABLE;
+	return container_of(pcs, struct mvpp2_port, phylink_pcs);
 }
 
 static void mvpp2_xlg_pcs_get_state(struct phylink_pcs *pcs,
-				    unsigned int neg_mode,
 				    struct phylink_link_state *state)
 {
-	struct mvpp2_port *port = mvpp2_pcs_xlg_to_port(pcs);
+	struct mvpp2_port *port = mvpp2_pcs_to_port(pcs);
 	u32 val;
 
-	if (port->phy_interface == PHY_INTERFACE_MODE_5GBASER)
-		state->speed = SPEED_5000;
-	else
-		state->speed = SPEED_10000;
+	state->speed = SPEED_10000;
 	state->duplex = 1;
 	state->an_complete = 1;
 
@@ -6255,7 +5792,8 @@ static void mvpp2_xlg_pcs_get_state(struct phylink_pcs *pcs,
 		state->pause |= MLO_PAUSE_RX;
 }
 
-static int mvpp2_xlg_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+static int mvpp2_xlg_pcs_config(struct phylink_pcs *pcs,
+				unsigned int mode,
 				phy_interface_t interface,
 				const unsigned long *advertising,
 				bool permit_pause_to_mac)
@@ -6264,38 +5802,14 @@ static int mvpp2_xlg_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 }
 
 static const struct phylink_pcs_ops mvpp2_phylink_xlg_pcs_ops = {
-	.pcs_inband_caps = mvpp2_xjg_pcs_inband_caps,
 	.pcs_get_state = mvpp2_xlg_pcs_get_state,
 	.pcs_config = mvpp2_xlg_pcs_config,
 };
 
-static unsigned int mvpp2_gmac_pcs_inband_caps(struct phylink_pcs *pcs,
-					       phy_interface_t interface)
-{
-	/* When operating in an 802.3z mode, we must have AN enabled:
-	 * Bit 2 Field InBandAnEn In-band Auto-Negotiation enable. ...
-	 * When <PortType> = 1 (1000BASE-X) this field must be set to 1.
-	 * Therefore, inband is "required".
-	 */
-	if (phy_interface_mode_is_8023z(interface))
-		return LINK_INBAND_ENABLE;
-
-	/* SGMII and RGMII can be configured to use inband signalling of the
-	 * AN result. Indicate these as "possible".
-	 */
-	if (interface == PHY_INTERFACE_MODE_SGMII ||
-	    phy_interface_mode_is_rgmii(interface))
-		return LINK_INBAND_DISABLE | LINK_INBAND_ENABLE;
-
-	/* For any other modes, indicate that inband is not supported. */
-	return LINK_INBAND_DISABLE;
-}
-
 static void mvpp2_gmac_pcs_get_state(struct phylink_pcs *pcs,
-				     unsigned int neg_mode,
 				     struct phylink_link_state *state)
 {
-	struct mvpp2_port *port = mvpp2_pcs_gmac_to_port(pcs);
+	struct mvpp2_port *port = mvpp2_pcs_to_port(pcs);
 	u32 val;
 
 	val = readl(port->base + MVPP2_GMAC_STATUS0);
@@ -6327,12 +5841,12 @@ static void mvpp2_gmac_pcs_get_state(struct phylink_pcs *pcs,
 		state->pause |= MLO_PAUSE_TX;
 }
 
-static int mvpp2_gmac_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+static int mvpp2_gmac_pcs_config(struct phylink_pcs *pcs, unsigned int mode,
 				 phy_interface_t interface,
 				 const unsigned long *advertising,
 				 bool permit_pause_to_mac)
 {
-	struct mvpp2_port *port = mvpp2_pcs_gmac_to_port(pcs);
+	struct mvpp2_port *port = mvpp2_pcs_to_port(pcs);
 	u32 mask, val, an, old_an, changed;
 
 	mask = MVPP2_GMAC_IN_BAND_AUTONEG_BYPASS |
@@ -6341,7 +5855,7 @@ static int mvpp2_gmac_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 	       MVPP2_GMAC_FLOW_CTRL_AUTONEG |
 	       MVPP2_GMAC_AN_DUPLEX_EN;
 
-	if (neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED) {
+	if (phylink_autoneg_inband(mode)) {
 		mask |= MVPP2_GMAC_CONFIG_MII_SPEED |
 			MVPP2_GMAC_CONFIG_GMII_SPEED |
 			MVPP2_GMAC_CONFIG_FULL_DUPLEX;
@@ -6386,7 +5900,7 @@ static int mvpp2_gmac_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 
 static void mvpp2_gmac_pcs_an_restart(struct phylink_pcs *pcs)
 {
-	struct mvpp2_port *port = mvpp2_pcs_gmac_to_port(pcs);
+	struct mvpp2_port *port = mvpp2_pcs_to_port(pcs);
 	u32 val = readl(port->base + MVPP2_GMAC_AUTONEG_CONFIG);
 
 	writel(val | MVPP2_GMAC_IN_BAND_RESTART_AN,
@@ -6396,11 +5910,96 @@ static void mvpp2_gmac_pcs_an_restart(struct phylink_pcs *pcs)
 }
 
 static const struct phylink_pcs_ops mvpp2_phylink_gmac_pcs_ops = {
-	.pcs_inband_caps = mvpp2_gmac_pcs_inband_caps,
 	.pcs_get_state = mvpp2_gmac_pcs_get_state,
 	.pcs_config = mvpp2_gmac_pcs_config,
 	.pcs_an_restart = mvpp2_gmac_pcs_an_restart,
 };
+
+static void mvpp2_phylink_validate(struct phylink_config *config,
+				   unsigned long *supported,
+				   struct phylink_link_state *state)
+{
+	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(mask) = { 0, };
+
+	/* Invalid combinations */
+	switch (state->interface) {
+	case PHY_INTERFACE_MODE_10GBASER:
+	case PHY_INTERFACE_MODE_XAUI:
+		if (!mvpp2_port_supports_xlg(port))
+			goto empty_set;
+		break;
+	case PHY_INTERFACE_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII_ID:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
+	case PHY_INTERFACE_MODE_RGMII_TXID:
+		if (!mvpp2_port_supports_rgmii(port))
+			goto empty_set;
+		break;
+	default:
+		break;
+	}
+
+	phylink_set(mask, Autoneg);
+	phylink_set_port_modes(mask);
+
+	switch (state->interface) {
+	case PHY_INTERFACE_MODE_10GBASER:
+	case PHY_INTERFACE_MODE_XAUI:
+	case PHY_INTERFACE_MODE_NA:
+		if (mvpp2_port_supports_xlg(port)) {
+			phylink_set(mask, 10000baseT_Full);
+			phylink_set(mask, 10000baseCR_Full);
+			phylink_set(mask, 10000baseSR_Full);
+			phylink_set(mask, 10000baseLR_Full);
+			phylink_set(mask, 10000baseLRM_Full);
+			phylink_set(mask, 10000baseER_Full);
+			phylink_set(mask, 10000baseKR_Full);
+		}
+		if (state->interface != PHY_INTERFACE_MODE_NA)
+			break;
+		fallthrough;
+	case PHY_INTERFACE_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII_ID:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
+	case PHY_INTERFACE_MODE_RGMII_TXID:
+	case PHY_INTERFACE_MODE_SGMII:
+		phylink_set(mask, 10baseT_Half);
+		phylink_set(mask, 10baseT_Full);
+		phylink_set(mask, 100baseT_Half);
+		phylink_set(mask, 100baseT_Full);
+		phylink_set(mask, 1000baseT_Full);
+		phylink_set(mask, 1000baseX_Full);
+		if (state->interface != PHY_INTERFACE_MODE_NA)
+			break;
+		fallthrough;
+	case PHY_INTERFACE_MODE_1000BASEX:
+	case PHY_INTERFACE_MODE_2500BASEX:
+		if (port->comphy ||
+		    state->interface != PHY_INTERFACE_MODE_2500BASEX) {
+			phylink_set(mask, 1000baseT_Full);
+			phylink_set(mask, 1000baseX_Full);
+		}
+		if (port->comphy ||
+		    state->interface == PHY_INTERFACE_MODE_2500BASEX) {
+			phylink_set(mask, 2500baseT_Full);
+			phylink_set(mask, 2500baseX_Full);
+		}
+		break;
+	default:
+		goto empty_set;
+	}
+
+	bitmap_and(supported, supported, mask, __ETHTOOL_LINK_MODE_MASK_NBITS);
+	bitmap_and(state->advertising, state->advertising, mask,
+		   __ETHTOOL_LINK_MODE_MASK_NBITS);
+
+	phylink_helper_basex_speed(state);
+	return;
+
+empty_set:
+	bitmap_zero(supported, __ETHTOOL_LINK_MODE_MASK_NBITS);
+}
 
 static void mvpp2_xlg_config(struct mvpp2_port *port, unsigned int mode,
 			     const struct phylink_link_state *state)
@@ -6434,7 +6033,7 @@ static void mvpp2_gmac_config(struct mvpp2_port *port, unsigned int mode,
 	old_ctrl4 = ctrl4 = readl(port->base + MVPP22_GMAC_CTRL_4_REG);
 
 	ctrl0 &= ~MVPP2_GMAC_PORT_TYPE_MASK;
-	ctrl2 &= ~(MVPP2_GMAC_INBAND_AN_MASK | MVPP2_GMAC_PCS_ENABLE_MASK | MVPP2_GMAC_FLOW_CTRL_MASK);
+	ctrl2 &= ~(MVPP2_GMAC_INBAND_AN_MASK | MVPP2_GMAC_PCS_ENABLE_MASK);
 
 	/* Configure port type */
 	if (phy_interface_mode_is_8023z(state->interface)) {
@@ -6481,23 +6080,8 @@ static void mvpp2_gmac_config(struct mvpp2_port *port, unsigned int mode,
 		writel(ctrl4, port->base + MVPP22_GMAC_CTRL_4_REG);
 }
 
-static struct phylink_pcs *mvpp2_select_pcs(struct phylink_config *config,
-					    phy_interface_t interface)
-{
-	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
-
-	/* Select the appropriate PCS operations depending on the
-	 * configured interface mode. We will only switch to a mode
-	 * that the validate() checks have already passed.
-	 */
-	if (mvpp2_is_xlg(interface))
-		return &port->pcs_xlg;
-	else
-		return &port->pcs_gmac;
-}
-
-static int mvpp2_mac_prepare(struct phylink_config *config, unsigned int mode,
-			     phy_interface_t interface)
+static int mvpp2__mac_prepare(struct phylink_config *config, unsigned int mode,
+			      phy_interface_t interface)
 {
 	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
 
@@ -6536,17 +6120,36 @@ static int mvpp2_mac_prepare(struct phylink_config *config, unsigned int mode,
 			     MVPP2_GMAC_PORT_RESET_MASK,
 			     MVPP2_GMAC_PORT_RESET_MASK);
 
-		if (port->priv->hw_version >= MVPP22) {
+		if (port->priv->hw_version == MVPP22) {
 			mvpp22_gop_mask_irq(port);
 
 			phy_power_off(port->comphy);
-
-			/* Reconfigure the serdes lanes */
-			mvpp22_mode_reconfigure(port, interface);
 		}
 	}
 
+	/* Select the appropriate PCS operations depending on the
+	 * configured interface mode. We will only switch to a mode
+	 * that the validate() checks have already passed.
+	 */
+	if (mvpp2_is_xlg(interface))
+		port->phylink_pcs.ops = &mvpp2_phylink_xlg_pcs_ops;
+	else
+		port->phylink_pcs.ops = &mvpp2_phylink_gmac_pcs_ops;
+
 	return 0;
+}
+
+static int mvpp2_mac_prepare(struct phylink_config *config, unsigned int mode,
+			     phy_interface_t interface)
+{
+	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
+	int ret;
+
+	ret = mvpp2__mac_prepare(config, mode, interface);
+	if (ret == 0)
+		phylink_set_pcs(port->phylink, &port->phylink_pcs);
+
+	return ret;
 }
 
 static void mvpp2_mac_config(struct phylink_config *config, unsigned int mode,
@@ -6571,9 +6174,12 @@ static int mvpp2_mac_finish(struct phylink_config *config, unsigned int mode,
 {
 	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
 
-	if (port->priv->hw_version >= MVPP22 &&
+	if (port->priv->hw_version == MVPP22 &&
 	    port->phy_interface != interface) {
 		port->phy_interface = interface;
+
+		/* Reconfigure the serdes lanes */
+		mvpp22_mode_reconfigure(port);
 
 		/* Unmask interrupts */
 		mvpp22_gop_unmask_irq(port);
@@ -6616,7 +6222,6 @@ static void mvpp2_mac_link_up(struct phylink_config *config,
 {
 	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
 	u32 val;
-	int i;
 
 	if (mvpp2_is_xlg(interface)) {
 		if (!phylink_autoneg_inband(mode)) {
@@ -6667,23 +6272,6 @@ static void mvpp2_mac_link_up(struct phylink_config *config,
 			     val);
 	}
 
-	if (port->priv->global_tx_fc) {
-		port->tx_fc = tx_pause;
-		if (tx_pause)
-			mvpp2_rxq_enable_fc(port);
-		else
-			mvpp2_rxq_disable_fc(port);
-		if (port->priv->percpu_pools) {
-			for (i = 0; i < port->nrxqs; i++)
-				mvpp2_bm_pool_update_fc(port, &port->priv->bm_pools[i], tx_pause);
-		} else {
-			mvpp2_bm_pool_update_fc(port, port->pool_long, tx_pause);
-			mvpp2_bm_pool_update_fc(port, port->pool_short, tx_pause);
-		}
-		if (port->priv->hw_version == MVPP23)
-			mvpp23_rx_fifo_fc_en(port->priv, port->id, tx_pause);
-	}
-
 	mvpp2_port_enable(port);
 
 	mvpp2_egress_enable(port);
@@ -6718,64 +6306,13 @@ static void mvpp2_mac_link_down(struct phylink_config *config,
 	mvpp2_port_disable(port);
 }
 
-static void mvpp2_mac_disable_tx_lpi(struct phylink_config *config)
-{
-	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
-
-	mvpp2_modify(port->base + MVPP2_GMAC_LPI_CTRL1,
-		     MVPP2_GMAC_LPI_CTRL1_REQ_EN, 0);
-}
-
-static int mvpp2_mac_enable_tx_lpi(struct phylink_config *config, u32 timer,
-				   bool tx_clk_stop)
-{
-	struct mvpp2_port *port = mvpp2_phylink_to_port(config);
-	u32 ts, tw, lpi1, status;
-
-	status = readl(port->base + MVPP2_GMAC_STATUS0);
-	if (status & MVPP2_GMAC_STATUS0_GMII_SPEED) {
-		/* At 1G speeds, the timer resolution are 1us, and
-		 * 802.3 says tw is 16.5us. Round up to 17us.
-		 */
-		tw = 17;
-		ts = timer;
-	} else {
-		/* At 100M speeds, the timer resolutions are 10us, and
-		 * 802.3 says tw is 30us.
-		 */
-		tw = 3;
-		ts = DIV_ROUND_UP(timer, 10);
-	}
-
-	if (ts > 255)
-		ts = 255;
-
-	/* Configure ts */
-	mvpp2_modify(port->base + MVPP2_GMAC_LPI_CTRL0,
-		     MVPP2_GMAC_LPI_CTRL0_TS_MASK,
-		     FIELD_PREP(MVPP2_GMAC_LPI_CTRL0_TS_MASK, ts));
-
-	lpi1 = readl(port->base + MVPP2_GMAC_LPI_CTRL1);
-
-	/* Configure tw */
-	lpi1 = u32_replace_bits(lpi1, tw, MVPP2_GMAC_LPI_CTRL1_TW_MASK);
-
-	/* Enable LPI generation */
-	writel(lpi1 | MVPP2_GMAC_LPI_CTRL1_REQ_EN,
-	       port->base + MVPP2_GMAC_LPI_CTRL1);
-
-	return 0;
-}
-
 static const struct phylink_mac_ops mvpp2_phylink_ops = {
-	.mac_select_pcs = mvpp2_select_pcs,
+	.validate = mvpp2_phylink_validate,
 	.mac_prepare = mvpp2_mac_prepare,
 	.mac_config = mvpp2_mac_config,
 	.mac_finish = mvpp2_mac_finish,
 	.mac_link_up = mvpp2_mac_link_up,
 	.mac_link_down = mvpp2_mac_link_down,
-	.mac_enable_tx_lpi = mvpp2_mac_enable_tx_lpi,
-	.mac_disable_tx_lpi = mvpp2_mac_disable_tx_lpi,
 };
 
 /* Work-around for ACPI */
@@ -6788,34 +6325,17 @@ static void mvpp2_acpi_start(struct mvpp2_port *port)
 	struct phylink_link_state state = {
 		.interface = port->phy_interface,
 	};
-	struct phylink_pcs *pcs;
-
-	pcs = mvpp2_select_pcs(&port->phylink_config, port->phy_interface);
-
-	mvpp2_mac_prepare(&port->phylink_config, MLO_AN_INBAND,
-			  port->phy_interface);
+	mvpp2__mac_prepare(&port->phylink_config, MLO_AN_INBAND,
+			   port->phy_interface);
 	mvpp2_mac_config(&port->phylink_config, MLO_AN_INBAND, &state);
-	pcs->ops->pcs_config(pcs, PHYLINK_PCS_NEG_INBAND_ENABLED,
-			     port->phy_interface, state.advertising,
-			     false);
+	port->phylink_pcs.ops->pcs_config(&port->phylink_pcs, MLO_AN_INBAND,
+					  port->phy_interface,
+					  state.advertising, false);
 	mvpp2_mac_finish(&port->phylink_config, MLO_AN_INBAND,
 			 port->phy_interface);
 	mvpp2_mac_link_up(&port->phylink_config, NULL,
 			  MLO_AN_INBAND, port->phy_interface,
 			  SPEED_UNKNOWN, DUPLEX_UNKNOWN, false, false);
-}
-
-/* In order to ensure backward compatibility for ACPI, check if the port
- * firmware node comprises the necessary description allowing to use phylink.
- */
-static bool mvpp2_use_acpi_compat_mode(struct fwnode_handle *port_fwnode)
-{
-	if (!is_acpi_node(port_fwnode))
-		return false;
-
-	return (!fwnode_property_present(port_fwnode, "phy-handle") &&
-		!fwnode_property_present(port_fwnode, "managed") &&
-		!fwnode_get_named_child_node(port_fwnode, "fixed-link"));
 }
 
 /* Ports initialization */
@@ -6893,6 +6413,7 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 	port = netdev_priv(dev);
 	port->dev = dev;
 	port->fwnode = port_fwnode;
+	port->has_phy = !!of_find_property(port_node, "phy", NULL);
 	port->ntxqs = ntxqs;
 	port->nrxqs = nrxqs;
 	port->priv = priv;
@@ -6976,9 +6497,7 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 	mutex_init(&port->gather_stats_lock);
 	INIT_DELAYED_WORK(&port->stats_work, mvpp2_gather_hw_statistics);
 
-	err = mvpp2_port_copy_mac_addr(dev, priv, port_fwnode, &mac_from);
-	if (err < 0)
-		goto err_free_stats;
+	mvpp2_port_copy_mac_addr(dev, priv, port_fwnode, &mac_from);
 
 	port->tx_ring_size = MVPP2_MAX_TXD_DFLT;
 	port->rx_ring_size = MVPP2_MAX_RXD_DFLT;
@@ -7005,8 +6524,9 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 		for (thread = 0; thread < priv->nthreads; thread++) {
 			port_pcpu = per_cpu_ptr(port->pcpu, thread);
 
-			hrtimer_setup(&port_pcpu->tx_done_timer, mvpp2_hr_timer_cb, CLOCK_MONOTONIC,
-				      HRTIMER_MODE_REL_PINNED_SOFT);
+			hrtimer_init(&port_pcpu->tx_done_timer, CLOCK_MONOTONIC,
+				     HRTIMER_MODE_REL_PINNED_SOFT);
+			port_pcpu->tx_done_timer.function = mvpp2_hr_timer_cb;
 			port_pcpu->timer_scheduled = false;
 			port_pcpu->dev = dev;
 		}
@@ -7018,114 +6538,28 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 	dev->hw_features |= features | NETIF_F_RXCSUM | NETIF_F_GRO |
 			    NETIF_F_HW_VLAN_CTAG_FILTER;
 
-	if (mvpp22_rss_is_supported(port)) {
+	if (mvpp22_rss_is_supported()) {
 		dev->hw_features |= NETIF_F_RXHASH;
 		dev->features |= NETIF_F_NTUPLE;
 	}
 
 	if (!port->priv->percpu_pools)
 		mvpp2_set_hw_csum(port, port->pool_long->id);
-	else if (port->ntxqs >= num_possible_cpus() * 2)
-		dev->xdp_features = NETDEV_XDP_ACT_BASIC |
-				    NETDEV_XDP_ACT_REDIRECT |
-				    NETDEV_XDP_ACT_NDO_XMIT;
 
 	dev->vlan_features |= features;
-	netif_set_tso_max_segs(dev, MVPP2_MAX_TSO_SEGS);
-
+	dev->gso_max_segs = MVPP2_MAX_TSO_SEGS;
 	dev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* MTU range: 68 - 9704 */
 	dev->min_mtu = ETH_MIN_MTU;
 	/* 9704 == 9728 - 20 and rounding to 8 */
 	dev->max_mtu = MVPP2_BM_JUMBO_PKT_SIZE;
-	device_set_node(&dev->dev, port_fwnode);
-	dev->dev_port = port->id;
+	dev->dev.of_node = port_node;
 
-	port->pcs_gmac.ops = &mvpp2_phylink_gmac_pcs_ops;
-	port->pcs_xlg.ops = &mvpp2_phylink_xlg_pcs_ops;
-
-	if (!mvpp2_use_acpi_compat_mode(port_fwnode)) {
+	/* Phylink isn't used w/ ACPI as of now */
+	if (port_node) {
 		port->phylink_config.dev = &dev->dev;
 		port->phylink_config.type = PHYLINK_NETDEV;
-		port->phylink_config.mac_capabilities =
-			MAC_2500FD | MAC_1000FD | MAC_100 | MAC_10;
-
-		__set_bit(PHY_INTERFACE_MODE_SGMII,
-			  port->phylink_config.lpi_interfaces);
-
-		port->phylink_config.lpi_capabilities = MAC_1000FD | MAC_100FD;
-
-		/* Setup EEE.  Choose 250us idle. */
-		port->phylink_config.lpi_timer_default = 250;
-		port->phylink_config.eee_enabled_default = true;
-
-		if (port->priv->global_tx_fc)
-			port->phylink_config.mac_capabilities |=
-				MAC_SYM_PAUSE | MAC_ASYM_PAUSE;
-
-		if (mvpp2_port_supports_xlg(port)) {
-			/* If a COMPHY is present, we can support any of
-			 * the serdes modes and switch between them.
-			 */
-			if (comphy) {
-				__set_bit(PHY_INTERFACE_MODE_5GBASER,
-					  port->phylink_config.supported_interfaces);
-				__set_bit(PHY_INTERFACE_MODE_10GBASER,
-					  port->phylink_config.supported_interfaces);
-				__set_bit(PHY_INTERFACE_MODE_XAUI,
-					  port->phylink_config.supported_interfaces);
-			} else if (phy_mode == PHY_INTERFACE_MODE_5GBASER) {
-				__set_bit(PHY_INTERFACE_MODE_5GBASER,
-					  port->phylink_config.supported_interfaces);
-			} else if (phy_mode == PHY_INTERFACE_MODE_10GBASER) {
-				__set_bit(PHY_INTERFACE_MODE_10GBASER,
-					  port->phylink_config.supported_interfaces);
-			} else if (phy_mode == PHY_INTERFACE_MODE_XAUI) {
-				__set_bit(PHY_INTERFACE_MODE_XAUI,
-					  port->phylink_config.supported_interfaces);
-			}
-
-			if (comphy)
-				port->phylink_config.mac_capabilities |=
-					MAC_10000FD | MAC_5000FD;
-			else if (phy_mode == PHY_INTERFACE_MODE_5GBASER)
-				port->phylink_config.mac_capabilities |=
-					MAC_5000FD;
-			else
-				port->phylink_config.mac_capabilities |=
-					MAC_10000FD;
-		}
-
-		if (mvpp2_port_supports_rgmii(port)) {
-			phy_interface_set_rgmii(port->phylink_config.supported_interfaces);
-			__set_bit(PHY_INTERFACE_MODE_MII,
-				  port->phylink_config.supported_interfaces);
-		}
-
-		if (comphy) {
-			/* If a COMPHY is present, we can support any of the
-			 * serdes modes and switch between them.
-			 */
-			__set_bit(PHY_INTERFACE_MODE_SGMII,
-				  port->phylink_config.supported_interfaces);
-			__set_bit(PHY_INTERFACE_MODE_1000BASEX,
-				  port->phylink_config.supported_interfaces);
-			__set_bit(PHY_INTERFACE_MODE_2500BASEX,
-				  port->phylink_config.supported_interfaces);
-		} else if (phy_mode == PHY_INTERFACE_MODE_2500BASEX) {
-			/* No COMPHY, with only 2500BASE-X mode supported */
-			__set_bit(PHY_INTERFACE_MODE_2500BASEX,
-				  port->phylink_config.supported_interfaces);
-		} else if (phy_mode == PHY_INTERFACE_MODE_1000BASEX ||
-			   phy_mode == PHY_INTERFACE_MODE_SGMII) {
-			/* No COMPHY, we can switch between 1000BASE-X and SGMII
-			 */
-			__set_bit(PHY_INTERFACE_MODE_1000BASEX,
-				  port->phylink_config.supported_interfaces);
-			__set_bit(PHY_INTERFACE_MODE_SGMII,
-				  port->phylink_config.supported_interfaces);
-		}
 
 		phylink = phylink_create(&port->phylink_config, port_fwnode,
 					 phy_mode, &mvpp2_phylink_ops);
@@ -7134,10 +6568,7 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 			goto err_free_port_pcpu;
 		}
 		port->phylink = phylink;
-
-		mvpp2_mac_disable_tx_lpi(&port->phylink_config);
 	} else {
-		dev_warn(&pdev->dev, "Use link irqs for port#%d. FW update required\n", port->id);
 		port->phylink = NULL;
 	}
 
@@ -7146,7 +6577,7 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 	 * driver does this, we can remove this code.
 	 */
 	if (port->comphy) {
-		err = mvpp22_comphy_init(port, port->phy_interface);
+		err = mvpp22_comphy_init(port);
 		if (err == 0)
 			phy_power_off(port->comphy);
 	}
@@ -7250,56 +6681,32 @@ static void mvpp2_rx_fifo_init(struct mvpp2 *priv)
 	mvpp2_write(priv, MVPP2_RX_FIFO_INIT_REG, 0x1);
 }
 
-static void mvpp22_rx_fifo_set_hw(struct mvpp2 *priv, int port, int data_size)
-{
-	int attr_size = MVPP2_RX_FIFO_PORT_ATTR_SIZE(data_size);
-
-	mvpp2_write(priv, MVPP2_RX_DATA_FIFO_SIZE_REG(port), data_size);
-	mvpp2_write(priv, MVPP2_RX_ATTR_FIFO_SIZE_REG(port), attr_size);
-}
-
-/* Initialize TX FIFO's: the total FIFO size is 48kB on PPv2.2 and PPv2.3.
- * 4kB fixed space must be assigned for the loopback port.
- * Redistribute remaining avialable 44kB space among all active ports.
- * Guarantee minimum 32kB for 10G port and 8kB for port 1, capable of 2.5G
- * SGMII link.
- */
 static void mvpp22_rx_fifo_init(struct mvpp2 *priv)
 {
-	int remaining_ports_count;
-	unsigned long port_map;
-	int size_remainder;
-	int port, size;
+	int port;
 
-	/* The loopback requires fixed 4kB of the FIFO space assignment. */
-	mvpp22_rx_fifo_set_hw(priv, MVPP2_LOOPBACK_PORT_INDEX,
-			      MVPP2_RX_FIFO_PORT_DATA_SIZE_4KB);
-	port_map = priv->port_map & ~BIT(MVPP2_LOOPBACK_PORT_INDEX);
+	/* The FIFO size parameters are set depending on the maximum speed a
+	 * given port can handle:
+	 * - Port 0: 10Gbps
+	 * - Port 1: 2.5Gbps
+	 * - Ports 2 and 3: 1Gbps
+	 */
 
-	/* Set RX FIFO size to 0 for inactive ports. */
-	for_each_clear_bit(port, &port_map, MVPP2_LOOPBACK_PORT_INDEX)
-		mvpp22_rx_fifo_set_hw(priv, port, 0);
+	mvpp2_write(priv, MVPP2_RX_DATA_FIFO_SIZE_REG(0),
+		    MVPP2_RX_FIFO_PORT_DATA_SIZE_32KB);
+	mvpp2_write(priv, MVPP2_RX_ATTR_FIFO_SIZE_REG(0),
+		    MVPP2_RX_FIFO_PORT_ATTR_SIZE_32KB);
 
-	/* Assign remaining RX FIFO space among all active ports. */
-	size_remainder = MVPP2_RX_FIFO_PORT_DATA_SIZE_44KB;
-	remaining_ports_count = hweight_long(port_map);
+	mvpp2_write(priv, MVPP2_RX_DATA_FIFO_SIZE_REG(1),
+		    MVPP2_RX_FIFO_PORT_DATA_SIZE_8KB);
+	mvpp2_write(priv, MVPP2_RX_ATTR_FIFO_SIZE_REG(1),
+		    MVPP2_RX_FIFO_PORT_ATTR_SIZE_8KB);
 
-	for_each_set_bit(port, &port_map, MVPP2_LOOPBACK_PORT_INDEX) {
-		if (remaining_ports_count == 1)
-			size = size_remainder;
-		else if (port == 0)
-			size = max(size_remainder / remaining_ports_count,
-				   MVPP2_RX_FIFO_PORT_DATA_SIZE_32KB);
-		else if (port == 1)
-			size = max(size_remainder / remaining_ports_count,
-				   MVPP2_RX_FIFO_PORT_DATA_SIZE_8KB);
-		else
-			size = size_remainder / remaining_ports_count;
-
-		size_remainder -= size;
-		remaining_ports_count--;
-
-		mvpp22_rx_fifo_set_hw(priv, port, size);
+	for (port = 2; port < MVPP2_MAX_PORTS; port++) {
+		mvpp2_write(priv, MVPP2_RX_DATA_FIFO_SIZE_REG(port),
+			    MVPP2_RX_FIFO_PORT_DATA_SIZE_4KB);
+		mvpp2_write(priv, MVPP2_RX_ATTR_FIFO_SIZE_REG(port),
+			    MVPP2_RX_FIFO_PORT_ATTR_SIZE_4KB);
 	}
 
 	mvpp2_write(priv, MVPP2_RX_MIN_PKT_SIZE_REG,
@@ -7307,102 +6714,24 @@ static void mvpp22_rx_fifo_init(struct mvpp2 *priv)
 	mvpp2_write(priv, MVPP2_RX_FIFO_INIT_REG, 0x1);
 }
 
-/* Configure Rx FIFO Flow control thresholds */
-static void mvpp23_rx_fifo_fc_set_tresh(struct mvpp2 *priv)
-{
-	int port, val;
-
-	/* Port 0: maximum speed -10Gb/s port
-	 *	   required by spec RX FIFO threshold 9KB
-	 * Port 1: maximum speed -5Gb/s port
-	 *	   required by spec RX FIFO threshold 4KB
-	 * Port 2: maximum speed -1Gb/s port
-	 *	   required by spec RX FIFO threshold 2KB
-	 */
-
-	/* Without loopback port */
-	for (port = 0; port < (MVPP2_MAX_PORTS - 1); port++) {
-		if (port == 0) {
-			val = (MVPP23_PORT0_FIFO_TRSH / MVPP2_RX_FC_TRSH_UNIT)
-				<< MVPP2_RX_FC_TRSH_OFFS;
-			val &= MVPP2_RX_FC_TRSH_MASK;
-			mvpp2_write(priv, MVPP2_RX_FC_REG(port), val);
-		} else if (port == 1) {
-			val = (MVPP23_PORT1_FIFO_TRSH / MVPP2_RX_FC_TRSH_UNIT)
-				<< MVPP2_RX_FC_TRSH_OFFS;
-			val &= MVPP2_RX_FC_TRSH_MASK;
-			mvpp2_write(priv, MVPP2_RX_FC_REG(port), val);
-		} else {
-			val = (MVPP23_PORT2_FIFO_TRSH / MVPP2_RX_FC_TRSH_UNIT)
-				<< MVPP2_RX_FC_TRSH_OFFS;
-			val &= MVPP2_RX_FC_TRSH_MASK;
-			mvpp2_write(priv, MVPP2_RX_FC_REG(port), val);
-		}
-	}
-}
-
-/* Configure Rx FIFO Flow control thresholds */
-void mvpp23_rx_fifo_fc_en(struct mvpp2 *priv, int port, bool en)
-{
-	int val;
-
-	val = mvpp2_read(priv, MVPP2_RX_FC_REG(port));
-
-	if (en)
-		val |= MVPP2_RX_FC_EN;
-	else
-		val &= ~MVPP2_RX_FC_EN;
-
-	mvpp2_write(priv, MVPP2_RX_FC_REG(port), val);
-}
-
-static void mvpp22_tx_fifo_set_hw(struct mvpp2 *priv, int port, int size)
-{
-	int threshold = MVPP2_TX_FIFO_THRESHOLD(size);
-
-	mvpp2_write(priv, MVPP22_TX_FIFO_SIZE_REG(port), size);
-	mvpp2_write(priv, MVPP22_TX_FIFO_THRESH_REG(port), threshold);
-}
-
-/* Initialize TX FIFO's: the total FIFO size is 19kB on PPv2.2 and PPv2.3.
- * 1kB fixed space must be assigned for the loopback port.
- * Redistribute remaining avialable 18kB space among all active ports.
- * The 10G interface should use 10kB (which is maximum possible size
- * per single port).
+/* Initialize Tx FIFO's: the total FIFO size is 19kB on PPv2.2 and 10G
+ * interfaces must have a Tx FIFO size of 10kB. As only port 0 can do 10G,
+ * configure its Tx FIFO size to 10kB and the others ports Tx FIFO size to 3kB.
  */
 static void mvpp22_tx_fifo_init(struct mvpp2 *priv)
 {
-	int remaining_ports_count;
-	unsigned long port_map;
-	int size_remainder;
-	int port, size;
+	int port, size, thrs;
 
-	/* The loopback requires fixed 1kB of the FIFO space assignment. */
-	mvpp22_tx_fifo_set_hw(priv, MVPP2_LOOPBACK_PORT_INDEX,
-			      MVPP22_TX_FIFO_DATA_SIZE_1KB);
-	port_map = priv->port_map & ~BIT(MVPP2_LOOPBACK_PORT_INDEX);
-
-	/* Set TX FIFO size to 0 for inactive ports. */
-	for_each_clear_bit(port, &port_map, MVPP2_LOOPBACK_PORT_INDEX)
-		mvpp22_tx_fifo_set_hw(priv, port, 0);
-
-	/* Assign remaining TX FIFO space among all active ports. */
-	size_remainder = MVPP22_TX_FIFO_DATA_SIZE_18KB;
-	remaining_ports_count = hweight_long(port_map);
-
-	for_each_set_bit(port, &port_map, MVPP2_LOOPBACK_PORT_INDEX) {
-		if (remaining_ports_count == 1)
-			size = min(size_remainder,
-				   MVPP22_TX_FIFO_DATA_SIZE_10KB);
-		else if (port == 0)
+	for (port = 0; port < MVPP2_MAX_PORTS; port++) {
+		if (port == 0) {
 			size = MVPP22_TX_FIFO_DATA_SIZE_10KB;
-		else
-			size = size_remainder / remaining_ports_count;
-
-		size_remainder -= size;
-		remaining_ports_count--;
-
-		mvpp22_tx_fifo_set_hw(priv, port, size);
+			thrs = MVPP2_TX_FIFO_THRESHOLD_10KB;
+		} else {
+			size = MVPP22_TX_FIFO_DATA_SIZE_3KB;
+			thrs = MVPP2_TX_FIFO_THRESHOLD_3KB;
+		}
+		mvpp2_write(priv, MVPP22_TX_FIFO_SIZE_REG(port), size);
+		mvpp2_write(priv, MVPP22_TX_FIFO_THRESH_REG(port), thrs);
 	}
 }
 
@@ -7472,7 +6801,7 @@ static int mvpp2_init(struct platform_device *pdev, struct mvpp2 *priv)
 	if (dram_target_info)
 		mvpp2_conf_mbus_windows(dram_target_info, priv);
 
-	if (priv->hw_version >= MVPP22)
+	if (priv->hw_version == MVPP22)
 		mvpp2_axi_init(priv);
 
 	/* Disable HW PHY polling */
@@ -7507,8 +6836,6 @@ static int mvpp2_init(struct platform_device *pdev, struct mvpp2 *priv)
 	} else {
 		mvpp22_rx_fifo_init(priv);
 		mvpp22_tx_fifo_init(priv);
-		if (priv->hw_version == MVPP23)
-			mvpp23_rx_fifo_fc_set_tresh(priv);
 	}
 
 	if (priv->hw_version == MVPP21)
@@ -7534,31 +6861,11 @@ static int mvpp2_init(struct platform_device *pdev, struct mvpp2 *priv)
 	return 0;
 }
 
-static int mvpp2_get_sram(struct platform_device *pdev,
-			  struct mvpp2 *priv)
-{
-	struct resource *res;
-	void __iomem *base;
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	if (!res) {
-		if (has_acpi_companion(&pdev->dev))
-			dev_warn(&pdev->dev, "ACPI is too old, Flow control not supported\n");
-		else
-			dev_warn(&pdev->dev, "DT is too old, Flow control not supported\n");
-		return 0;
-	}
-
-	base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(base))
-		return PTR_ERR(base);
-
-	priv->cm3_base = base;
-	return 0;
-}
-
 static int mvpp2_probe(struct platform_device *pdev)
 {
+	const struct acpi_device_id *acpi_id;
+	struct fwnode_handle *fwnode = pdev->dev.fwnode;
+	struct fwnode_handle *port_fwnode;
 	struct mvpp2 *priv;
 	struct resource *res;
 	void __iomem *base;
@@ -7569,7 +6876,16 @@ static int mvpp2_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	priv->hw_version = (unsigned long)device_get_match_data(&pdev->dev);
+	if (has_acpi_companion(&pdev->dev)) {
+		acpi_id = acpi_match_device(pdev->dev.driver->acpi_match_table,
+					    &pdev->dev);
+		if (!acpi_id)
+			return -EINVAL;
+		priv->hw_version = (unsigned long)acpi_id->driver_data;
+	} else {
+		priv->hw_version =
+			(unsigned long)of_device_get_match_data(&pdev->dev);
+	}
 
 	/* multi queue mode isn't supported on PPV2.1, fallback to single
 	 * mode
@@ -7605,18 +6921,9 @@ static int mvpp2_probe(struct platform_device *pdev)
 		priv->iface_base = devm_ioremap_resource(&pdev->dev, res);
 		if (IS_ERR(priv->iface_base))
 			return PTR_ERR(priv->iface_base);
-
-		/* Map CM3 SRAM */
-		err = mvpp2_get_sram(pdev, priv);
-		if (err)
-			dev_warn(&pdev->dev, "Fail to alloc CM3 SRAM\n");
-
-		/* Enable global Flow Control only if handler to SRAM not NULL */
-		if (priv->cm3_base)
-			priv->global_tx_fc = true;
 	}
 
-	if (priv->hw_version >= MVPP22 && dev_of_node(&pdev->dev)) {
+	if (priv->hw_version == MVPP22 && dev_of_node(&pdev->dev)) {
 		priv->sysctrl_base =
 			syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
 							"marvell,system-controller");
@@ -7629,7 +6936,7 @@ static int mvpp2_probe(struct platform_device *pdev)
 			priv->sysctrl_base = NULL;
 	}
 
-	if (priv->hw_version >= MVPP22 &&
+	if (priv->hw_version == MVPP22 &&
 	    mvpp2_get_nrxqs(priv) * 2 <= MVPP2_BM_MAX_POOLS)
 		priv->percpu_pools = 1;
 
@@ -7674,7 +6981,7 @@ static int mvpp2_probe(struct platform_device *pdev)
 		if (err < 0)
 			goto err_pp_clk;
 
-		if (priv->hw_version >= MVPP22) {
+		if (priv->hw_version == MVPP22) {
 			priv->mg_clk = devm_clk_get(&pdev->dev, "mg_clk");
 			if (IS_ERR(priv->mg_clk)) {
 				err = PTR_ERR(priv->mg_clk);
@@ -7685,38 +6992,37 @@ static int mvpp2_probe(struct platform_device *pdev)
 			if (err < 0)
 				goto err_gop_clk;
 
-			priv->mg_core_clk = devm_clk_get_optional(&pdev->dev, "mg_core_clk");
+			priv->mg_core_clk = devm_clk_get(&pdev->dev, "mg_core_clk");
 			if (IS_ERR(priv->mg_core_clk)) {
-				err = PTR_ERR(priv->mg_core_clk);
-				goto err_mg_clk;
+				priv->mg_core_clk = NULL;
+			} else {
+				err = clk_prepare_enable(priv->mg_core_clk);
+				if (err < 0)
+					goto err_mg_clk;
 			}
-
-			err = clk_prepare_enable(priv->mg_core_clk);
-			if (err < 0)
-				goto err_mg_clk;
 		}
 
-		priv->axi_clk = devm_clk_get_optional(&pdev->dev, "axi_clk");
+		priv->axi_clk = devm_clk_get(&pdev->dev, "axi_clk");
 		if (IS_ERR(priv->axi_clk)) {
 			err = PTR_ERR(priv->axi_clk);
-			goto err_mg_core_clk;
+			if (err == -EPROBE_DEFER)
+				goto err_mg_core_clk;
+			priv->axi_clk = NULL;
+		} else {
+			err = clk_prepare_enable(priv->axi_clk);
+			if (err < 0)
+				goto err_mg_core_clk;
 		}
-
-		err = clk_prepare_enable(priv->axi_clk);
-		if (err < 0)
-			goto err_mg_core_clk;
 
 		/* Get system's tclk rate */
 		priv->tclk = clk_get_rate(priv->pp_clk);
-	} else {
-		err = device_property_read_u32(&pdev->dev, "clock-frequency", &priv->tclk);
-		if (err) {
-			dev_err(&pdev->dev, "missing clock-frequency value\n");
-			return err;
-		}
+	} else if (device_property_read_u32(&pdev->dev, "clock-frequency",
+					    &priv->tclk)) {
+		dev_err(&pdev->dev, "missing clock-frequency value\n");
+		return -EINVAL;
 	}
 
-	if (priv->hw_version >= MVPP22) {
+	if (priv->hw_version == MVPP22) {
 		err = dma_set_mask(&pdev->dev, MVPP2_DESC_DMA_MASK);
 		if (err)
 			goto err_axi_clk;
@@ -7730,19 +7036,6 @@ static int mvpp2_probe(struct platform_device *pdev)
 			goto err_axi_clk;
 	}
 
-	/* Map DTS-active ports. Should be done before FIFO mvpp2_init */
-	device_for_each_child_node_scoped(&pdev->dev, port_fwnode) {
-		if (!fwnode_property_read_u32(port_fwnode, "port-id", &i))
-			priv->port_map |= BIT(i);
-	}
-
-	if (mvpp2_read(priv, MVPP2_VER_ID_REG) == MVPP2_VER_PP23)
-		priv->hw_version = MVPP23;
-
-	/* Init locks for shared packet processor resources */
-	spin_lock_init(&priv->mss_spinlock);
-	spin_lock_init(&priv->prs_spinlock);
-
 	/* Initialize network controller */
 	err = mvpp2_init(pdev, priv);
 	if (err < 0) {
@@ -7755,7 +7048,7 @@ static int mvpp2_probe(struct platform_device *pdev)
 		goto err_axi_clk;
 
 	/* Initialize ports */
-	device_for_each_child_node_scoped(&pdev->dev, port_fwnode) {
+	fwnode_for_each_available_child_node(fwnode, port_fwnode) {
 		err = mvpp2_port_probe(pdev, port_fwnode, priv);
 		if (err < 0)
 			goto err_port_probe;
@@ -7782,26 +7075,29 @@ static int mvpp2_probe(struct platform_device *pdev)
 		goto err_port_probe;
 	}
 
-	if (priv->global_tx_fc && priv->hw_version >= MVPP22) {
-		err = mvpp2_enable_global_fc(priv);
-		if (err)
-			dev_warn(&pdev->dev, "Minimum of CM3 firmware 18.09 and chip revision B0 required for flow control\n");
-	}
-
 	mvpp2_dbgfs_init(priv, pdev->name);
 
 	platform_set_drvdata(pdev, priv);
 	return 0;
 
 err_port_probe:
-	for (i = 0; i < priv->port_count; i++)
-		mvpp2_port_remove(priv->port_list[i]);
+	fwnode_handle_put(port_fwnode);
+
+	i = 0;
+	fwnode_for_each_available_child_node(fwnode, port_fwnode) {
+		if (priv->port_list[i])
+			mvpp2_port_remove(priv->port_list[i]);
+		i++;
+	}
 err_axi_clk:
 	clk_disable_unprepare(priv->axi_clk);
+
 err_mg_core_clk:
-	clk_disable_unprepare(priv->mg_core_clk);
+	if (priv->hw_version == MVPP22)
+		clk_disable_unprepare(priv->mg_core_clk);
 err_mg_clk:
-	clk_disable_unprepare(priv->mg_clk);
+	if (priv->hw_version == MVPP22)
+		clk_disable_unprepare(priv->mg_clk);
 err_gop_clk:
 	clk_disable_unprepare(priv->gop_clk);
 err_pp_clk:
@@ -7809,16 +7105,21 @@ err_pp_clk:
 	return err;
 }
 
-static void mvpp2_remove(struct platform_device *pdev)
+static int mvpp2_remove(struct platform_device *pdev)
 {
 	struct mvpp2 *priv = platform_get_drvdata(pdev);
-	int i, poolnum = MVPP2_BM_POOLS_NUM;
+	struct fwnode_handle *fwnode = pdev->dev.fwnode;
+	int i = 0, poolnum = MVPP2_BM_POOLS_NUM;
+	struct fwnode_handle *port_fwnode;
 
 	mvpp2_dbgfs_cleanup(priv);
 
-	for (i = 0; i < priv->port_count; i++) {
-		mutex_destroy(&priv->port_list[i]->gather_stats_lock);
-		mvpp2_port_remove(priv->port_list[i]);
+	fwnode_for_each_available_child_node(fwnode, port_fwnode) {
+		if (priv->port_list[i]) {
+			mutex_destroy(&priv->port_list[i]->gather_stats_lock);
+			mvpp2_port_remove(priv->port_list[i]);
+		}
+		i++;
 	}
 
 	destroy_workqueue(priv->stats_queue);
@@ -7841,14 +7142,16 @@ static void mvpp2_remove(struct platform_device *pdev)
 				  aggr_txq->descs_dma);
 	}
 
-	if (!dev_of_node(&pdev->dev))
-		return;
+	if (is_acpi_node(port_fwnode))
+		return 0;
 
 	clk_disable_unprepare(priv->axi_clk);
 	clk_disable_unprepare(priv->mg_core_clk);
 	clk_disable_unprepare(priv->mg_clk);
 	clk_disable_unprepare(priv->pp_clk);
 	clk_disable_unprepare(priv->gop_clk);
+
+	return 0;
 }
 
 static const struct of_device_id mvpp2_match[] = {

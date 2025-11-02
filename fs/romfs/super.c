@@ -18,7 +18,7 @@
  *					Changed for 2.1.19 modules
  *	Jan 1997			Initial release
  *	Jun 1997			2.1.43+ changes
- *					Proper page locking in read_folio
+ *					Proper page locking in readpage
  *					Changed to work with 2.1.45+ fs
  *	Jul 1997			Fixed follow_link
  *			2.1.47
@@ -41,7 +41,7 @@
  *					  dentries in lookup
  *					clean up page flags setting
  *					  (error, uptodate, locking) in
- *					  in read_folio
+ *					  in readpage
  *					use init_special_inode for
  *					  fifos/sockets (and streamline) in
  *					  read_inode, fix _ops table order
@@ -99,17 +99,20 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos);
 /*
  * read a page worth of data from the image
  */
-static int romfs_read_folio(struct file *file, struct folio *folio)
+static int romfs_readpage(struct file *file, struct page *page)
 {
-	struct inode *inode = folio->mapping->host;
+	struct inode *inode = page->mapping->host;
 	loff_t offset, size;
 	unsigned long fillsize, pos;
 	void *buf;
 	int ret;
 
-	buf = kmap_local_folio(folio, 0);
+	buf = kmap(page);
+	if (!buf)
+		return -ENOMEM;
 
-	offset = folio_pos(folio);
+	/* 32 bit warning -- but not for us :) */
+	offset = page_offset(page);
 	size = i_size_read(inode);
 	fillsize = 0;
 	ret = 0;
@@ -121,19 +124,25 @@ static int romfs_read_folio(struct file *file, struct folio *folio)
 
 		ret = romfs_dev_read(inode->i_sb, pos, buf, fillsize);
 		if (ret < 0) {
+			SetPageError(page);
 			fillsize = 0;
 			ret = -EIO;
 		}
 	}
 
-	buf = folio_zero_tail(folio, fillsize, buf + fillsize);
-	kunmap_local(buf);
-	folio_end_read(folio, ret == 0);
+	if (fillsize < PAGE_SIZE)
+		memset(buf + fillsize, 0, PAGE_SIZE - fillsize);
+	if (ret == 0)
+		SetPageUptodate(page);
+
+	flush_dcache_page(page);
+	kunmap(page);
+	unlock_page(page);
 	return ret;
 }
 
 static const struct address_space_operations romfs_aops = {
-	.read_folio	= romfs_read_folio
+	.readpage	= romfs_readpage
 };
 
 /*
@@ -312,8 +321,8 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 
 	set_nlink(i, 1);		/* Hard to decide.. */
 	i->i_size = be32_to_cpu(ri.size);
-	inode_set_mtime_to_ts(i,
-			      inode_set_atime_to_ts(i, inode_set_ctime(i, 0, 0)));
+	i->i_mtime.tv_sec = i->i_atime.tv_sec = i->i_ctime.tv_sec = 0;
+	i->i_mtime.tv_nsec = i->i_atime.tv_nsec = i->i_ctime.tv_nsec = 0;
 
 	/* set up mode and ops */
 	mode = romfs_modemap[nextfh & ROMFH_TYPE];
@@ -366,7 +375,7 @@ static struct inode *romfs_alloc_inode(struct super_block *sb)
 {
 	struct romfs_inode_info *inode;
 
-	inode = alloc_inode_sb(sb, romfs_inode_cachep, GFP_KERNEL);
+	inode = kmem_cache_alloc(romfs_inode_cachep, GFP_KERNEL);
 	return inode ? &inode->vfs_inode : NULL;
 }
 
@@ -573,18 +582,16 @@ static int romfs_init_fs_context(struct fs_context *fc)
  */
 static void romfs_kill_sb(struct super_block *sb)
 {
-	generic_shutdown_super(sb);
-
 #ifdef CONFIG_ROMFS_ON_MTD
 	if (sb->s_mtd) {
-		put_mtd_device(sb->s_mtd);
-		sb->s_mtd = NULL;
+		kill_mtd_super(sb);
+		return;
 	}
 #endif
 #ifdef CONFIG_ROMFS_ON_BLOCK
 	if (sb->s_bdev) {
-		sync_blockdev(sb->s_bdev);
-		bdev_fput(sb->s_bdev_file);
+		kill_block_super(sb);
+		return;
 	}
 #endif
 }
@@ -620,8 +627,8 @@ static int __init init_romfs_fs(void)
 	romfs_inode_cachep =
 		kmem_cache_create("romfs_i",
 				  sizeof(struct romfs_inode_info), 0,
-				  SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT,
-				  romfs_i_init_once);
+				  SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD |
+				  SLAB_ACCOUNT, romfs_i_init_once);
 
 	if (!romfs_inode_cachep) {
 		pr_err("Failed to initialise inode cache\n");
@@ -659,3 +666,4 @@ module_exit(exit_romfs_fs);
 MODULE_DESCRIPTION("Direct-MTD Capable RomFS");
 MODULE_AUTHOR("Red Hat, Inc.");
 MODULE_LICENSE("GPL"); /* Actually dual-licensed, but it doesn't matter for */
+MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);

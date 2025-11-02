@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  * mount.c - operations for initializing and mounting configfs.
  *
  * Based on sysfs:
@@ -36,7 +38,7 @@ static void configfs_free_inode(struct inode *inode)
 
 static const struct super_operations configfs_ops = {
 	.statfs		= simple_statfs,
-	.drop_inode	= inode_just_drop,
+	.drop_inode	= generic_delete_inode,
 	.free_inode	= configfs_free_inode,
 };
 
@@ -92,8 +94,7 @@ static int configfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	configfs_root_group.cg_item.ci_dentry = root;
 	root->d_fsdata = &configfs_root;
 	sb->s_root = root;
-	set_default_d_op(sb, &configfs_dentry_ops); /* the rest get that */
-	sb->s_d_flags |= DCACHE_DONTCACHE;
+	sb->s_d_op = &configfs_dentry_ops; /* the rest get that */
 	return 0;
 }
 
@@ -172,6 +173,7 @@ static void __exit configfs_exit(void)
 
 MODULE_AUTHOR("Oracle");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 MODULE_VERSION("0.0.2");
 MODULE_DESCRIPTION("Simple RAM filesystem for user driven kernel subsystem configuration.");
 

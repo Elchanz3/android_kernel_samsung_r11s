@@ -179,10 +179,9 @@ static struct rockchip_cpuclk_rate_table rk3288_cpuclk_rates[] __initdata = {
 };
 
 static const struct rockchip_cpuclk_reg_data rk3288_cpuclk_data = {
-	.core_reg[0] = RK3288_CLKSEL_CON(0),
-	.div_core_shift[0] = 8,
-	.div_core_mask[0] = 0x1f,
-	.num_cores = 1,
+	.core_reg = RK3288_CLKSEL_CON(0),
+	.div_core_shift = 8,
+	.div_core_mask = 0x1f,
 	.mux_core_alt = 1,
 	.mux_core_main = 0,
 	.mux_core_shift = 15,
@@ -418,7 +417,7 @@ static struct rockchip_clk_branch rk3288_clk_branches[] __initdata = {
 			RK3288_CLKSEL_CON(32), 14, 2, MFLAGS, 8, 5, DFLAGS,
 			RK3288_CLKGATE_CON(3), 11, GFLAGS),
 	MUXGRF(0, "aclk_vcodec_pre", mux_aclk_vcodec_pre_p, CLK_SET_RATE_PARENT,
-			RK3288_GRF_SOC_CON(0), 7, 1, MFLAGS, grf_type_sys),
+			RK3288_GRF_SOC_CON(0), 7, 1, MFLAGS),
 	GATE(ACLK_VCODEC, "aclk_vcodec", "aclk_vcodec_pre", 0,
 		RK3288_CLKGATE_CON(9), 0, GFLAGS),
 
@@ -932,7 +931,6 @@ static void __init rk3288_common_init(struct device_node *np,
 				      enum rk3288_variant soc)
 {
 	struct rockchip_clk_provider *ctx;
-	unsigned long clk_nr_clks;
 
 	rk3288_cru_base = of_iomap(np, 0);
 	if (!rk3288_cru_base) {
@@ -940,9 +938,7 @@ static void __init rk3288_common_init(struct device_node *np,
 		return;
 	}
 
-	clk_nr_clks = rockchip_clk_find_max_clk_id(rk3288_clk_branches,
-						   ARRAY_SIZE(rk3288_clk_branches)) + 1;
-	ctx = rockchip_clk_init(np, rk3288_cru_base, clk_nr_clks);
+	ctx = rockchip_clk_init(np, rk3288_cru_base, CLK_NR_CLKS);
 	if (IS_ERR(ctx)) {
 		pr_err("%s: rockchip clk init failed\n", __func__);
 		iounmap(rk3288_cru_base);

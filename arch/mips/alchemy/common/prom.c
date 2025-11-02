@@ -40,7 +40,6 @@
 #include <linux/string.h>
 
 #include <asm/bootinfo.h>
-#include <prom.h>
 
 int prom_argc;
 char **prom_argv;
@@ -143,4 +142,8 @@ int __init prom_get_ethernet_addr(char *ethernet_addr)
 	str2eaddr(ethernet_addr, ethaddr_str);
 
 	return 0;
+}
+
+void __init prom_free_prom_memory(void)
+{
 }

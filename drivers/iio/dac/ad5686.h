@@ -13,8 +13,6 @@
 #include <linux/mutex.h>
 #include <linux/kernel.h>
 
-#include <linux/iio/iio.h>
-
 #define AD5310_CMD(x)				((x) << 12)
 
 #define AD5683_DATA(x)				((x) << 4)
@@ -54,16 +52,12 @@
 enum ad5686_supported_device_ids {
 	ID_AD5310R,
 	ID_AD5311R,
-	ID_AD5337R,
-	ID_AD5338R,
 	ID_AD5671R,
 	ID_AD5672R,
-	ID_AD5673R,
 	ID_AD5674R,
 	ID_AD5675R,
 	ID_AD5676,
 	ID_AD5676R,
-	ID_AD5677R,
 	ID_AD5679R,
 	ID_AD5681R,
 	ID_AD5682R,
@@ -115,9 +109,10 @@ struct ad5686_chip_info {
 };
 
 /**
- * struct ad5686_state - driver instance specific data
+ * struct ad5446_state - driver instance specific data
  * @spi:		spi_device
  * @chip_info:		chip model specific constants, available modes etc
+ * @reg:		supply regulator
  * @vref_mv:		actual reference voltage used
  * @pwr_down_mask:	power down mask
  * @pwr_down_mode:	current power down mode
@@ -129,6 +124,7 @@ struct ad5686_chip_info {
 struct ad5686_state {
 	struct device			*dev;
 	const struct ad5686_chip_info	*chip_info;
+	struct regulator		*reg;
 	unsigned short			vref_mv;
 	unsigned int			pwr_down_mask;
 	unsigned int			pwr_down_mode;
@@ -138,7 +134,7 @@ struct ad5686_state {
 	struct mutex			lock;
 
 	/*
-	 * DMA (thus cache coherency maintenance) may require the
+	 * DMA (thus cache coherency maintenance) requires the
 	 * transfer buffers to live in their own cache lines.
 	 */
 
@@ -146,7 +142,7 @@ struct ad5686_state {
 		__be32 d32;
 		__be16 d16;
 		u8 d8[4];
-	} data[3] __aligned(IIO_DMA_MINALIGN);
+	} data[3] ____cacheline_aligned;
 };
 
 
@@ -154,6 +150,8 @@ int ad5686_probe(struct device *dev,
 		 enum ad5686_supported_device_ids chip_type,
 		 const char *name, ad5686_write_func write,
 		 ad5686_read_func read);
+
+int ad5686_remove(struct device *dev);
 
 
 #endif /* __DRIVERS_IIO_DAC_AD5686_H__ */

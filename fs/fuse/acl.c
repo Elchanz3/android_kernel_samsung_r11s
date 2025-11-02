@@ -11,21 +11,18 @@
 #include <linux/posix_acl.h>
 #include <linux/posix_acl_xattr.h>
 
-static struct posix_acl *__fuse_get_acl(struct fuse_conn *fc,
-					struct inode *inode, int type, bool rcu)
+struct posix_acl *fuse_get_acl(struct inode *inode, int type)
 {
+	struct fuse_conn *fc = get_fuse_conn(inode);
 	int size;
 	const char *name;
 	void *value = NULL;
 	struct posix_acl *acl;
 
-	if (rcu)
-		return ERR_PTR(-ECHILD);
-
 	if (fuse_is_bad(inode))
 		return ERR_PTR(-EIO);
 
-	if (fc->no_getxattr)
+	if (!fc->posix_acl || fc->no_getxattr)
 		return NULL;
 
 	if (type == ACL_TYPE_ACCESS)
@@ -53,49 +50,8 @@ static struct posix_acl *__fuse_get_acl(struct fuse_conn *fc,
 	return acl;
 }
 
-static inline bool fuse_no_acl(const struct fuse_conn *fc,
-			       const struct inode *inode)
+int fuse_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
-	/*
-	 * Refuse interacting with POSIX ACLs for daemons that
-	 * don't support FUSE_POSIX_ACL and are not mounted on
-	 * the host to retain backwards compatibility.
-	 */
-	return !fc->posix_acl && (i_user_ns(inode) != &init_user_ns);
-}
-
-struct posix_acl *fuse_get_acl(struct mnt_idmap *idmap,
-			       struct dentry *dentry, int type)
-{
-	struct inode *inode = d_inode(dentry);
-	struct fuse_conn *fc = get_fuse_conn(inode);
-
-	if (fuse_no_acl(fc, inode))
-		return ERR_PTR(-EOPNOTSUPP);
-
-	return __fuse_get_acl(fc, inode, type, false);
-}
-
-struct posix_acl *fuse_get_inode_acl(struct inode *inode, int type, bool rcu)
-{
-	struct fuse_conn *fc = get_fuse_conn(inode);
-
-	/*
-	 * FUSE daemons before FUSE_POSIX_ACL was introduced could get and set
-	 * POSIX ACLs without them being used for permission checking by the
-	 * vfs. Retain that behavior for backwards compatibility as there are
-	 * filesystems that do all permission checking for acls in the daemon
-	 * and not in the kernel.
-	 */
-	if (!fc->posix_acl)
-		return NULL;
-	return __fuse_get_acl(fc,  inode, type, rcu);
-}
-
-int fuse_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
-		 struct posix_acl *acl, int type)
-{
-	struct inode *inode = d_inode(dentry);
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	const char *name;
 	int ret;
@@ -103,7 +59,7 @@ int fuse_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (fuse_is_bad(inode))
 		return -EIO;
 
-	if (fc->no_setxattr || fuse_no_acl(fc, inode))
+	if (!fc->posix_acl || fc->no_setxattr)
 		return -EOPNOTSUPP;
 
 	if (type == ACL_TYPE_ACCESS)
@@ -114,7 +70,6 @@ int fuse_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 		return -EINVAL;
 
 	if (acl) {
-		unsigned int extra_flags = 0;
 		/*
 		 * Fuse userspace is responsible for updating access
 		 * permissions in the inode, if needed. fuse_setxattr
@@ -138,30 +93,13 @@ int fuse_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 			return ret;
 		}
 
-		/*
-		 * Fuse daemons without FUSE_POSIX_ACL never changed the passed
-		 * through POSIX ACLs. Such daemons don't expect setgid bits to
-		 * be stripped.
-		 */
-		if (fc->posix_acl &&
-		    !in_group_or_capable(idmap, inode,
-					 i_gid_into_vfsgid(idmap, inode)))
-			extra_flags |= FUSE_SETXATTR_ACL_KILL_SGID;
-
-		ret = fuse_setxattr(inode, name, value, size, 0, extra_flags);
+		ret = fuse_setxattr(inode, name, value, size, 0);
 		kfree(value);
 	} else {
 		ret = fuse_removexattr(inode, name);
 	}
-
-	if (fc->posix_acl) {
-		/*
-		 * Fuse daemons without FUSE_POSIX_ACL never cached POSIX ACLs
-		 * and didn't invalidate attributes. Retain that behavior.
-		 */
-		forget_all_cached_acls(inode);
-		fuse_invalidate_attr(inode);
-	}
+	forget_all_cached_acls(inode);
+	fuse_invalidate_attr(inode);
 
 	return ret;
 }

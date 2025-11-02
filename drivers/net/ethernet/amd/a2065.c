@@ -486,7 +486,7 @@ static int lance_close(struct net_device *dev)
 	volatile struct lance_regs *ll = lp->ll;
 
 	netif_stop_queue(dev);
-	timer_delete_sync(&lp->multicast_timer);
+	del_timer_sync(&lp->multicast_timer);
 
 	/* Stop the card */
 	ll->rap = LE_CSR0;
@@ -636,7 +636,7 @@ static void lance_set_multicast(struct net_device *dev)
 
 static void lance_set_multicast_retry(struct timer_list *t)
 {
-	struct lance_private *lp = timer_container_of(lp, t, multicast_timer);
+	struct lance_private *lp = from_timer(lp, t, multicast_timer);
 
 	lance_set_multicast(lp->dev);
 }
@@ -680,7 +680,6 @@ static int a2065_init_one(struct zorro_dev *z,
 	unsigned long base_addr = board + A2065_LANCE;
 	unsigned long mem_start = board + A2065_RAM;
 	struct resource *r1, *r2;
-	u8 addr[ETH_ALEN];
 	u32 serial;
 	int err;
 
@@ -695,7 +694,7 @@ static int a2065_init_one(struct zorro_dev *z,
 	}
 
 	dev = alloc_etherdev(sizeof(struct lance_private));
-	if (!dev) {
+	if (dev == NULL) {
 		release_mem_region(base_addr, sizeof(struct lance_regs));
 		release_mem_region(mem_start, A2065_RAM_SIZE);
 		return -ENOMEM;
@@ -707,18 +706,17 @@ static int a2065_init_one(struct zorro_dev *z,
 	r2->name = dev->name;
 
 	serial = be32_to_cpu(z->rom.er_SerialNumber);
-	addr[0] = 0x00;
+	dev->dev_addr[0] = 0x00;
 	if (z->id != ZORRO_PROD_AMERISTAR_A2065) {	/* Commodore */
-		addr[1] = 0x80;
-		addr[2] = 0x10;
+		dev->dev_addr[1] = 0x80;
+		dev->dev_addr[2] = 0x10;
 	} else {					/* Ameristar */
-		addr[1] = 0x00;
-		addr[2] = 0x9f;
+		dev->dev_addr[1] = 0x00;
+		dev->dev_addr[2] = 0x9f;
 	}
-	addr[3] = (serial >> 16) & 0xff;
-	addr[4] = (serial >> 8) & 0xff;
-	addr[5] = serial & 0xff;
-	eth_hw_addr_set(dev, addr);
+	dev->dev_addr[3] = (serial >> 16) & 0xff;
+	dev->dev_addr[4] = (serial >> 8) & 0xff;
+	dev->dev_addr[5] = serial & 0xff;
 	dev->base_addr = (unsigned long)ZTWO_VADDR(base_addr);
 	dev->mem_start = (unsigned long)ZTWO_VADDR(mem_start);
 	dev->mem_end = dev->mem_start + A2065_RAM_SIZE;
@@ -781,5 +779,4 @@ static void __exit a2065_cleanup_module(void)
 module_init(a2065_init_module);
 module_exit(a2065_cleanup_module);
 
-MODULE_DESCRIPTION("Commodore A2065 Ethernet driver");
 MODULE_LICENSE("GPL");

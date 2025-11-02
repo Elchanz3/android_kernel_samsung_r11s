@@ -32,23 +32,23 @@ enum {
 	CHTDC_TI_CCEOCAL = 7,	/* battery */
 };
 
-static const struct resource power_button_resources[] = {
+static struct resource power_button_resources[] = {
 	DEFINE_RES_IRQ(CHTDC_TI_PWRBTN),
 };
 
-static const struct resource thermal_resources[] = {
+static struct resource thermal_resources[] = {
 	DEFINE_RES_IRQ(CHTDC_TI_DIETMPWARN),
 };
 
-static const struct resource adc_resources[] = {
+static struct resource adc_resources[] = {
 	DEFINE_RES_IRQ(CHTDC_TI_ADCCMPL),
 };
 
-static const struct resource pwrsrc_resources[] = {
+static struct resource pwrsrc_resources[] = {
 	DEFINE_RES_IRQ(CHTDC_TI_VBUSDET),
 };
 
-static const struct resource battery_resources[] = {
+static struct resource battery_resources[] = {
 	DEFINE_RES_IRQ(CHTDC_TI_VBATLOW),
 	DEFINE_RES_IRQ(CHTDC_TI_CCEOCAL),
 };
@@ -81,9 +81,8 @@ static struct mfd_cell chtdc_ti_dev[] = {
 static const struct regmap_config chtdc_ti_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = 0xff,
-	/* The hardware does not support reading multiple registers at once */
-	.use_single_read = true,
+	.max_register = 128,
+	.cache_type = REGCACHE_NONE,
 };
 
 static const struct regmap_irq chtdc_ti_irqs[] = {
@@ -141,7 +140,7 @@ static void chtdc_ti_shutdown(struct i2c_client *i2c)
 	disable_irq(pmic->irq);
 }
 
-static int chtdc_ti_suspend(struct device *dev)
+static int __maybe_unused chtdc_ti_suspend(struct device *dev)
 {
 	struct intel_soc_pmic *pmic = dev_get_drvdata(dev);
 
@@ -150,7 +149,7 @@ static int chtdc_ti_suspend(struct device *dev)
 	return 0;
 }
 
-static int chtdc_ti_resume(struct device *dev)
+static int __maybe_unused chtdc_ti_resume(struct device *dev)
 {
 	struct intel_soc_pmic *pmic = dev_get_drvdata(dev);
 
@@ -159,7 +158,7 @@ static int chtdc_ti_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(chtdc_ti_pm_ops, chtdc_ti_suspend, chtdc_ti_resume);
+static SIMPLE_DEV_PM_OPS(chtdc_ti_pm_ops, chtdc_ti_suspend, chtdc_ti_resume);
 
 static const struct acpi_device_id chtdc_ti_acpi_ids[] = {
 	{ "INT33F5" },
@@ -170,10 +169,10 @@ MODULE_DEVICE_TABLE(acpi, chtdc_ti_acpi_ids);
 static struct i2c_driver chtdc_ti_i2c_driver = {
 	.driver = {
 		.name = "intel_soc_pmic_chtdc_ti",
-		.pm = pm_sleep_ptr(&chtdc_ti_pm_ops),
+		.pm = &chtdc_ti_pm_ops,
 		.acpi_match_table = chtdc_ti_acpi_ids,
 	},
-	.probe = chtdc_ti_probe,
+	.probe_new = chtdc_ti_probe,
 	.shutdown = chtdc_ti_shutdown,
 };
 module_i2c_driver(chtdc_ti_i2c_driver);

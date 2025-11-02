@@ -161,10 +161,8 @@ static const char * const topbuttonpad_pnp_ids[] = {
 	NULL
 };
 
-#ifdef CONFIG_MOUSE_PS2_SYNAPTICS_SMBUS
 static const char * const smbus_pnp_ids[] = {
 	/* all of the topbuttonpad_pnp_ids are valid, we just add some extras */
-	"DLL060d", /* Dell Precision M3800 */
 	"LEN0048", /* X1 Carbon 3 */
 	"LEN0046", /* X250 */
 	"LEN0049", /* Yoga 11e */
@@ -184,25 +182,17 @@ static const char * const smbus_pnp_ids[] = {
 	"LEN0099", /* X1 Extreme Gen 1 / P1 Gen 1 */
 	"LEN009b", /* T580 */
 	"LEN0402", /* X1 Extreme Gen 2 / P1 Gen 2 */
-	"LEN040f", /* P1 Gen 3 */
-	"LEN0411", /* L14 Gen 1 */
 	"LEN200f", /* T450s */
 	"LEN2044", /* L470  */
 	"LEN2054", /* E480 */
 	"LEN2055", /* E580 */
 	"LEN2068", /* T14 Gen 1 */
-	"SYN1221", /* TUXEDO InfinityBook Pro 14 v5 */
-	"SYN3003", /* HP EliteBook 850 G1 */
-	"SYN3015", /* HP EliteBook 840 G2 */
 	"SYN3052", /* HP EliteBook 840 G4 */
 	"SYN3221", /* HP 15-ay000 */
 	"SYN323d", /* HP Spectre X360 13-w013dx */
 	"SYN3257", /* HP Envy 13-ad105ng */
-	"TOS01f6", /* Dynabook Portege X30L-G */
-	"TOS0213", /* Dynabook Portege X30-D */
 	NULL
 };
-#endif
 
 static const char * const forcepad_pnp_ids[] = {
 	"SYN300D",
@@ -637,7 +627,7 @@ static void synaptics_set_rate(struct psmouse *psmouse, unsigned int rate)
  ****************************************************************************/
 static int synaptics_pt_write(struct serio *serio, u8 c)
 {
-	struct psmouse *parent = psmouse_from_serio(serio->parent);
+	struct psmouse *parent = serio_get_drvdata(serio->parent);
 	u8 rate_param = SYN_PS_CLIENT_CMD; /* indicates that we want pass-through port */
 	int error;
 
@@ -654,42 +644,24 @@ static int synaptics_pt_write(struct serio *serio, u8 c)
 
 static int synaptics_pt_start(struct serio *serio)
 {
-	struct psmouse *parent = psmouse_from_serio(serio->parent);
+	struct psmouse *parent = serio_get_drvdata(serio->parent);
 	struct synaptics_data *priv = parent->private;
 
-	guard(serio_pause_rx)(parent->ps2dev.serio);
+	serio_pause_rx(parent->ps2dev.serio);
 	priv->pt_port = serio;
+	serio_continue_rx(parent->ps2dev.serio);
 
 	return 0;
 }
 
 static void synaptics_pt_stop(struct serio *serio)
 {
-	struct psmouse *parent = psmouse_from_serio(serio->parent);
+	struct psmouse *parent = serio_get_drvdata(serio->parent);
 	struct synaptics_data *priv = parent->private;
 
-	guard(serio_pause_rx)(parent->ps2dev.serio);
+	serio_pause_rx(parent->ps2dev.serio);
 	priv->pt_port = NULL;
-}
-
-static int synaptics_pt_open(struct serio *serio)
-{
-	struct psmouse *parent = psmouse_from_serio(serio->parent);
-	struct synaptics_data *priv = parent->private;
-
-	guard(serio_pause_rx)(parent->ps2dev.serio);
-	priv->pt_port_open = true;
-
-	return 0;
-}
-
-static void synaptics_pt_close(struct serio *serio)
-{
-	struct psmouse *parent = psmouse_from_serio(serio->parent);
-	struct synaptics_data *priv = parent->private;
-
-	guard(serio_pause_rx)(parent->ps2dev.serio);
-	priv->pt_port_open = false;
+	serio_continue_rx(parent->ps2dev.serio);
 }
 
 static int synaptics_is_pt_packet(u8 *buf)
@@ -697,32 +669,25 @@ static int synaptics_is_pt_packet(u8 *buf)
 	return (buf[0] & 0xFC) == 0x84 && (buf[3] & 0xCC) == 0xC4;
 }
 
-static void synaptics_pass_pt_packet(struct synaptics_data *priv, u8 *packet)
+static void synaptics_pass_pt_packet(struct serio *ptport, u8 *packet)
 {
-	struct serio *ptport;
+	struct psmouse *child = serio_get_drvdata(ptport);
 
-	ptport = priv->pt_port;
-	if (!ptport)
-		return;
-
-	serio_interrupt(ptport, packet[1], 0);
-
-	if (priv->pt_port_open) {
-		struct psmouse *child = psmouse_from_serio(ptport);
-
-		if (child->state == PSMOUSE_ACTIVATED) {
-			serio_interrupt(ptport, packet[4], 0);
-			serio_interrupt(ptport, packet[5], 0);
-			if (child->pktsize == 4)
-				serio_interrupt(ptport, packet[2], 0);
-		}
+	if (child && child->state == PSMOUSE_ACTIVATED) {
+		serio_interrupt(ptport, packet[1], 0);
+		serio_interrupt(ptport, packet[4], 0);
+		serio_interrupt(ptport, packet[5], 0);
+		if (child->pktsize == 4)
+			serio_interrupt(ptport, packet[2], 0);
+	} else {
+		serio_interrupt(ptport, packet[1], 0);
 	}
 }
 
 static void synaptics_pt_activate(struct psmouse *psmouse)
 {
 	struct synaptics_data *priv = psmouse->private;
-	struct psmouse *child = psmouse_from_serio(priv->pt_port);
+	struct psmouse *child = serio_get_drvdata(priv->pt_port);
 
 	/* adjust the touchpad to child's choice of protocol */
 	if (child) {
@@ -741,7 +706,7 @@ static void synaptics_pt_create(struct psmouse *psmouse)
 {
 	struct serio *serio;
 
-	serio = kzalloc(sizeof(*serio), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!serio) {
 		psmouse_err(psmouse,
 			    "not enough memory for pass-through port\n");
@@ -749,13 +714,11 @@ static void synaptics_pt_create(struct psmouse *psmouse)
 	}
 
 	serio->id.type = SERIO_PS_PSTHRU;
-	strscpy(serio->name, "Synaptics pass-through", sizeof(serio->name));
-	strscpy(serio->phys, "synaptics-pt/serio0", sizeof(serio->phys));
+	strlcpy(serio->name, "Synaptics pass-through", sizeof(serio->name));
+	strlcpy(serio->phys, "synaptics-pt/serio0", sizeof(serio->phys));
 	serio->write = synaptics_pt_write;
 	serio->start = synaptics_pt_start;
 	serio->stop = synaptics_pt_stop;
-	serio->open = synaptics_pt_open;
-	serio->close = synaptics_pt_close;
 	serio->parent = psmouse->ps2dev.serio;
 
 	psmouse->pt_activate = synaptics_pt_activate;
@@ -1143,11 +1106,8 @@ static void synaptics_process_packet(struct psmouse *psmouse)
 					num_fingers = hw.w + 2;
 				break;
 			case 2:
-				/*
-				 * SYN_MODEL_PEN(info->model_id): even if
-				 * the device supports pen, we treat it as
-				 * a single finger.
-				 */
+				if (SYN_MODEL_PEN(info->model_id))
+					;   /* Nothing, treat a pen as a single finger */
 				break;
 			case 4 ... 15:
 				if (SYN_CAP_PALMDETECT(info->capabilities))
@@ -1252,10 +1212,11 @@ static psmouse_ret_t synaptics_process_byte(struct psmouse *psmouse)
 
 		if (SYN_CAP_PASS_THROUGH(priv->info.capabilities) &&
 		    synaptics_is_pt_packet(psmouse->packet)) {
-			synaptics_pass_pt_packet(priv, psmouse->packet);
-		} else {
+			if (priv->pt_port)
+				synaptics_pass_pt_packet(priv->pt_port,
+							 psmouse->packet);
+		} else
 			synaptics_process_packet(psmouse);
-		}
 
 		return PSMOUSE_FULL_PACKET;
 	}
@@ -1597,7 +1558,7 @@ static int synaptics_init_ps2(struct psmouse *psmouse,
 
 	synaptics_apply_quirks(psmouse, info);
 
-	psmouse->private = priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	psmouse->private = priv = kzalloc(sizeof(struct synaptics_data), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1811,7 +1772,7 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
 				  leave_breadcrumbs);
 }
 
-/*
+/**
  * synaptics_setup_intertouch - called once the PS/2 devices are enumerated
  * and decides to instantiate a SMBus InterTouch device.
  */

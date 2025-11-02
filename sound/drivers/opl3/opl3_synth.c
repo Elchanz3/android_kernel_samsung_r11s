@@ -158,8 +158,10 @@ int snd_opl3_ioctl(struct snd_hwdep * hw, struct file *file,
 		return 0;
 #endif
 
+#ifdef CONFIG_SND_DEBUG
 	default:
-		dev_dbg(opl3->card->dev, "unknown IOCTL: 0x%x\n", cmd);
+		snd_printk(KERN_WARNING "unknown IOCTL: 0x%x\n", cmd);
+#endif
 	}
 	return -ENOTTY;
 }
@@ -288,7 +290,7 @@ int snd_opl3_load_patch(struct snd_opl3 *opl3,
 	}
 
 	if (name)
-		strscpy(patch->name, name, sizeof(patch->name));
+		strlcpy(patch->name, name, sizeof(patch->name));
 
 	return 0;
 }

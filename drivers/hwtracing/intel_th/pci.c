@@ -23,6 +23,7 @@ enum {
 	TH_PCI_RTIT_BAR		= 4,
 };
 
+#define BAR_MASK (BIT(TH_PCI_CONFIG_BAR) | BIT(TH_PCI_STH_SW_BAR))
 
 #define PCI_REG_NPKDSC	0x80
 #define NPKDSC_TSACT	BIT(5)
@@ -70,7 +71,7 @@ static void intel_th_pci_deactivate(struct intel_th *th)
 static int intel_th_pci_probe(struct pci_dev *pdev,
 			      const struct pci_device_id *id)
 {
-	const struct intel_th_drvdata *drvdata = (void *)id->driver_data;
+	struct intel_th_drvdata *drvdata = (void *)id->driver_data;
 	struct resource resource[TH_MMIO_END + TH_NVEC_MAX] = {
 		[TH_MMIO_CONFIG]	= pdev->resource[TH_PCI_CONFIG_BAR],
 		[TH_MMIO_SW]		= pdev->resource[TH_PCI_STH_SW_BAR],
@@ -82,15 +83,9 @@ static int intel_th_pci_probe(struct pci_dev *pdev,
 	if (err)
 		return err;
 
-	err = pcim_request_all_regions(pdev, DRIVER_NAME);
+	err = pcim_iomap_regions_request_all(pdev, BAR_MASK, DRIVER_NAME);
 	if (err)
 		return err;
-
-	if (!pcim_iomap(pdev, TH_PCI_CONFIG_BAR, 0))
-		return -ENOMEM;
-
-	if (!pcim_iomap(pdev, TH_PCI_STH_SW_BAR, 0))
-		return -ENOMEM;
 
 	if (pdev->resource[TH_PCI_RTIT_BAR].start) {
 		resource[TH_MMIO_RTIT] = pdev->resource[TH_PCI_RTIT_BAR];
@@ -295,13 +290,13 @@ static const struct pci_device_id intel_th_pci_id_table[] = {
 		.driver_data = (kernel_ulong_t)&intel_th_2x,
 	},
 	{
-		/* Meteor Lake-S */
-		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x7f26),
+		/* Meteor Lake-S CPU */
+		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0xae24),
 		.driver_data = (kernel_ulong_t)&intel_th_2x,
 	},
 	{
-		/* Meteor Lake-S CPU */
-		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0xae24),
+		/* Meteor Lake-S */
+		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x7f26),
 		.driver_data = (kernel_ulong_t)&intel_th_2x,
 	},
 	{
@@ -332,21 +327,6 @@ static const struct pci_device_id intel_th_pci_id_table[] = {
 	{
 		/* Lunar Lake */
 		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0xa824),
-		.driver_data = (kernel_ulong_t)&intel_th_2x,
-	},
-	{
-		/* Arrow Lake */
-		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x7724),
-		.driver_data = (kernel_ulong_t)&intel_th_2x,
-	},
-	{
-		/* Panther Lake-H */
-		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0xe324),
-		.driver_data = (kernel_ulong_t)&intel_th_2x,
-	},
-	{
-		/* Panther Lake-P/U */
-		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0xe424),
 		.driver_data = (kernel_ulong_t)&intel_th_2x,
 	},
 	{

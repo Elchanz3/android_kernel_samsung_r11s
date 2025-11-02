@@ -13,7 +13,6 @@
 #include <linux/export.h>
 #include <linux/gfp.h>
 #include <linux/kernel.h>
-#include <linux/of.h>
 #include <linux/pci.h>
 #include <linux/string.h>
 
@@ -24,10 +23,10 @@ static int eeh_pe_aux_size = 0;
 static LIST_HEAD(eeh_phb_pe);
 
 /**
- * eeh_set_pe_aux_size - Set PE auxiliary data size
- * @size: PE auxiliary data size in bytes
+ * eeh_set_pe_aux_size - Set PE auxillary data size
+ * @size: PE auxillary data size
  *
- * Set PE auxiliary data size.
+ * Set PE auxillary data size
  */
 void eeh_set_pe_aux_size(int size)
 {
@@ -302,7 +301,7 @@ struct eeh_pe *eeh_pe_get(struct pci_controller *phb, int pe_no)
  * @new_pe_parent.
  *
  * If @new_pe_parent is NULL then the new PE will be inserted under
- * directly under the PHB.
+ * directly under the the PHB.
  */
 int eeh_pe_tree_insert(struct eeh_dev *edev, struct eeh_pe *new_pe_parent)
 {
@@ -527,7 +526,7 @@ EXPORT_SYMBOL_GPL(eeh_pe_state_mark);
  * eeh_pe_mark_isolated
  * @pe: EEH PE
  *
- * Record that a PE has been isolated by marking the PE and its children as
+ * Record that a PE has been isolated by marking the PE and it's children as
  * EEH_PE_ISOLATED (and EEH_PE_CFG_BLOCKED, if required) and their PCI devices
  * as pci_channel_io_frozen.
  */
@@ -671,12 +670,11 @@ static void eeh_bridge_check_link(struct eeh_dev *edev)
 	eeh_ops->write_config(edev, cap + PCI_EXP_LNKCTL, 2, val);
 
 	/* Check link */
-	if (edev->pdev) {
-		if (!edev->pdev->link_active_reporting) {
-			eeh_edev_dbg(edev, "No link reporting capability\n");
-			msleep(1000);
-			return;
-		}
+	eeh_ops->read_config(edev, cap + PCI_EXP_LNKCAP, 4, &val);
+	if (!(val & PCI_EXP_LNKCAP_DLLLARC)) {
+		eeh_edev_dbg(edev, "No link reporting capability (0x%08x) \n", val);
+		msleep(1000);
+		return;
 	}
 
 	/* Wait the link is up until timeout (5s) */

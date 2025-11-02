@@ -69,7 +69,6 @@ static struct attribute *def_attrs[] = {
 	&memmap_type_attr.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(def);
 
 static const struct sysfs_ops memmap_attr_ops = {
 	.show = memmap_attr_show,
@@ -116,10 +115,10 @@ static void __meminit release_firmware_map_entry(struct kobject *kobj)
 	kfree(entry);
 }
 
-static const struct kobj_type memmap_ktype = {
+static struct kobj_type __refdata memmap_ktype = {
 	.release	= release_firmware_map_entry,
 	.sysfs_ops	= &memmap_attr_ops,
-	.default_groups	= def_groups,
+	.default_attrs	= def_attrs,
 };
 
 /*

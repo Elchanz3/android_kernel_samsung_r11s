@@ -19,12 +19,6 @@
 #define QCOM_MUTEX_APPS_PROC_ID	1
 #define QCOM_MUTEX_NUM_LOCKS	32
 
-struct qcom_hwspinlock_of_data {
-	u32 offset;
-	u32 stride;
-	const struct regmap_config *regmap_config;
-};
-
 static int qcom_hwspinlock_trylock(struct hwspinlock *lock)
 {
 	struct regmap_field *field = lock->priv;
@@ -64,85 +58,14 @@ static void qcom_hwspinlock_unlock(struct hwspinlock *lock)
 		pr_err("%s: failed to unlock spinlock\n", __func__);
 }
 
-static int qcom_hwspinlock_bust(struct hwspinlock *lock, unsigned int id)
-{
-	struct regmap_field *field = lock->priv;
-	u32 owner;
-	int ret;
-
-	ret = regmap_field_read(field, &owner);
-	if (ret) {
-		dev_err(lock->bank->dev, "unable to query spinlock owner\n");
-		return ret;
-	}
-
-	if (owner != id)
-		return 0;
-
-	ret = regmap_field_write(field, 0);
-	if (ret) {
-		dev_err(lock->bank->dev, "failed to bust spinlock\n");
-		return ret;
-	}
-
-	return 0;
-}
-
 static const struct hwspinlock_ops qcom_hwspinlock_ops = {
 	.trylock	= qcom_hwspinlock_trylock,
 	.unlock		= qcom_hwspinlock_unlock,
-	.bust		= qcom_hwspinlock_bust,
-};
-
-static const struct regmap_config sfpb_mutex_config = {
-	.reg_bits		= 32,
-	.reg_stride		= 4,
-	.val_bits		= 32,
-	.max_register		= 0x100,
-	.fast_io		= true,
-};
-
-static const struct qcom_hwspinlock_of_data of_sfpb_mutex = {
-	.offset = 0x4,
-	.stride = 0x4,
-	.regmap_config = &sfpb_mutex_config,
-};
-
-static const struct regmap_config tcsr_msm8226_mutex_config = {
-	.reg_bits		= 32,
-	.reg_stride		= 4,
-	.val_bits		= 32,
-	.max_register		= 0x1000,
-	.fast_io		= true,
-};
-
-static const struct qcom_hwspinlock_of_data of_msm8226_tcsr_mutex = {
-	.offset = 0,
-	.stride = 0x80,
-	.regmap_config = &tcsr_msm8226_mutex_config,
-};
-
-static const struct regmap_config tcsr_mutex_config = {
-	.reg_bits		= 32,
-	.reg_stride		= 4,
-	.val_bits		= 32,
-	.max_register		= 0x20000,
-	.fast_io		= true,
-};
-
-static const struct qcom_hwspinlock_of_data of_tcsr_mutex = {
-	.offset = 0,
-	.stride = 0x1000,
-	.regmap_config = &tcsr_mutex_config,
 };
 
 static const struct of_device_id qcom_hwspinlock_of_match[] = {
-	{ .compatible = "qcom,sfpb-mutex", .data = &of_sfpb_mutex },
-	{ .compatible = "qcom,tcsr-mutex", .data = &of_tcsr_mutex },
-	{ .compatible = "qcom,apq8084-tcsr-mutex", .data = &of_msm8226_tcsr_mutex },
-	{ .compatible = "qcom,msm8226-tcsr-mutex", .data = &of_msm8226_tcsr_mutex },
-	{ .compatible = "qcom,msm8974-tcsr-mutex", .data = &of_msm8226_tcsr_mutex },
-	{ .compatible = "qcom,msm8994-tcsr-mutex", .data = &of_msm8226_tcsr_mutex },
+	{ .compatible = "qcom,sfpb-mutex" },
+	{ .compatible = "qcom,tcsr-mutex" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, qcom_hwspinlock_of_match);
@@ -178,25 +101,29 @@ static struct regmap *qcom_hwspinlock_probe_syscon(struct platform_device *pdev,
 	return regmap;
 }
 
+static const struct regmap_config tcsr_mutex_config = {
+	.reg_bits		= 32,
+	.reg_stride		= 4,
+	.val_bits		= 32,
+	.max_register		= 0x20000,
+	.fast_io		= true,
+};
+
 static struct regmap *qcom_hwspinlock_probe_mmio(struct platform_device *pdev,
 						 u32 *offset, u32 *stride)
 {
-	const struct qcom_hwspinlock_of_data *data;
 	struct device *dev = &pdev->dev;
 	void __iomem *base;
 
-	data = of_device_get_match_data(dev);
-	if (!data->regmap_config)
-		return ERR_PTR(-EINVAL);
-
-	*offset = data->offset;
-	*stride = data->stride;
+	/* All modern platform has offset 0 and stride of 4k */
+	*offset = 0;
+	*stride = 0x1000;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return ERR_CAST(base);
 
-	return devm_regmap_init_mmio(dev, base, data->regmap_config);
+	return devm_regmap_init_mmio(dev, base, &tcsr_mutex_config);
 }
 
 static int qcom_hwspinlock_probe(struct platform_device *pdev)
@@ -230,8 +157,6 @@ static int qcom_hwspinlock_probe(struct platform_device *pdev)
 
 		bank->lock[i].priv = devm_regmap_field_alloc(&pdev->dev,
 							     regmap, field);
-		if (IS_ERR(bank->lock[i].priv))
-			return PTR_ERR(bank->lock[i].priv);
 	}
 
 	return devm_hwspin_lock_register(&pdev->dev, bank, &qcom_hwspinlock_ops,

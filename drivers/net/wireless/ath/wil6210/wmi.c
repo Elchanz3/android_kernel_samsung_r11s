@@ -53,7 +53,7 @@ MODULE_PARM_DESC(led_id,
  *
  * There are several buses present on the WIL6210 card.
  * Same memory areas are visible at different address on
- * the different buses. There are 3 main bus masters:
+ * the different busses. There are 3 main bus masters:
  *  - MAC CPU (ucode)
  *  - User CPU (firmware)
  *  - AHB (host)
@@ -224,7 +224,7 @@ struct auth_no_hdr {
 u8 led_polarity = LED_POLARITY_LOW_ACTIVE;
 
 /**
- * wmi_addr_remap - return AHB address for given firmware internal (linker) address
+ * return AHB address for given firmware internal (linker) address
  * @x: internal address
  * If address have no valid AHB mapping, return 0
  */
@@ -242,7 +242,7 @@ static u32 wmi_addr_remap(u32 x)
 }
 
 /**
- * wil_find_fw_mapping - find fw_mapping entry by section name
+ * find fw_mapping entry by section name
  * @section: section name
  *
  * Return pointer to section or NULL if not found
@@ -260,9 +260,9 @@ struct fw_map *wil_find_fw_mapping(const char *section)
 }
 
 /**
- * wmi_buffer_block - Check address validity for WMI buffer; remap if needed
+ * Check address validity for WMI buffer; remap if needed
  * @wil: driver data
- * @ptr_: internal (linker) fw/ucode address
+ * @ptr: internal (linker) fw/ucode address
  * @size: if non zero, validate the block does not
  *  exceed the device memory (bar)
  *
@@ -780,7 +780,7 @@ static void wmi_evt_ready(struct wil6210_vif *vif, int id, void *d, int len)
 		return; /* FW load will fail after timeout */
 	}
 	/* ignore MAC address, we already have it from the boot loader */
-	strscpy(wiphy->fw_version, wil->fw_version, sizeof(wiphy->fw_version));
+	strlcpy(wiphy->fw_version, wil->fw_version, sizeof(wiphy->fw_version));
 
 	if (len > offsetof(struct wmi_ready_event, rfc_read_calib_result)) {
 		wil_dbg_wmi(wil, "rfc calibration result %d\n",
@@ -851,9 +851,9 @@ static void wmi_evt_rx_mgmt(struct wil6210_vif *vif, int id, void *d, int len)
 	d_status = le16_to_cpu(data->info.status);
 	fc = rx_mgmt_frame->frame_control;
 
-	wil_dbg_wmi(wil, "MGMT Rx: channel %d MCS %s RSSI %d SQI %d%%\n",
-		    data->info.channel, WIL_EXTENDED_MCS_CHECK(data->info.mcs),
-		    data->info.rssi, data->info.sqi);
+	wil_dbg_wmi(wil, "MGMT Rx: channel %d MCS %d RSSI %d SQI %d%%\n",
+		    data->info.channel, data->info.mcs, data->info.rssi,
+		    data->info.sqi);
 	wil_dbg_wmi(wil, "status 0x%04x len %d fc 0x%04x\n", d_status, d_len,
 		    le16_to_cpu(fc));
 	wil_dbg_wmi(wil, "qid %d mid %d cid %d\n",
@@ -870,6 +870,7 @@ static void wmi_evt_rx_mgmt(struct wil6210_vif *vif, int id, void *d, int len)
 		struct cfg80211_bss *bss;
 		struct cfg80211_inform_bss bss_data = {
 			.chan = channel,
+			.scan_width = NL80211_BSS_CHAN_WIDTH_20,
 			.signal = signal,
 			.boottime_ns = ktime_to_ns(ktime_get_boottime()),
 		};
@@ -933,7 +934,7 @@ static void wmi_evt_scan_complete(struct wil6210_vif *vif, int id,
 		wil_dbg_wmi(wil, "SCAN_COMPLETE(0x%08x)\n", status);
 		wil_dbg_misc(wil, "Complete scan_request 0x%p aborted %d\n",
 			     vif->scan_request, info.aborted);
-		timer_delete_sync(&vif->scan_timer);
+		del_timer_sync(&vif->scan_timer);
 		cfg80211_scan_done(vif->scan_request, &info);
 		if (vif->mid == 0)
 			wil->radio_wdev = wil->main_ndev->ieee80211_ptr;
@@ -1023,7 +1024,7 @@ static void wmi_evt_connect(struct wil6210_vif *vif, int id, void *d, int len)
 			mutex_unlock(&wil->mutex);
 			return;
 		}
-		timer_delete_sync(&vif->connect_timer);
+		del_timer_sync(&vif->connect_timer);
 	} else if ((wdev->iftype == NL80211_IFTYPE_AP) ||
 		   (wdev->iftype == NL80211_IFTYPE_P2P_GO)) {
 		if (wil->sta[evt->cid].status != wil_sta_unused) {
@@ -1198,7 +1199,7 @@ static void wmi_evt_eapol_rx(struct wil6210_vif *vif, int id, void *d, int len)
 	eth->h_proto = cpu_to_be16(ETH_P_PAE);
 	skb_put_data(skb, evt->eapol, eapol_len);
 	skb->protocol = eth_type_trans(skb, ndev);
-	if (likely(netif_rx(skb) == NET_RX_SUCCESS)) {
+	if (likely(netif_rx_ni(skb) == NET_RX_SUCCESS)) {
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += sz;
 		if (stats) {
@@ -1388,6 +1389,7 @@ wmi_evt_sched_scan_result(struct wil6210_vif *vif, int id, void *d, int len)
 	u32 d_len;
 	struct cfg80211_bss *bss;
 	struct cfg80211_inform_bss bss_data = {
+		.scan_width = NL80211_BSS_CHAN_WIDTH_20,
 		.boottime_ns = ktime_to_ns(ktime_get_boottime()),
 	};
 
@@ -1420,9 +1422,8 @@ wmi_evt_sched_scan_result(struct wil6210_vif *vif, int id, void *d, int len)
 	else
 		signal = data->info.sqi;
 
-	wil_dbg_wmi(wil, "sched scan result: channel %d MCS %s RSSI %d\n",
-		    data->info.channel, WIL_EXTENDED_MCS_CHECK(data->info.mcs),
-		    data->info.rssi);
+	wil_dbg_wmi(wil, "sched scan result: channel %d MCS %d RSSI %d\n",
+		    data->info.channel, data->info.mcs, data->info.rssi);
 	wil_dbg_wmi(wil, "len %d qid %d mid %d cid %d\n",
 		    d_len, data->info.qid, data->info.mid, data->info.cid);
 	wil_hex_dump_wmi("PROBE ", DUMP_PREFIX_OFFSET, 16, 1, rx_mgmt_frame,
@@ -1454,7 +1455,7 @@ static void wil_link_stats_store_basic(struct wil6210_vif *vif,
 	u8 cid = basic->cid;
 	struct wil_sta_info *sta;
 
-	if (cid >= wil->max_assoc_sta) {
+	if (cid < 0 || cid >= wil->max_assoc_sta) {
 		wil_err(wil, "invalid cid %d\n", cid);
 		return;
 	}
@@ -1814,14 +1815,14 @@ wmi_evt_reassoc_status(struct wil6210_vif *vif, int id, void *d, int len)
 	wil->sta[cid].stats.ft_roams++;
 	ether_addr_copy(wil->sta[cid].addr, vif->bss->bssid);
 	mutex_unlock(&wil->mutex);
-	timer_delete_sync(&vif->connect_timer);
+	del_timer_sync(&vif->connect_timer);
 
 	cfg80211_ref_bss(wiphy, vif->bss);
 	freq = ieee80211_channel_to_frequency(ch, NL80211_BAND_60GHZ);
 
 	memset(&info, 0, sizeof(info));
-	info.links[0].channel = ieee80211_get_channel(wiphy, freq);
-	info.links[0].bss = vif->bss;
+	info.channel = ieee80211_get_channel(wiphy, freq);
+	info.bss = vif->bss;
 	info.req_ie = assoc_req_ie;
 	info.req_ie_len = assoc_req_ie_len;
 	info.resp_ie = assoc_resp_ie;
@@ -2095,7 +2096,7 @@ int wmi_echo(struct wil6210_priv *wil)
 			WIL_WMI_CALL_GENERAL_TO_MS);
 }
 
-int wmi_set_mac_address(struct wil6210_priv *wil, const void *addr)
+int wmi_set_mac_address(struct wil6210_priv *wil, void *addr)
 {
 	struct wil6210_vif *vif = ndev_to_vif(wil->main_ndev);
 	struct wmi_set_mac_address_cmd cmd;
@@ -4015,22 +4016,27 @@ int wmi_set_cqm_rssi_config(struct wil6210_priv *wil,
 	struct wil6210_vif *vif = ndev_to_vif(ndev);
 	int rc;
 	struct {
+		struct wmi_set_link_monitor_cmd cmd;
+		s8 rssi_thold;
+	} __packed cmd = {
+		.cmd = {
+			.rssi_hyst = rssi_hyst,
+			.rssi_thresholds_list_size = 1,
+		},
+		.rssi_thold = rssi_thold,
+	};
+	struct {
 		struct wmi_cmd_hdr hdr;
 		struct wmi_set_link_monitor_event evt;
 	} __packed reply = {
 		.evt = {.status = WMI_FW_STATUS_FAILURE},
 	};
-	DEFINE_FLEX(struct wmi_set_link_monitor_cmd, cmd,
-		    rssi_thresholds_list, rssi_thresholds_list_size, 1);
-
-	cmd->rssi_hyst = rssi_hyst;
-	cmd->rssi_thresholds_list[0] = rssi_thold;
 
 	if (rssi_thold > S8_MAX || rssi_thold < S8_MIN || rssi_hyst > U8_MAX)
 		return -EINVAL;
 
-	rc = wmi_call(wil, WMI_SET_LINK_MONITOR_CMDID, vif->mid, cmd,
-		      __struct_size(cmd), WMI_SET_LINK_MONITOR_EVENTID,
+	rc = wmi_call(wil, WMI_SET_LINK_MONITOR_CMDID, vif->mid, &cmd,
+		      sizeof(cmd), WMI_SET_LINK_MONITOR_EVENTID,
 		      &reply, sizeof(reply), WIL_WMI_CALL_GENERAL_TO_MS);
 	if (rc) {
 		wil_err(wil, "WMI_SET_LINK_MONITOR_CMDID failed, rc %d\n", rc);

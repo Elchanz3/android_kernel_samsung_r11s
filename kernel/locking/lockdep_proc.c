@@ -91,28 +91,26 @@ static int l_show(struct seq_file *m, void *v)
 #ifdef CONFIG_DEBUG_LOCKDEP
 	seq_printf(m, " OPS:%8ld", debug_class_ops_read(class));
 #endif
-	if (IS_ENABLED(CONFIG_PROVE_LOCKING)) {
-		seq_printf(m, " FD:%5ld", lockdep_count_forward_deps(class));
-		seq_printf(m, " BD:%5ld", lockdep_count_backward_deps(class));
+#ifdef CONFIG_PROVE_LOCKING
+	seq_printf(m, " FD:%5ld", lockdep_count_forward_deps(class));
+	seq_printf(m, " BD:%5ld", lockdep_count_backward_deps(class));
+#endif
 
-		get_usage_chars(class, usage);
-		seq_printf(m, " %s", usage);
-	}
+	get_usage_chars(class, usage);
+	seq_printf(m, " %s", usage);
 
 	seq_printf(m, ": ");
 	print_name(m, class);
 	seq_puts(m, "\n");
 
-	if (IS_ENABLED(CONFIG_PROVE_LOCKING)) {
-		list_for_each_entry(entry, &class->locks_after, entry) {
-			if (entry->distance == 1) {
-				seq_printf(m, " -> [%p] ", entry->class->key);
-				print_name(m, entry->class);
-				seq_puts(m, "\n");
-			}
+	list_for_each_entry(entry, &class->locks_after, entry) {
+		if (entry->distance == 1) {
+			seq_printf(m, " -> [%p] ", entry->class->key);
+			print_name(m, entry->class);
+			seq_puts(m, "\n");
 		}
-		seq_puts(m, "\n");
 	}
+	seq_puts(m, "\n");
 
 	return 0;
 }
@@ -286,8 +284,6 @@ static int lockdep_stats_show(struct seq_file *m, void *v)
 #endif
 	seq_printf(m, " lock-classes:                  %11lu [max: %lu]\n",
 			nr_lock_classes, MAX_LOCKDEP_KEYS);
-	seq_printf(m, " dynamic-keys:                  %11lu\n",
-			nr_dynamic_keys);
 	seq_printf(m, " direct dependencies:           %11lu [max: %lu]\n",
 			nr_list_entries, MAX_LOCKDEP_ENTRIES);
 	seq_printf(m, " indirect dependencies:         %11lu\n",
@@ -379,7 +375,7 @@ static int lockdep_stats_show(struct seq_file *m, void *v)
 			debug_locks);
 
 	/*
-	 * Zapped classes and lockdep data buffers reuse statistics.
+	 * Zappped classes and lockdep data buffers reuse statistics.
 	 */
 	seq_puts(m, "\n");
 	seq_printf(m, " zapped classes:                %11lu\n",
@@ -426,7 +422,7 @@ static void seq_line(struct seq_file *m, char c, int offset, int length)
 	for (i = 0; i < offset; i++)
 		seq_puts(m, " ");
 	for (i = 0; i < length; i++)
-		seq_putc(m, c);
+		seq_printf(m, "%c", c);
 	seq_puts(m, "\n");
 }
 
@@ -442,7 +438,7 @@ static void snprint_time(char *buf, size_t bufsiz, s64 nr)
 
 static void seq_time(struct seq_file *m, s64 time)
 {
-	char num[22];
+	char num[15];
 
 	snprint_time(num, sizeof(num), time);
 	seq_printf(m, " %14s", num);
@@ -657,7 +653,7 @@ static int lock_stat_open(struct inode *inode, struct file *file)
 			if (!test_bit(idx, lock_classes_in_use))
 				continue;
 			iter->class = class;
-			lock_stats(class, &iter->stats);
+			iter->stats = lock_stats(class);
 			iter++;
 		}
 

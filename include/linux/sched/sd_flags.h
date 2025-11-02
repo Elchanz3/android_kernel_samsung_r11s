@@ -91,16 +91,6 @@ SD_FLAG(SD_WAKE_AFFINE, SDF_SHARED_CHILD)
 SD_FLAG(SD_ASYM_CPUCAPACITY, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
 
 /*
- * Domain members have different CPU capacities spanning all unique CPU
- * capacity values.
- *
- * SHARED_PARENT: Set from the topmost domain down to the first domain where
- *		  all available CPU capacities are visible
- * NEEDS_GROUPS: Per-CPU capacity is asymmetric between groups.
- */
-SD_FLAG(SD_ASYM_CPUCAPACITY_FULL, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
-
-/*
  * Domain members share CPU capacity (i.e. SMT)
  *
  * SHARED_CHILD: Set from the base domain up until spanned CPUs no longer share
@@ -110,20 +100,13 @@ SD_FLAG(SD_ASYM_CPUCAPACITY_FULL, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
 SD_FLAG(SD_SHARE_CPUCAPACITY, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
 
 /*
- * Domain members share CPU cluster (LLC tags or L2 cache)
- *
- * NEEDS_GROUPS: Clusters are shared between groups.
- */
-SD_FLAG(SD_CLUSTER, SDF_NEEDS_GROUPS)
-
-/*
- * Domain members share CPU Last Level Caches
+ * Domain members share CPU package resources (i.e. caches)
  *
  * SHARED_CHILD: Set from the base domain up until spanned CPUs no longer share
  *               the same cache(s).
  * NEEDS_GROUPS: Caches are shared between groups.
  */
-SD_FLAG(SD_SHARE_LLC, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
+SD_FLAG(SD_SHARE_PKG_RESOURCES, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
 
 /*
  * Only a single load balancing instance
@@ -139,9 +122,12 @@ SD_FLAG(SD_SERIALIZE, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
 /*
  * Place busy tasks earlier in the domain
  *
+ * SHARED_CHILD: Usually set on the SMT level. Technically could be set further
+ *               up, but currently assumed to be set from the base domain
+ *               upwards (see update_top_cache_domain()).
  * NEEDS_GROUPS: Load balancing flag.
  */
-SD_FLAG(SD_ASYM_PACKING, SDF_NEEDS_GROUPS)
+SD_FLAG(SD_ASYM_PACKING, SDF_SHARED_CHILD | SDF_NEEDS_GROUPS)
 
 /*
  * Prefer to place tasks in a sibling domain
@@ -152,6 +138,14 @@ SD_FLAG(SD_ASYM_PACKING, SDF_NEEDS_GROUPS)
  * NEEDS_GROUPS: Load balancing flag.
  */
 SD_FLAG(SD_PREFER_SIBLING, SDF_NEEDS_GROUPS)
+
+/*
+ * sched_groups of this level overlap
+ *
+ * SHARED_PARENT: Set for all NUMA levels above NODE.
+ * NEEDS_GROUPS: Overlaps can only exist with more than one group.
+ */
+SD_FLAG(SD_OVERLAP, SDF_SHARED_PARENT | SDF_NEEDS_GROUPS)
 
 /*
  * Cross-node balancing

@@ -23,7 +23,7 @@
  */
 #define ARC_UNCACHED_ADDR_SPACE	0xc0000000
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 #include <linux/build_bug.h>
 
@@ -62,10 +62,14 @@
 #define ARCH_SLAB_MINALIGN	8
 #endif
 
+extern void arc_cache_init(void);
+extern char *arc_cache_mumbojumbo(int cpu_id, char *buf, int len);
+extern void read_decode_cache_bcr(void);
+
 extern int ioc_enable;
 extern unsigned long perip_base, perip_end;
 
-#endif	/* !__ASSEMBLER__ */
+#endif	/* !__ASSEMBLY__ */
 
 /* Instruction cache related Auxiliary registers */
 #define ARC_REG_IC_BCR		0x77	/* Build Config reg */

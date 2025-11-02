@@ -13,7 +13,6 @@
 #include <linux/regulator/consumer.h>
 #include <linux/err.h>
 #include <linux/delay.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/bitops.h>
@@ -23,6 +22,8 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
+
+#include <linux/platform_data/ad7298.h>
 
 #define AD7298_WRITE	BIT(15) /* write to the control register */
 #define AD7298_REPEAT	BIT(14) /* repeated conversion enable */
@@ -49,7 +50,7 @@ struct ad7298_state {
 	 * DMA (thus cache coherency maintenance) requires the
 	 * transfer buffers to live in their own cache lines.
 	 */
-	__be16				rx_buf[12] __aligned(IIO_DMA_MINALIGN);
+	__be16				rx_buf[12] ____cacheline_aligned;
 	__be16				tx_buf[2];
 };
 
@@ -109,8 +110,7 @@ static int ad7298_update_scan_mode(struct iio_dev *indio_dev,
 	int scan_count;
 
 	/* Now compute overall size */
-	scan_count = bitmap_weight(active_scan_mask,
-				   iio_get_masklength(indio_dev));
+	scan_count = bitmap_weight(active_scan_mask, indio_dev->masklength);
 
 	command = AD7298_WRITE | st->ext_ref;
 
@@ -144,6 +144,12 @@ static int ad7298_update_scan_mode(struct iio_dev *indio_dev,
 	return 0;
 }
 
+/*
+ * ad7298_trigger_handler() bh of trigger launched polling to ring buffer
+ *
+ * Currently there is no option in this driver to disable the saving of
+ * timestamps within the ring.
+ */
 static irqreturn_t ad7298_trigger_handler(int irq, void *p)
 {
 	struct iio_poll_func *pf = p;
@@ -155,8 +161,8 @@ static irqreturn_t ad7298_trigger_handler(int irq, void *p)
 	if (b_sent)
 		goto done;
 
-	iio_push_to_buffers_with_ts(indio_dev, st->rx_buf, sizeof(st->rx_buf),
-				    iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_timestamp(indio_dev, st->rx_buf,
+		iio_get_time_ns(indio_dev));
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -210,7 +216,7 @@ static int ad7298_get_ref_voltage(struct ad7298_state *st)
 {
 	int vref;
 
-	if (st->reg) {
+	if (st->ext_ref) {
 		vref = regulator_get_voltage(st->reg);
 		if (vref < 0)
 			return vref;
@@ -232,15 +238,16 @@ static int ad7298_read_raw(struct iio_dev *indio_dev,
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret)
+			return ret;
 
 		if (chan->address == AD7298_CH_TEMP)
 			ret = ad7298_scan_temp(st, val);
 		else
 			ret = ad7298_scan_direct(st, chan->address);
 
-		iio_device_release_direct(indio_dev);
+		iio_device_release_direct_mode(indio_dev);
 
 		if (ret < 0)
 			return ret;
@@ -274,15 +281,9 @@ static const struct iio_info ad7298_info = {
 	.update_scan_mode = ad7298_update_scan_mode,
 };
 
-static void ad7298_reg_disable(void *data)
-{
-	struct regulator *reg = data;
-
-	regulator_disable(reg);
-}
-
 static int ad7298_probe(struct spi_device *spi)
 {
+	struct ad7298_platform_data *pdata = spi->dev.platform_data;
 	struct ad7298_state *st;
 	struct iio_dev *indio_dev;
 	int ret;
@@ -293,27 +294,20 @@ static int ad7298_probe(struct spi_device *spi)
 
 	st = iio_priv(indio_dev);
 
-	st->reg = devm_regulator_get_optional(&spi->dev, "vref");
-	if (!IS_ERR(st->reg)) {
+	if (pdata && pdata->ext_ref)
 		st->ext_ref = AD7298_EXTREF;
-	} else {
-		ret = PTR_ERR(st->reg);
-		if (ret != -ENODEV)
-			return ret;
 
-		st->reg = NULL;
-	}
+	if (st->ext_ref) {
+		st->reg = devm_regulator_get(&spi->dev, "vref");
+		if (IS_ERR(st->reg))
+			return PTR_ERR(st->reg);
 
-	if (st->reg) {
 		ret = regulator_enable(st->reg);
 		if (ret)
 			return ret;
-
-		ret = devm_add_action_or_reset(&spi->dev, ad7298_reg_disable,
-					       st->reg);
-		if (ret)
-			return ret;
 	}
+
+	spi_set_drvdata(spi, indio_dev);
 
 	st->spi = spi;
 
@@ -339,32 +333,51 @@ static int ad7298_probe(struct spi_device *spi)
 	spi_message_add_tail(&st->scan_single_xfer[1], &st->scan_single_msg);
 	spi_message_add_tail(&st->scan_single_xfer[2], &st->scan_single_msg);
 
-	ret = devm_iio_triggered_buffer_setup(&spi->dev, indio_dev, NULL,
+	ret = iio_triggered_buffer_setup(indio_dev, NULL,
 			&ad7298_trigger_handler, NULL);
 	if (ret)
-		return ret;
+		goto error_disable_reg;
 
-	return devm_iio_device_register(&spi->dev, indio_dev);
+	ret = iio_device_register(indio_dev);
+	if (ret)
+		goto error_cleanup_ring;
+
+	return 0;
+
+error_cleanup_ring:
+	iio_triggered_buffer_cleanup(indio_dev);
+error_disable_reg:
+	if (st->ext_ref)
+		regulator_disable(st->reg);
+
+	return ret;
 }
 
-static const struct acpi_device_id ad7298_acpi_ids[] = {
-	{ "INT3494", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(acpi, ad7298_acpi_ids);
+static int ad7298_remove(struct spi_device *spi)
+{
+	struct iio_dev *indio_dev = spi_get_drvdata(spi);
+	struct ad7298_state *st = iio_priv(indio_dev);
+
+	iio_device_unregister(indio_dev);
+	iio_triggered_buffer_cleanup(indio_dev);
+	if (st->ext_ref)
+		regulator_disable(st->reg);
+
+	return 0;
+}
 
 static const struct spi_device_id ad7298_id[] = {
-	{ "ad7298", 0 },
-	{ }
+	{"ad7298", 0},
+	{}
 };
 MODULE_DEVICE_TABLE(spi, ad7298_id);
 
 static struct spi_driver ad7298_driver = {
 	.driver = {
 		.name	= "ad7298",
-		.acpi_match_table = ad7298_acpi_ids,
 	},
 	.probe		= ad7298_probe,
+	.remove		= ad7298_remove,
 	.id_table	= ad7298_id,
 };
 module_spi_driver(ad7298_driver);

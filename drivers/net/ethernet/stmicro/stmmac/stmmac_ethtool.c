@@ -11,13 +11,12 @@
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/interrupt.h>
-#include <linux/io.h>
 #include <linux/mii.h>
 #include <linux/phylink.h>
 #include <linux/net_tstamp.h>
+#include <asm/io.h>
 
 #include "stmmac.h"
-#include "stmmac_fpe.h"
 #include "dwmac_dma.h"
 #include "dwxgmac2.h"
 
@@ -37,7 +36,7 @@
 #define ETHTOOL_DMA_OFFSET	55
 
 struct stmmac_stats {
-	char stat_string[ETH_GSTRING_LEN] __nonstring;
+	char stat_string[ETH_GSTRING_LEN];
 	int sizeof_stat;
 	int stat_offset;
 };
@@ -90,6 +89,14 @@ static const struct stmmac_stats stmmac_gstrings_stats[] = {
 	/* Tx/Rx IRQ Events */
 	STMMAC_STAT(rx_early_irq),
 	STMMAC_STAT(threshold),
+	STMMAC_STAT(tx_pkt_n),
+	STMMAC_STAT(rx_pkt_n),
+	STMMAC_STAT(normal_irq_n),
+	STMMAC_STAT(rx_normal_irq_n),
+	STMMAC_STAT(napi_poll),
+	STMMAC_STAT(tx_normal_irq_n),
+	STMMAC_STAT(tx_clean),
+	STMMAC_STAT(tx_set_ic_bit),
 	STMMAC_STAT(irq_receive_pmt_irq_n),
 	/* MMC info */
 	STMMAC_STAT(mmc_tx_irq_n),
@@ -156,31 +163,11 @@ static const struct stmmac_stats stmmac_gstrings_stats[] = {
 	STMMAC_STAT(mtl_rx_fifo_ctrl_active),
 	STMMAC_STAT(mac_rx_frame_ctrl_fifo),
 	STMMAC_STAT(mac_gmii_rx_proto_engine),
-	/* EST */
-	STMMAC_STAT(mtl_est_cgce),
-	STMMAC_STAT(mtl_est_hlbs),
-	STMMAC_STAT(mtl_est_hlbf),
-	STMMAC_STAT(mtl_est_btre),
-	STMMAC_STAT(mtl_est_btrlm),
+	/* TSO */
+	STMMAC_STAT(tx_tso_frames),
+	STMMAC_STAT(tx_tso_nfrags),
 };
 #define STMMAC_STATS_LEN ARRAY_SIZE(stmmac_gstrings_stats)
-
-/* statistics collected in queue which will be summed up for all TX or RX
- * queues, or summed up for both TX and RX queues(napi_poll, normal_irq_n).
- */
-static const char stmmac_qstats_string[][ETH_GSTRING_LEN] = {
-	"rx_pkt_n",
-	"rx_normal_irq_n",
-	"tx_pkt_n",
-	"tx_normal_irq_n",
-	"tx_clean",
-	"tx_set_ic_bit",
-	"tx_tso_frames",
-	"tx_tso_nfrags",
-	"normal_irq_n",
-	"napi_poll",
-};
-#define STMMAC_QSTATS ARRAY_SIZE(stmmac_qstats_string)
 
 /* HW MAC Management counters (if supported) */
 #define STMMAC_MMC_STAT(m)	\
@@ -213,9 +200,6 @@ static const struct stmmac_stats stmmac_mmc[] = {
 	STMMAC_MMC_STAT(mmc_tx_excessdef),
 	STMMAC_MMC_STAT(mmc_tx_pause_frame),
 	STMMAC_MMC_STAT(mmc_tx_vlan_frame_g),
-	STMMAC_MMC_STAT(mmc_tx_oversize_g),
-	STMMAC_MMC_STAT(mmc_tx_lpi_usec),
-	STMMAC_MMC_STAT(mmc_tx_lpi_tran),
 	STMMAC_MMC_STAT(mmc_rx_framecount_gb),
 	STMMAC_MMC_STAT(mmc_rx_octetcount_gb),
 	STMMAC_MMC_STAT(mmc_rx_octetcount_g),
@@ -240,12 +224,8 @@ static const struct stmmac_stats stmmac_mmc[] = {
 	STMMAC_MMC_STAT(mmc_rx_fifo_overflow),
 	STMMAC_MMC_STAT(mmc_rx_vlan_frames_gb),
 	STMMAC_MMC_STAT(mmc_rx_watchdog_error),
-	STMMAC_MMC_STAT(mmc_rx_error),
-	STMMAC_MMC_STAT(mmc_rx_lpi_usec),
-	STMMAC_MMC_STAT(mmc_rx_lpi_tran),
-	STMMAC_MMC_STAT(mmc_rx_discard_frames_gb),
-	STMMAC_MMC_STAT(mmc_rx_discard_octets_gb),
-	STMMAC_MMC_STAT(mmc_rx_align_err_frames),
+	STMMAC_MMC_STAT(mmc_rx_ipc_intr_mask),
+	STMMAC_MMC_STAT(mmc_rx_ipc_intr),
 	STMMAC_MMC_STAT(mmc_rx_ipv4_gd),
 	STMMAC_MMC_STAT(mmc_rx_ipv4_hderr),
 	STMMAC_MMC_STAT(mmc_rx_ipv4_nopay),
@@ -274,11 +254,8 @@ static const struct stmmac_stats stmmac_mmc[] = {
 	STMMAC_MMC_STAT(mmc_rx_tcp_err_octets),
 	STMMAC_MMC_STAT(mmc_rx_icmp_gd_octets),
 	STMMAC_MMC_STAT(mmc_rx_icmp_err_octets),
-	STMMAC_MMC_STAT(mmc_sgf_pass_fragment_cntr),
-	STMMAC_MMC_STAT(mmc_sgf_fail_fragment_cntr),
 	STMMAC_MMC_STAT(mmc_tx_fpe_fragment_cntr),
 	STMMAC_MMC_STAT(mmc_tx_hold_req_cntr),
-	STMMAC_MMC_STAT(mmc_tx_gate_overrun_cntr),
 	STMMAC_MMC_STAT(mmc_rx_packet_assembly_err_cntr),
 	STMMAC_MMC_STAT(mmc_rx_packet_smd_err_cntr),
 	STMMAC_MMC_STAT(mmc_rx_packet_assembly_ok_cntr),
@@ -286,35 +263,20 @@ static const struct stmmac_stats stmmac_mmc[] = {
 };
 #define STMMAC_MMC_STATS_LEN ARRAY_SIZE(stmmac_mmc)
 
-static const char stmmac_qstats_tx_string[][ETH_GSTRING_LEN] = {
-	"tx_pkt_n",
-	"tx_irq_n",
-#define STMMAC_TXQ_STATS ARRAY_SIZE(stmmac_qstats_tx_string)
-};
-
-static const char stmmac_qstats_rx_string[][ETH_GSTRING_LEN] = {
-	"rx_pkt_n",
-	"rx_irq_n",
-#define STMMAC_RXQ_STATS ARRAY_SIZE(stmmac_qstats_rx_string)
-};
-
 static void stmmac_ethtool_getdrvinfo(struct net_device *dev,
 				      struct ethtool_drvinfo *info)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 
 	if (priv->plat->has_gmac || priv->plat->has_gmac4)
-		strscpy(info->driver, GMAC_ETHTOOL_NAME, sizeof(info->driver));
+		strlcpy(info->driver, GMAC_ETHTOOL_NAME, sizeof(info->driver));
 	else if (priv->plat->has_xgmac)
-		strscpy(info->driver, XGMAC_ETHTOOL_NAME, sizeof(info->driver));
+		strlcpy(info->driver, XGMAC_ETHTOOL_NAME, sizeof(info->driver));
 	else
-		strscpy(info->driver, MAC100_ETHTOOL_NAME,
+		strlcpy(info->driver, MAC100_ETHTOOL_NAME,
 			sizeof(info->driver));
 
-	if (priv->plat->pdev) {
-		strscpy(info->bus_info, pci_name(priv->plat->pdev),
-			sizeof(info->bus_info));
-	}
+	strlcpy(info->version, DRV_MODULE_VERSION, sizeof(info->version));
 }
 
 static int stmmac_ethtool_get_link_ksettings(struct net_device *dev,
@@ -322,9 +284,9 @@ static int stmmac_ethtool_get_link_ksettings(struct net_device *dev,
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 
-	if (!(priv->plat->flags & STMMAC_FLAG_HAS_INTEGRATED_PCS) &&
-	    (priv->hw->pcs & STMMAC_PCS_RGMII ||
-	     priv->hw->pcs & STMMAC_PCS_SGMII)) {
+	if (priv->hw->pcs & STMMAC_PCS_RGMII ||
+	    priv->hw->pcs & STMMAC_PCS_SGMII) {
+		struct rgmii_adv adv;
 		u32 supported, advertising, lp_advertising;
 
 		if (!priv->xstats.pcs_link) {
@@ -336,6 +298,10 @@ static int stmmac_ethtool_get_link_ksettings(struct net_device *dev,
 
 		cmd->base.speed = priv->xstats.pcs_speed;
 
+		/* Get and convert ADV/LP_ADV from the HW AN registers */
+		if (stmmac_pcs_get_adv_lp(priv, priv->ioaddr, &adv))
+			return -EOPNOTSUPP;	/* should never happen indeed */
+
 		/* Encoding of PSE bits is defined in 802.3z, 37.2.1.4 */
 
 		ethtool_convert_link_mode_to_legacy_u32(
@@ -345,12 +311,44 @@ static int stmmac_ethtool_get_link_ksettings(struct net_device *dev,
 		ethtool_convert_link_mode_to_legacy_u32(
 			&lp_advertising, cmd->link_modes.lp_advertising);
 
+		if (adv.pause & STMMAC_PCS_PAUSE)
+			advertising |= ADVERTISED_Pause;
+		if (adv.pause & STMMAC_PCS_ASYM_PAUSE)
+			advertising |= ADVERTISED_Asym_Pause;
+		if (adv.lp_pause & STMMAC_PCS_PAUSE)
+			lp_advertising |= ADVERTISED_Pause;
+		if (adv.lp_pause & STMMAC_PCS_ASYM_PAUSE)
+			lp_advertising |= ADVERTISED_Asym_Pause;
+
 		/* Reg49[3] always set because ANE is always supported */
 		cmd->base.autoneg = ADVERTISED_Autoneg;
 		supported |= SUPPORTED_Autoneg;
 		advertising |= ADVERTISED_Autoneg;
 		lp_advertising |= ADVERTISED_Autoneg;
 
+		if (adv.duplex) {
+			supported |= (SUPPORTED_1000baseT_Full |
+				      SUPPORTED_100baseT_Full |
+				      SUPPORTED_10baseT_Full);
+			advertising |= (ADVERTISED_1000baseT_Full |
+					ADVERTISED_100baseT_Full |
+					ADVERTISED_10baseT_Full);
+		} else {
+			supported |= (SUPPORTED_1000baseT_Half |
+				      SUPPORTED_100baseT_Half |
+				      SUPPORTED_10baseT_Half);
+			advertising |= (ADVERTISED_1000baseT_Half |
+					ADVERTISED_100baseT_Half |
+					ADVERTISED_10baseT_Half);
+		}
+		if (adv.lp_duplex)
+			lp_advertising |= (ADVERTISED_1000baseT_Full |
+					   ADVERTISED_100baseT_Full |
+					   ADVERTISED_10baseT_Full);
+		else
+			lp_advertising |= (ADVERTISED_1000baseT_Half |
+					   ADVERTISED_100baseT_Half |
+					   ADVERTISED_10baseT_Half);
 		cmd->base.port = PORT_OTHER;
 
 		ethtool_convert_legacy_u32_to_link_mode(
@@ -372,15 +370,23 @@ stmmac_ethtool_set_link_ksettings(struct net_device *dev,
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 
-	if (!(priv->plat->flags & STMMAC_FLAG_HAS_INTEGRATED_PCS) &&
-	    (priv->hw->pcs & STMMAC_PCS_RGMII ||
-	     priv->hw->pcs & STMMAC_PCS_SGMII)) {
+	if (priv->hw->pcs & STMMAC_PCS_RGMII ||
+	    priv->hw->pcs & STMMAC_PCS_SGMII) {
+		u32 mask = ADVERTISED_Autoneg | ADVERTISED_Pause;
+
 		/* Only support ANE */
 		if (cmd->base.autoneg != AUTONEG_ENABLE)
 			return -EINVAL;
 
+		mask &= (ADVERTISED_1000baseT_Half |
+			ADVERTISED_1000baseT_Full |
+			ADVERTISED_100baseT_Half |
+			ADVERTISED_100baseT_Full |
+			ADVERTISED_10baseT_Half |
+			ADVERTISED_10baseT_Full);
+
 		mutex_lock(&priv->lock);
-		stmmac_pcs_ctrl_ane(priv, 1, priv->hw->ps, 0);
+		stmmac_pcs_ctrl_ane(priv, priv->ioaddr, 1, priv->hw->ps, 0);
 		mutex_unlock(&priv->lock);
 
 		return 0;
@@ -400,6 +406,13 @@ static void stmmac_ethtool_setmsglevel(struct net_device *dev, u32 level)
 	struct stmmac_priv *priv = netdev_priv(dev);
 	priv->msg_enable = level;
 
+}
+
+static int stmmac_check_if_running(struct net_device *dev)
+{
+	if (!netif_running(dev))
+		return -EBUSY;
+	return 0;
 }
 
 static int stmmac_ethtool_get_regs_len(struct net_device *dev)
@@ -443,22 +456,18 @@ static int stmmac_nway_reset(struct net_device *dev)
 }
 
 static void stmmac_get_ringparam(struct net_device *netdev,
-				 struct ethtool_ringparam *ring,
-				 struct kernel_ethtool_ringparam *kernel_ring,
-				 struct netlink_ext_ack *extack)
+				 struct ethtool_ringparam *ring)
 {
 	struct stmmac_priv *priv = netdev_priv(netdev);
 
 	ring->rx_max_pending = DMA_MAX_RX_SIZE;
 	ring->tx_max_pending = DMA_MAX_TX_SIZE;
-	ring->rx_pending = priv->dma_conf.dma_rx_size;
-	ring->tx_pending = priv->dma_conf.dma_tx_size;
+	ring->rx_pending = priv->dma_rx_size;
+	ring->tx_pending = priv->dma_tx_size;
 }
 
 static int stmmac_set_ringparam(struct net_device *netdev,
-				struct ethtool_ringparam *ring,
-				struct kernel_ethtool_ringparam *kernel_ring,
-				struct netlink_ext_ack *extack)
+				struct ethtool_ringparam *ring)
 {
 	if (ring->rx_mini_pending || ring->rx_jumbo_pending ||
 	    ring->rx_pending < DMA_MIN_RX_SIZE ||
@@ -478,9 +487,12 @@ stmmac_get_pauseparam(struct net_device *netdev,
 		      struct ethtool_pauseparam *pause)
 {
 	struct stmmac_priv *priv = netdev_priv(netdev);
+	struct rgmii_adv adv_lp;
 
-	if (priv->hw->pcs) {
+	if (priv->hw->pcs && !stmmac_pcs_get_adv_lp(priv, priv->ioaddr, &adv_lp)) {
 		pause->autoneg = 1;
+		if (!adv_lp.pause)
+			return;
 	} else {
 		phylink_ethtool_get_pauseparam(priv->phylink, pause);
 	}
@@ -491,88 +503,15 @@ stmmac_set_pauseparam(struct net_device *netdev,
 		      struct ethtool_pauseparam *pause)
 {
 	struct stmmac_priv *priv = netdev_priv(netdev);
+	struct rgmii_adv adv_lp;
 
-	if (priv->hw->pcs) {
+	if (priv->hw->pcs && !stmmac_pcs_get_adv_lp(priv, priv->ioaddr, &adv_lp)) {
 		pause->autoneg = 1;
+		if (!adv_lp.pause)
+			return -EOPNOTSUPP;
 		return 0;
 	} else {
 		return phylink_ethtool_set_pauseparam(priv->phylink, pause);
-	}
-}
-
-static u64 stmmac_get_rx_normal_irq_n(struct stmmac_priv *priv, int q)
-{
-	u64 total;
-	int cpu;
-
-	total = 0;
-	for_each_possible_cpu(cpu) {
-		struct stmmac_pcpu_stats *pcpu;
-		unsigned int start;
-		u64 irq_n;
-
-		pcpu = per_cpu_ptr(priv->xstats.pcpu_stats, cpu);
-		do {
-			start = u64_stats_fetch_begin(&pcpu->syncp);
-			irq_n = u64_stats_read(&pcpu->rx_normal_irq_n[q]);
-		} while (u64_stats_fetch_retry(&pcpu->syncp, start));
-		total += irq_n;
-	}
-	return total;
-}
-
-static u64 stmmac_get_tx_normal_irq_n(struct stmmac_priv *priv, int q)
-{
-	u64 total;
-	int cpu;
-
-	total = 0;
-	for_each_possible_cpu(cpu) {
-		struct stmmac_pcpu_stats *pcpu;
-		unsigned int start;
-		u64 irq_n;
-
-		pcpu = per_cpu_ptr(priv->xstats.pcpu_stats, cpu);
-		do {
-			start = u64_stats_fetch_begin(&pcpu->syncp);
-			irq_n = u64_stats_read(&pcpu->tx_normal_irq_n[q]);
-		} while (u64_stats_fetch_retry(&pcpu->syncp, start));
-		total += irq_n;
-	}
-	return total;
-}
-
-static void stmmac_get_per_qstats(struct stmmac_priv *priv, u64 *data)
-{
-	u32 tx_cnt = priv->plat->tx_queues_to_use;
-	u32 rx_cnt = priv->plat->rx_queues_to_use;
-	unsigned int start;
-	int q;
-
-	for (q = 0; q < tx_cnt; q++) {
-		struct stmmac_txq_stats *txq_stats = &priv->xstats.txq_stats[q];
-		u64 pkt_n;
-
-		do {
-			start = u64_stats_fetch_begin(&txq_stats->napi_syncp);
-			pkt_n = u64_stats_read(&txq_stats->napi.tx_pkt_n);
-		} while (u64_stats_fetch_retry(&txq_stats->napi_syncp, start));
-
-		*data++ = pkt_n;
-		*data++ = stmmac_get_tx_normal_irq_n(priv, q);
-	}
-
-	for (q = 0; q < rx_cnt; q++) {
-		struct stmmac_rxq_stats *rxq_stats = &priv->xstats.rxq_stats[q];
-		u64 pkt_n;
-
-		do {
-			start = u64_stats_fetch_begin(&rxq_stats->napi_syncp);
-			pkt_n = u64_stats_read(&rxq_stats->napi.rx_pkt_n);
-		} while (u64_stats_fetch_retry(&rxq_stats->napi_syncp, start));
-
-		*data++ = pkt_n;
-		*data++ = stmmac_get_rx_normal_irq_n(priv, q);
 	}
 }
 
@@ -582,10 +521,8 @@ static void stmmac_get_ethtool_stats(struct net_device *dev,
 	struct stmmac_priv *priv = netdev_priv(dev);
 	u32 rx_queues_count = priv->plat->rx_queues_to_use;
 	u32 tx_queues_count = priv->plat->tx_queues_to_use;
-	u64 napi_poll = 0, normal_irq_n = 0;
-	int i, j = 0, pos, ret;
 	unsigned long count;
-	unsigned int start;
+	int i, j = 0, ret;
 
 	if (priv->dma_cap.asp) {
 		for (i = 0; i < STMMAC_SAFETY_FEAT_SIZE; i++) {
@@ -596,7 +533,8 @@ static void stmmac_get_ethtool_stats(struct net_device *dev,
 	}
 
 	/* Update the DMA HW counters for dwmac10/100 */
-	ret = stmmac_dma_diagnostic_fr(priv, &priv->xstats, priv->ioaddr);
+	ret = stmmac_dma_diagnostic_fr(priv, &dev->stats, (void *) &priv->xstats,
+			priv->ioaddr);
 	if (ret) {
 		/* If supported, for new GMAC chips expose the MMC counters */
 		if (priv->dma_cap.rmon) {
@@ -611,7 +549,7 @@ static void stmmac_get_ethtool_stats(struct net_device *dev,
 					     (*(u32 *)p);
 			}
 		}
-		if (priv->dma_cap.eee) {
+		if (priv->eee_enabled) {
 			int val = phylink_get_eee_err(priv->phylink);
 			if (val)
 				priv->xstats.phy_eee_wakeup_error_n = val;
@@ -627,73 +565,16 @@ static void stmmac_get_ethtool_stats(struct net_device *dev,
 		data[j++] = (stmmac_gstrings_stats[i].sizeof_stat ==
 			     sizeof(u64)) ? (*(u64 *)p) : (*(u32 *)p);
 	}
-
-	pos = j;
-	for (i = 0; i < rx_queues_count; i++) {
-		struct stmmac_rxq_stats *rxq_stats = &priv->xstats.rxq_stats[i];
-		struct stmmac_napi_rx_stats snapshot;
-		u64 n_irq;
-
-		j = pos;
-		do {
-			start = u64_stats_fetch_begin(&rxq_stats->napi_syncp);
-			snapshot = rxq_stats->napi;
-		} while (u64_stats_fetch_retry(&rxq_stats->napi_syncp, start));
-
-		data[j++] += u64_stats_read(&snapshot.rx_pkt_n);
-		n_irq = stmmac_get_rx_normal_irq_n(priv, i);
-		data[j++] += n_irq;
-		normal_irq_n += n_irq;
-		napi_poll += u64_stats_read(&snapshot.poll);
-	}
-
-	pos = j;
-	for (i = 0; i < tx_queues_count; i++) {
-		struct stmmac_txq_stats *txq_stats = &priv->xstats.txq_stats[i];
-		struct stmmac_napi_tx_stats napi_snapshot;
-		struct stmmac_q_tx_stats q_snapshot;
-		u64 n_irq;
-
-		j = pos;
-		do {
-			start = u64_stats_fetch_begin(&txq_stats->q_syncp);
-			q_snapshot = txq_stats->q;
-		} while (u64_stats_fetch_retry(&txq_stats->q_syncp, start));
-		do {
-			start = u64_stats_fetch_begin(&txq_stats->napi_syncp);
-			napi_snapshot = txq_stats->napi;
-		} while (u64_stats_fetch_retry(&txq_stats->napi_syncp, start));
-
-		data[j++] += u64_stats_read(&napi_snapshot.tx_pkt_n);
-		n_irq = stmmac_get_tx_normal_irq_n(priv, i);
-		data[j++] += n_irq;
-		normal_irq_n += n_irq;
-		data[j++] += u64_stats_read(&napi_snapshot.tx_clean);
-		data[j++] += u64_stats_read(&q_snapshot.tx_set_ic_bit) +
-			u64_stats_read(&napi_snapshot.tx_set_ic_bit);
-		data[j++] += u64_stats_read(&q_snapshot.tx_tso_frames);
-		data[j++] += u64_stats_read(&q_snapshot.tx_tso_nfrags);
-		napi_poll += u64_stats_read(&napi_snapshot.poll);
-	}
-	normal_irq_n += priv->xstats.rx_early_irq;
-	data[j++] = normal_irq_n;
-	data[j++] = napi_poll;
-
-	stmmac_get_per_qstats(priv, &data[j]);
 }
 
 static int stmmac_get_sset_count(struct net_device *netdev, int sset)
 {
 	struct stmmac_priv *priv = netdev_priv(netdev);
-	u32 tx_cnt = priv->plat->tx_queues_to_use;
-	u32 rx_cnt = priv->plat->rx_queues_to_use;
 	int i, len, safety_len = 0;
 
 	switch (sset) {
 	case ETH_SS_STATS:
-		len = STMMAC_STATS_LEN + STMMAC_QSTATS +
-		      STMMAC_TXQ_STATS * tx_cnt +
-		      STMMAC_RXQ_STATS * rx_cnt;
+		len = STMMAC_STATS_LEN;
 
 		if (priv->dma_cap.rmon)
 			len += STMMAC_MMC_STATS_LEN;
@@ -713,28 +594,6 @@ static int stmmac_get_sset_count(struct net_device *netdev, int sset)
 		return stmmac_selftest_get_count(priv);
 	default:
 		return -EOPNOTSUPP;
-	}
-}
-
-static void stmmac_get_qstats_string(struct stmmac_priv *priv, u8 *data)
-{
-	u32 tx_cnt = priv->plat->tx_queues_to_use;
-	u32 rx_cnt = priv->plat->rx_queues_to_use;
-	int q, stat;
-
-	for (q = 0; q < tx_cnt; q++) {
-		for (stat = 0; stat < STMMAC_TXQ_STATS; stat++) {
-			snprintf(data, ETH_GSTRING_LEN, "q%d_%s", q,
-				 stmmac_qstats_tx_string[stat]);
-			data += ETH_GSTRING_LEN;
-		}
-	}
-	for (q = 0; q < rx_cnt; q++) {
-		for (stat = 0; stat < STMMAC_RXQ_STATS; stat++) {
-			snprintf(data, ETH_GSTRING_LEN, "q%d_%s", q,
-				 stmmac_qstats_rx_string[stat]);
-			data += ETH_GSTRING_LEN;
-		}
 	}
 }
 
@@ -764,14 +623,10 @@ static void stmmac_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 				p += ETH_GSTRING_LEN;
 			}
 		for (i = 0; i < STMMAC_STATS_LEN; i++) {
-			memcpy(p, stmmac_gstrings_stats[i].stat_string, ETH_GSTRING_LEN);
+			memcpy(p, stmmac_gstrings_stats[i].stat_string,
+				ETH_GSTRING_LEN);
 			p += ETH_GSTRING_LEN;
 		}
-		for (i = 0; i < STMMAC_QSTATS; i++) {
-			memcpy(p, stmmac_qstats_string[i], ETH_GSTRING_LEN);
-			p += ETH_GSTRING_LEN;
-		}
-		stmmac_get_qstats_string(priv, p);
 		break;
 	case ETH_SS_TEST:
 		stmmac_selftest_get_strings(priv, p);
@@ -803,6 +658,7 @@ static void stmmac_get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 static int stmmac_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
+	u32 support = WAKE_MAGIC | WAKE_UCAST;
 
 	if (!device_can_wakeup(priv->device))
 		return -EOPNOTSUPP;
@@ -815,7 +671,23 @@ static int stmmac_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 		return ret;
 	}
 
-	device_set_wakeup_enable(priv->device, !!wol->wolopts);
+	/* By default almost all GMAC devices support the WoL via
+	 * magic frame but we can disable it if the HW capability
+	 * register shows no support for pmt_magic_frame. */
+	if ((priv->hw_cap_support) && (!priv->dma_cap.pmt_magic_frame))
+		wol->wolopts &= ~WAKE_MAGIC;
+
+	if (wol->wolopts & ~support)
+		return -EINVAL;
+
+	if (wol->wolopts) {
+		pr_info("stmmac: wakeup enable\n");
+		device_set_wakeup_enable(priv->device, 1);
+		enable_irq_wake(priv->wol_irq);
+	} else {
+		device_set_wakeup_enable(priv->device, 0);
+		disable_irq_wake(priv->wol_irq);
+	}
 
 	mutex_lock(&priv->lock);
 	priv->wolopts = wol->wolopts;
@@ -825,19 +697,48 @@ static int stmmac_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 }
 
 static int stmmac_ethtool_op_get_eee(struct net_device *dev,
-				     struct ethtool_keee *edata)
+				     struct ethtool_eee *edata)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
+
+	if (!priv->dma_cap.eee)
+		return -EOPNOTSUPP;
+
+	edata->eee_enabled = priv->eee_enabled;
+	edata->eee_active = priv->eee_active;
+	edata->tx_lpi_timer = priv->tx_lpi_timer;
+	edata->tx_lpi_enabled = priv->tx_lpi_enabled;
 
 	return phylink_ethtool_get_eee(priv->phylink, edata);
 }
 
 static int stmmac_ethtool_op_set_eee(struct net_device *dev,
-				     struct ethtool_keee *edata)
+				     struct ethtool_eee *edata)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
+	int ret;
 
-	return phylink_ethtool_set_eee(priv->phylink, edata);
+	if (!priv->dma_cap.eee)
+		return -EOPNOTSUPP;
+
+	if (priv->tx_lpi_enabled != edata->tx_lpi_enabled)
+		netdev_warn(priv->dev,
+			    "Setting EEE tx-lpi is not supported\n");
+
+	if (!edata->eee_enabled)
+		stmmac_disable_eee_mode(priv);
+
+	ret = phylink_ethtool_set_eee(priv->phylink, edata);
+	if (ret)
+		return ret;
+
+	if (edata->eee_enabled &&
+	    priv->tx_lpi_timer != edata->tx_lpi_timer) {
+		priv->tx_lpi_timer = edata->tx_lpi_timer;
+		stmmac_eee_init(priv);
+	}
+
+	return 0;
 }
 
 static u32 stmmac_usec2riwt(u32 usec, struct stmmac_priv *priv)
@@ -866,101 +767,37 @@ static u32 stmmac_riwt2usec(u32 riwt, struct stmmac_priv *priv)
 	return (riwt * 256) / (clk / 1000000);
 }
 
-static int __stmmac_get_coalesce(struct net_device *dev,
-				 struct ethtool_coalesce *ec,
-				 int queue)
+static int stmmac_get_coalesce(struct net_device *dev,
+			       struct ethtool_coalesce *ec)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
-	u32 max_cnt;
-	u32 rx_cnt;
-	u32 tx_cnt;
 
-	rx_cnt = priv->plat->rx_queues_to_use;
-	tx_cnt = priv->plat->tx_queues_to_use;
-	max_cnt = max(rx_cnt, tx_cnt);
+	ec->tx_coalesce_usecs = priv->tx_coal_timer;
+	ec->tx_max_coalesced_frames = priv->tx_coal_frames;
 
-	if (queue < 0)
-		queue = 0;
-	else if (queue >= max_cnt)
-		return -EINVAL;
-
-	if (queue < tx_cnt) {
-		ec->tx_coalesce_usecs = priv->tx_coal_timer[queue];
-		ec->tx_max_coalesced_frames = priv->tx_coal_frames[queue];
-	} else {
-		ec->tx_coalesce_usecs = 0;
-		ec->tx_max_coalesced_frames = 0;
-	}
-
-	if (priv->use_riwt && queue < rx_cnt) {
-		ec->rx_max_coalesced_frames = priv->rx_coal_frames[queue];
-		ec->rx_coalesce_usecs = stmmac_riwt2usec(priv->rx_riwt[queue],
-							 priv);
-	} else {
-		ec->rx_max_coalesced_frames = 0;
-		ec->rx_coalesce_usecs = 0;
+	if (priv->use_riwt) {
+		ec->rx_max_coalesced_frames = priv->rx_coal_frames;
+		ec->rx_coalesce_usecs = stmmac_riwt2usec(priv->rx_riwt, priv);
 	}
 
 	return 0;
 }
 
-static int stmmac_get_coalesce(struct net_device *dev,
-			       struct ethtool_coalesce *ec,
-			       struct kernel_ethtool_coalesce *kernel_coal,
-			       struct netlink_ext_ack *extack)
-{
-	return __stmmac_get_coalesce(dev, ec, -1);
-}
-
-static int stmmac_get_per_queue_coalesce(struct net_device *dev, u32 queue,
-					 struct ethtool_coalesce *ec)
-{
-	return __stmmac_get_coalesce(dev, ec, queue);
-}
-
-static int __stmmac_set_coalesce(struct net_device *dev,
-				 struct ethtool_coalesce *ec,
-				 int queue)
+static int stmmac_set_coalesce(struct net_device *dev,
+			       struct ethtool_coalesce *ec)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
-	bool all_queues = false;
+	u32 rx_cnt = priv->plat->rx_queues_to_use;
 	unsigned int rx_riwt;
-	u32 max_cnt;
-	u32 rx_cnt;
-	u32 tx_cnt;
 
-	rx_cnt = priv->plat->rx_queues_to_use;
-	tx_cnt = priv->plat->tx_queues_to_use;
-	max_cnt = max(rx_cnt, tx_cnt);
-
-	if (queue < 0)
-		all_queues = true;
-	else if (queue >= max_cnt)
-		return -EINVAL;
-
-	if (priv->use_riwt) {
+	if (priv->use_riwt && (ec->rx_coalesce_usecs > 0)) {
 		rx_riwt = stmmac_usec2riwt(ec->rx_coalesce_usecs, priv);
 
 		if ((rx_riwt > MAX_DMA_RIWT) || (rx_riwt < MIN_DMA_RIWT))
 			return -EINVAL;
 
-		if (all_queues) {
-			int i;
-
-			for (i = 0; i < rx_cnt; i++) {
-				priv->rx_riwt[i] = rx_riwt;
-				stmmac_rx_watchdog(priv, priv->ioaddr,
-						   rx_riwt, i);
-				priv->rx_coal_frames[i] =
-					ec->rx_max_coalesced_frames;
-			}
-		} else if (queue < rx_cnt) {
-			priv->rx_riwt[queue] = rx_riwt;
-			stmmac_rx_watchdog(priv, priv->ioaddr,
-					   rx_riwt, queue);
-			priv->rx_coal_frames[queue] =
-				ec->rx_max_coalesced_frames;
-		}
+		priv->rx_riwt = rx_riwt;
+		stmmac_rx_watchdog(priv, priv->ioaddr, priv->rx_riwt, rx_cnt);
 	}
 
 	if ((ec->tx_coalesce_usecs == 0) &&
@@ -971,37 +808,11 @@ static int __stmmac_set_coalesce(struct net_device *dev,
 	    (ec->tx_max_coalesced_frames > STMMAC_TX_MAX_FRAMES))
 		return -EINVAL;
 
-	if (all_queues) {
-		int i;
-
-		for (i = 0; i < tx_cnt; i++) {
-			priv->tx_coal_frames[i] =
-				ec->tx_max_coalesced_frames;
-			priv->tx_coal_timer[i] =
-				ec->tx_coalesce_usecs;
-		}
-	} else if (queue < tx_cnt) {
-		priv->tx_coal_frames[queue] =
-			ec->tx_max_coalesced_frames;
-		priv->tx_coal_timer[queue] =
-			ec->tx_coalesce_usecs;
-	}
-
+	/* Only copy relevant parameters, ignore all others. */
+	priv->tx_coal_frames = ec->tx_max_coalesced_frames;
+	priv->tx_coal_timer = ec->tx_coalesce_usecs;
+	priv->rx_coal_frames = ec->rx_max_coalesced_frames;
 	return 0;
-}
-
-static int stmmac_set_coalesce(struct net_device *dev,
-			       struct ethtool_coalesce *ec,
-			       struct kernel_ethtool_coalesce *kernel_coal,
-			       struct netlink_ext_ack *extack)
-{
-	return __stmmac_set_coalesce(dev, ec, -1);
-}
-
-static int stmmac_set_per_queue_coalesce(struct net_device *dev, u32 queue,
-					 struct ethtool_coalesce *ec)
-{
-	return __stmmac_set_coalesce(dev, ec, queue);
 }
 
 static int stmmac_get_rxnfc(struct net_device *dev,
@@ -1034,42 +845,41 @@ static u32 stmmac_get_rxfh_indir_size(struct net_device *dev)
 	return ARRAY_SIZE(priv->rss.table);
 }
 
-static int stmmac_get_rxfh(struct net_device *dev,
-			   struct ethtool_rxfh_param *rxfh)
+static int stmmac_get_rxfh(struct net_device *dev, u32 *indir, u8 *key,
+			   u8 *hfunc)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 	int i;
 
-	if (rxfh->indir) {
+	if (indir) {
 		for (i = 0; i < ARRAY_SIZE(priv->rss.table); i++)
-			rxfh->indir[i] = priv->rss.table[i];
+			indir[i] = priv->rss.table[i];
 	}
 
-	if (rxfh->key)
-		memcpy(rxfh->key, priv->rss.key, sizeof(priv->rss.key));
-	rxfh->hfunc = ETH_RSS_HASH_TOP;
+	if (key)
+		memcpy(key, priv->rss.key, sizeof(priv->rss.key));
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
 
 	return 0;
 }
 
-static int stmmac_set_rxfh(struct net_device *dev,
-			   struct ethtool_rxfh_param *rxfh,
-			   struct netlink_ext_ack *extack)
+static int stmmac_set_rxfh(struct net_device *dev, const u32 *indir,
+			   const u8 *key, const u8 hfunc)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 	int i;
 
-	if (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE &&
-	    rxfh->hfunc != ETH_RSS_HASH_TOP)
+	if ((hfunc != ETH_RSS_HASH_NO_CHANGE) && (hfunc != ETH_RSS_HASH_TOP))
 		return -EOPNOTSUPP;
 
-	if (rxfh->indir) {
+	if (indir) {
 		for (i = 0; i < ARRAY_SIZE(priv->rss.table); i++)
-			priv->rss.table[i] = rxfh->indir[i];
+			priv->rss.table[i] = indir[i];
 	}
 
-	if (rxfh->key)
-		memcpy(priv->rss.key, rxfh->key, sizeof(priv->rss.key));
+	if (key)
+		memcpy(priv->rss.key, key, sizeof(priv->rss.key));
 
 	return stmmac_rss_configure(priv, priv->hw, &priv->rss,
 				    priv->plat->rx_queues_to_use);
@@ -1100,7 +910,7 @@ static int stmmac_set_channels(struct net_device *dev,
 }
 
 static int stmmac_get_ts_info(struct net_device *dev,
-			      struct kernel_ethtool_ts_info *info)
+			      struct ethtool_ts_info *info)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 
@@ -1108,13 +918,13 @@ static int stmmac_get_ts_info(struct net_device *dev,
 
 		info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
 					SOF_TIMESTAMPING_TX_HARDWARE |
+					SOF_TIMESTAMPING_RX_SOFTWARE |
 					SOF_TIMESTAMPING_RX_HARDWARE |
+					SOF_TIMESTAMPING_SOFTWARE |
 					SOF_TIMESTAMPING_RAW_HARDWARE;
 
 		if (priv->ptp_clock)
 			info->phc_index = ptp_clock_index(priv->ptp_clock);
-		else
-			info->phc_index = 0;
 
 		info->tx_types = (1 << HWTSTAMP_TX_OFF) | (1 << HWTSTAMP_TX_ON);
 
@@ -1134,64 +944,47 @@ static int stmmac_get_ts_info(struct net_device *dev,
 		return ethtool_op_get_ts_info(dev, info);
 }
 
-static int stmmac_get_mm(struct net_device *ndev,
-			 struct ethtool_mm_state *state)
+static int stmmac_get_tunable(struct net_device *dev,
+			      const struct ethtool_tunable *tuna, void *data)
 {
-	struct stmmac_priv *priv = netdev_priv(ndev);
-	u32 frag_size;
+	struct stmmac_priv *priv = netdev_priv(dev);
+	int ret = 0;
 
-	if (!stmmac_fpe_supported(priv))
-		return -EOPNOTSUPP;
+	switch (tuna->id) {
+	case ETHTOOL_RX_COPYBREAK:
+		*(u32 *)data = priv->rx_copybreak;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
 
-	state->rx_min_frag_size = ETH_ZLEN;
-	frag_size = stmmac_fpe_get_add_frag_size(priv);
-	state->tx_min_frag_size = ethtool_mm_frag_size_add_to_min(frag_size);
-
-	ethtool_mmsv_get_mm(&priv->fpe_cfg.mmsv, state);
-
-	return 0;
+	return ret;
 }
 
-static int stmmac_set_mm(struct net_device *ndev, struct ethtool_mm_cfg *cfg,
-			 struct netlink_ext_ack *extack)
+static int stmmac_set_tunable(struct net_device *dev,
+			      const struct ethtool_tunable *tuna,
+			      const void *data)
 {
-	struct stmmac_priv *priv = netdev_priv(ndev);
-	u32 frag_size;
-	int err;
+	struct stmmac_priv *priv = netdev_priv(dev);
+	int ret = 0;
 
-	err = ethtool_mm_frag_size_min_to_add(cfg->tx_min_frag_size,
-					      &frag_size, extack);
-	if (err)
-		return err;
+	switch (tuna->id) {
+	case ETHTOOL_RX_COPYBREAK:
+		priv->rx_copybreak = *(u32 *)data;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
 
-	stmmac_fpe_set_add_frag_size(priv, frag_size);
-	ethtool_mmsv_set_mm(&priv->fpe_cfg.mmsv, cfg);
-
-	return 0;
-}
-
-static void stmmac_get_mm_stats(struct net_device *ndev,
-				struct ethtool_mm_stats *s)
-{
-	struct stmmac_priv *priv = netdev_priv(ndev);
-	struct stmmac_counters *mmc = &priv->mmc;
-
-	if (!priv->dma_cap.rmon)
-		return;
-
-	stmmac_mmc_read(priv, priv->mmcaddr, mmc);
-
-	s->MACMergeFrameAssErrorCount = mmc->mmc_rx_packet_assembly_err_cntr;
-	s->MACMergeFrameAssOkCount = mmc->mmc_rx_packet_assembly_ok_cntr;
-	s->MACMergeFrameSmdErrorCount = mmc->mmc_rx_packet_smd_err_cntr;
-	s->MACMergeFragCountRx = mmc->mmc_rx_fpe_fragment_cntr;
-	s->MACMergeFragCountTx = mmc->mmc_tx_fpe_fragment_cntr;
-	s->MACMergeHoldCount = mmc->mmc_tx_hold_req_cntr;
+	return ret;
 }
 
 static const struct ethtool_ops stmmac_ethtool_ops = {
 	.supported_coalesce_params = ETHTOOL_COALESCE_USECS |
 				     ETHTOOL_COALESCE_MAX_FRAMES,
+	.begin = stmmac_check_if_running,
 	.get_drvinfo = stmmac_ethtool_getdrvinfo,
 	.get_msglevel = stmmac_ethtool_getmsglevel,
 	.set_msglevel = stmmac_ethtool_setmsglevel,
@@ -1219,15 +1012,12 @@ static const struct ethtool_ops stmmac_ethtool_ops = {
 	.get_ts_info = stmmac_get_ts_info,
 	.get_coalesce = stmmac_get_coalesce,
 	.set_coalesce = stmmac_set_coalesce,
-	.get_per_queue_coalesce = stmmac_get_per_queue_coalesce,
-	.set_per_queue_coalesce = stmmac_set_per_queue_coalesce,
 	.get_channels = stmmac_get_channels,
 	.set_channels = stmmac_set_channels,
+	.get_tunable = stmmac_get_tunable,
+	.set_tunable = stmmac_set_tunable,
 	.get_link_ksettings = stmmac_ethtool_get_link_ksettings,
 	.set_link_ksettings = stmmac_ethtool_set_link_ksettings,
-	.get_mm = stmmac_get_mm,
-	.set_mm = stmmac_set_mm,
-	.get_mm_stats = stmmac_get_mm_stats,
 };
 
 void stmmac_set_ethtool_ops(struct net_device *netdev)

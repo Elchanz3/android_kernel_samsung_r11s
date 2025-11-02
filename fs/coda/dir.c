@@ -73,8 +73,7 @@ static struct dentry *coda_lookup(struct inode *dir, struct dentry *entry, unsig
 }
 
 
-int coda_permission(struct mnt_idmap *idmap, struct inode *inode,
-		    int mask)
+int coda_permission(struct inode *inode, int mask)
 {
 	int error;
 
@@ -111,7 +110,7 @@ static inline void coda_dir_update_mtime(struct inode *dir)
 	/* optimistically we can also act as if our nose bleeds. The
 	 * granularity of the mtime is coarse anyways so we might actually be
 	 * right most of the time. Note: we only do this for directories. */
-	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 #endif
 }
 
@@ -133,8 +132,7 @@ static inline void coda_dir_drop_nlink(struct inode *dir)
 }
 
 /* creation routines: create, mknod, mkdir, link, symlink */
-static int coda_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *de, umode_t mode, bool excl)
+static int coda_create(struct inode *dir, struct dentry *de, umode_t mode, bool excl)
 {
 	int error;
 	const char *name=de->d_name.name;
@@ -166,8 +164,7 @@ err_out:
 	return error;
 }
 
-static struct dentry *coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-				 struct dentry *de, umode_t mode)
+static int coda_mkdir(struct inode *dir, struct dentry *de, umode_t mode)
 {
 	struct inode *inode;
 	struct coda_vattr attrs;
@@ -177,14 +174,14 @@ static struct dentry *coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	struct CodaFid newfid;
 
 	if (is_root_inode(dir) && coda_iscontrol(name, len))
-		return ERR_PTR(-EPERM);
+		return -EPERM;
 
 	attrs.va_mode = mode;
-	error = venus_mkdir(dir->i_sb, coda_i2f(dir),
+	error = venus_mkdir(dir->i_sb, coda_i2f(dir), 
 			       name, len, &newfid, &attrs);
 	if (error)
 		goto err_out;
-
+         
 	inode = coda_iget(dir->i_sb, &newfid, &attrs);
 	if (IS_ERR(inode)) {
 		error = PTR_ERR(inode);
@@ -195,10 +192,10 @@ static struct dentry *coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	coda_dir_inc_nlink(dir);
 	coda_dir_update_mtime(dir);
 	d_instantiate(de, inode);
-	return NULL;
+	return 0;
 err_out:
 	d_drop(de);
-	return ERR_PTR(error);
+	return error;
 }
 
 /* try to make de an entry in dir_inodde linked to source_de */ 
@@ -228,8 +225,7 @@ static int coda_link(struct dentry *source_de, struct inode *dir_inode,
 }
 
 
-static int coda_symlink(struct mnt_idmap *idmap,
-			struct inode *dir_inode, struct dentry *de,
+static int coda_symlink(struct inode *dir_inode, struct dentry *de,
 			const char *symname)
 {
 	const char *name = de->d_name.name;
@@ -295,9 +291,9 @@ static int coda_rmdir(struct inode *dir, struct dentry *de)
 }
 
 /* rename */
-static int coda_rename(struct mnt_idmap *idmap, struct inode *old_dir,
-		       struct dentry *old_dentry, struct inode *new_dir,
-		       struct dentry *new_dentry, unsigned int flags)
+static int coda_rename(struct inode *old_dir, struct dentry *old_dentry,
+		       struct inode *new_dir, struct dentry *new_dentry,
+		       unsigned int flags)
 {
 	const char *old_name = old_dentry->d_name.name;
 	const char *new_name = new_dentry->d_name.name;
@@ -317,10 +313,13 @@ static int coda_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 				coda_dir_drop_nlink(old_dir);
 				coda_dir_inc_nlink(new_dir);
 			}
+			coda_dir_update_mtime(old_dir);
+			coda_dir_update_mtime(new_dir);
 			coda_flag_inode(d_inode(new_dentry), C_VATTR);
+		} else {
+			coda_flag_inode(old_dir, C_VATTR);
+			coda_flag_inode(new_dir, C_VATTR);
 		}
-		coda_dir_update_mtime(old_dir);
-		coda_dir_update_mtime(new_dir);
 	}
 	return error;
 }
@@ -429,16 +428,30 @@ static int coda_readdir(struct file *coda_file, struct dir_context *ctx)
 	cfi = coda_ftoc(coda_file);
 	host_file = cfi->cfi_container;
 
-	ret = iterate_dir(host_file, ctx);
-	if (ret != -ENOTDIR)
+	if (host_file->f_op->iterate || host_file->f_op->iterate_shared) {
+		struct inode *host_inode = file_inode(host_file);
+		ret = -ENOENT;
+		if (!IS_DEADDIR(host_inode)) {
+			if (host_file->f_op->iterate_shared) {
+				inode_lock_shared(host_inode);
+				ret = host_file->f_op->iterate_shared(host_file, ctx);
+				file_accessed(host_file);
+				inode_unlock_shared(host_inode);
+			} else {
+				inode_lock(host_inode);
+				ret = host_file->f_op->iterate(host_file, ctx);
+				file_accessed(host_file);
+				inode_unlock(host_inode);
+			}
+		}
 		return ret;
+	}
 	/* Venus: we must read Venus dirents from a file */
 	return coda_venus_readdir(coda_file, ctx);
 }
 
 /* called when a cache lookup succeeds */
-static int coda_dentry_revalidate(struct inode *dir, const struct qstr *name,
-				  struct dentry *de, unsigned int flags)
+static int coda_dentry_revalidate(struct dentry *de, unsigned int flags)
 {
 	struct inode *inode;
 	struct coda_inode_info *cii;
@@ -482,20 +495,15 @@ out:
  */
 static int coda_dentry_delete(const struct dentry * dentry)
 {
-	struct inode *inode;
-	struct coda_inode_info *cii;
+	int flags;
 
 	if (d_really_is_negative(dentry)) 
 		return 0;
 
-	inode = d_inode(dentry);
-	if (!inode || is_bad_inode(inode))
+	flags = (ITOC(d_inode(dentry))->c_flags) & C_PURGE;
+	if (is_bad_inode(d_inode(dentry)) || flags) {
 		return 1;
-
-	cii = ITOC(inode);
-	if (cii->c_flags & C_PURGE)
-		return 1;
-
+	}
 	return 0;
 }
 
@@ -571,11 +579,10 @@ const struct inode_operations coda_dir_inode_operations = {
 	.setattr	= coda_setattr,
 };
 
-WRAP_DIR_ITER(coda_readdir) // FIXME!
 const struct file_operations coda_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-	.iterate_shared	= shared_coda_readdir,
+	.iterate	= coda_readdir,
 	.open		= coda_open,
 	.release	= coda_release,
 	.fsync		= coda_fsync,

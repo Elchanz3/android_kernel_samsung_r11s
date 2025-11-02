@@ -11,11 +11,10 @@
 #ifndef _XTENSA_CMPXCHG_H
 #define _XTENSA_CMPXCHG_H
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 #include <linux/bits.h>
 #include <linux/stringify.h>
-#include <linux/cmpxchg-emu.h>
 
 /*
  * cmpxchg
@@ -53,16 +52,16 @@ __cmpxchg_u32(volatile int *p, int old, int new)
 	return new;
 #else
 	__asm__ __volatile__(
-			"       rsil    a14, "__stringify(TOPLEVEL)"\n"
+			"       rsil    a15, "__stringify(TOPLEVEL)"\n"
 			"       l32i    %[old], %[mem]\n"
 			"       bne     %[old], %[cmp], 1f\n"
 			"       s32i    %[new], %[mem]\n"
 			"1:\n"
-			"       wsr     a14, ps\n"
+			"       wsr     a15, ps\n"
 			"       rsync\n"
 			: [old] "=&a" (old), [mem] "+m" (*p)
 			: [cmp] "a" (old), [new] "r" (new)
-			: "a14", "memory");
+			: "a15", "memory");
 	return old;
 #endif
 }
@@ -75,14 +74,13 @@ static __inline__ unsigned long
 __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
 {
 	switch (size) {
-	case 1:  return cmpxchg_emu_u8(ptr, old, new);
 	case 4:  return __cmpxchg_u32(ptr, old, new);
 	default: __cmpxchg_called_with_bad_pointer();
 		 return old;
 	}
 }
 
-#define arch_cmpxchg(ptr,o,n)						      \
+#define cmpxchg(ptr,o,n)						      \
 	({ __typeof__(*(ptr)) _o_ = (o);				      \
 	   __typeof__(*(ptr)) _n_ = (n);				      \
 	   (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,	      \
@@ -99,7 +97,7 @@ static inline unsigned long __cmpxchg_local(volatile void *ptr,
 	case 4:
 		return __cmpxchg_u32(ptr, old, new);
 	default:
-		return __generic_cmpxchg_local(ptr, old, new, size);
+		return __cmpxchg_local_generic(ptr, old, new, size);
 	}
 
 	return old;
@@ -109,19 +107,19 @@ static inline unsigned long __cmpxchg_local(volatile void *ptr,
  * cmpxchg_local and cmpxchg64_local are atomic wrt current CPU. Always make
  * them available.
  */
-#define arch_cmpxchg_local(ptr, o, n)				  	       \
-	((__typeof__(*(ptr)))__generic_cmpxchg_local((ptr), (unsigned long)(o),\
+#define cmpxchg_local(ptr, o, n)				  	       \
+	((__typeof__(*(ptr)))__cmpxchg_local_generic((ptr), (unsigned long)(o),\
 			(unsigned long)(n), sizeof(*(ptr))))
-#define arch_cmpxchg64_local(ptr, o, n) __generic_cmpxchg64_local((ptr), (o), (n))
-#define arch_cmpxchg64(ptr, o, n)    arch_cmpxchg64_local((ptr), (o), (n))
+#define cmpxchg64_local(ptr, o, n) __cmpxchg64_local_generic((ptr), (o), (n))
+#define cmpxchg64(ptr, o, n)    cmpxchg64_local((ptr), (o), (n))
 
 /*
  * xchg_u32
  *
- * Note that a14 is used here because the register allocation
+ * Note that a15 is used here because the register allocation
  * done by the compiler is not guaranteed and a window overflow
  * may not occur between the rsil and wsr instructions. By using
- * a14 in the rsil, the machine is guaranteed to be in a state
+ * a15 in the rsil, the machine is guaranteed to be in a state
  * where no register reference will cause an overflow.
  */
 
@@ -159,20 +157,20 @@ static inline unsigned long xchg_u32(volatile int * m, unsigned long val)
 #else
 	unsigned long tmp;
 	__asm__ __volatile__(
-			"       rsil    a14, "__stringify(TOPLEVEL)"\n"
+			"       rsil    a15, "__stringify(TOPLEVEL)"\n"
 			"       l32i    %[tmp], %[mem]\n"
 			"       s32i    %[val], %[mem]\n"
-			"       wsr     a14, ps\n"
+			"       wsr     a15, ps\n"
 			"       rsync\n"
 			: [tmp] "=&a" (tmp), [mem] "+m" (*m)
 			: [val] "a" (val)
-			: "a14", "memory");
+			: "a15", "memory");
 	return tmp;
 #endif
 }
 
-#define arch_xchg(ptr,x) \
-	((__typeof__(*(ptr)))__arch_xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
+#define xchg(ptr,x) \
+	((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 
 static inline u32 xchg_small(volatile void *ptr, u32 x, int size)
 {
@@ -205,7 +203,7 @@ static inline u32 xchg_small(volatile void *ptr, u32 x, int size)
 extern void __xchg_called_with_bad_pointer(void);
 
 static __inline__ unsigned long
-__arch_xchg(unsigned long x, volatile void * ptr, int size)
+__xchg(unsigned long x, volatile void * ptr, int size)
 {
 	switch (size) {
 	case 1:
@@ -220,6 +218,6 @@ __arch_xchg(unsigned long x, volatile void * ptr, int size)
 	}
 }
 
-#endif /* __ASSEMBLER__ */
+#endif /* __ASSEMBLY__ */
 
 #endif /* _XTENSA_CMPXCHG_H */

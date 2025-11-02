@@ -72,12 +72,17 @@ static struct imx_icc_node_desc nodes[] = {
 
 static int imx8mn_icc_probe(struct platform_device *pdev)
 {
-	return imx_icc_register(pdev, nodes, ARRAY_SIZE(nodes), NULL);
+	return imx_icc_register(pdev, nodes, ARRAY_SIZE(nodes));
+}
+
+static int imx8mn_icc_remove(struct platform_device *pdev)
+{
+	return imx_icc_unregister(pdev);
 }
 
 static struct platform_driver imx8mn_icc_driver = {
 	.probe = imx8mn_icc_probe,
-	.remove = imx_icc_unregister,
+	.remove = imx8mn_icc_remove,
 	.driver = {
 		.name = "imx8mn-interconnect",
 	},
@@ -86,5 +91,4 @@ static struct platform_driver imx8mn_icc_driver = {
 module_platform_driver(imx8mn_icc_driver);
 MODULE_ALIAS("platform:imx8mn-interconnect");
 MODULE_AUTHOR("Leonard Crestez <leonard.crestez@nxp.com>");
-MODULE_DESCRIPTION("Interconnect framework driver for i.MX8MN SoC");
 MODULE_LICENSE("GPL v2");

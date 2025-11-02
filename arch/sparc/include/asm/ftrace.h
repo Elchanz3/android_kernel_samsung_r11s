@@ -6,7 +6,7 @@
 #define MCOUNT_ADDR		((unsigned long)(_mcount))
 #define MCOUNT_INSN_SIZE	4 /* sizeof mcount call */
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 void _mcount(void);
 #endif
 
@@ -17,7 +17,7 @@ void _mcount(void);
 #endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE
-/* relocation of mcount call site is the same as the address */
+/* reloction of mcount call site is the same as the address */
 static inline unsigned long ftrace_call_adjust(unsigned long addr)
 {
 	return addr;

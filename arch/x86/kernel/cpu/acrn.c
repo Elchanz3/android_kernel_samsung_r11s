@@ -10,8 +10,6 @@
  */
 
 #include <linux/interrupt.h>
-
-#include <asm/acrn.h>
 #include <asm/apic.h>
 #include <asm/cpufeatures.h>
 #include <asm/desc.h>
@@ -21,16 +19,13 @@
 
 static u32 __init acrn_detect(void)
 {
-	return acrn_cpuid_base();
+	return hypervisor_cpuid_base("ACRNACRNACRN", 0);
 }
 
 static void __init acrn_init_platform(void)
 {
-	/* Install system interrupt handler for ACRN hypervisor callback */
-	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_acrn_hv_callback);
-
-	x86_platform.calibrate_tsc = acrn_get_tsc_khz;
-	x86_platform.calibrate_cpu = acrn_get_tsc_khz;
+	/* Setup the IDT for ACRN hypervisor callback */
+	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_acrn_hv_callback);
 }
 
 static bool acrn_x2apic_available(void)
@@ -51,7 +46,7 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_acrn_hv_callback)
 	 * will block the interrupt whose vector is lower than
 	 * HYPERVISOR_CALLBACK_VECTOR.
 	 */
-	apic_eoi();
+	ack_APIC_irq();
 	inc_irq_stat(irq_hv_callback_count);
 
 	if (acrn_intr_handler)
@@ -59,18 +54,6 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_acrn_hv_callback)
 
 	set_irq_regs(old_regs);
 }
-
-void acrn_setup_intr_handler(void (*handler)(void))
-{
-	acrn_intr_handler = handler;
-}
-EXPORT_SYMBOL_GPL(acrn_setup_intr_handler);
-
-void acrn_remove_intr_handler(void)
-{
-	acrn_intr_handler = NULL;
-}
-EXPORT_SYMBOL_GPL(acrn_remove_intr_handler);
 
 const __initconst struct hypervisor_x86 x86_hyper_acrn = {
 	.name                   = "ACRN",

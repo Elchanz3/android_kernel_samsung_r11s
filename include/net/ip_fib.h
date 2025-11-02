@@ -17,17 +17,14 @@
 #include <linux/rcupdate.h>
 #include <net/fib_notifier.h>
 #include <net/fib_rules.h>
-#include <net/inet_dscp.h>
 #include <net/inetpeer.h>
 #include <linux/percpu.h>
 #include <linux/notifier.h>
 #include <linux/refcount.h>
-#include <linux/ip.h>
-#include <linux/in_route.h>
 
 struct fib_config {
 	u8			fc_dst_len;
-	dscp_t			fc_dscp;
+	u8			fc_tos;
 	u8			fc_protocol;
 	u8			fc_scope;
 	u8			fc_type;
@@ -82,7 +79,6 @@ struct fnhe_hash_bucket {
 
 struct fib_nh_common {
 	struct net_device	*nhc_dev;
-	netdevice_tracker	nhc_dev_tracker;
 	int			nhc_oif;
 	unsigned char		nhc_scope;
 	u8			nhc_family;
@@ -115,7 +111,6 @@ struct fib_nh {
 	int			nh_saddr_genid;
 #define fib_nh_family		nh_common.nhc_family
 #define fib_nh_dev		nh_common.nhc_dev
-#define fib_nh_dev_tracker	nh_common.nhc_dev_tracker
 #define fib_nh_oif		nh_common.nhc_oif
 #define fib_nh_flags		nh_common.nhc_flags
 #define fib_nh_lws		nh_common.nhc_lwtstate
@@ -138,7 +133,7 @@ struct fib_info {
 	struct hlist_node	fib_lhash;
 	struct list_head	nh_list;
 	struct net		*fib_net;
-	refcount_t		fib_treeref;
+	int			fib_treeref;
 	refcount_t		fib_clntref;
 	unsigned int		fib_flags;
 	unsigned char		fib_dead;
@@ -156,14 +151,11 @@ struct fib_info {
 	int			fib_nhs;
 	bool			fib_nh_is_v6;
 	bool			nh_updated;
-	bool			pfsrc_removed;
 	struct nexthop		*nh;
 	struct rcu_head		rcu;
-	struct fib_nh		fib_nh[] __counted_by(fib_nhs);
+	struct fib_nh		fib_nh[];
 };
 
-int __net_init fib4_semantics_init(struct net *net);
-void __net_exit fib4_semantics_exit(struct net *net);
 
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 struct fib_rule;
@@ -177,7 +169,6 @@ struct fib_result {
 	unsigned char		type;
 	unsigned char		scope;
 	u32			tclassid;
-	dscp_t			dscp;
 	struct fib_nh_common	*nhc;
 	struct fib_info		*fi;
 	struct fib_table	*table;
@@ -218,12 +209,11 @@ struct fib_rt_info {
 	u32			tb_id;
 	__be32			dst;
 	int			dst_len;
-	dscp_t			dscp;
+	u8			tos;
 	u8			type;
 	u8			offload:1,
 				trap:1,
-				offload_failed:1,
-				unused:5;
+				unused:6;
 };
 
 struct fib_entry_notifier_info {
@@ -231,7 +221,7 @@ struct fib_entry_notifier_info {
 	u32 dst;
 	int dst_len;
 	struct fib_info *fi;
-	dscp_t dscp;
+	u8 tos;
 	u8 type;
 	u32 tb_id;
 };
@@ -269,7 +259,6 @@ struct fib_dump_filter {
 	bool			filter_set;
 	bool			dump_routes;
 	bool			dump_exceptions;
-	bool			rtnl_held;
 	unsigned char		protocol;
 	unsigned char		rt_type;
 	unsigned int		flags;
@@ -349,7 +338,7 @@ static inline int fib4_rules_dump(struct net *net, struct notifier_block *nb,
 	return 0;
 }
 
-static inline unsigned int fib4_rules_seq_read(const struct net *net)
+static inline unsigned int fib4_rules_seq_read(struct net *net)
 {
 	return 0;
 }
@@ -413,7 +402,7 @@ static inline bool fib4_has_custom_rules(const struct net *net)
 bool fib4_rule_default(const struct fib_rule *rule);
 int fib4_rules_dump(struct net *net, struct notifier_block *nb,
 		    struct netlink_ext_ack *extack);
-unsigned int fib4_rules_seq_read(const struct net *net);
+unsigned int fib4_rules_seq_read(struct net *net);
 
 static inline bool fib4_rules_early_flow_dissect(struct net *net,
 						 struct sk_buff *skb,
@@ -425,10 +414,7 @@ static inline bool fib4_rules_early_flow_dissect(struct net *net,
 	if (!net->ipv4.fib_rules_require_fldissect)
 		return false;
 
-	memset(flkeys, 0, sizeof(*flkeys));
-	__skb_flow_dissect(net, skb, &flow_keys_dissector,
-			   flkeys, NULL, 0, 0, 0, flag);
-
+	skb_flow_dissect_flow_keys(skb, flkeys, flag);
 	fl4->fl4_sport = flkeys->ports.src;
 	fl4->fl4_dport = flkeys->ports.dst;
 	fl4->flowi4_proto = flkeys->basic.ip_proto;
@@ -438,11 +424,6 @@ static inline bool fib4_rules_early_flow_dissect(struct net *net,
 
 #endif /* CONFIG_IP_MULTIPLE_TABLES */
 
-static inline bool fib_dscp_masked_match(dscp_t dscp, const struct flowi4 *fl4)
-{
-	return dscp == (fl4->flowi4_dscp & INET_DSCP_LEGACY_TOS_MASK);
-}
-
 /* Exported by fib_frontend.c */
 extern const struct nla_policy rtm_ipv4_policy[];
 void ip_fib_init(void);
@@ -451,21 +432,8 @@ int fib_gw_from_via(struct fib_config *cfg, struct nlattr *nla,
 __be32 fib_compute_spec_dst(struct sk_buff *skb);
 bool fib_info_nh_uses_dev(struct fib_info *fi, const struct net_device *dev);
 int fib_validate_source(struct sk_buff *skb, __be32 src, __be32 dst,
-			dscp_t dscp, int oif, struct net_device *dev,
+			u8 tos, int oif, struct net_device *dev,
 			struct in_device *idev, u32 *itag);
-
-static inline enum skb_drop_reason
-fib_validate_source_reason(struct sk_buff *skb, __be32 src, __be32 dst,
-			   dscp_t dscp, int oif, struct net_device *dev,
-			   struct in_device *idev, u32 *itag)
-{
-	int err = fib_validate_source(skb, src, dst, dscp, oif, dev, idev,
-				      itag);
-	if (err < 0)
-		return -err;
-	return SKB_NOT_DROPPED_YET;
-}
-
 #ifdef CONFIG_IP_ROUTE_CLASSID
 static inline int fib_num_tclassid_users(struct net *net)
 {
@@ -497,85 +465,13 @@ int fib_sync_up(struct net_device *dev, unsigned char nh_flags);
 void fib_sync_mtu(struct net_device *dev, u32 orig_mtu);
 void fib_nhc_update_mtu(struct fib_nh_common *nhc, u32 new, u32 orig);
 
-/* Fields used for sysctl_fib_multipath_hash_fields.
- * Common to IPv4 and IPv6.
- *
- * Add new fields at the end. This is user API.
- */
-#define FIB_MULTIPATH_HASH_FIELD_SRC_IP			BIT(0)
-#define FIB_MULTIPATH_HASH_FIELD_DST_IP			BIT(1)
-#define FIB_MULTIPATH_HASH_FIELD_IP_PROTO		BIT(2)
-#define FIB_MULTIPATH_HASH_FIELD_FLOWLABEL		BIT(3)
-#define FIB_MULTIPATH_HASH_FIELD_SRC_PORT		BIT(4)
-#define FIB_MULTIPATH_HASH_FIELD_DST_PORT		BIT(5)
-#define FIB_MULTIPATH_HASH_FIELD_INNER_SRC_IP		BIT(6)
-#define FIB_MULTIPATH_HASH_FIELD_INNER_DST_IP		BIT(7)
-#define FIB_MULTIPATH_HASH_FIELD_INNER_IP_PROTO		BIT(8)
-#define FIB_MULTIPATH_HASH_FIELD_INNER_FLOWLABEL	BIT(9)
-#define FIB_MULTIPATH_HASH_FIELD_INNER_SRC_PORT		BIT(10)
-#define FIB_MULTIPATH_HASH_FIELD_INNER_DST_PORT		BIT(11)
-
-#define FIB_MULTIPATH_HASH_FIELD_OUTER_MASK		\
-	(FIB_MULTIPATH_HASH_FIELD_SRC_IP |		\
-	 FIB_MULTIPATH_HASH_FIELD_DST_IP |		\
-	 FIB_MULTIPATH_HASH_FIELD_IP_PROTO |		\
-	 FIB_MULTIPATH_HASH_FIELD_FLOWLABEL |		\
-	 FIB_MULTIPATH_HASH_FIELD_SRC_PORT |		\
-	 FIB_MULTIPATH_HASH_FIELD_DST_PORT)
-
-#define FIB_MULTIPATH_HASH_FIELD_INNER_MASK		\
-	(FIB_MULTIPATH_HASH_FIELD_INNER_SRC_IP |	\
-	 FIB_MULTIPATH_HASH_FIELD_INNER_DST_IP |	\
-	 FIB_MULTIPATH_HASH_FIELD_INNER_IP_PROTO |	\
-	 FIB_MULTIPATH_HASH_FIELD_INNER_FLOWLABEL |	\
-	 FIB_MULTIPATH_HASH_FIELD_INNER_SRC_PORT |	\
-	 FIB_MULTIPATH_HASH_FIELD_INNER_DST_PORT)
-
-#define FIB_MULTIPATH_HASH_FIELD_ALL_MASK		\
-	(FIB_MULTIPATH_HASH_FIELD_OUTER_MASK |		\
-	 FIB_MULTIPATH_HASH_FIELD_INNER_MASK)
-
-#define FIB_MULTIPATH_HASH_FIELD_DEFAULT_MASK		\
-	(FIB_MULTIPATH_HASH_FIELD_SRC_IP |		\
-	 FIB_MULTIPATH_HASH_FIELD_DST_IP |		\
-	 FIB_MULTIPATH_HASH_FIELD_IP_PROTO)
-
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 int fib_multipath_hash(const struct net *net, const struct flowi4 *fl4,
 		       const struct sk_buff *skb, struct flow_keys *flkeys);
-
-static void
-fib_multipath_hash_construct_key(siphash_key_t *key, u32 mp_seed)
-{
-	u64 mp_seed_64 = mp_seed;
-
-	key->key[0] = (mp_seed_64 << 32) | mp_seed_64;
-	key->key[1] = key->key[0];
-}
-
-static inline u32 fib_multipath_hash_from_keys(const struct net *net,
-					       struct flow_keys *keys)
-{
-	siphash_aligned_key_t hash_key;
-	u32 mp_seed;
-
-	mp_seed = READ_ONCE(net->ipv4.sysctl_fib_multipath_hash_seed).mp_seed;
-	fib_multipath_hash_construct_key(&hash_key, mp_seed);
-
-	return flow_hash_from_keys_seed(keys, &hash_key);
-}
-#else
-static inline u32 fib_multipath_hash_from_keys(const struct net *net,
-					       struct flow_keys *keys)
-{
-	return flow_hash_from_keys(keys);
-}
 #endif
-
 int fib_check_nh(struct net *net, struct fib_nh *nh, u32 table, u8 scope,
 		 struct netlink_ext_ack *extack);
-void fib_select_multipath(struct fib_result *res, int hash,
-			  const struct flowi4 *fl4);
+void fib_select_multipath(struct fib_result *res, int hash);
 void fib_select_path(struct net *net, struct fib_result *res,
 		     struct flowi4 *fl4, const struct sk_buff *skb);
 

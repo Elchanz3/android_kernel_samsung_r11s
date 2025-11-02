@@ -36,6 +36,7 @@
 #include <linux/profile.h>
 #include <linux/timex.h>
 #include <linux/notifier.h>
+#include <linux/timekeeper_internal.h>
 #include <linux/clockchips.h>
 #include <linux/gfp.h>
 #include <linux/kprobes.h>
@@ -54,10 +55,14 @@
 #include <asm/cio.h>
 #include "entry.h"
 
-union tod_clock __bootdata_preserved(tod_clock_base);
+unsigned char tod_clock_base[16] __aligned(8) = {
+	/* Force to data section. */
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
 EXPORT_SYMBOL_GPL(tod_clock_base);
 
-u64 __bootdata_preserved(clock_comparator_max);
+u64 clock_comparator_max = -1ULL;
 EXPORT_SYMBOL_GPL(clock_comparator_max);
 
 static DEFINE_PER_CPU(struct clock_event_device, comparators);
@@ -67,8 +72,10 @@ EXPORT_SYMBOL(s390_epoch_delta_notifier);
 
 unsigned char ptff_function_mask[16];
 
-static unsigned long lpar_offset;
-static unsigned long initial_leap_seconds;
+static unsigned long long lpar_offset;
+static unsigned long long initial_leap_seconds;
+static unsigned long long tod_steering_end;
+static long long tod_steering_delta;
 
 /*
  * Get time offsets with PTFF
@@ -78,7 +85,9 @@ void __init time_early_init(void)
 	struct ptff_qto qto;
 	struct ptff_qui qui;
 
-	vdso_k_time_data->arch_data.tod_delta = tod_clock_base.tod;
+	/* Initialize TOD steering parameters */
+	tod_steering_end = *(unsigned long long *) &tod_clock_base[1];
+	vdso_data->arch_data.tod_steering_end = tod_steering_end;
 
 	if (!test_facility(28))
 		return;
@@ -91,13 +100,8 @@ void __init time_early_init(void)
 
 	/* get initial leap seconds */
 	if (ptff_query(PTFF_QUI) && ptff(&qui, sizeof(qui), PTFF_QUI) == 0)
-		initial_leap_seconds = (unsigned long)
+		initial_leap_seconds = (unsigned long long)
 			((long) qui.old_leap * 4096000000L);
-}
-
-unsigned long long noinstr sched_clock_noinstr(void)
-{
-	return tod_to_ns(__get_tod_clock_monotonic());
 }
 
 /*
@@ -109,13 +113,18 @@ unsigned long long notrace sched_clock(void)
 }
 NOKPROBE_SYMBOL(sched_clock);
 
-static void ext_to_timespec64(union tod_clock *clk, struct timespec64 *xt)
+static void ext_to_timespec64(unsigned char *clk, struct timespec64 *xt)
 {
-	unsigned long rem, sec, nsec;
+	unsigned long long high, low, rem, sec, nsec;
 
-	sec = clk->us;
+	/* Split extendnd TOD clock to micro-seconds and sub-micro-seconds */
+	high = (*(unsigned long long *) clk) >> 4;
+	low = (*(unsigned long long *)&clk[7]) << 4;
+	/* Calculate seconds and nano-seconds */
+	sec = high;
 	rem = do_div(sec, 1000000);
-	nsec = ((clk->sus + (rem << 12)) * 125) >> 9;
+	nsec = (((low >> 32) + (rem << 32)) * 1000) >> 32;
+
 	xt->tv_sec = sec;
 	xt->tv_nsec = nsec;
 }
@@ -124,7 +133,7 @@ void clock_comparator_work(void)
 {
 	struct clock_event_device *cd;
 
-	get_lowcore()->clock_comparator = clock_comparator_max;
+	S390_lowcore.clock_comparator = clock_comparator_max;
 	cd = this_cpu_ptr(&comparators);
 	cd->event_handler(cd);
 }
@@ -132,8 +141,8 @@ void clock_comparator_work(void)
 static int s390_next_event(unsigned long delta,
 			   struct clock_event_device *evt)
 {
-	get_lowcore()->clock_comparator = get_tod_clock() + delta;
-	set_clock_comparator(get_lowcore()->clock_comparator);
+	S390_lowcore.clock_comparator = get_tod_clock() + delta;
+	set_clock_comparator(S390_lowcore.clock_comparator);
 	return 0;
 }
 
@@ -146,8 +155,8 @@ void init_cpu_timer(void)
 	struct clock_event_device *cd;
 	int cpu;
 
-	get_lowcore()->clock_comparator = clock_comparator_max;
-	set_clock_comparator(get_lowcore()->clock_comparator);
+	S390_lowcore.clock_comparator = clock_comparator_max;
+	set_clock_comparator(S390_lowcore.clock_comparator);
 
 	cpu = smp_processor_id();
 	cd = &per_cpu(comparators, cpu);
@@ -166,10 +175,10 @@ void init_cpu_timer(void)
 	clockevents_register_device(cd);
 
 	/* Enable clock comparator timer interrupt. */
-	local_ctl_set_bit(0, CR0_CLOCK_COMPARATOR_SUBMASK_BIT);
+	__ctl_set_bit(0,11);
 
 	/* Always allow the timing alert external interrupt. */
-	local_ctl_set_bit(0, CR0_ETR_SUBMASK_BIT);
+	__ctl_set_bit(0, 4);
 }
 
 static void clock_comparator_interrupt(struct ext_code ext_code,
@@ -177,8 +186,8 @@ static void clock_comparator_interrupt(struct ext_code ext_code,
 				       unsigned long param64)
 {
 	inc_irq_stat(IRQEXT_CLK);
-	if (get_lowcore()->clock_comparator == clock_comparator_max)
-		set_clock_comparator(get_lowcore()->clock_comparator);
+	if (S390_lowcore.clock_comparator == clock_comparator_max)
+		set_clock_comparator(S390_lowcore.clock_comparator);
 }
 
 static void stp_timing_alert(struct stp_irq_parm *);
@@ -195,26 +204,30 @@ static void stp_reset(void);
 
 void read_persistent_clock64(struct timespec64 *ts)
 {
-	union tod_clock clk;
-	u64 delta;
+	unsigned char clk[STORE_CLOCK_EXT_SIZE];
+	__u64 delta;
 
 	delta = initial_leap_seconds + TOD_UNIX_EPOCH;
-	store_tod_clock_ext(&clk);
-	clk.eitod -= delta;
-	ext_to_timespec64(&clk, ts);
+	get_tod_clock_ext(clk);
+	*(__u64 *) &clk[1] -= delta;
+	if (*(__u64 *) &clk[1] > delta)
+		clk[0]--;
+	ext_to_timespec64(clk, ts);
 }
 
 void __init read_persistent_wall_and_boot_offset(struct timespec64 *wall_time,
 						 struct timespec64 *boot_offset)
 {
+	unsigned char clk[STORE_CLOCK_EXT_SIZE];
 	struct timespec64 boot_time;
-	union tod_clock clk;
-	u64 delta;
+	__u64 delta;
 
 	delta = initial_leap_seconds + TOD_UNIX_EPOCH;
-	clk = tod_clock_base;
-	clk.eitod -= delta;
-	ext_to_timespec64(&clk, &boot_time);
+	memcpy(clk, tod_clock_base, STORE_CLOCK_EXT_SIZE);
+	*(__u64 *)&clk[1] -= delta;
+	if (*(__u64 *)&clk[1] > delta)
+		clk[0]--;
+	ext_to_timespec64(clk, &boot_time);
 
 	read_persistent_clock64(wall_time);
 	*boot_offset = timespec64_sub(*wall_time, boot_time);
@@ -222,7 +235,21 @@ void __init read_persistent_wall_and_boot_offset(struct timespec64 *wall_time,
 
 static u64 read_tod_clock(struct clocksource *cs)
 {
-	return get_tod_clock_monotonic();
+	unsigned long long now, adj;
+
+	preempt_disable(); /* protect from changes to steering parameters */
+	now = get_tod_clock();
+	adj = tod_steering_end - now;
+	if (unlikely((s64) adj > 0))
+		/*
+		 * manually steer by 1 cycle every 2^16 cycles. This
+		 * corresponds to shifting the tod delta by 15. 1s is
+		 * therefore steered in ~9h. The adjust will decrease
+		 * over time, until it finally reaches 0.
+		 */
+		now += (tod_steering_delta < 0) ? (adj >> 15) : -(adj >> 15);
+	preempt_enable();
+	return now;
 }
 
 static struct clocksource clocksource_tod = {
@@ -230,11 +257,10 @@ static struct clocksource clocksource_tod = {
 	.rating		= 400,
 	.read		= read_tod_clock,
 	.mask		= CLOCKSOURCE_MASK(64),
-	.mult		= 4096000,
-	.shift		= 24,
+	.mult		= 1000,
+	.shift		= 12,
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
 	.vdso_clock_mode = VDSO_CLOCKMODE_TOD,
-	.id		= CSID_S390_TOD,
 };
 
 struct clocksource * __init clocksource_default_clock(void)
@@ -349,13 +375,31 @@ static inline int check_sync_clock(void)
  * Apply clock delta to the global data structures.
  * This is called once on the CPU that performed the clock sync.
  */
-static void clock_sync_global(long delta)
+static void clock_sync_global(unsigned long long delta)
 {
+	unsigned long now, adj;
 	struct ptff_qto qto;
 
 	/* Fixup the monotonic sched clock. */
-	tod_clock_base.eitod += delta;
-	vdso_k_time_data->arch_data.tod_delta = tod_clock_base.tod;
+	*(unsigned long long *) &tod_clock_base[1] += delta;
+	if (*(unsigned long long *) &tod_clock_base[1] < delta)
+		/* Epoch overflow */
+		tod_clock_base[0]++;
+	/* Adjust TOD steering parameters. */
+	now = get_tod_clock();
+	adj = tod_steering_end - now;
+	if (unlikely((s64) adj >= 0))
+		/* Calculate how much of the old adjustment is left. */
+		tod_steering_delta = (tod_steering_delta < 0) ?
+			-(adj >> 15) : (adj >> 15);
+	tod_steering_delta += delta;
+	if ((abs(tod_steering_delta) >> 48) != 0)
+		panic("TOD clock sync offset %lli is too large to drift\n",
+		      tod_steering_delta);
+	tod_steering_end = now + (abs(tod_steering_delta) << 15);
+	vdso_data->arch_data.tod_steering_end = tod_steering_end;
+	vdso_data->arch_data.tod_steering_delta = tod_steering_delta;
+
 	/* Update LPAR offset. */
 	if (ptff_query(PTFF_QTO) && ptff(&qto, sizeof(qto), PTFF_QTO) == 0)
 		lpar_offset = qto.tod_epoch_difference;
@@ -367,15 +411,15 @@ static void clock_sync_global(long delta)
  * Apply clock delta to the per-CPU data structures of this CPU.
  * This is called for each online CPU after the call to clock_sync_global.
  */
-static void clock_sync_local(long delta)
+static void clock_sync_local(unsigned long long delta)
 {
 	/* Add the delta to the clock comparator. */
-	if (get_lowcore()->clock_comparator != clock_comparator_max) {
-		get_lowcore()->clock_comparator += delta;
-		set_clock_comparator(get_lowcore()->clock_comparator);
+	if (S390_lowcore.clock_comparator != clock_comparator_max) {
+		S390_lowcore.clock_comparator += delta;
+		set_clock_comparator(S390_lowcore.clock_comparator);
 	}
 	/* Adjust the last_update_clock time-stamp. */
-	get_lowcore()->last_update_clock += delta;
+	S390_lowcore.last_update_clock += delta;
 }
 
 /* Single threaded workqueue used for stp sync events */
@@ -391,13 +435,13 @@ static void __init time_init_wq(void)
 struct clock_sync_data {
 	atomic_t cpus;
 	int in_sync;
-	long clock_delta;
+	unsigned long long clock_delta;
 };
 
 /*
  * Server Time Protocol (STP) code.
  */
-static bool stp_online = true;
+static bool stp_online;
 static struct stp_sstpi stp_info;
 static void *stp_page;
 
@@ -423,17 +467,12 @@ static void __init stp_reset(void)
 	if (rc == 0)
 		set_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags);
 	else if (stp_online) {
+		pr_warn("The real or virtual hardware system does not provide an STP interface\n");
 		free_page((unsigned long) stp_page);
 		stp_page = NULL;
 		stp_online = false;
 	}
 }
-
-bool stp_enabled(void)
-{
-	return test_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags) && stp_online;
-}
-EXPORT_SYMBOL(stp_enabled);
 
 static void stp_timeout(struct timer_list *unused)
 {
@@ -516,7 +555,7 @@ static int stpinfo_valid(void)
 static int stp_sync_clock(void *data)
 {
 	struct clock_sync_data *sync = data;
-	long clock_delta, flags;
+	unsigned long long clock_delta, flags;
 	static int first;
 	int rc;
 
@@ -526,7 +565,9 @@ static int stp_sync_clock(void *data)
 		while (atomic_read(&sync->cpus) != 0)
 			cpu_relax();
 		rc = 0;
-		if (stp_info.todoff || stp_info.tmd != 2) {
+		if (stp_info.todoff[0] || stp_info.todoff[1] ||
+		    stp_info.todoff[2] || stp_info.todoff[3] ||
+		    stp_info.tmd != 2) {
 			flags = vdso_update_begin();
 			rc = chsc_sstpc(stp_page, STP_OP_SYNC, 0,
 					&clock_delta);
@@ -546,7 +587,7 @@ static int stp_sync_clock(void *data)
 		atomic_dec(&sync->cpus);
 		/* Wait for in_sync to be set. */
 		while (READ_ONCE(sync->in_sync) == 0)
-			;
+			__udelay(1);
 	}
 	if (sync->in_sync != 1)
 		/* Didn't work. Clear per-cpu in sync bit again. */
@@ -555,6 +596,81 @@ static int stp_sync_clock(void *data)
 	clock_sync_local(sync->clock_delta);
 
 	return 0;
+}
+
+static int stp_clear_leap(void)
+{
+	struct __kernel_timex txc;
+	int ret;
+
+	memset(&txc, 0, sizeof(txc));
+
+	ret = do_adjtimex(&txc);
+	if (ret < 0)
+		return ret;
+
+	txc.modes = ADJ_STATUS;
+	txc.status &= ~(STA_INS|STA_DEL);
+	return do_adjtimex(&txc);
+}
+
+static void stp_check_leap(void)
+{
+	struct stp_stzi stzi;
+	struct stp_lsoib *lsoib = &stzi.lsoib;
+	struct __kernel_timex txc;
+	int64_t timediff;
+	int leapdiff, ret;
+
+	if (!stp_info.lu || !check_sync_clock()) {
+		/*
+		 * Either a scheduled leap second was removed by the operator,
+		 * or STP is out of sync. In both cases, clear the leap second
+		 * kernel flags.
+		 */
+		if (stp_clear_leap() < 0)
+			pr_err("failed to clear leap second flags\n");
+		return;
+	}
+
+	if (chsc_stzi(stp_page, &stzi, sizeof(stzi))) {
+		pr_err("stzi failed\n");
+		return;
+	}
+
+	timediff = tod_to_ns(lsoib->nlsout - get_tod_clock()) / NSEC_PER_SEC;
+	leapdiff = lsoib->nlso - lsoib->also;
+
+	if (leapdiff != 1 && leapdiff != -1) {
+		pr_err("Cannot schedule %d leap seconds\n", leapdiff);
+		return;
+	}
+
+	if (timediff < 0) {
+		if (stp_clear_leap() < 0)
+			pr_err("failed to clear leap second flags\n");
+	} else if (timediff < 7200) {
+		memset(&txc, 0, sizeof(txc));
+		ret = do_adjtimex(&txc);
+		if (ret < 0)
+			return;
+
+		txc.modes = ADJ_STATUS;
+		if (leapdiff > 0)
+			txc.status |= STA_INS;
+		else
+			txc.status |= STA_DEL;
+		ret = do_adjtimex(&txc);
+		if (ret < 0)
+			pr_err("failed to set leap second flags\n");
+		/* arm Timer to clear leap second flags */
+		mod_timer(&stp_timer, jiffies + msecs_to_jiffies(14400 * MSEC_PER_SEC));
+	} else {
+		/* The day the leap second is scheduled for hasn't been reached. Retry
+		 * in one hour.
+		 */
+		mod_timer(&stp_timer, jiffies + msecs_to_jiffies(3600 * MSEC_PER_SEC));
+	}
 }
 
 /*
@@ -571,7 +687,7 @@ static void stp_work_fn(struct work_struct *work)
 
 	if (!stp_online) {
 		chsc_sstpc(stp_page, STP_OP_CTRL, 0x0000, NULL);
-		timer_delete_sync(&stp_timer);
+		del_timer_sync(&stp_timer);
 		goto out_unlock;
 	}
 
@@ -594,10 +710,12 @@ static void stp_work_fn(struct work_struct *work)
 
 	if (!check_sync_clock())
 		/*
-		 * There is a usable clock but the synchronization failed.
+		 * There is a usable clock but the synchonization failed.
 		 * Retry after a second.
 		 */
 		mod_timer(&stp_timer, jiffies + msecs_to_jiffies(MSEC_PER_SEC));
+	else if (stp_info.lu)
+		stp_check_leap();
 
 out_unlock:
 	mutex_unlock(&stp_mutex);
@@ -606,7 +724,7 @@ out_unlock:
 /*
  * STP subsys sysfs interface functions
  */
-static const struct bus_type stp_subsys = {
+static struct bus_type stp_subsys = {
 	.name		= "stp",
 	.dev_name	= "stp",
 };
@@ -619,8 +737,8 @@ static ssize_t ctn_id_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sysfs_emit(buf, "%016lx\n",
-				 *(unsigned long *)stp_info.ctnid);
+		ret = sprintf(buf, "%016llx\n",
+			      *(unsigned long long *) stp_info.ctnid);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -635,7 +753,7 @@ static ssize_t ctn_type_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sysfs_emit(buf, "%i\n", stp_info.ctn);
+		ret = sprintf(buf, "%i\n", stp_info.ctn);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -650,7 +768,7 @@ static ssize_t dst_offset_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x2000))
-		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.dsto);
+		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.dsto);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -665,7 +783,7 @@ static ssize_t leap_seconds_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x8000))
-		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.leaps);
+		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.leaps);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -691,11 +809,11 @@ static ssize_t leap_seconds_scheduled_show(struct device *dev,
 		return ret;
 
 	if (!stzi.lsoib.p)
-		return sysfs_emit(buf, "0,0\n");
+		return sprintf(buf, "0,0\n");
 
-	return sysfs_emit(buf, "%lu,%d\n",
-			  tod_to_ns(stzi.lsoib.nlsout - TOD_UNIX_EPOCH) / NSEC_PER_SEC,
-			  stzi.lsoib.nlso - stzi.lsoib.also);
+	return sprintf(buf, "%llu,%d\n",
+		       tod_to_ns(stzi.lsoib.nlsout - TOD_UNIX_EPOCH) / NSEC_PER_SEC,
+		       stzi.lsoib.nlso - stzi.lsoib.also);
 }
 
 static DEVICE_ATTR_RO(leap_seconds_scheduled);
@@ -708,7 +826,7 @@ static ssize_t stratum_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.stratum);
+		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.stratum);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -723,7 +841,7 @@ static ssize_t time_offset_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x0800))
-		ret = sysfs_emit(buf, "%i\n", (int)stp_info.tto);
+		ret = sprintf(buf, "%i\n", (int) stp_info.tto);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -738,7 +856,7 @@ static ssize_t time_zone_offset_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x4000))
-		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.tzo);
+		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.tzo);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -753,7 +871,7 @@ static ssize_t timing_mode_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sysfs_emit(buf, "%i\n", stp_info.tmd);
+		ret = sprintf(buf, "%i\n", stp_info.tmd);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -768,7 +886,7 @@ static ssize_t timing_state_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sysfs_emit(buf, "%i\n", stp_info.tst);
+		ret = sprintf(buf, "%i\n", stp_info.tst);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -779,7 +897,7 @@ static ssize_t online_show(struct device *dev,
 				struct device_attribute *attr,
 				char *buf)
 {
-	return sysfs_emit(buf, "%i\n", stp_online);
+	return sprintf(buf, "%i\n", stp_online);
 }
 
 static ssize_t online_store(struct device *dev,
@@ -810,25 +928,41 @@ static ssize_t online_store(struct device *dev,
  */
 static DEVICE_ATTR_RW(online);
 
-static struct attribute *stp_dev_attrs[] = {
-	&dev_attr_ctn_id.attr,
-	&dev_attr_ctn_type.attr,
-	&dev_attr_dst_offset.attr,
-	&dev_attr_leap_seconds.attr,
-	&dev_attr_online.attr,
-	&dev_attr_leap_seconds_scheduled.attr,
-	&dev_attr_stratum.attr,
-	&dev_attr_time_offset.attr,
-	&dev_attr_time_zone_offset.attr,
-	&dev_attr_timing_mode.attr,
-	&dev_attr_timing_state.attr,
+static struct device_attribute *stp_attributes[] = {
+	&dev_attr_ctn_id,
+	&dev_attr_ctn_type,
+	&dev_attr_dst_offset,
+	&dev_attr_leap_seconds,
+	&dev_attr_online,
+	&dev_attr_leap_seconds_scheduled,
+	&dev_attr_stratum,
+	&dev_attr_time_offset,
+	&dev_attr_time_zone_offset,
+	&dev_attr_timing_mode,
+	&dev_attr_timing_state,
 	NULL
 };
-ATTRIBUTE_GROUPS(stp_dev);
 
 static int __init stp_init_sysfs(void)
 {
-	return subsys_system_register(&stp_subsys, stp_dev_groups);
+	struct device_attribute **attr;
+	int rc;
+
+	rc = subsys_system_register(&stp_subsys, NULL);
+	if (rc)
+		goto out;
+	for (attr = stp_attributes; *attr; attr++) {
+		rc = device_create_file(stp_subsys.dev_root, *attr);
+		if (rc)
+			goto out_unreg;
+	}
+	return 0;
+out_unreg:
+	for (; attr >= stp_attributes; attr--)
+		device_remove_file(stp_subsys.dev_root, *attr);
+	bus_unregister(&stp_subsys);
+out:
+	return rc;
 }
 
 device_initcall(stp_init_sysfs);

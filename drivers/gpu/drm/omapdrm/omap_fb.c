@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2011 Texas Instruments Incorporated - https://www.ti.com/
+ * Copyright (C) 2011 Texas Instruments Incorporated - http://www.ti.com/
  * Author: Rob Clark <rob@ti.com>
  */
 
 #include <linux/dma-mapping.h>
-#include <linux/seq_file.h>
 
-#include <drm/drm_blend.h>
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 
 #include "omap_dmm_tiler.h"
@@ -134,9 +131,7 @@ static u32 drm_rotation_to_tiler(unsigned int drm_rot)
 /* update ovl info for scanout, handles cases of multi-planar fb's, etc.
  */
 void omap_framebuffer_update_scanout(struct drm_framebuffer *fb,
-		struct drm_plane_state *state,
-		struct omap_overlay_info *info,
-		struct omap_overlay_info *r_info)
+		struct drm_plane_state *state, struct omap_overlay_info *info)
 {
 	struct omap_framebuffer *omap_fb = to_omap_framebuffer(fb);
 	const struct drm_format_info *format = omap_fb->format;
@@ -223,35 +218,6 @@ void omap_framebuffer_update_scanout(struct drm_framebuffer *fb,
 	} else {
 		info->p_uv_addr = 0;
 	}
-
-	if (r_info) {
-		info->width /= 2;
-		info->out_width /= 2;
-
-		*r_info = *info;
-
-		if (fb->format->is_yuv) {
-			if (info->width & 1) {
-				info->width++;
-				r_info->width--;
-			}
-
-			if (info->out_width & 1) {
-				info->out_width++;
-				r_info->out_width--;
-			}
-		}
-
-		r_info->pos_x = info->pos_x + info->out_width;
-
-		r_info->paddr =	get_linear_addr(fb, format, 0,
-						x + info->width, y);
-		if (fb->format->format == DRM_FORMAT_NV12) {
-			r_info->p_uv_addr =
-				get_linear_addr(fb, format, 1,
-						x + info->width, y);
-		}
-	}
 }
 
 /* pin, prepare for scanout: */
@@ -335,9 +301,10 @@ void omap_framebuffer_describe(struct drm_framebuffer *fb, struct seq_file *m)
 #endif
 
 struct drm_framebuffer *omap_framebuffer_create(struct drm_device *dev,
-		struct drm_file *file, const struct drm_format_info *info,
-		const struct drm_mode_fb_cmd2 *mode_cmd)
+		struct drm_file *file, const struct drm_mode_fb_cmd2 *mode_cmd)
 {
+	const struct drm_format_info *info = drm_get_format_info(dev,
+								 mode_cmd);
 	unsigned int num_planes = info->num_planes;
 	struct drm_gem_object *bos[4];
 	struct drm_framebuffer *fb;
@@ -351,7 +318,7 @@ struct drm_framebuffer *omap_framebuffer_create(struct drm_device *dev,
 		}
 	}
 
-	fb = omap_framebuffer_init(dev, info, mode_cmd, bos);
+	fb = omap_framebuffer_init(dev, mode_cmd, bos);
 	if (IS_ERR(fb))
 		goto error;
 
@@ -365,9 +332,9 @@ error:
 }
 
 struct drm_framebuffer *omap_framebuffer_init(struct drm_device *dev,
-		const struct drm_format_info *info,
 		const struct drm_mode_fb_cmd2 *mode_cmd, struct drm_gem_object **bos)
 {
+	const struct drm_format_info *format = NULL;
 	struct omap_framebuffer *omap_fb = NULL;
 	struct drm_framebuffer *fb = NULL;
 	unsigned int pitch = mode_cmd->pitches[0];
@@ -377,12 +344,14 @@ struct drm_framebuffer *omap_framebuffer_init(struct drm_device *dev,
 			dev, mode_cmd, mode_cmd->width, mode_cmd->height,
 			(char *)&mode_cmd->pixel_format);
 
+	format = drm_get_format_info(dev, mode_cmd);
+
 	for (i = 0; i < ARRAY_SIZE(formats); i++) {
 		if (formats[i] == mode_cmd->pixel_format)
 			break;
 	}
 
-	if (i == ARRAY_SIZE(formats)) {
+	if (!format || i == ARRAY_SIZE(formats)) {
 		dev_dbg(dev->dev, "unsupported pixel format: %4.4s\n",
 			(char *)&mode_cmd->pixel_format);
 		ret = -EINVAL;
@@ -396,7 +365,7 @@ struct drm_framebuffer *omap_framebuffer_init(struct drm_device *dev,
 	}
 
 	fb = &omap_fb->base;
-	omap_fb->format = info;
+	omap_fb->format = format;
 	mutex_init(&omap_fb->lock);
 
 	/*
@@ -404,23 +373,23 @@ struct drm_framebuffer *omap_framebuffer_init(struct drm_device *dev,
 	 * that the two planes of multiplane formats need the same number of
 	 * bytes per pixel.
 	 */
-	if (info->num_planes == 2 && pitch != mode_cmd->pitches[1]) {
+	if (format->num_planes == 2 && pitch != mode_cmd->pitches[1]) {
 		dev_dbg(dev->dev, "pitches differ between planes 0 and 1\n");
 		ret = -EINVAL;
 		goto fail;
 	}
 
-	if (pitch % info->cpp[0]) {
+	if (pitch % format->cpp[0]) {
 		dev_dbg(dev->dev,
 			"buffer pitch (%u bytes) is not a multiple of pixel size (%u bytes)\n",
-			pitch, info->cpp[0]);
+			pitch, format->cpp[0]);
 		ret = -EINVAL;
 		goto fail;
 	}
 
-	for (i = 0; i < info->num_planes; i++) {
+	for (i = 0; i < format->num_planes; i++) {
 		struct plane *plane = &omap_fb->planes[i];
-		unsigned int vsub = i == 0 ? 1 : info->vsub;
+		unsigned int vsub = i == 0 ? 1 : format->vsub;
 		unsigned int size;
 
 		size = pitch * mode_cmd->height / vsub;
@@ -437,7 +406,7 @@ struct drm_framebuffer *omap_framebuffer_init(struct drm_device *dev,
 		plane->dma_addr  = 0;
 	}
 
-	drm_helper_mode_fill_fb_struct(dev, fb, info, mode_cmd);
+	drm_helper_mode_fill_fb_struct(dev, fb, mode_cmd);
 
 	ret = drm_framebuffer_init(dev, fb, &omap_framebuffer_funcs);
 	if (ret) {

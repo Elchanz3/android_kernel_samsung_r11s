@@ -39,7 +39,7 @@ static DEFINE_PER_CPU(struct kprobe, saved_next_opcode2);
 
 int __kprobes arch_prepare_kprobe(struct kprobe *p)
 {
-	kprobe_opcode_t opcode = *p->addr;
+	kprobe_opcode_t opcode = *(kprobe_opcode_t *) (p->addr);
 
 	if (OPCODE_RTE(opcode))
 		return -EFAULT;	/* Bad breakpoint */
@@ -202,7 +202,7 @@ void __kprobes arch_prepare_kretprobe(struct kretprobe_instance *ri,
 	ri->fp = NULL;
 
 	/* Replace the return addr with trampoline addr */
-	regs->pr = (unsigned long)__kretprobe_trampoline;
+	regs->pr = (unsigned long)kretprobe_trampoline;
 }
 
 static int __kprobes kprobe_handler(struct pt_regs *regs)
@@ -248,7 +248,7 @@ static int __kprobes kprobe_handler(struct pt_regs *regs)
 	p = get_kprobe(addr);
 	if (!p) {
 		/* Not one of ours: let kernel handle it */
-		if (*addr != BREAKPOINT_INSTRUCTION) {
+		if (*(kprobe_opcode_t *)addr != BREAKPOINT_INSTRUCTION) {
 			/*
 			 * The breakpoint instruction was removed right
 			 * after we hit it. Another cpu has removed
@@ -288,17 +288,17 @@ no_kprobe:
  */
 static void __used kretprobe_trampoline_holder(void)
 {
-	asm volatile (".globl __kretprobe_trampoline\n"
-		      "__kretprobe_trampoline:\n\t"
+	asm volatile (".globl kretprobe_trampoline\n"
+		      "kretprobe_trampoline:\n\t"
 		      "nop\n");
 }
 
 /*
- * Called when we hit the probe point at __kretprobe_trampoline
+ * Called when we hit the probe point at kretprobe_trampoline
  */
-static int __kprobes trampoline_probe_handler(struct kprobe *p, struct pt_regs *regs)
+int __kprobes trampoline_probe_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	regs->pc = __kretprobe_trampoline_handler(regs, NULL);
+	regs->pc = __kretprobe_trampoline_handler(regs, &kretprobe_trampoline, NULL);
 
 	return 1;
 }
@@ -378,6 +378,23 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 	case KPROBE_HIT_ACTIVE:
 	case KPROBE_HIT_SSDONE:
 		/*
+		 * We increment the nmissed count for accounting,
+		 * we can also use npre/npostfault count for accounting
+		 * these specific fault cases.
+		 */
+		kprobes_inc_nmissed_count(cur);
+
+		/*
+		 * We come here because instructions in the pre/post
+		 * handler caused the page_fault, this could happen
+		 * if handler tries to access user space by
+		 * copy_from_user(), get_user() etc. Let the
+		 * user-specified handler try to fix it first.
+		 */
+		if (cur->fault_handler && cur->fault_handler(cur, regs, trapnr))
+			return 1;
+
+		/*
 		 * In case the user-specified fault handler returned
 		 * zero, try to fix up.
 		 */
@@ -404,10 +421,13 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 int __kprobes kprobe_exceptions_notify(struct notifier_block *self,
 				       unsigned long val, void *data)
 {
+	struct kprobe *p = NULL;
 	struct die_args *args = (struct die_args *)data;
 	int ret = NOTIFY_DONE;
+	kprobe_opcode_t *addr = NULL;
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 
+	addr = (kprobe_opcode_t *) (args->regs->pc);
 	if (val == DIE_TRAP &&
 	    args->trapnr == (BREAKPOINT_INSTRUCTION & 0xff)) {
 		if (!kprobe_running()) {
@@ -418,6 +438,7 @@ int __kprobes kprobe_exceptions_notify(struct notifier_block *self,
 				ret = NOTIFY_DONE;
 			}
 		} else {
+			p = get_kprobe(addr);
 			if ((kcb->kprobe_status == KPROBE_HIT_SS) ||
 			    (kcb->kprobe_status == KPROBE_REENTER)) {
 				if (post_kprobe_handler(args->regs))
@@ -433,7 +454,7 @@ int __kprobes kprobe_exceptions_notify(struct notifier_block *self,
 }
 
 static struct kprobe trampoline_p = {
-	.addr = (kprobe_opcode_t *)&__kretprobe_trampoline,
+	.addr = (kprobe_opcode_t *)&kretprobe_trampoline,
 	.pre_handler = trampoline_probe_handler
 };
 

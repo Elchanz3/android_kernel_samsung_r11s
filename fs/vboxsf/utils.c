@@ -9,7 +9,6 @@
 #include <linux/namei.h>
 #include <linux/nls.h>
 #include <linux/sizes.h>
-#include <linux/pagemap.h>
 #include <linux/vfs.h>
 #include "vfsmod.h"
 
@@ -46,12 +45,12 @@ struct inode *vboxsf_new_inode(struct super_block *sb)
 }
 
 /* set [inode] attributes based on [info], uid/gid based on [sbi] */
-int vboxsf_init_inode(struct vboxsf_sbi *sbi, struct inode *inode,
-		       const struct shfl_fsobjinfo *info, bool reinit)
+void vboxsf_init_inode(struct vboxsf_sbi *sbi, struct inode *inode,
+		       const struct shfl_fsobjinfo *info)
 {
 	const struct shfl_fsobjattr *attr;
 	s64 allocated;
-	umode_t mode;
+	int mode;
 
 	attr = &info->attr;
 
@@ -76,44 +75,29 @@ int vboxsf_init_inode(struct vboxsf_sbi *sbi, struct inode *inode,
 	inode->i_mapping->a_ops = &vboxsf_reg_aops;
 
 	if (SHFL_IS_DIRECTORY(attr->mode)) {
-		if (sbi->o.dmode_set)
-			mode = sbi->o.dmode;
-		mode &= ~sbi->o.dmask;
-		mode |= S_IFDIR;
-		if (!reinit) {
-			inode->i_op = &vboxsf_dir_iops;
-			inode->i_fop = &vboxsf_dir_fops;
-			/*
-			 * XXX: this probably should be set to the number of entries
-			 * in the directory plus two (. ..)
-			 */
-			set_nlink(inode, 1);
-		} else if (!S_ISDIR(inode->i_mode))
-			return -ESTALE;
-		inode->i_mode = mode;
+		inode->i_mode = sbi->o.dmode_set ? sbi->o.dmode : mode;
+		inode->i_mode &= ~sbi->o.dmask;
+		inode->i_mode |= S_IFDIR;
+		inode->i_op = &vboxsf_dir_iops;
+		inode->i_fop = &vboxsf_dir_fops;
+		/*
+		 * XXX: this probably should be set to the number of entries
+		 * in the directory plus two (. ..)
+		 */
+		set_nlink(inode, 1);
 	} else if (SHFL_IS_SYMLINK(attr->mode)) {
-		if (sbi->o.fmode_set)
-			mode = sbi->o.fmode;
-		mode &= ~sbi->o.fmask;
-		mode |= S_IFLNK;
-		if (!reinit) {
-			inode->i_op = &vboxsf_lnk_iops;
-			set_nlink(inode, 1);
-		} else if (!S_ISLNK(inode->i_mode))
-			return -ESTALE;
-		inode->i_mode = mode;
+		inode->i_mode = sbi->o.fmode_set ? sbi->o.fmode : mode;
+		inode->i_mode &= ~sbi->o.fmask;
+		inode->i_mode |= S_IFLNK;
+		inode->i_op = &vboxsf_lnk_iops;
+		set_nlink(inode, 1);
 	} else {
-		if (sbi->o.fmode_set)
-			mode = sbi->o.fmode;
-		mode &= ~sbi->o.fmask;
-		mode |= S_IFREG;
-		if (!reinit) {
-			inode->i_op = &vboxsf_reg_iops;
-			inode->i_fop = &vboxsf_reg_fops;
-			set_nlink(inode, 1);
-		} else if (!S_ISREG(inode->i_mode))
-			return -ESTALE;
-		inode->i_mode = mode;
+		inode->i_mode = sbi->o.fmode_set ? sbi->o.fmode : mode;
+		inode->i_mode &= ~sbi->o.fmask;
+		inode->i_mode |= S_IFREG;
+		inode->i_op = &vboxsf_reg_iops;
+		inode->i_fop = &vboxsf_reg_fops;
+		set_nlink(inode, 1);
 	}
 
 	inode->i_uid = sbi->o.uid;
@@ -126,13 +110,12 @@ int vboxsf_init_inode(struct vboxsf_sbi *sbi, struct inode *inode,
 	do_div(allocated, 512);
 	inode->i_blocks = allocated;
 
-	inode_set_atime_to_ts(inode,
-			      ns_to_timespec64(info->access_time.ns_relative_to_unix_epoch));
-	inode_set_ctime_to_ts(inode,
-			      ns_to_timespec64(info->change_time.ns_relative_to_unix_epoch));
-	inode_set_mtime_to_ts(inode,
-			      ns_to_timespec64(info->modification_time.ns_relative_to_unix_epoch));
-	return 0;
+	inode->i_atime = ns_to_timespec64(
+				 info->access_time.ns_relative_to_unix_epoch);
+	inode->i_ctime = ns_to_timespec64(
+				 info->change_time.ns_relative_to_unix_epoch);
+	inode->i_mtime = ns_to_timespec64(
+			   info->modification_time.ns_relative_to_unix_epoch);
 }
 
 int vboxsf_create_at_dentry(struct dentry *dentry,
@@ -194,7 +177,7 @@ int vboxsf_inode_revalidate(struct dentry *dentry)
 	struct vboxsf_sbi *sbi;
 	struct vboxsf_inode *sf_i;
 	struct shfl_fsobjinfo info;
-	struct timespec64 mtime, prev_mtime;
+	struct timespec64 prev_mtime;
 	struct inode *inode;
 	int err;
 
@@ -202,7 +185,7 @@ int vboxsf_inode_revalidate(struct dentry *dentry)
 		return -EINVAL;
 
 	inode = d_inode(dentry);
-	prev_mtime = inode_get_mtime(inode);
+	prev_mtime = inode->i_mtime;
 	sf_i = VBOXSF_I(inode);
 	sbi = VBOXSF_SBI(dentry->d_sb);
 	if (!sf_i->force_restat) {
@@ -216,24 +199,21 @@ int vboxsf_inode_revalidate(struct dentry *dentry)
 
 	dentry->d_time = jiffies;
 	sf_i->force_restat = 0;
-	err = vboxsf_init_inode(sbi, inode, &info, true);
-	if (err)
-		return err;
+	vboxsf_init_inode(sbi, inode, &info);
 
 	/*
 	 * If the file was changed on the host side we need to invalidate the
 	 * page-cache for it.  Note this also gets triggered by our own writes,
 	 * this is unavoidable.
 	 */
-	mtime = inode_get_mtime(inode);
-	if (timespec64_compare(&mtime, &prev_mtime) > 0)
+	if (timespec64_compare(&inode->i_mtime, &prev_mtime) > 0)
 		invalidate_inode_pages2(inode->i_mapping);
 
 	return 0;
 }
 
-int vboxsf_getattr(struct mnt_idmap *idmap, const struct path *path,
-		   struct kstat *kstat, u32 request_mask, unsigned int flags)
+int vboxsf_getattr(const struct path *path, struct kstat *kstat,
+		   u32 request_mask, unsigned int flags)
 {
 	int err;
 	struct dentry *dentry = path->dentry;
@@ -253,12 +233,11 @@ int vboxsf_getattr(struct mnt_idmap *idmap, const struct path *path,
 	if (err)
 		return err;
 
-	generic_fillattr(&nop_mnt_idmap, request_mask, d_inode(dentry), kstat);
+	generic_fillattr(d_inode(dentry), kstat);
 	return 0;
 }
 
-int vboxsf_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
-		   struct iattr *iattr)
+int vboxsf_setattr(struct dentry *dentry, struct iattr *iattr)
 {
 	struct vboxsf_inode *sf_i = VBOXSF_I(d_inode(dentry));
 	struct vboxsf_sbi *sbi = VBOXSF_SBI(dentry->d_sb);
@@ -440,6 +419,7 @@ int vboxsf_nlscpy(struct vboxsf_sbi *sbi, char *name, size_t name_bound_len,
 {
 	const char *in;
 	char *out;
+	size_t out_len;
 	size_t out_bound_len;
 	size_t in_bound_len;
 
@@ -447,6 +427,7 @@ int vboxsf_nlscpy(struct vboxsf_sbi *sbi, char *name, size_t name_bound_len,
 	in_bound_len = utf8_len;
 
 	out = name;
+	out_len = 0;
 	/* Reserve space for terminating 0 */
 	out_bound_len = name_bound_len - 1;
 
@@ -467,6 +448,7 @@ int vboxsf_nlscpy(struct vboxsf_sbi *sbi, char *name, size_t name_bound_len,
 
 		out += nb;
 		out_bound_len -= nb;
+		out_len += nb;
 	}
 
 	*out = 0;

@@ -16,7 +16,6 @@
 #include <linux/syscore_ops.h>
 #include <linux/pm.h>
 
-#include <asm/cpu_device_id.h>
 #include <asm/cpufeature.h>
 #include <asm/msr.h>
 
@@ -59,27 +58,11 @@ static DEFINE_PER_CPU(u8, saved_epb);
 #define EPB_SAVED	0x10ULL
 #define MAX_EPB		EPB_MASK
 
-enum energy_perf_value_index {
-	EPB_INDEX_PERFORMANCE,
-	EPB_INDEX_BALANCE_PERFORMANCE,
-	EPB_INDEX_NORMAL,
-	EPB_INDEX_BALANCE_POWERSAVE,
-	EPB_INDEX_POWERSAVE,
-};
-
-static u8 energ_perf_values[] = {
-	[EPB_INDEX_PERFORMANCE] = ENERGY_PERF_BIAS_PERFORMANCE,
-	[EPB_INDEX_BALANCE_PERFORMANCE] = ENERGY_PERF_BIAS_BALANCE_PERFORMANCE,
-	[EPB_INDEX_NORMAL] = ENERGY_PERF_BIAS_NORMAL,
-	[EPB_INDEX_BALANCE_POWERSAVE] = ENERGY_PERF_BIAS_BALANCE_POWERSAVE,
-	[EPB_INDEX_POWERSAVE] = ENERGY_PERF_BIAS_POWERSAVE,
-};
-
 static int intel_epb_save(void)
 {
 	u64 epb;
 
-	rdmsrq(MSR_IA32_ENERGY_PERF_BIAS, epb);
+	rdmsrl(MSR_IA32_ENERGY_PERF_BIAS, epb);
 	/*
 	 * Ensure that saved_epb will always be nonzero after this write even if
 	 * the EPB value read from the MSR is 0.
@@ -94,7 +77,7 @@ static void intel_epb_restore(void)
 	u64 val = this_cpu_read(saved_epb);
 	u64 epb;
 
-	rdmsrq(MSR_IA32_ENERGY_PERF_BIAS, epb);
+	rdmsrl(MSR_IA32_ENERGY_PERF_BIAS, epb);
 	if (val) {
 		val &= EPB_MASK;
 	} else {
@@ -107,11 +90,11 @@ static void intel_epb_restore(void)
 		 */
 		val = epb & EPB_MASK;
 		if (val == ENERGY_PERF_BIAS_PERFORMANCE) {
-			val = energ_perf_values[EPB_INDEX_NORMAL];
+			val = ENERGY_PERF_BIAS_NORMAL;
 			pr_warn_once("ENERGY_PERF_BIAS: Set to 'normal', was 'performance'\n");
 		}
 	}
-	wrmsrq(MSR_IA32_ENERGY_PERF_BIAS, (epb & ~EPB_MASK) | val);
+	wrmsrl(MSR_IA32_ENERGY_PERF_BIAS, (epb & ~EPB_MASK) | val);
 }
 
 static struct syscore_ops intel_epb_syscore_ops = {
@@ -120,11 +103,18 @@ static struct syscore_ops intel_epb_syscore_ops = {
 };
 
 static const char * const energy_perf_strings[] = {
-	[EPB_INDEX_PERFORMANCE] = "performance",
-	[EPB_INDEX_BALANCE_PERFORMANCE] = "balance-performance",
-	[EPB_INDEX_NORMAL] = "normal",
-	[EPB_INDEX_BALANCE_POWERSAVE] = "balance-power",
-	[EPB_INDEX_POWERSAVE] = "power",
+	"performance",
+	"balance-performance",
+	"normal",
+	"balance-power",
+	"power"
+};
+static const u8 energ_perf_values[] = {
+	ENERGY_PERF_BIAS_PERFORMANCE,
+	ENERGY_PERF_BIAS_BALANCE_PERFORMANCE,
+	ENERGY_PERF_BIAS_NORMAL,
+	ENERGY_PERF_BIAS_BALANCE_POWERSAVE,
+	ENERGY_PERF_BIAS_POWERSAVE
 };
 
 static ssize_t energy_perf_bias_show(struct device *dev,
@@ -135,7 +125,7 @@ static ssize_t energy_perf_bias_show(struct device *dev,
 	u64 epb;
 	int ret;
 
-	ret = rdmsrq_on_cpu(cpu, MSR_IA32_ENERGY_PERF_BIAS, &epb);
+	ret = rdmsrl_on_cpu(cpu, MSR_IA32_ENERGY_PERF_BIAS, &epb);
 	if (ret < 0)
 		return ret;
 
@@ -157,11 +147,11 @@ static ssize_t energy_perf_bias_store(struct device *dev,
 	else if (kstrtou64(buf, 0, &val) || val > MAX_EPB)
 		return -EINVAL;
 
-	ret = rdmsrq_on_cpu(cpu, MSR_IA32_ENERGY_PERF_BIAS, &epb);
+	ret = rdmsrl_on_cpu(cpu, MSR_IA32_ENERGY_PERF_BIAS, &epb);
 	if (ret < 0)
 		return ret;
 
-	ret = wrmsrq_on_cpu(cpu, MSR_IA32_ENERGY_PERF_BIAS,
+	ret = wrmsrl_on_cpu(cpu, MSR_IA32_ENERGY_PERF_BIAS,
 			    (epb & ~EPB_MASK) | val);
 	if (ret < 0)
 		return ret;
@@ -203,26 +193,12 @@ static int intel_epb_offline(unsigned int cpu)
 	return 0;
 }
 
-static const struct x86_cpu_id intel_epb_normal[] = {
-	X86_MATCH_VFM(INTEL_ALDERLAKE_L,
-		      ENERGY_PERF_BIAS_NORMAL_POWERSAVE),
-	X86_MATCH_VFM(INTEL_ATOM_GRACEMONT,
-		      ENERGY_PERF_BIAS_NORMAL_POWERSAVE),
-	X86_MATCH_VFM(INTEL_RAPTORLAKE_P,
-		      ENERGY_PERF_BIAS_NORMAL_POWERSAVE),
-	{}
-};
-
 static __init int intel_epb_init(void)
 {
-	const struct x86_cpu_id *id = x86_match_cpu(intel_epb_normal);
 	int ret;
 
 	if (!boot_cpu_has(X86_FEATURE_EPB))
 		return -ENODEV;
-
-	if (id)
-		energ_perf_values[EPB_INDEX_NORMAL] = id->driver_data;
 
 	ret = cpuhp_setup_state(CPUHP_AP_X86_INTEL_EPB_ONLINE,
 				"x86/intel/epb:online", intel_epb_online,
@@ -237,4 +213,4 @@ err_out_online:
 	cpuhp_remove_state(CPUHP_AP_X86_INTEL_EPB_ONLINE);
 	return ret;
 }
-late_initcall(intel_epb_init);
+subsys_initcall(intel_epb_init);

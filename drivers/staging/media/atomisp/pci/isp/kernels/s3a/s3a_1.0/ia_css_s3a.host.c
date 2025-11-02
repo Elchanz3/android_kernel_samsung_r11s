@@ -2,6 +2,15 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
  */
 
 #include "ia_css_types.h"
@@ -218,6 +227,10 @@ ia_css_s3a_hmem_decode(
     struct ia_css_3a_statistics *host_stats,
     const struct ia_css_bh_table *hmem_buf)
 {
+#if defined(HAS_NO_HMEM)
+	(void)host_stats;
+	(void)hmem_buf;
+#else
 	struct ia_css_3a_rgby_output	*out_ptr;
 	int			i;
 
@@ -278,6 +291,7 @@ ia_css_s3a_hmem_decode(
 	out_ptr[0].g -= diff;
 	out_ptr[0].b -= diff;
 	out_ptr[0].y -= diff;
+#endif
 }
 
 void

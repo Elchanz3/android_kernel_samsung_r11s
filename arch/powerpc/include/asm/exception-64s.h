@@ -35,25 +35,12 @@
 /* PACA save area size in u64 units (exgen, exmc, etc) */
 #define EX_SIZE		10
 
-/* PACA save area offsets */
-#define EX_R9		0
-#define EX_R10		8
-#define EX_R11		16
-#define EX_R12		24
-#define EX_R13		32
-#define EX_DAR		40
-#define EX_DSISR	48
-#define EX_CCR		52
-#define EX_CFAR		56
-#define EX_PPR		64
-#define EX_CTR		72
-
 /*
  * maximum recursive depth of MCE exceptions
  */
 #define MAX_MCE_DEPTH	4
 
-#ifdef __ASSEMBLER__
+#ifdef __ASSEMBLY__
 
 #define STF_ENTRY_BARRIER_SLOT						\
 	STF_ENTRY_BARRIER_FIXUP_SECTION;				\
@@ -170,9 +157,9 @@
 	RFSCV;								\
 	b	rfscv_flush_fallback
 
-#else /* __ASSEMBLER__ */
+#else /* __ASSEMBLY__ */
 /* Prototype for function defined in exceptions-64s.S */
 void do_uaccess_flush(void);
-#endif /* __ASSEMBLER__ */
+#endif /* __ASSEMBLY__ */
 
 #endif	/* _ASM_POWERPC_EXCEPTION_H */

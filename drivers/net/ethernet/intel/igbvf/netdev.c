@@ -3,25 +3,25 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/bitfield.h>
-#include <linux/delay.h>
-#include <linux/ethtool.h>
-#include <linux/if_vlan.h>
-#include <linux/init.h>
-#include <linux/ipv6.h>
-#include <linux/mii.h>
 #include <linux/module.h>
-#include <linux/netdevice.h>
-#include <linux/pagemap.h>
-#include <linux/pci.h>
-#include <linux/prefetch.h>
-#include <linux/sctp.h>
-#include <linux/slab.h>
-#include <linux/tcp.h>
 #include <linux/types.h>
+#include <linux/init.h>
+#include <linux/pci.h>
 #include <linux/vmalloc.h>
+#include <linux/pagemap.h>
+#include <linux/delay.h>
+#include <linux/netdevice.h>
+#include <linux/tcp.h>
+#include <linux/ipv6.h>
+#include <linux/slab.h>
 #include <net/checksum.h>
 #include <net/ip6_checksum.h>
+#include <linux/mii.h>
+#include <linux/ethtool.h>
+#include <linux/if_vlan.h>
+#include <linux/prefetch.h>
+#include <linux/sctp.h>
+
 #include "igbvf.h"
 
 char igbvf_driver_name[] = "igbvf";
@@ -273,8 +273,9 @@ static bool igbvf_clean_rx_irq(struct igbvf_adapter *adapter,
 		 * that case, it fills the header buffer and spills the rest
 		 * into the page.
 		 */
-		hlen = le16_get_bits(rx_desc->wb.lower.lo_dword.hs_rss.hdr_info,
-				     E1000_RXDADV_HDRBUFLEN_MASK);
+		hlen = (le16_to_cpu(rx_desc->wb.lower.lo_dword.hs_rss.hdr_info)
+		       & E1000_RXDADV_HDRBUFLEN_MASK) >>
+		       E1000_RXDADV_HDRBUFLEN_SHIFT;
 		if (hlen > adapter->rx_ps_hdr_size)
 			hlen = adapter->rx_ps_hdr_size;
 
@@ -855,6 +856,8 @@ static irqreturn_t igbvf_msix_other(int irq, void *data)
 	struct igbvf_adapter *adapter = netdev_priv(netdev);
 	struct e1000_hw *hw = &adapter->hw;
 
+	adapter->int_counter1++;
+
 	hw->mac.get_link_status = 1;
 	if (!test_bit(__IGBVF_DOWN, &adapter->state))
 		mod_timer(&adapter->watchdog_timer, jiffies + 1);
@@ -896,6 +899,8 @@ static irqreturn_t igbvf_intr_msix_rx(int irq, void *data)
 {
 	struct net_device *netdev = data;
 	struct igbvf_adapter *adapter = netdev_priv(netdev);
+
+	adapter->int_counter0++;
 
 	/* Write the ITR value calculated at the end of the
 	 * previous interrupt.
@@ -1108,7 +1113,7 @@ static int igbvf_alloc_queues(struct igbvf_adapter *adapter)
 		return -ENOMEM;
 	}
 
-	netif_napi_add(netdev, &adapter->rx_ring->napi, igbvf_poll);
+	netif_napi_add(netdev, &adapter->rx_ring->napi, igbvf_poll, 64);
 
 	return 0;
 }
@@ -1235,7 +1240,7 @@ static int igbvf_vlan_rx_add_vid(struct net_device *netdev,
 	spin_lock_bh(&hw->mbx_lock);
 
 	if (hw->mac.ops.set_vfta(hw, vid, true)) {
-		dev_warn(&adapter->pdev->dev, "Vlan id %d\n is not added", vid);
+		dev_err(&adapter->pdev->dev, "Failed to add vlan id %d\n", vid);
 		spin_unlock_bh(&hw->mbx_lock);
 		return -EINVAL;
 	}
@@ -1519,14 +1524,15 @@ static void igbvf_reset(struct igbvf_adapter *adapter)
 
 	/* Allow time for pending master requests to run */
 	if (mac->ops.reset_hw(hw))
-		dev_info(&adapter->pdev->dev, "PF still resetting\n");
+		dev_err(&adapter->pdev->dev, "PF still resetting\n");
 
 	mac->ops.init_hw(hw);
 
 	spin_unlock_bh(&hw->mbx_lock);
 
 	if (is_valid_ether_addr(adapter->hw.mac.addr)) {
-		eth_hw_addr_set(netdev, adapter->hw.mac.addr);
+		memcpy(netdev->dev_addr, adapter->hw.mac.addr,
+		       netdev->addr_len);
 		memcpy(netdev->perm_addr, adapter->hw.mac.addr,
 		       netdev->addr_len);
 	}
@@ -1588,7 +1594,7 @@ void igbvf_down(struct igbvf_adapter *adapter)
 
 	igbvf_irq_disable(adapter);
 
-	timer_delete_sync(&adapter->watchdog_timer);
+	del_timer_sync(&adapter->watchdog_timer);
 
 	/* record the stats before reset*/
 	igbvf_update_stats(adapter);
@@ -1629,6 +1635,10 @@ static int igbvf_sw_init(struct igbvf_adapter *adapter)
 	adapter->max_frame_size = netdev->mtu + ETH_HLEN + ETH_FCS_LEN;
 	adapter->min_frame_size = ETH_ZLEN + ETH_FCS_LEN;
 
+	adapter->tx_int_delay = 8;
+	adapter->tx_abs_int_delay = 32;
+	adapter->rx_int_delay = 0;
+	adapter->rx_abs_int_delay = 8;
 	adapter->requested_itr = 3;
 	adapter->current_itr = IGBVF_START_ITR;
 
@@ -1648,9 +1658,12 @@ static int igbvf_sw_init(struct igbvf_adapter *adapter)
 	if (igbvf_alloc_queues(adapter))
 		return -ENOMEM;
 
+	spin_lock_init(&adapter->tx_queue_lock);
+
 	/* Explicitly disable IRQ since the NIC can be in any state. */
 	igbvf_irq_disable(adapter);
 
+	spin_lock_init(&adapter->stats_lock);
 	spin_lock_init(&adapter->hw.mbx_lock);
 
 	set_bit(__IGBVF_DOWN, &adapter->state);
@@ -1804,7 +1817,7 @@ static int igbvf_set_mac(struct net_device *netdev, void *p)
 	if (!ether_addr_equal(addr->sa_data, hw->mac.addr))
 		return -EADDRNOTAVAIL;
 
-	eth_hw_addr_set(netdev, addr->sa_data);
+	memcpy(netdev->dev_addr, addr->sa_data, netdev->addr_len);
 
 	return 0;
 }
@@ -1892,8 +1905,7 @@ static bool igbvf_has_link(struct igbvf_adapter *adapter)
  **/
 static void igbvf_watchdog(struct timer_list *t)
 {
-	struct igbvf_adapter *adapter = timer_container_of(adapter, t,
-							   watchdog_timer);
+	struct igbvf_adapter *adapter = from_timer(adapter, t, watchdog_timer);
 
 	/* Do the rest outside of interrupt context */
 	schedule_work(&adapter->watchdog_task);
@@ -2048,7 +2060,7 @@ static int igbvf_tso(struct igbvf_ring *tx_ring,
 
 	/* remove payload length from inner checksum */
 	paylen = skb->len - l4_offset;
-	csum_replace_by_diff(&l4.tcp->check, (__force __wsum)htonl(paylen));
+	csum_replace_by_diff(&l4.tcp->check, htonl(paylen));
 
 	/* MSS L4LEN IDX */
 	mss_l4len_idx = (*hdr_len - l4_offset) << E1000_ADVTXD_L4LEN_SHIFT;
@@ -2062,6 +2074,15 @@ static int igbvf_tso(struct igbvf_ring *tx_ring,
 	igbvf_tx_ctxtdesc(tx_ring, vlan_macip_lens, type_tucmd, mss_l4len_idx);
 
 	return 1;
+}
+
+static inline bool igbvf_ipv6_csum_is_sctp(struct sk_buff *skb)
+{
+	unsigned int offset = 0;
+
+	ipv6_find_hdr(skb, &offset, IPPROTO_SCTP, NULL, NULL);
+
+	return offset == skb_checksum_start_offset(skb);
 }
 
 static bool igbvf_tx_csum(struct igbvf_ring *tx_ring, struct sk_buff *skb,
@@ -2085,7 +2106,10 @@ csum_failed:
 		break;
 	case offsetof(struct sctphdr, checksum):
 		/* validate that this is actually an SCTP request */
-		if (skb_csum_is_sctp(skb)) {
+		if (((protocol == htons(ETH_P_IP)) &&
+		     (ip_hdr(skb)->protocol == IPPROTO_SCTP)) ||
+		    ((protocol == htons(ETH_P_IPV6)) &&
+		     igbvf_ipv6_csum_is_sctp(skb))) {
 			type_tucmd = E1000_ADVTXD_TUCMD_L4T_SCTP;
 			break;
 		}
@@ -2424,7 +2448,7 @@ static int igbvf_change_mtu(struct net_device *netdev, int new_mtu)
 
 	netdev_dbg(netdev, "changing MTU from %d to %d\n",
 		   netdev->mtu, new_mtu);
-	WRITE_ONCE(netdev->mtu, new_mtu);
+	netdev->mtu = new_mtu;
 
 	if (netif_running(netdev))
 		igbvf_up(adapter);
@@ -2460,7 +2484,7 @@ static int igbvf_suspend(struct device *dev_d)
 	return 0;
 }
 
-static int igbvf_resume(struct device *dev_d)
+static int __maybe_unused igbvf_resume(struct device *dev_d)
 {
 	struct pci_dev *pdev = to_pci_dev(dev_d);
 	struct net_device *netdev = pci_get_drvdata(pdev);
@@ -2530,7 +2554,7 @@ static pci_ers_result_t igbvf_io_error_detected(struct pci_dev *pdev,
 		igbvf_down(adapter);
 	pci_disable_device(pdev);
 
-	/* Request a slot reset. */
+	/* Request a slot slot reset. */
 	return PCI_ERS_RESULT_NEED_RESET;
 }
 
@@ -2582,33 +2606,6 @@ static void igbvf_io_resume(struct pci_dev *pdev)
 	netif_device_attach(netdev);
 }
 
-/**
- * igbvf_io_prepare - prepare device driver for PCI reset
- * @pdev: PCI device information struct
- */
-static void igbvf_io_prepare(struct pci_dev *pdev)
-{
-	struct net_device *netdev = pci_get_drvdata(pdev);
-	struct igbvf_adapter *adapter = netdev_priv(netdev);
-
-	while (test_and_set_bit(__IGBVF_RESETTING, &adapter->state))
-		usleep_range(1000, 2000);
-	igbvf_down(adapter);
-}
-
-/**
- * igbvf_io_reset_done - PCI reset done, device driver reset can begin
- * @pdev: PCI device information struct
- */
-static void igbvf_io_reset_done(struct pci_dev *pdev)
-{
-	struct net_device *netdev = pci_get_drvdata(pdev);
-	struct igbvf_adapter *adapter = netdev_priv(netdev);
-
-	igbvf_up(adapter);
-	clear_bit(__IGBVF_RESETTING, &adapter->state);
-}
-
 static void igbvf_print_device_info(struct igbvf_adapter *adapter)
 {
 	struct e1000_hw *hw = &adapter->hw;
@@ -2645,7 +2642,7 @@ igbvf_features_check(struct sk_buff *skb, struct net_device *dev,
 	unsigned int network_hdr_len, mac_hdr_len;
 
 	/* Make certain the headers can be described by a context descriptor */
-	mac_hdr_len = skb_network_offset(skb);
+	mac_hdr_len = skb_network_header(skb) - skb->data;
 	if (unlikely(mac_hdr_len > IGBVF_MAX_MAC_HDR_LEN))
 		return features & ~(NETIF_F_HW_CSUM |
 				    NETIF_F_SCTP_CRC |
@@ -2676,7 +2673,7 @@ static const struct net_device_ops igbvf_netdev_ops = {
 	.ndo_set_rx_mode	= igbvf_set_rx_mode,
 	.ndo_set_mac_address	= igbvf_set_mac,
 	.ndo_change_mtu		= igbvf_change_mtu,
-	.ndo_eth_ioctl		= igbvf_ioctl,
+	.ndo_do_ioctl		= igbvf_ioctl,
 	.ndo_tx_timeout		= igbvf_tx_timeout,
 	.ndo_vlan_rx_add_vid	= igbvf_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= igbvf_vlan_rx_kill_vid,
@@ -2704,17 +2701,25 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct igbvf_adapter *adapter;
 	struct e1000_hw *hw;
 	const struct igbvf_info *ei = igbvf_info_tbl[ent->driver_data];
-	int err;
+
+	static int cards_found;
+	int err, pci_using_dac;
 
 	err = pci_enable_device_mem(pdev);
 	if (err)
 		return err;
 
+	pci_using_dac = 0;
 	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
-	if (err) {
-		dev_err(&pdev->dev,
-			"No usable DMA configuration, aborting\n");
-		goto err_dma;
+	if (!err) {
+		pci_using_dac = 1;
+	} else {
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (err) {
+			dev_err(&pdev->dev,
+				"No usable DMA configuration, aborting\n");
+			goto err_dma;
+		}
 	}
 
 	err = pci_request_regions(pdev, igbvf_driver_name);
@@ -2773,7 +2778,9 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	igbvf_set_ethtool_ops(netdev);
 	netdev->watchdog_timeo = 5 * HZ;
-	strscpy(netdev->name, pci_name(pdev), sizeof(netdev->name));
+	strncpy(netdev->name, pci_name(pdev), sizeof(netdev->name) - 1);
+
+	adapter->bd_number = cards_found++;
 
 	netdev->hw_features = NETIF_F_SG |
 			      NETIF_F_TSO |
@@ -2793,7 +2800,10 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	netdev->hw_features |= NETIF_F_GSO_PARTIAL |
 			       IGBVF_GSO_PARTIAL_FEATURES;
 
-	netdev->features = netdev->hw_features | NETIF_F_HIGHDMA;
+	netdev->features = netdev->hw_features;
+
+	if (pci_using_dac)
+		netdev->features |= NETIF_F_HIGHDMA;
 
 	netdev->vlan_features |= netdev->features | NETIF_F_TSO_MANGLEID;
 	netdev->mpls_features |= NETIF_F_HW_CSUM;
@@ -2822,7 +2832,8 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		else if (is_zero_ether_addr(adapter->hw.mac.addr))
 			dev_info(&pdev->dev,
 				 "MAC address not assigned by administrator.\n");
-		eth_hw_addr_set(netdev, adapter->hw.mac.addr);
+		memcpy(netdev->dev_addr, adapter->hw.mac.addr,
+		       netdev->addr_len);
 	}
 
 	spin_unlock_bh(&hw->mbx_lock);
@@ -2902,7 +2913,7 @@ static void igbvf_remove(struct pci_dev *pdev)
 	 * disable it from being rescheduled.
 	 */
 	set_bit(__IGBVF_DOWN, &adapter->state);
-	timer_delete_sync(&adapter->watchdog_timer);
+	del_timer_sync(&adapter->watchdog_timer);
 
 	cancel_work_sync(&adapter->reset_task);
 	cancel_work_sync(&adapter->watchdog_task);
@@ -2933,8 +2944,6 @@ static const struct pci_error_handlers igbvf_err_handler = {
 	.error_detected = igbvf_io_error_detected,
 	.slot_reset = igbvf_io_slot_reset,
 	.resume = igbvf_io_resume,
-	.reset_prepare = igbvf_io_prepare,
-	.reset_done = igbvf_io_reset_done,
 };
 
 static const struct pci_device_id igbvf_pci_tbl[] = {
@@ -2944,7 +2953,7 @@ static const struct pci_device_id igbvf_pci_tbl[] = {
 };
 MODULE_DEVICE_TABLE(pci, igbvf_pci_tbl);
 
-static DEFINE_SIMPLE_DEV_PM_OPS(igbvf_pm_ops, igbvf_suspend, igbvf_resume);
+static SIMPLE_DEV_PM_OPS(igbvf_pm_ops, igbvf_suspend, igbvf_resume);
 
 /* PCI Device API Driver */
 static struct pci_driver igbvf_driver = {
@@ -2952,7 +2961,7 @@ static struct pci_driver igbvf_driver = {
 	.id_table	= igbvf_pci_tbl,
 	.probe		= igbvf_probe,
 	.remove		= igbvf_remove,
-	.driver.pm	= pm_sleep_ptr(&igbvf_pm_ops),
+	.driver.pm	= &igbvf_pm_ops,
 	.shutdown	= igbvf_shutdown,
 	.err_handler	= &igbvf_err_handler
 };
@@ -2988,6 +2997,7 @@ static void __exit igbvf_exit_module(void)
 }
 module_exit(igbvf_exit_module);
 
+MODULE_AUTHOR("Intel Corporation, <e1000-devel@lists.sourceforge.net>");
 MODULE_DESCRIPTION("Intel(R) Gigabit Virtual Function Network Driver");
 MODULE_LICENSE("GPL v2");
 

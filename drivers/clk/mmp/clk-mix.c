@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mmp mix(div and mux) clock operation source file
  *
  * Copyright (C) 2014 Marvell
  * Chao Xie <chao.xie@marvell.com>
+ *
+ * This file is licensed under the terms of the GNU General Public
+ * License version 2. This program is licensed "as is" without any
+ * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clk-provider.h>
@@ -447,6 +450,7 @@ struct clk *mmp_clk_register_mix(struct device *dev,
 	struct mmp_clk_mix *mix;
 	struct clk *clk;
 	struct clk_init_data init;
+	size_t table_bytes;
 
 	mix = kzalloc(sizeof(*mix), GFP_KERNEL);
 	if (!mix)
@@ -460,8 +464,8 @@ struct clk *mmp_clk_register_mix(struct device *dev,
 
 	memcpy(&mix->reg_info, &config->reg_info, sizeof(config->reg_info));
 	if (config->table) {
-		mix->table = kmemdup_array(config->table, config->table_size,
-					   sizeof(*mix->table), GFP_KERNEL);
+		table_bytes = sizeof(*config->table) * config->table_size;
+		mix->table = kmemdup(config->table, table_bytes, GFP_KERNEL);
 		if (!mix->table)
 			goto free_mix;
 
@@ -469,8 +473,9 @@ struct clk *mmp_clk_register_mix(struct device *dev,
 	}
 
 	if (config->mux_table) {
-		mix->mux_table = kmemdup_array(config->mux_table, num_parents,
-					       sizeof(*mix->mux_table), GFP_KERNEL);
+		table_bytes = sizeof(u32) * num_parents;
+		mix->mux_table = kmemdup(config->mux_table, table_bytes,
+					 GFP_KERNEL);
 		if (!mix->mux_table) {
 			kfree(mix->table);
 			goto free_mix;

@@ -18,6 +18,7 @@
 MODULE_AUTHOR("Creative Technology Ltd");
 MODULE_DESCRIPTION("X-Fi driver version 1.03");
 MODULE_LICENSE("GPL v2");
+MODULE_SUPPORTED_DEVICE("{{Creative Labs, Sound Blaster X-Fi}");
 
 static unsigned int reference_rate = 48000;
 static unsigned int multiple = 2;
@@ -98,8 +99,8 @@ ct_card_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 	if (err < 0)
 		goto error;
 
-	strscpy(card->driver, "SB-XFi");
-	strscpy(card->shortname, "Creative X-Fi");
+	strcpy(card->driver, "SB-XFi");
+	strcpy(card->shortname, "Creative X-Fi");
 	snprintf(card->longname, sizeof(card->longname), "%s %s %s",
 		 card->shortname, atc->chip_name, atc->model_name);
 

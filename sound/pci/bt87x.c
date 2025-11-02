@@ -23,6 +23,8 @@
 MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de>");
 MODULE_DESCRIPTION("Brooktree Bt87x audio driver");
 MODULE_LICENSE("GPL");
+MODULE_SUPPORTED_DEVICE("{{Brooktree,Bt878},"
+		"{Brooktree,Bt879}}");
 
 static int index[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = -2}; /* Exclude the first card */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -325,8 +327,7 @@ static irqreturn_t snd_bt87x_interrupt(int irq, void *dev_id)
 		current_block = chip->current_line * 16 / chip->lines;
 		irq_block = status >> INT_RISCS_SHIFT;
 		if (current_block != irq_block)
-			chip->current_line = DIV_ROUND_UP(irq_block * chip->lines,
-							  16);
+			chip->current_line = (irq_block * chip->lines + 15) / 16;
 
 		snd_pcm_period_elapsed(chip->substream);
 	}
@@ -431,10 +432,10 @@ static int snd_bt87x_close(struct snd_pcm_substream *substream)
 {
 	struct snd_bt87x *chip = snd_pcm_substream_chip(substream);
 
-	scoped_guard(spinlock_irq, &chip->reg_lock) {
-		chip->reg_control |= CTL_A_PWRDN;
-		snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
-	}
+	spin_lock_irq(&chip->reg_lock);
+	chip->reg_control |= CTL_A_PWRDN;
+	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
+	spin_unlock_irq(&chip->reg_lock);
 
 	chip->substream = NULL;
 	clear_bit(0, &chip->opened);
@@ -466,19 +467,20 @@ static int snd_bt87x_prepare(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int decimation;
 
-	guard(spinlock_irq)(&chip->reg_lock);
+	spin_lock_irq(&chip->reg_lock);
 	chip->reg_control &= ~(CTL_DA_SDR_MASK | CTL_DA_SBR);
 	decimation = (ANALOG_CLOCK + runtime->rate / 4) / runtime->rate;
 	chip->reg_control |= decimation << CTL_DA_SDR_SHIFT;
 	if (runtime->format == SNDRV_PCM_FORMAT_S8)
 		chip->reg_control |= CTL_DA_SBR;
 	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
+	spin_unlock_irq(&chip->reg_lock);
 	return 0;
 }
 
 static int snd_bt87x_start(struct snd_bt87x *chip)
 {
-	guard(spinlock)(&chip->reg_lock);
+	spin_lock(&chip->reg_lock);
 	chip->current_line = 0;
 	chip->reg_control |= CTL_FIFO_ENABLE | CTL_RISC_ENABLE | CTL_ACAP_EN;
 	snd_bt87x_writel(chip, REG_RISC_STRT_ADD, chip->dma_risc.addr);
@@ -486,16 +488,18 @@ static int snd_bt87x_start(struct snd_bt87x *chip)
 			 chip->line_bytes | (chip->lines << 16));
 	snd_bt87x_writel(chip, REG_INT_MASK, chip->interrupt_mask);
 	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
+	spin_unlock(&chip->reg_lock);
 	return 0;
 }
 
 static int snd_bt87x_stop(struct snd_bt87x *chip)
 {
-	guard(spinlock)(&chip->reg_lock);
+	spin_lock(&chip->reg_lock);
 	chip->reg_control &= ~(CTL_FIFO_ENABLE | CTL_RISC_ENABLE | CTL_ACAP_EN);
 	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
 	snd_bt87x_writel(chip, REG_INT_MASK, 0);
 	snd_bt87x_writel(chip, REG_INT_STAT, MY_INTERRUPTS);
+	spin_unlock(&chip->reg_lock);
 	return 0;
 }
 
@@ -557,12 +561,13 @@ static int snd_bt87x_capture_volume_put(struct snd_kcontrol *kcontrol,
 	u32 old_control;
 	int changed;
 
-	guard(spinlock_irq)(&chip->reg_lock);
+	spin_lock_irq(&chip->reg_lock);
 	old_control = chip->reg_control;
 	chip->reg_control = (chip->reg_control & ~CTL_A_GAIN_MASK)
 		| (value->value.integer.value[0] << CTL_A_GAIN_SHIFT);
 	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
 	changed = old_control != chip->reg_control;
+	spin_unlock_irq(&chip->reg_lock);
 	return changed;
 }
 
@@ -592,12 +597,13 @@ static int snd_bt87x_capture_boost_put(struct snd_kcontrol *kcontrol,
 	u32 old_control;
 	int changed;
 
-	guard(spinlock_irq)(&chip->reg_lock);
+	spin_lock_irq(&chip->reg_lock);
 	old_control = chip->reg_control;
 	chip->reg_control = (chip->reg_control & ~CTL_A_G2X)
 		| (value->value.integer.value[0] ? CTL_A_G2X : 0);
 	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
 	changed = chip->reg_control != old_control;
+	spin_unlock_irq(&chip->reg_lock);
 	return changed;
 }
 
@@ -633,12 +639,13 @@ static int snd_bt87x_capture_source_put(struct snd_kcontrol *kcontrol,
 	u32 old_control;
 	int changed;
 
-	guard(spinlock_irq)(&chip->reg_lock);
+	spin_lock_irq(&chip->reg_lock);
 	old_control = chip->reg_control;
 	chip->reg_control = (chip->reg_control & ~CTL_A_SEL_MASK)
 		| (value->value.enumerated.item[0] << CTL_A_SEL_SHIFT);
 	snd_bt87x_writel(chip, REG_GPIO_DMA_CTL, chip->reg_control);
 	changed = chip->reg_control != old_control;
+	spin_unlock_irq(&chip->reg_lock);
 	return changed;
 }
 
@@ -650,11 +657,23 @@ static const struct snd_kcontrol_new snd_bt87x_capture_source = {
 	.put = snd_bt87x_capture_source_put,
 };
 
-static void snd_bt87x_free(struct snd_card *card)
+static int snd_bt87x_free(struct snd_bt87x *chip)
 {
-	struct snd_bt87x *chip = card->private_data;
+	if (chip->mmio)
+		snd_bt87x_stop(chip);
+	if (chip->irq >= 0)
+		free_irq(chip->irq, chip);
+	iounmap(chip->mmio);
+	pci_release_regions(chip->pci);
+	pci_disable_device(chip->pci);
+	kfree(chip);
+	return 0;
+}
 
-	snd_bt87x_stop(chip);
+static int snd_bt87x_dev_free(struct snd_device *device)
+{
+	struct snd_bt87x *chip = device->device_data;
+	return snd_bt87x_free(chip);
 }
 
 static int snd_bt87x_pcm(struct snd_bt87x *chip, int device, char *name)
@@ -666,7 +685,7 @@ static int snd_bt87x_pcm(struct snd_bt87x *chip, int device, char *name)
 	if (err < 0)
 		return err;
 	pcm->private_data = chip;
-	strscpy(pcm->name, name);
+	strcpy(pcm->name, name);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_bt87x_pcm_ops);
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV_SG,
 				       &chip->pci->dev,
@@ -676,23 +695,42 @@ static int snd_bt87x_pcm(struct snd_bt87x *chip, int device, char *name)
 }
 
 static int snd_bt87x_create(struct snd_card *card,
-			    struct pci_dev *pci)
+			    struct pci_dev *pci,
+			    struct snd_bt87x **rchip)
 {
-	struct snd_bt87x *chip = card->private_data;
+	struct snd_bt87x *chip;
 	int err;
+	static const struct snd_device_ops ops = {
+		.dev_free = snd_bt87x_dev_free
+	};
 
-	err = pcim_enable_device(pci);
+	*rchip = NULL;
+
+	err = pci_enable_device(pci);
 	if (err < 0)
 		return err;
 
+	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
+	if (!chip) {
+		pci_disable_device(pci);
+		return -ENOMEM;
+	}
 	chip->card = card;
 	chip->pci = pci;
 	chip->irq = -1;
 	spin_lock_init(&chip->reg_lock);
 
-	chip->mmio = pcim_iomap_region(pci, 0, "Bt87x audio");
-	if (IS_ERR(chip->mmio))
-		return PTR_ERR(chip->mmio);
+	if ((err = pci_request_regions(pci, "Bt87x audio")) < 0) {
+		kfree(chip);
+		pci_disable_device(pci);
+		return err;
+	}
+	chip->mmio = pci_ioremap_bar(pci, 0);
+	if (!chip->mmio) {
+		dev_err(card->dev, "cannot remap io memory\n");
+		err = -ENOMEM;
+		goto fail;
+	}
 
 	chip->reg_control = CTL_A_PWRDN | CTL_DA_ES2 |
 			    CTL_PKTP_16 | (15 << CTL_DA_SDR_SHIFT);
@@ -701,18 +739,26 @@ static int snd_bt87x_create(struct snd_card *card,
 	snd_bt87x_writel(chip, REG_INT_MASK, 0);
 	snd_bt87x_writel(chip, REG_INT_STAT, MY_INTERRUPTS);
 
-	err = devm_request_irq(&pci->dev, pci->irq, snd_bt87x_interrupt,
-			       IRQF_SHARED, KBUILD_MODNAME, chip);
+	err = request_irq(pci->irq, snd_bt87x_interrupt, IRQF_SHARED,
+			  KBUILD_MODNAME, chip);
 	if (err < 0) {
 		dev_err(card->dev, "cannot grab irq %d\n", pci->irq);
-		return err;
+		goto fail;
 	}
 	chip->irq = pci->irq;
 	card->sync_irq = chip->irq;
-	card->private_free = snd_bt87x_free;
 	pci_set_master(pci);
 
+	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);
+	if (err < 0)
+		goto fail;
+
+	*rchip = chip;
 	return 0;
+
+fail:
+	snd_bt87x_free(chip);
+	return err;
 }
 
 #define BT_DEVICE(chip, subvend, subdev, id) \
@@ -798,8 +844,8 @@ static int snd_bt87x_detect_card(struct pci_dev *pci)
 	return SND_BT87X_BOARD_UNKNOWN;
 }
 
-static int __snd_bt87x_probe(struct pci_dev *pci,
-			     const struct pci_device_id *pci_id)
+static int snd_bt87x_probe(struct pci_dev *pci,
+			   const struct pci_device_id *pci_id)
 {
 	static int dev;
 	struct snd_card *card;
@@ -822,15 +868,14 @@ static int __snd_bt87x_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	err = snd_devm_card_new(&pci->dev, index[dev], id[dev], THIS_MODULE,
-				sizeof(*chip), &card);
+	err = snd_card_new(&pci->dev, index[dev], id[dev], THIS_MODULE,
+			   0, &card);
 	if (err < 0)
 		return err;
-	chip = card->private_data;
 
-	err = snd_bt87x_create(card, pci);
+	err = snd_bt87x_create(card, pci, &chip);
 	if (err < 0)
-		return err;
+		goto _error;
 
 	memcpy(&chip->board, &snd_bt87x_boards[boardid], sizeof(chip->board));
 
@@ -842,50 +887,53 @@ static int __snd_bt87x_probe(struct pci_dev *pci,
 
 		err = snd_bt87x_pcm(chip, DEVICE_DIGITAL, "Bt87x Digital");
 		if (err < 0)
-			return err;
+			goto _error;
 	}
 	if (!chip->board.no_analog) {
 		err = snd_bt87x_pcm(chip, DEVICE_ANALOG, "Bt87x Analog");
 		if (err < 0)
-			return err;
+			goto _error;
 		err = snd_ctl_add(card, snd_ctl_new1(
 				  &snd_bt87x_capture_volume, chip));
 		if (err < 0)
-			return err;
+			goto _error;
 		err = snd_ctl_add(card, snd_ctl_new1(
 				  &snd_bt87x_capture_boost, chip));
 		if (err < 0)
-			return err;
+			goto _error;
 		err = snd_ctl_add(card, snd_ctl_new1(
 				  &snd_bt87x_capture_source, chip));
 		if (err < 0)
-			return err;
+			goto _error;
 	}
 	dev_info(card->dev, "bt87x%d: Using board %d, %sanalog, %sdigital "
 		   "(rate %d Hz)\n", dev, boardid,
 		   chip->board.no_analog ? "no " : "",
 		   chip->board.no_digital ? "no " : "", chip->board.dig_rate);
 
-	strscpy(card->driver, "Bt87x");
+	strcpy(card->driver, "Bt87x");
 	sprintf(card->shortname, "Brooktree Bt%x", pci->device);
 	sprintf(card->longname, "%s at %#llx, irq %i",
 		card->shortname, (unsigned long long)pci_resource_start(pci, 0),
 		chip->irq);
-	strscpy(card->mixername, "Bt87x");
+	strcpy(card->mixername, "Bt87x");
 
 	err = snd_card_register(card);
 	if (err < 0)
-		return err;
+		goto _error;
 
 	pci_set_drvdata(pci, card);
 	++dev;
 	return 0;
+
+_error:
+	snd_card_free(card);
+	return err;
 }
 
-static int snd_bt87x_probe(struct pci_dev *pci,
-			   const struct pci_device_id *pci_id)
+static void snd_bt87x_remove(struct pci_dev *pci)
 {
-	return snd_card_free_on_error(&pci->dev, __snd_bt87x_probe(pci, pci_id));
+	snd_card_free(pci_get_drvdata(pci));
 }
 
 /* default entries for all Bt87x cards - it's not exported */
@@ -900,6 +948,7 @@ static struct pci_driver driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = snd_bt87x_ids,
 	.probe = snd_bt87x_probe,
+	.remove = snd_bt87x_remove,
 };
 
 static int __init alsa_card_bt87x_init(void)

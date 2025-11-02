@@ -102,11 +102,9 @@ static const struct flag_info flag_array[] = {
 	}
 };
 
-struct ptdump_pg_level pg_level[5] = {
-	{ /* pgd */
-		.flag	= flag_array,
-		.num	= ARRAY_SIZE(flag_array),
-	}, { /* p4d */
+struct pgtable_level pg_level[5] = {
+	{
+	}, { /* pgd */
 		.flag	= flag_array,
 		.num	= ARRAY_SIZE(flag_array),
 	}, { /* pud */

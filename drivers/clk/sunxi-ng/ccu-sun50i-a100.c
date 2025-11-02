@@ -6,6 +6,7 @@
 #include <linux/clk-provider.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 
 #include "ccu_common.h"
@@ -436,7 +437,7 @@ static SUNXI_CCU_MP_WITH_MUX_GATE_POSTDIV(mmc0_clk, "mmc0", mmc_parents, 0x830,
 					  24, 2,	/* mux */
 					  BIT(31),	/* gate */
 					  2,		/* post-div */
-					  0);
+					  CLK_SET_RATE_NO_REPARENT);
 
 static SUNXI_CCU_MP_WITH_MUX_GATE_POSTDIV(mmc1_clk, "mmc1", mmc_parents, 0x834,
 					  0, 4,		/* M */
@@ -444,7 +445,7 @@ static SUNXI_CCU_MP_WITH_MUX_GATE_POSTDIV(mmc1_clk, "mmc1", mmc_parents, 0x834,
 					  24, 2,	/* mux */
 					  BIT(31),	/* gate */
 					  2,		/* post-div */
-					  0);
+					  CLK_SET_RATE_NO_REPARENT);
 
 static SUNXI_CCU_MP_WITH_MUX_GATE_POSTDIV(mmc2_clk, "mmc2", mmc_parents, 0x838,
 					  0, 4,		/* M */
@@ -452,7 +453,7 @@ static SUNXI_CCU_MP_WITH_MUX_GATE_POSTDIV(mmc2_clk, "mmc2", mmc_parents, 0x838,
 					  24, 2,	/* mux */
 					  BIT(31),	/* gate */
 					  2,		/* post-div */
-					  0);
+					  CLK_SET_RATE_NO_REPARENT);
 
 static SUNXI_CCU_GATE(bus_mmc0_clk, "bus-mmc0", "ahb3", 0x84c, BIT(0), 0);
 static SUNXI_CCU_GATE(bus_mmc1_clk, "bus-mmc1", "ahb3", 0x84c, BIT(1), 0);
@@ -1061,7 +1062,7 @@ static struct clk_hw_onecell_data sun50i_a100_hw_clks = {
 	.num = CLK_NUMBER,
 };
 
-static const struct ccu_reset_map sun50i_a100_ccu_resets[] = {
+static struct ccu_reset_map sun50i_a100_ccu_resets[] = {
 	[RST_MBUS]		= { 0x540, BIT(30) },
 
 	[RST_BUS_DE]		= { 0x60c, BIT(16) },
@@ -1246,7 +1247,7 @@ static int sun50i_a100_ccu_probe(struct platform_device *pdev)
 		writel(val, reg + sun50i_a100_usb2_clk_regs[i]);
 	}
 
-	ret = devm_sunxi_ccu_probe(&pdev->dev, reg, &sun50i_a100_ccu_desc);
+	ret = sunxi_ccu_probe(pdev->dev.of_node, reg, &sun50i_a100_ccu_desc);
 	if (ret)
 		return ret;
 
@@ -1264,18 +1265,12 @@ static const struct of_device_id sun50i_a100_ccu_ids[] = {
 	{ .compatible = "allwinner,sun50i-a100-ccu" },
 	{ }
 };
-MODULE_DEVICE_TABLE(of, sun50i_a100_ccu_ids);
 
 static struct platform_driver sun50i_a100_ccu_driver = {
 	.probe	= sun50i_a100_ccu_probe,
 	.driver	= {
 		.name	= "sun50i-a100-ccu",
-		.suppress_bind_attrs = true,
 		.of_match_table	= sun50i_a100_ccu_ids,
 	},
 };
 module_platform_driver(sun50i_a100_ccu_driver);
-
-MODULE_IMPORT_NS("SUNXI_CCU");
-MODULE_DESCRIPTION("Support for the Allwinner A100 CCU");
-MODULE_LICENSE("GPL");

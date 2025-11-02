@@ -29,9 +29,13 @@ struct gb_channel {
 	struct attribute_group		*attr_group;
 	const struct attribute_group	**attr_groups;
 	struct led_classdev		*led;
+#if IS_REACHABLE(CONFIG_LEDS_CLASS_FLASH)
 	struct led_classdev_flash	fled;
 	struct led_flash_setting	intensity_uA;
 	struct led_flash_setting	timeout_us;
+#else
+	struct led_classdev		cled;
+#endif
 	struct gb_light			*light;
 	bool				is_registered;
 	bool				releasing;
@@ -80,6 +84,7 @@ static bool is_channel_flash(struct gb_channel *channel)
 				   | GB_CHANNEL_MODE_INDICATOR));
 }
 
+#if IS_REACHABLE(CONFIG_LEDS_CLASS_FLASH)
 static struct gb_channel *get_channel_from_cdev(struct led_classdev *cdev)
 {
 	struct led_classdev_flash *fled_cdev = lcdev_to_flcdev(cdev);
@@ -151,6 +156,22 @@ static int __gb_lights_flash_brightness_set(struct gb_channel *channel)
 
 	return __gb_lights_flash_intensity_set(channel, intensity);
 }
+#else
+static struct gb_channel *get_channel_from_cdev(struct led_classdev *cdev)
+{
+	return container_of(cdev, struct gb_channel, cled);
+}
+
+static struct led_classdev *get_channel_cdev(struct gb_channel *channel)
+{
+	return &channel->cled;
+}
+
+static int __gb_lights_flash_brightness_set(struct gb_channel *channel)
+{
+	return 0;
+}
+#endif
 
 static int gb_lights_color_set(struct gb_channel *channel, u32 color);
 static int gb_lights_fade_set(struct gb_channel *channel);
@@ -272,7 +293,8 @@ static int channel_attr_groups_set(struct gb_channel *channel,
 	channel->attrs = kcalloc(size + 1, sizeof(*channel->attrs), GFP_KERNEL);
 	if (!channel->attrs)
 		return -ENOMEM;
-	channel->attr_group = kzalloc(sizeof(*channel->attr_group), GFP_KERNEL);
+	channel->attr_group = kcalloc(1, sizeof(*channel->attr_group),
+				      GFP_KERNEL);
 	if (!channel->attr_group)
 		return -ENOMEM;
 	channel->attr_groups = kcalloc(2, sizeof(*channel->attr_groups),
@@ -1339,5 +1361,4 @@ static struct greybus_driver gb_lights_driver = {
 };
 module_greybus_driver(gb_lights_driver);
 
-MODULE_DESCRIPTION("Greybus Lights protocol driver");
 MODULE_LICENSE("GPL v2");

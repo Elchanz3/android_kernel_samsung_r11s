@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  * sysfile.c
  *
  * Initialize, read, write, etc. system files.
@@ -127,14 +129,14 @@ static struct inode * _ocfs2_get_system_file_inode(struct ocfs2_super *osb,
 	char namebuf[40];
 	struct inode *inode = NULL;
 	u64 blkno;
-	int len, status = 0;
+	int status = 0;
 
-	len = ocfs2_sprintf_system_inode_name(namebuf,
-					      sizeof(namebuf),
-					      type, slot);
+	ocfs2_sprintf_system_inode_name(namebuf,
+					sizeof(namebuf),
+					type, slot);
 
-	status = ocfs2_lookup_ino_from_name(osb->sys_root_inode,
-					    namebuf, len, &blkno);
+	status = ocfs2_lookup_ino_from_name(osb->sys_root_inode, namebuf,
+					    strlen(namebuf), &blkno);
 	if (status < 0) {
 		goto bail;
 	}

@@ -257,9 +257,9 @@ static unsigned long tpt_trig_traffic(struct ieee80211_local *local,
 
 static void tpt_trig_timer(struct timer_list *t)
 {
-	struct tpt_led_trigger *tpt_trig = timer_container_of(tpt_trig, t,
-							      timer);
+	struct tpt_led_trigger *tpt_trig = from_timer(tpt_trig, t, timer);
 	struct ieee80211_local *local = tpt_trig->local;
+	struct led_classdev *led_cdev;
 	unsigned long on, off, tpt;
 	int i;
 
@@ -283,7 +283,10 @@ static void tpt_trig_timer(struct timer_list *t)
 		}
 	}
 
-	led_trigger_blink(&local->tpt_led, on, off);
+	read_lock(&local->tpt_led.leddev_list_lock);
+	list_for_each_entry(led_cdev, &local->tpt_led.led_cdevs, trig_list)
+		led_blink_set(led_cdev, &on, &off);
+	read_unlock(&local->tpt_led.leddev_list_lock);
 }
 
 const char *
@@ -338,14 +341,18 @@ static void ieee80211_start_tpt_led_trig(struct ieee80211_local *local)
 static void ieee80211_stop_tpt_led_trig(struct ieee80211_local *local)
 {
 	struct tpt_led_trigger *tpt_trig = local->tpt_led_trigger;
+	struct led_classdev *led_cdev;
 
 	if (!tpt_trig->running)
 		return;
 
 	tpt_trig->running = false;
-	timer_delete_sync(&tpt_trig->timer);
+	del_timer_sync(&tpt_trig->timer);
 
-	led_trigger_event(&local->tpt_led, LED_OFF);
+	read_lock(&local->tpt_led.leddev_list_lock);
+	list_for_each_entry(led_cdev, &local->tpt_led.led_cdevs, trig_list)
+		led_set_brightness(led_cdev, LED_OFF);
+	read_unlock(&local->tpt_led.leddev_list_lock);
 }
 
 void ieee80211_mod_tpt_led_trig(struct ieee80211_local *local,

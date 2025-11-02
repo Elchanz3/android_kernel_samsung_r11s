@@ -9,7 +9,6 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/mmu_context.h>
 #include <linux/ptrace.h>
 #include <linux/smp.h>
 #include <linux/stddef.h>
@@ -27,7 +26,6 @@
 #include <asm/elf.h>
 #include <asm/pgtable-bits.h>
 #include <asm/spram.h>
-#include <asm/traps.h>
 #include <linux/uaccess.h>
 
 #include "fpu-probe.h"
@@ -37,8 +35,6 @@
 /* Hardware capabilities */
 unsigned int elf_hwcap __read_mostly;
 EXPORT_SYMBOL_GPL(elf_hwcap);
-
-static bool mmid_disabled_quirk;
 
 static inline unsigned long cpu_get_msa_id(void)
 {
@@ -159,7 +155,7 @@ static inline void check_errata(void)
 		/*
 		 * Erratum "RPS May Cause Incorrect Instruction Execution"
 		 * This code only handles VPE0, any SMP/RTOS code
-		 * making use of VPE1 will be responsible for that VPE.
+		 * making use of VPE1 will be responsable for that VPE.
 		 */
 		if ((c->processor_id & PRID_REV_MASK) <= PRID_REV_34K_V1_0_2)
 			write_c0_config7(read_c0_config7() | MIPS_CONF7_RPS);
@@ -182,6 +178,7 @@ void __init check_bugs32(void)
 static inline int cpu_has_confreg(void)
 {
 #ifdef CONFIG_CPU_R3000
+	extern unsigned long r3k_cache_size(unsigned long);
 	unsigned long size1, size2;
 	unsigned long cfg = read_c0_conf();
 
@@ -648,7 +645,7 @@ static inline unsigned int decode_config5(struct cpuinfo_mips *c)
 	config5 &= ~(MIPS_CONF5_UFR | MIPS_CONF5_UFE);
 
 	if (cpu_has_mips_r6) {
-		if (!mmid_disabled_quirk && (!__builtin_constant_p(cpu_has_mmid) || cpu_has_mmid))
+		if (!__builtin_constant_p(cpu_has_mmid) || cpu_has_mmid)
 			config5 |= MIPS_CONF5_MI;
 		else
 			config5 &= ~MIPS_CONF5_MI;
@@ -711,6 +708,7 @@ static inline unsigned int decode_config5(struct cpuinfo_mips *c)
 					max_mmid_width);
 				asid_mask = GENMASK(max_mmid_width - 1, 0);
 			}
+
 			set_cpu_asid_mask(c, asid_mask);
 		}
 	}
@@ -1116,14 +1114,45 @@ static inline void cpu_probe_legacy(struct cpuinfo_mips *c, unsigned int cpu)
 			     MIPS_CPU_LLSC;
 		c->tlbsize = 48;
 		break;
-	case PRID_IMP_R4300:
-		c->cputype = CPU_R4300;
-		__cpu_name[cpu] = "R4300";
+	case PRID_IMP_VR41XX:
 		set_isa(c, MIPS_CPU_ISA_III);
 		c->fpu_msk31 |= FPU_CSR_CONDX;
-		c->options = R4K_OPTS | MIPS_CPU_FPU | MIPS_CPU_32FPR |
-			     MIPS_CPU_LLSC;
+		c->options = R4K_OPTS;
 		c->tlbsize = 32;
+		switch (c->processor_id & 0xf0) {
+		case PRID_REV_VR4111:
+			c->cputype = CPU_VR4111;
+			__cpu_name[cpu] = "NEC VR4111";
+			break;
+		case PRID_REV_VR4121:
+			c->cputype = CPU_VR4121;
+			__cpu_name[cpu] = "NEC VR4121";
+			break;
+		case PRID_REV_VR4122:
+			if ((c->processor_id & 0xf) < 0x3) {
+				c->cputype = CPU_VR4122;
+				__cpu_name[cpu] = "NEC VR4122";
+			} else {
+				c->cputype = CPU_VR4181A;
+				__cpu_name[cpu] = "NEC VR4181A";
+			}
+			break;
+		case PRID_REV_VR4130:
+			if ((c->processor_id & 0xf) < 0x4) {
+				c->cputype = CPU_VR4131;
+				__cpu_name[cpu] = "NEC VR4131";
+			} else {
+				c->cputype = CPU_VR4133;
+				c->options |= MIPS_CPU_LLSC;
+				__cpu_name[cpu] = "NEC VR4133";
+			}
+			break;
+		default:
+			printk(KERN_INFO "Unexpected CPU of NEC VR4100 series\n");
+			c->cputype = CPU_VR41XX;
+			__cpu_name[cpu] = "NEC Vr41xx";
+			break;
+		}
 		break;
 	case PRID_IMP_R4600:
 		c->cputype = CPU_R4600;
@@ -1140,7 +1169,7 @@ static inline void cpu_probe_legacy(struct cpuinfo_mips *c, unsigned int cpu)
 		 * This processor doesn't have an MMU, so it's not
 		 * "real easy" to run Linux on it. It is left purely
 		 * for documentation.  Commented out because it shares
-		 * its c0_prid id number with the TX3900.
+		 * it's c0_prid id number with the TX3900.
 		 */
 		c->cputype = CPU_R4650;
 		__cpu_name[cpu] = "R4650";
@@ -1150,6 +1179,29 @@ static inline void cpu_probe_legacy(struct cpuinfo_mips *c, unsigned int cpu)
 		c->tlbsize = 48;
 		break;
 	#endif
+	case PRID_IMP_TX39:
+		c->fpu_msk31 |= FPU_CSR_CONDX | FPU_CSR_FS;
+		c->options = MIPS_CPU_TLB | MIPS_CPU_TX39_CACHE;
+
+		if ((c->processor_id & 0xf0) == (PRID_REV_TX3927 & 0xf0)) {
+			c->cputype = CPU_TX3927;
+			__cpu_name[cpu] = "TX3927";
+			c->tlbsize = 64;
+		} else {
+			switch (c->processor_id & PRID_REV_MASK) {
+			case PRID_REV_TX3912:
+				c->cputype = CPU_TX3912;
+				__cpu_name[cpu] = "TX3912";
+				c->tlbsize = 32;
+				break;
+			case PRID_REV_TX3922:
+				c->cputype = CPU_TX3922;
+				__cpu_name[cpu] = "TX3922";
+				c->tlbsize = 64;
+				break;
+			}
+		}
+		break;
 	case PRID_IMP_R4700:
 		c->cputype = CPU_R4700;
 		__cpu_name[cpu] = "R4700";
@@ -1288,14 +1340,14 @@ static inline void cpu_probe_legacy(struct cpuinfo_mips *c, unsigned int cpu)
 		set_cpu_asid_mask(c, MIPS_ENTRYHI_ASID);
 		c->writecombine = _CACHE_UNCACHED_ACCELERATED;
 		break;
-	case PRID_IMP_LOONGSON_32:
+	case PRID_IMP_LOONGSON_32:  /* Loongson-1 */
 		decode_configs(c);
 
 		c->cputype = CPU_LOONGSON32;
 
 		switch (c->processor_id & PRID_REV_MASK) {
-		case PRID_REV_LOONGSON1:
-			__cpu_name[cpu] = "ICT Loongson-1";
+		case PRID_REV_LOONGSON1B:
+			__cpu_name[cpu] = "Loongson 1B";
 			break;
 		}
 
@@ -1503,10 +1555,6 @@ static inline void cpu_probe_alchemy(struct cpuinfo_mips *c, unsigned int cpu)
 			break;
 		}
 		break;
-	case PRID_IMP_NETLOGIC_AU13XX:
-		c->cputype = CPU_ALCHEMY;
-		__cpu_name[cpu] = "Au1300";
-		break;
 	}
 }
 
@@ -1571,7 +1619,6 @@ static inline void cpu_probe_broadcom(struct cpuinfo_mips *c, unsigned int cpu)
 		c->cputype = CPU_BMIPS3300;
 		__cpu_name[cpu] = "Broadcom BMIPS3300";
 		set_elf_platform(cpu, "bmips3300");
-		reserve_exception_space(0x400, VECTORSPACING * 64);
 		break;
 	case PRID_IMP_BMIPS43XX: {
 		int rev = c->processor_id & PRID_REV_MASK;
@@ -1582,7 +1629,6 @@ static inline void cpu_probe_broadcom(struct cpuinfo_mips *c, unsigned int cpu)
 			__cpu_name[cpu] = "Broadcom BMIPS4380";
 			set_elf_platform(cpu, "bmips4380");
 			c->options |= MIPS_CPU_RIXI;
-			reserve_exception_space(0x400, VECTORSPACING * 64);
 		} else {
 			c->cputype = CPU_BMIPS4350;
 			__cpu_name[cpu] = "Broadcom BMIPS4350";
@@ -1599,7 +1645,6 @@ static inline void cpu_probe_broadcom(struct cpuinfo_mips *c, unsigned int cpu)
 			__cpu_name[cpu] = "Broadcom BMIPS5000";
 		set_elf_platform(cpu, "bmips5000");
 		c->options |= MIPS_CPU_ULRI | MIPS_CPU_RIXI;
-		reserve_exception_space(0x1000, VECTORSPACING * 64);
 		break;
 	}
 }
@@ -1607,8 +1652,6 @@ static inline void cpu_probe_broadcom(struct cpuinfo_mips *c, unsigned int cpu)
 static inline void cpu_probe_cavium(struct cpuinfo_mips *c, unsigned int cpu)
 {
 	decode_configs(c);
-	/* Octeon has different cache interface */
-	c->options &= ~MIPS_CPU_4K_CACHE;
 	switch (c->processor_id & PRID_IMP_MASK) {
 	case PRID_IMP_CAVIUM_CN38XX:
 	case PRID_IMP_CAVIUM_CN31XX:
@@ -1726,16 +1769,12 @@ static inline void cpu_probe_loongson(struct cpuinfo_mips *c, unsigned int cpu)
 		c->ases |= (MIPS_ASE_LOONGSON_MMI | MIPS_ASE_LOONGSON_CAM |
 			MIPS_ASE_LOONGSON_EXT | MIPS_ASE_LOONGSON_EXT2);
 		c->ases &= ~MIPS_ASE_VZ; /* VZ of Loongson-3A2000/3000 is incomplete */
-		change_c0_config6(LOONGSON_CONF6_EXTIMER | LOONGSON_CONF6_INTIMER,
-				  LOONGSON_CONF6_INTIMER);
 		break;
 	case PRID_IMP_LOONGSON_64G:
 		__cpu_name[cpu] = "ICT Loongson-3";
 		set_elf_platform(cpu, "loongson3a");
 		set_isa(c, MIPS_CPU_ISA_M64R2);
 		decode_cpucfg(c);
-		change_c0_config6(LOONGSON_CONF6_EXTIMER | LOONGSON_CONF6_INTIMER,
-				  LOONGSON_CONF6_INTIMER);
 		break;
 	default:
 		panic("Unknown Loongson Processor ID!");
@@ -1831,6 +1870,87 @@ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
 	}
 }
 
+static inline void cpu_probe_netlogic(struct cpuinfo_mips *c, int cpu)
+{
+	decode_configs(c);
+
+	if ((c->processor_id & PRID_IMP_MASK) == PRID_IMP_NETLOGIC_AU13XX) {
+		c->cputype = CPU_ALCHEMY;
+		__cpu_name[cpu] = "Au1300";
+		/* following stuff is not for Alchemy */
+		return;
+	}
+
+	c->options = (MIPS_CPU_TLB	 |
+			MIPS_CPU_4KEX	 |
+			MIPS_CPU_COUNTER |
+			MIPS_CPU_DIVEC	 |
+			MIPS_CPU_WATCH	 |
+			MIPS_CPU_EJTAG	 |
+			MIPS_CPU_LLSC);
+
+	switch (c->processor_id & PRID_IMP_MASK) {
+	case PRID_IMP_NETLOGIC_XLP2XX:
+	case PRID_IMP_NETLOGIC_XLP9XX:
+	case PRID_IMP_NETLOGIC_XLP5XX:
+		c->cputype = CPU_XLP;
+		__cpu_name[cpu] = "Broadcom XLPII";
+		break;
+
+	case PRID_IMP_NETLOGIC_XLP8XX:
+	case PRID_IMP_NETLOGIC_XLP3XX:
+		c->cputype = CPU_XLP;
+		__cpu_name[cpu] = "Netlogic XLP";
+		break;
+
+	case PRID_IMP_NETLOGIC_XLR732:
+	case PRID_IMP_NETLOGIC_XLR716:
+	case PRID_IMP_NETLOGIC_XLR532:
+	case PRID_IMP_NETLOGIC_XLR308:
+	case PRID_IMP_NETLOGIC_XLR532C:
+	case PRID_IMP_NETLOGIC_XLR516C:
+	case PRID_IMP_NETLOGIC_XLR508C:
+	case PRID_IMP_NETLOGIC_XLR308C:
+		c->cputype = CPU_XLR;
+		__cpu_name[cpu] = "Netlogic XLR";
+		break;
+
+	case PRID_IMP_NETLOGIC_XLS608:
+	case PRID_IMP_NETLOGIC_XLS408:
+	case PRID_IMP_NETLOGIC_XLS404:
+	case PRID_IMP_NETLOGIC_XLS208:
+	case PRID_IMP_NETLOGIC_XLS204:
+	case PRID_IMP_NETLOGIC_XLS108:
+	case PRID_IMP_NETLOGIC_XLS104:
+	case PRID_IMP_NETLOGIC_XLS616B:
+	case PRID_IMP_NETLOGIC_XLS608B:
+	case PRID_IMP_NETLOGIC_XLS416B:
+	case PRID_IMP_NETLOGIC_XLS412B:
+	case PRID_IMP_NETLOGIC_XLS408B:
+	case PRID_IMP_NETLOGIC_XLS404B:
+		c->cputype = CPU_XLR;
+		__cpu_name[cpu] = "Netlogic XLS";
+		break;
+
+	default:
+		pr_info("Unknown Netlogic chip id [%02x]!\n",
+		       c->processor_id);
+		c->cputype = CPU_XLR;
+		break;
+	}
+
+	if (c->cputype == CPU_XLP) {
+		set_isa(c, MIPS_CPU_ISA_M64R2);
+		c->options |= (MIPS_CPU_FPU | MIPS_CPU_ULRI | MIPS_CPU_MCHECK);
+		/* This will be updated again after all threads are woken up */
+		c->tlbsize = ((read_c0_config6() >> 16) & 0xffff) + 1;
+	} else {
+		set_isa(c, MIPS_CPU_ISA_M64R1);
+		c->tlbsize = ((read_c0_config1() >> 25) & 0x3f) + 1;
+	}
+	c->kscratch_mask = 0xf;
+}
+
 #ifdef CONFIG_64BIT
 /* For use by uaccess.h */
 u64 __ua_limit;
@@ -1869,7 +1989,6 @@ void cpu_probe(void)
 		cpu_probe_mips(c, cpu);
 		break;
 	case PRID_COMP_ALCHEMY:
-	case PRID_COMP_NETLOGIC:
 		cpu_probe_alchemy(c, cpu);
 		break;
 	case PRID_COMP_SIBYTE:
@@ -1895,6 +2014,9 @@ void cpu_probe(void)
 	case PRID_COMP_INGENIC_D1:
 	case PRID_COMP_INGENIC_E1:
 		cpu_probe_ingenic(c, cpu);
+		break;
+	case PRID_COMP_NETLOGIC:
+		cpu_probe_netlogic(c, cpu);
 		break;
 	}
 
@@ -2001,8 +2123,6 @@ void cpu_probe(void)
 	if (cpu == 0)
 		__ua_limit = ~((1ull << cpu_vmbits) - 1);
 #endif
-
-	reserve_exception_space(0, 0x1000);
 }
 
 void cpu_report(void)
@@ -2047,40 +2167,4 @@ void cpu_set_vpe_id(struct cpuinfo_mips *cpuinfo, unsigned int vpe)
 
 	cpuinfo->globalnumber &= ~MIPS_GLOBALNUMBER_VP;
 	cpuinfo->globalnumber |= vpe << MIPS_GLOBALNUMBER_VP_SHF;
-}
-
-void cpu_disable_mmid(void)
-{
-	int i;
-	unsigned long asid_mask;
-	unsigned int cpu = smp_processor_id();
-	struct cpuinfo_mips *c = &current_cpu_data;
-	unsigned int config4 = read_c0_config4();
-	unsigned int config5 =  read_c0_config5();
-
-	/* Setup the initial ASID mask based on config4 */
-	asid_mask = MIPS_ENTRYHI_ASID;
-	if (config4 & MIPS_CONF4_AE)
-		asid_mask |= MIPS_ENTRYHI_ASIDX;
-	set_cpu_asid_mask(c, asid_mask);
-
-	/* Disable MMID in the C0 and update cpuinfo_mips accordingly */
-	config5 &= ~(MIPS_CONF5_UFR | MIPS_CONF5_UFE);
-	config5 &= ~MIPS_CONF5_MI;
-	write_c0_config5(config5);
-	/* Ensure the write to config5 above takes effect */
-	back_to_back_c0_hazard();
-	c->options &= ~MIPS_CPU_MMID;
-
-	/* Setup asid cache value cleared in per_cpu_trap_init() */
-	cpu_data[cpu].asid_cache = asid_first_version(cpu);
-
-	/* Reinit context for each CPU */
-	for_each_possible_cpu(i)
-		set_cpu_context(i, &init_mm, 0);
-
-	/* Ensure that now MMID will be seen as disable */
-	mmid_disabled_quirk = true;
-
-	pr_info("MMID support disabled due to hardware support issue\n");
 }

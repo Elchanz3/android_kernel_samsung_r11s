@@ -6,7 +6,6 @@
 #include <linux/hugetlb.h>
 #include <linux/mman.h>
 #include <linux/mmzone.h>
-#include <linux/memblock.h>
 #include <linux/proc_fs.h>
 #include <linux/percpu.h>
 #include <linux/seq_file.h>
@@ -17,10 +16,12 @@
 #ifdef CONFIG_CMA
 #include <linux/cma.h>
 #endif
-#include <linux/zswap.h>
+#ifdef CONFIG_HUGEPAGE_POOL
+#include <linux/hugepage_pool.h>
+#endif
 #include <asm/page.h>
 #include "internal.h"
-
+#include <trace/hooks/mm.h>
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
@@ -31,6 +32,10 @@ static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
 	seq_write(m, " kB\n", 4);
 }
 
+#ifdef CONFIG_RBIN
+unsigned long rbin_total;
+#endif
+
 static int meminfo_proc_show(struct seq_file *m, void *v)
 {
 	struct sysinfo i;
@@ -40,6 +45,10 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	unsigned long pages[NR_LRU_LISTS];
 	unsigned long sreclaimable, sunreclaim;
 	int lru;
+	long hugepage_pool_pages = 0;
+#ifdef CONFIG_RBIN
+	int stats[NR_RBIN_STAT_ITEMS] = {0,};
+#endif
 
 	si_meminfo(&i);
 	si_swapinfo(&i);
@@ -47,6 +56,11 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 	cached = global_node_page_state(NR_FILE_PAGES) -
 			total_swapcache_pages() - i.bufferram;
+#ifdef CONFIG_RBIN
+	rbin_oem_func(GET_RBIN_STATS, stats);
+	cached += stats[RBIN_CACHED];
+#endif
+
 	if (cached < 0)
 		cached = 0;
 
@@ -56,10 +70,18 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	available = si_mem_available();
 	sreclaimable = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
 	sunreclaim = global_node_page_state_pages(NR_SLAB_UNRECLAIMABLE_B);
+#ifdef CONFIG_HUGEPAGE_POOL
+	hugepage_pool_pages = total_hugepage_pool_pages();
+#endif
 
 	show_val_kb(m, "MemTotal:       ", i.totalram);
-	show_val_kb(m, "MemFree:        ", i.freeram);
+#ifdef CONFIG_RBIN
+	show_val_kb(m, "MemFree:        ", i.freeram + stats[RBIN_FREE] + hugepage_pool_pages);
+	show_val_kb(m, "MemAvailable:   ", available + stats[RBIN_FREE]);
+#else
+	show_val_kb(m, "MemFree:        ", i.freeram + hugepage_pool_pages);
 	show_val_kb(m, "MemAvailable:   ", available);
+#endif
 	show_val_kb(m, "Buffers:        ", i.bufferram);
 	show_val_kb(m, "Cached:         ", cached);
 	show_val_kb(m, "SwapCached:     ", total_swapcache_pages());
@@ -85,15 +107,19 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "MmapCopy:       ",
 		    (unsigned long)atomic_long_read(&mmap_pages_allocated));
 #endif
+#ifdef CONFIG_RBIN
+	show_val_kb(m, "RbinTotal:      ", rbin_total);
+	show_val_kb(m, "RbinAlloced:    ", stats[RBIN_ALLOCATED] + stats[RBIN_POOL]);
+	show_val_kb(m, "RbinPool:       ", stats[RBIN_POOL]);
+	show_val_kb(m, "RbinFree:       ", stats[RBIN_FREE]);
+	show_val_kb(m, "RbinCached:     ", stats[RBIN_CACHED]);
+#endif
 
+#ifdef CONFIG_KZEROD
+	show_val_kb(m, "ZeroedFree:     ", kzerod_get_zeroed_size());
+#endif
 	show_val_kb(m, "SwapTotal:      ", i.totalswap);
 	show_val_kb(m, "SwapFree:       ", i.freeswap);
-#ifdef CONFIG_ZSWAP
-	show_val_kb(m, "Zswap:          ", zswap_total_pages());
-	seq_printf(m,  "Zswapped:       %8lu kB\n",
-		   (unsigned long)atomic_long_read(&zswap_stored_pages) <<
-		   (PAGE_SHIFT - 10));
-#endif
 	show_val_kb(m, "Dirty:          ",
 		    global_node_page_state(NR_FILE_DIRTY));
 	show_val_kb(m, "Writeback:      ",
@@ -115,13 +141,13 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		   global_node_page_state(NR_KERNEL_SCS_KB));
 #endif
 	show_val_kb(m, "PageTables:     ",
-		    global_node_page_state(NR_PAGETABLE));
-	show_val_kb(m, "SecPageTables:  ",
-		    global_node_page_state(NR_SECONDARY_PAGETABLE));
+		    global_zone_page_state(NR_PAGETABLE));
 
 	show_val_kb(m, "NFS_Unstable:   ", 0);
-	show_val_kb(m, "Bounce:         ", 0);
-	show_val_kb(m, "WritebackTmp:   ", 0);
+	show_val_kb(m, "Bounce:         ",
+		    global_zone_page_state(NR_BOUNCE));
+	show_val_kb(m, "WritebackTmp:   ",
+		    global_node_page_state(NR_WRITEBACK_TEMP));
 	show_val_kb(m, "CommitLimit:    ", vm_commit_limit());
 	show_val_kb(m, "Committed_AS:   ", committed);
 	seq_printf(m, "VmallocTotal:   %8lu kB\n",
@@ -130,8 +156,6 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "VmallocChunk:   ", 0ul);
 	show_val_kb(m, "Percpu:         ", pcpu_nr_pages());
 
-	memtest_report_meminfo(m);
-
 #ifdef CONFIG_MEMORY_FAILURE
 	seq_printf(m, "HardwareCorrupted: %5lu kB\n",
 		   atomic_long_read(&num_poisoned_pages) << (PAGE_SHIFT - 10));
@@ -139,15 +163,18 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	show_val_kb(m, "AnonHugePages:  ",
-		    global_node_page_state(NR_ANON_THPS));
+		    global_node_page_state(NR_ANON_THPS) * HPAGE_PMD_NR);
 	show_val_kb(m, "ShmemHugePages: ",
-		    global_node_page_state(NR_SHMEM_THPS));
+		    global_node_page_state(NR_SHMEM_THPS) * HPAGE_PMD_NR);
 	show_val_kb(m, "ShmemPmdMapped: ",
-		    global_node_page_state(NR_SHMEM_PMDMAPPED));
+		    global_node_page_state(NR_SHMEM_PMDMAPPED) * HPAGE_PMD_NR);
 	show_val_kb(m, "FileHugePages:  ",
-		    global_node_page_state(NR_FILE_THPS));
+		    global_node_page_state(NR_FILE_THPS) * HPAGE_PMD_NR);
 	show_val_kb(m, "FilePmdMapped:  ",
-		    global_node_page_state(NR_FILE_PMDMAPPED));
+		    global_node_page_state(NR_FILE_PMDMAPPED) * HPAGE_PMD_NR);
+#ifdef CONFIG_HUGEPAGE_POOL
+	show_val_kb(m, "HugepagePool:   ", hugepage_pool_pages);
+#endif
 #endif
 
 #ifdef CONFIG_CMA
@@ -155,13 +182,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "CmaFree:        ",
 		    global_zone_page_state(NR_FREE_CMA_PAGES));
 #endif
-
-#ifdef CONFIG_UNACCEPTED_MEMORY
-	show_val_kb(m, "Unaccepted:     ",
-		    global_zone_page_state(NR_UNACCEPTED));
-#endif
-	show_val_kb(m, "Balloon:        ",
-		    global_node_page_state(NR_BALLOON_PAGES));
+	trace_android_vh_meminfo_proc_show(m);
 
 	hugetlb_report_meminfo(m);
 
@@ -172,10 +193,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 static int __init proc_meminfo_init(void)
 {
-	struct proc_dir_entry *pde;
-
-	pde = proc_create_single("meminfo", 0, NULL, meminfo_proc_show);
-	pde_make_permanent(pde);
+	proc_create_single("meminfo", 0, NULL, meminfo_proc_show);
 	return 0;
 }
 fs_initcall(proc_meminfo_init);

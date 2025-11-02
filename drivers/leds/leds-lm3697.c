@@ -2,16 +2,11 @@
 // TI LM3697 LED chip family driver
 // Copyright (C) 2018 Texas Instruments Incorporated - https://www.ti.com/
 
-#include <linux/bits.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
-#include <linux/module.h>
-#include <linux/property.h>
-#include <linux/regmap.h>
+#include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
-#include <linux/types.h>
-
 #include <linux/leds-ti-lmu-common.h>
 
 #define LM3697_REV			0x0
@@ -52,8 +47,6 @@
  * @lmu_data: Register and setting values for common code
  * @control_bank: Control bank the LED is associated to. 0 is control bank A
  *		   1 is control bank B
- * @enabled: LED brightness level (or LED_OFF)
- * @num_leds: Number of LEDs available
  */
 struct lm3697_led {
 	u32 hvled_strings[LM3697_MAX_LED_STRINGS];
@@ -75,8 +68,6 @@ struct lm3697_led {
  * @dev: Pointer to the devices device struct
  * @lock: Lock for reading/writing the device
  * @leds: Array of LED strings
- * @bank_cfg: OUTPUT_CONFIG register values
- * @num_banks: Number of control banks
  */
 struct lm3697 {
 	struct gpio_desc *enable_gpio;
@@ -89,7 +80,7 @@ struct lm3697 {
 	int bank_cfg;
 	int num_banks;
 
-	struct lm3697_led leds[] __counted_by(num_banks);
+	struct lm3697_led leds[];
 };
 
 static const struct reg_default lm3697_reg_defs[] = {
@@ -202,6 +193,7 @@ out:
 
 static int lm3697_probe_dt(struct lm3697 *priv)
 {
+	struct fwnode_handle *child = NULL;
 	struct device *dev = priv->dev;
 	struct lm3697_led *led;
 	int ret = -EINVAL;
@@ -219,18 +211,21 @@ static int lm3697_probe_dt(struct lm3697 *priv)
 	if (IS_ERR(priv->regulator))
 		priv->regulator = NULL;
 
-	device_for_each_child_node_scoped(dev, child) {
+	device_for_each_child_node(dev, child) {
 		struct led_init_data init_data = {};
 
 		ret = fwnode_property_read_u32(child, "reg", &control_bank);
 		if (ret) {
 			dev_err(dev, "reg property missing\n");
-			return ret;
+			fwnode_handle_put(child);
+			goto child_out;
 		}
 
 		if (control_bank > LM3697_CONTROL_B) {
 			dev_err(dev, "reg property is invalid\n");
-			return -EINVAL;
+			ret = -EINVAL;
+			fwnode_handle_put(child);
+			goto child_out;
 		}
 
 		led = &priv->leds[i];
@@ -260,7 +255,8 @@ static int lm3697_probe_dt(struct lm3697 *priv)
 						    led->num_leds);
 		if (ret) {
 			dev_err(dev, "led-sources property missing\n");
-			return ret;
+			fwnode_handle_put(child);
+			goto child_out;
 		}
 
 		for (j = 0; j < led->num_leds; j++)
@@ -284,16 +280,19 @@ static int lm3697_probe_dt(struct lm3697 *priv)
 						     &init_data);
 		if (ret) {
 			dev_err(dev, "led register err: %d\n", ret);
-			return ret;
+			fwnode_handle_put(child);
+			goto child_out;
 		}
 
 		i++;
 	}
 
-	return 0;
+child_out:
+	return ret;
 }
 
-static int lm3697_probe(struct i2c_client *client)
+static int lm3697_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
 	struct lm3697 *led;
@@ -330,7 +329,7 @@ static int lm3697_probe(struct i2c_client *client)
 	return lm3697_init(led);
 }
 
-static void lm3697_remove(struct i2c_client *client)
+static int lm3697_remove(struct i2c_client *client)
 {
 	struct lm3697 *led = i2c_get_clientdata(client);
 	struct device *dev = &led->client->dev;
@@ -338,8 +337,10 @@ static void lm3697_remove(struct i2c_client *client)
 
 	ret = regmap_update_bits(led->regmap, LM3697_CTRL_ENABLE,
 				 LM3697_CTRL_A_B_EN, 0);
-	if (ret)
+	if (ret) {
 		dev_err(dev, "Failed to disable the device\n");
+		return ret;
+	}
 
 	if (led->enable_gpio)
 		gpiod_direction_output(led->enable_gpio, 0);
@@ -351,10 +352,12 @@ static void lm3697_remove(struct i2c_client *client)
 	}
 
 	mutex_destroy(&led->lock);
+
+	return 0;
 }
 
 static const struct i2c_device_id lm3697_id[] = {
-	{ "lm3697" },
+	{ "lm3697", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm3697_id);

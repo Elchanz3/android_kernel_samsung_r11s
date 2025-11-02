@@ -50,9 +50,8 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_irq.h>
-#include <linux/platform_device.h>
+#include <linux/of_platform.h>
 #include <linux/spinlock.h>
 #include <linux/pm_runtime.h>
 
@@ -62,6 +61,7 @@
 #define CHAN_MAX_NUM		0x8
 
 struct intmux_irqchip_data {
+	struct irq_chip		chip;
 	u32			saved_reg;
 	int			chanidx;
 	int			irq;
@@ -73,7 +73,7 @@ struct intmux_data {
 	void __iomem			*regs;
 	struct clk			*ipg_clk;
 	int				channum;
-	struct intmux_irqchip_data	irqchip_data[] __counted_by(channum);
+	struct intmux_irqchip_data	irqchip_data[];
 };
 
 static void imx_intmux_irq_mask(struct irq_data *d)
@@ -114,7 +114,7 @@ static void imx_intmux_irq_unmask(struct irq_data *d)
 	raw_spin_unlock_irqrestore(&data->lock, flags);
 }
 
-static struct irq_chip imx_intmux_irq_chip __ro_after_init = {
+static struct irq_chip imx_intmux_irq_chip = {
 	.name		= "intmux",
 	.irq_mask	= imx_intmux_irq_mask,
 	.irq_unmask	= imx_intmux_irq_unmask,
@@ -126,7 +126,7 @@ static int imx_intmux_irq_map(struct irq_domain *h, unsigned int irq,
 	struct intmux_irqchip_data *data = h->host_data;
 
 	irq_set_chip_data(irq, data);
-	irq_set_chip_and_handler(irq, &imx_intmux_irq_chip, handle_level_irq);
+	irq_set_chip_and_handler(irq, &data->chip, handle_level_irq);
 
 	return 0;
 }
@@ -166,10 +166,6 @@ static int imx_intmux_irq_select(struct irq_domain *d, struct irq_fwspec *fwspec
 	if (fwspec->fwnode != d->fwnode)
 		return false;
 
-	/* Handle pure domain searches */
-	if (!fwspec->param_count)
-		return d->bus_token == bus_token;
-
 	return irqchip_data->chanidx == fwspec->param[1];
 }
 
@@ -186,15 +182,18 @@ static void imx_intmux_irq_handler(struct irq_desc *desc)
 	struct intmux_data *data = container_of(irqchip_data, struct intmux_data,
 						irqchip_data[idx]);
 	unsigned long irqstat;
-	int pos;
+	int pos, virq;
 
 	chained_irq_enter(irq_desc_get_chip(desc), desc);
 
 	/* read the interrupt source pending status of this channel */
 	irqstat = readl_relaxed(data->regs + CHANIPR(idx));
 
-	for_each_set_bit(pos, &irqstat, 32)
-		generic_handle_domain_irq(irqchip_data->domain, pos);
+	for_each_set_bit(pos, &irqstat, 32) {
+		virq = irq_find_mapping(irqchip_data->domain, pos);
+		if (virq)
+			generic_handle_irq(virq);
+	}
 
 	chained_irq_exit(irq_desc_get_chip(desc), desc);
 }
@@ -245,6 +244,8 @@ static int imx_intmux_probe(struct platform_device *pdev)
 	}
 
 	for (i = 0; i < channum; i++) {
+		data->irqchip_data[i].chip = imx_intmux_irq_chip;
+		data->irqchip_data[i].chip.parent_device = &pdev->dev;
 		data->irqchip_data[i].chanidx = i;
 
 		data->irqchip_data[i].irq = irq_of_parse_and_map(np, i);
@@ -254,7 +255,7 @@ static int imx_intmux_probe(struct platform_device *pdev)
 			goto out;
 		}
 
-		domain = irq_domain_create_linear(of_fwnode_handle(np), 32, &imx_intmux_domain_ops,
+		domain = irq_domain_add_linear(np, 32, &imx_intmux_domain_ops,
 					       &data->irqchip_data[i]);
 		if (!domain) {
 			ret = -ENOMEM;
@@ -262,7 +263,6 @@ static int imx_intmux_probe(struct platform_device *pdev)
 			goto out;
 		}
 		data->irqchip_data[i].domain = domain;
-		irq_domain_set_pm_device(domain, &pdev->dev);
 
 		/* disable all interrupt sources of this channel firstly */
 		writel_relaxed(0, data->regs + CHANIER(i));
@@ -286,7 +286,7 @@ out:
 	return ret;
 }
 
-static void imx_intmux_remove(struct platform_device *pdev)
+static int imx_intmux_remove(struct platform_device *pdev)
 {
 	struct intmux_data *data = platform_get_drvdata(pdev);
 	int i;
@@ -302,6 +302,8 @@ static void imx_intmux_remove(struct platform_device *pdev)
 	}
 
 	pm_runtime_disable(&pdev->dev);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -356,11 +358,11 @@ static const struct of_device_id imx_intmux_id[] = {
 
 static struct platform_driver imx_intmux_driver = {
 	.driver = {
-		.name		= "imx-intmux",
-		.of_match_table	= imx_intmux_id,
-		.pm		= &imx_intmux_pm_ops,
+		.name = "imx-intmux",
+		.of_match_table = imx_intmux_id,
+		.pm = &imx_intmux_pm_ops,
 	},
-	.probe		= imx_intmux_probe,
-	.remove		= imx_intmux_remove,
+	.probe = imx_intmux_probe,
+	.remove = imx_intmux_remove,
 };
 builtin_platform_driver(imx_intmux_driver);

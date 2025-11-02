@@ -25,6 +25,15 @@ Multitouch Library
 .. kernel-doc:: drivers/input/input-mt.c
    :export:
 
+Polled input devices
+--------------------
+
+.. kernel-doc:: include/linux/input-polldev.h
+   :internal:
+
+.. kernel-doc:: drivers/input/input-polldev.c
+   :export:
+
 Matrix keyboards/keypads
 ------------------------
 
@@ -40,10 +49,3 @@ Sparse keymap support
 .. kernel-doc:: drivers/input/sparse-keymap.c
    :export:
 
-PS/2 protocol support
----------------------
-.. kernel-doc:: include/linux/libps2.h
-   :internal:
-
-.. kernel-doc:: drivers/input/serio/libps2.c
-   :export:

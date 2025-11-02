@@ -37,8 +37,9 @@
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/sched.h>
@@ -99,11 +100,9 @@ static int srf04_read(struct srf04_data *data)
 	u64 dt_ns;
 	u32 time_ns, distance_mm;
 
-	if (data->gpiod_power) {
-		ret = pm_runtime_resume_and_get(data->dev);
-		if (ret < 0)
-			return ret;
-	}
+	if (data->gpiod_power)
+		pm_runtime_get_sync(data->dev);
+
 	/*
 	 * just one read-echo-cycle can take place at a time
 	 * ==> lock against concurrent reading calls
@@ -117,8 +116,10 @@ static int srf04_read(struct srf04_data *data)
 	udelay(data->cfg->trigger_pulse_us);
 	gpiod_set_value(data->gpiod_trig, 0);
 
-	if (data->gpiod_power)
+	if (data->gpiod_power) {
+		pm_runtime_mark_last_busy(data->dev);
 		pm_runtime_put_autosuspend(data->dev);
+	}
 
 	/* it should not take more than 20 ms until echo is rising */
 	ret = wait_for_completion_killable_timeout(&data->rising, HZ/50);
@@ -232,13 +233,13 @@ static const struct iio_chan_spec srf04_chan_spec[] = {
 };
 
 static const struct of_device_id of_srf04_match[] = {
-	{ .compatible = "devantech,srf04", .data = &srf04_cfg },
-	{ .compatible = "maxbotix,mb1000", .data = &mb_lv_cfg },
-	{ .compatible = "maxbotix,mb1010", .data = &mb_lv_cfg },
-	{ .compatible = "maxbotix,mb1020", .data = &mb_lv_cfg },
-	{ .compatible = "maxbotix,mb1030", .data = &mb_lv_cfg },
-	{ .compatible = "maxbotix,mb1040", .data = &mb_lv_cfg },
-	{ }
+	{ .compatible = "devantech,srf04", .data = &srf04_cfg},
+	{ .compatible = "maxbotix,mb1000", .data = &mb_lv_cfg},
+	{ .compatible = "maxbotix,mb1010", .data = &mb_lv_cfg},
+	{ .compatible = "maxbotix,mb1020", .data = &mb_lv_cfg},
+	{ .compatible = "maxbotix,mb1030", .data = &mb_lv_cfg},
+	{ .compatible = "maxbotix,mb1040", .data = &mb_lv_cfg},
+	{},
 };
 
 MODULE_DEVICE_TABLE(of, of_srf04_match);
@@ -251,12 +252,14 @@ static int srf04_probe(struct platform_device *pdev)
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(struct srf04_data));
-	if (!indio_dev)
+	if (!indio_dev) {
+		dev_err(dev, "failed to allocate IIO device\n");
 		return -ENOMEM;
+	}
 
 	data = iio_priv(indio_dev);
 	data->dev = dev;
-	data->cfg = device_get_match_data(dev);
+	data->cfg = of_match_device(of_srf04_match, dev)->data;
 
 	mutex_init(&data->lock);
 	init_completion(&data->rising);
@@ -284,8 +287,10 @@ static int srf04_probe(struct platform_device *pdev)
 		return PTR_ERR(data->gpiod_power);
 	}
 	if (data->gpiod_power) {
-		data->startup_time_ms = 100;
-		device_property_read_u32(dev, "startup-time-ms", &data->startup_time_ms);
+
+		if (of_property_read_u32(dev->of_node, "startup-time-ms",
+						&data->startup_time_ms))
+			data->startup_time_ms = 100;
 		dev_dbg(dev, "using power gpio: startup-time-ms=%d\n",
 							data->startup_time_ms);
 	}
@@ -340,7 +345,7 @@ static int srf04_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static void srf04_remove(struct platform_device *pdev)
+static int srf04_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct srf04_data *data = iio_priv(indio_dev);
@@ -351,9 +356,11 @@ static void srf04_remove(struct platform_device *pdev)
 		pm_runtime_disable(data->dev);
 		pm_runtime_set_suspended(data->dev);
 	}
+
+	return 0;
 }
 
-static int  srf04_pm_runtime_suspend(struct device *dev)
+static int __maybe_unused srf04_pm_runtime_suspend(struct device *dev)
 {
 	struct platform_device *pdev = container_of(dev,
 						struct platform_device, dev);
@@ -365,7 +372,7 @@ static int  srf04_pm_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int srf04_pm_runtime_resume(struct device *dev)
+static int __maybe_unused srf04_pm_runtime_resume(struct device *dev)
 {
 	struct platform_device *pdev = container_of(dev,
 						struct platform_device, dev);
@@ -379,8 +386,8 @@ static int srf04_pm_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops srf04_pm_ops = {
-	RUNTIME_PM_OPS(srf04_pm_runtime_suspend,
-		       srf04_pm_runtime_resume, NULL)
+	SET_RUNTIME_PM_OPS(srf04_pm_runtime_suspend,
+				srf04_pm_runtime_resume, NULL)
 };
 
 static struct platform_driver srf04_driver = {
@@ -389,7 +396,7 @@ static struct platform_driver srf04_driver = {
 	.driver		= {
 		.name		= "srf04-gpio",
 		.of_match_table	= of_srf04_match,
-		.pm		= pm_ptr(&srf04_pm_ops),
+		.pm		= &srf04_pm_ops,
 	},
 };
 

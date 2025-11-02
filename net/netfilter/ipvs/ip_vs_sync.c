@@ -51,7 +51,7 @@
 #include <linux/kernel.h>
 #include <linux/sched/signal.h>
 
-#include <linux/unaligned.h>		/* Used for ntoh_seq and hton_seq */
+#include <asm/unaligned.h>		/* Used for ntoh_seq and hton_seq */
 
 #include <net/ip.h>
 #include <net/sock.h>
@@ -615,7 +615,7 @@ static void ip_vs_sync_conn_v0(struct netns_ipvs *ipvs, struct ip_vs_conn *cp,
 	cp = cp->control;
 	if (cp) {
 		if (cp->flags & IP_VS_CONN_F_TEMPLATE)
-			pkts = atomic_inc_return(&cp->in_pkts);
+			pkts = atomic_add_return(1, &cp->in_pkts);
 		else
 			pkts = sysctl_sync_threshold(ipvs);
 		ip_vs_sync_conn(ipvs, cp, pkts);
@@ -776,7 +776,7 @@ control:
 	if (!cp)
 		return;
 	if (cp->flags & IP_VS_CONN_F_TEMPLATE)
-		pkts = atomic_inc_return(&cp->in_pkts);
+		pkts = atomic_add_return(1, &cp->in_pkts);
 	else
 		pkts = sysctl_sync_threshold(ipvs);
 	goto sloop;
@@ -1297,14 +1297,20 @@ static void set_sock_size(struct sock *sk, int mode, int val)
  */
 static void set_mcast_loop(struct sock *sk, u_char loop)
 {
+	struct inet_sock *inet = inet_sk(sk);
+
 	/* setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)); */
-	inet_assign_bit(MC_LOOP, sk, loop);
+	lock_sock(sk);
+	inet->mc_loop = loop ? 1 : 0;
 #ifdef CONFIG_IP_VS_IPV6
-	if (READ_ONCE(sk->sk_family) == AF_INET6) {
+	if (sk->sk_family == AF_INET6) {
+		struct ipv6_pinfo *np = inet6_sk(sk);
+
 		/* IPV6_MULTICAST_LOOP */
-		inet6_assign_bit(MC6_LOOP, sk, loop);
+		np->mc_loop = loop ? 1 : 0;
 	}
 #endif
+	release_sock(sk);
 }
 
 /*
@@ -1316,13 +1322,13 @@ static void set_mcast_ttl(struct sock *sk, u_char ttl)
 
 	/* setsockopt(sock, SOL_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)); */
 	lock_sock(sk);
-	WRITE_ONCE(inet->mc_ttl, ttl);
+	inet->mc_ttl = ttl;
 #ifdef CONFIG_IP_VS_IPV6
 	if (sk->sk_family == AF_INET6) {
 		struct ipv6_pinfo *np = inet6_sk(sk);
 
 		/* IPV6_MULTICAST_HOPS */
-		WRITE_ONCE(np->mcast_hops, ttl);
+		np->mcast_hops = ttl;
 	}
 #endif
 	release_sock(sk);
@@ -1335,13 +1341,13 @@ static void set_mcast_pmtudisc(struct sock *sk, int val)
 
 	/* setsockopt(sock, SOL_IP, IP_MTU_DISCOVER, &val, sizeof(val)); */
 	lock_sock(sk);
-	WRITE_ONCE(inet->pmtudisc, val);
+	inet->pmtudisc = val;
 #ifdef CONFIG_IP_VS_IPV6
 	if (sk->sk_family == AF_INET6) {
 		struct ipv6_pinfo *np = inet6_sk(sk);
 
 		/* IPV6_MTU_DISCOVER */
-		WRITE_ONCE(np->pmtudisc, val);
+		np->pmtudisc = val;
 	}
 #endif
 	release_sock(sk);
@@ -1365,7 +1371,7 @@ static int set_mcast_if(struct sock *sk, struct net_device *dev)
 		struct ipv6_pinfo *np = inet6_sk(sk);
 
 		/* IPV6_MULTICAST_IF */
-		WRITE_ONCE(np->mcast_oif, dev->ifindex);
+		np->mcast_oif = dev->ifindex;
 	}
 #endif
 	release_sock(sk);
@@ -1576,11 +1582,13 @@ ip_vs_send_async(struct socket *sock, const char *buffer, const size_t length)
 	struct kvec	iov;
 	int		len;
 
+	EnterFunction(7);
 	iov.iov_base     = (void *)buffer;
 	iov.iov_len      = length;
 
 	len = kernel_sendmsg(sock, &msg, &iov, 1, (size_t)(length));
 
+	LeaveFunction(7);
 	return len;
 }
 
@@ -1606,12 +1614,15 @@ ip_vs_receive(struct socket *sock, char *buffer, const size_t buflen)
 	struct kvec		iov = {buffer, buflen};
 	int			len;
 
+	EnterFunction(7);
+
 	/* Receive a packet */
-	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &iov, 1, buflen);
+	iov_iter_kvec(&msg.msg_iter, READ, &iov, 1, buflen);
 	len = sock_recvmsg(sock, &msg, MSG_DONTWAIT);
 	if (len < 0)
 		return len;
 
+	LeaveFunction(7);
 	return len;
 }
 

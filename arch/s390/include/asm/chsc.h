@@ -11,9 +11,6 @@
 
 #include <uapi/asm/chsc.h>
 
-/* struct from linux/notifier.h */
-struct notifier_block;
-
 /**
  * Operation codes for CHSC PNSO:
  *    PNSO_OC_NET_BRIDGE_INFO - only addresses that are visible to a bridgeport
@@ -66,19 +63,7 @@ struct chsc_pnso_area {
 	struct chsc_header response;
 	u32:32;
 	struct chsc_pnso_naihdr naihdr;
-	struct chsc_pnso_naid_l2 entries[];
+	struct chsc_pnso_naid_l2 entries[0];
 } __packed __aligned(PAGE_SIZE);
-
-/*
- * notifier interface - registered notifiers gets called on
- * the following events:
- * - ap config changed (CHSC_NOTIFY_AP_CFG)
- */
-enum chsc_notify_type {
-	CHSC_NOTIFY_AP_CFG = 3,
-};
-
-int chsc_notifier_register(struct notifier_block *nb);
-int chsc_notifier_unregister(struct notifier_block *nb);
 
 #endif /* _ASM_S390_CHSC_H */

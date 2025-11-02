@@ -1,8 +1,20 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * NXP Wireless LAN device driver: 802.11n RX Re-ordering
  *
  * Copyright 2011-2020 NXP
+ *
+ * This software file (the "File") is distributed by NXP
+ * under the terms of the GNU General Public License Version 2, June 1991
+ * (the "License").  You may use, redistribute and/or modify this File in
+ * accordance with the terms and conditions of the License, a copy of which
+ * is available by writing to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
+ * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
+ *
+ * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
+ * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
+ * this warranty disclaimer.
  */
 
 #include "decl.h"
@@ -33,7 +45,7 @@ static int mwifiex_11n_dispatch_amsdu_pkt(struct mwifiex_private *priv,
 		skb_trim(skb, le16_to_cpu(local_rx_pd->rx_pkt_length));
 
 		ieee80211_amsdu_to_8023s(skb, &list, priv->curr_addr,
-					 priv->wdev.iftype, 0, NULL, NULL, false);
+					 priv->wdev.iftype, 0, NULL, NULL);
 
 		while (!skb_queue_empty(&list)) {
 			struct rx_packet_hdr *rx_hdr;
@@ -206,7 +218,7 @@ mwifiex_del_rx_reorder_entry(struct mwifiex_private *priv,
 	start_win = (tbl->start_win + tbl->win_size) & (MAX_TID_VALUE - 1);
 	mwifiex_11n_dispatch_pkt_until_start_win(priv, tbl, start_win);
 
-	timer_delete_sync(&tbl->timer_context.timer);
+	del_timer_sync(&tbl->timer_context.timer);
 	tbl->timer_context.timer_is_set = false;
 
 	spin_lock_bh(&priv->rx_reorder_tbl_lock);
@@ -300,7 +312,7 @@ static void
 mwifiex_flush_data(struct timer_list *t)
 {
 	struct reorder_tmr_cnxt *ctx =
-		timer_container_of(ctx, t, timer);
+		from_timer(ctx, t, timer);
 	int start_win, seq_num;
 
 	ctx->timer_is_set = false;
@@ -335,7 +347,7 @@ mwifiex_11n_create_rx_reorder_tbl(struct mwifiex_private *priv, u8 *ta,
 	struct mwifiex_sta_node *node;
 
 	/*
-	 * If we get a TID, ta pair which is already present dispatch all
+	 * If we get a TID, ta pair which is already present dispatch all the
 	 * the packets and move the window size until the ssn
 	 */
 	tbl = mwifiex_11n_get_rx_reorder_tbl(priv, tid, ta);
@@ -810,6 +822,8 @@ void mwifiex_update_rxreor_flags(struct mwifiex_adapter *adapter, u8 flags)
 
 	for (i = 0; i < adapter->priv_num; i++) {
 		priv = adapter->priv[i];
+		if (!priv)
+			continue;
 
 		spin_lock_bh(&priv->rx_reorder_tbl_lock);
 		list_for_each_entry(tbl, &priv->rx_reorder_tbl_ptr, list)
@@ -832,6 +846,8 @@ static void mwifiex_update_ampdu_rxwinsize(struct mwifiex_adapter *adapter,
 	dev_dbg(adapter->dev, "Update rxwinsize %d\n", coex_flag);
 
 	for (i = 0; i < adapter->priv_num; i++) {
+		if (!adapter->priv[i])
+			continue;
 		priv = adapter->priv[i];
 		rx_win_size = priv->add_ba_param.rx_win_size;
 		if (coex_flag) {
@@ -878,16 +894,17 @@ void mwifiex_coex_ampdu_rxwinsize(struct mwifiex_adapter *adapter)
 	u8 count = 0;
 
 	for (i = 0; i < adapter->priv_num; i++) {
-		priv = adapter->priv[i];
-		if (GET_BSS_ROLE(priv) == MWIFIEX_BSS_ROLE_STA) {
-			if (priv->media_connected)
-				count++;
+		if (adapter->priv[i]) {
+			priv = adapter->priv[i];
+			if (GET_BSS_ROLE(priv) == MWIFIEX_BSS_ROLE_STA) {
+				if (priv->media_connected)
+					count++;
+			}
+			if (GET_BSS_ROLE(priv) == MWIFIEX_BSS_ROLE_UAP) {
+				if (priv->bss_started)
+					count++;
+			}
 		}
-		if (GET_BSS_ROLE(priv) == MWIFIEX_BSS_ROLE_UAP) {
-			if (priv->bss_started)
-				count++;
-		}
-
 		if (count >= MWIFIEX_BSS_COEX_COUNT)
 			break;
 	}
@@ -913,17 +930,9 @@ void mwifiex_11n_rxba_sync_event(struct mwifiex_private *priv,
 
 	mwifiex_dbg_dump(priv->adapter, EVT_D, "RXBA_SYNC event:",
 			 event_buf, len);
-	while (tlv_buf_left > sizeof(*tlv_rxba)) {
+	while (tlv_buf_left >= sizeof(*tlv_rxba)) {
 		tlv_type = le16_to_cpu(tlv_rxba->header.type);
 		tlv_len  = le16_to_cpu(tlv_rxba->header.len);
-		if (size_add(sizeof(tlv_rxba->header), tlv_len) > tlv_buf_left) {
-			mwifiex_dbg(priv->adapter, WARN,
-				    "TLV size (%zu) overflows event_buf buf_left=%d\n",
-				    size_add(sizeof(tlv_rxba->header), tlv_len),
-				    tlv_buf_left);
-			return;
-		}
-
 		if (tlv_type != TLV_TYPE_RXBA_SYNC) {
 			mwifiex_dbg(priv->adapter, ERROR,
 				    "Wrong TLV id=0x%x\n", tlv_type);
@@ -932,14 +941,6 @@ void mwifiex_11n_rxba_sync_event(struct mwifiex_private *priv,
 
 		tlv_seq_num = le16_to_cpu(tlv_rxba->seq_num);
 		tlv_bitmap_len = le16_to_cpu(tlv_rxba->bitmap_len);
-		if (size_add(sizeof(*tlv_rxba), tlv_bitmap_len) > tlv_buf_left) {
-			mwifiex_dbg(priv->adapter, WARN,
-				    "TLV size (%zu) overflows event_buf buf_left=%d\n",
-				    size_add(sizeof(*tlv_rxba), tlv_bitmap_len),
-				    tlv_buf_left);
-			return;
-		}
-
 		mwifiex_dbg(priv->adapter, INFO,
 			    "%pM tid=%d seq_num=%d bitmap_len=%d\n",
 			    tlv_rxba->mac, tlv_rxba->tid, tlv_seq_num,

@@ -11,7 +11,12 @@
 #define _ASM_MICROBLAZE_EXCEPTIONS_H
 
 #ifdef __KERNEL__
-#ifndef __ASSEMBLER__
+
+#ifndef CONFIG_MMU
+#define EX_HANDLER_STACK_SIZ	(4*19)
+#endif
+
+#ifndef __ASSEMBLY__
 
 /* Macros to enable and disable HW exceptions in the MSR */
 /* Define MSR enable bit for HW exceptions */
@@ -64,6 +69,6 @@ void bad_page_fault(struct pt_regs *regs, unsigned long address, int sig);
 void die(const char *str, struct pt_regs *fp, long err);
 void _exception(int signr, struct pt_regs *regs, int code, unsigned long addr);
 
-#endif /*__ASSEMBLER__ */
+#endif /*__ASSEMBLY__ */
 #endif /* __KERNEL__ */
 #endif /* _ASM_MICROBLAZE_EXCEPTIONS_H */

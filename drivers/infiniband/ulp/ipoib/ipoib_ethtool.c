@@ -65,16 +65,14 @@ static void ipoib_get_drvinfo(struct net_device *netdev,
 
 	ib_get_device_fw_str(priv->ca, drvinfo->fw_version);
 
-	strscpy(drvinfo->bus_info, dev_name(priv->ca->dev.parent),
+	strlcpy(drvinfo->bus_info, dev_name(priv->ca->dev.parent),
 		sizeof(drvinfo->bus_info));
 
-	strscpy(drvinfo->driver, "ib_ipoib", sizeof(drvinfo->driver));
+	strlcpy(drvinfo->driver, "ib_ipoib", sizeof(drvinfo->driver));
 }
 
 static int ipoib_get_coalesce(struct net_device *dev,
-			      struct ethtool_coalesce *coal,
-			      struct kernel_ethtool_coalesce *kernel_coal,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_coalesce *coal)
 {
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
@@ -85,9 +83,7 @@ static int ipoib_get_coalesce(struct net_device *dev,
 }
 
 static int ipoib_set_coalesce(struct net_device *dev,
-			      struct ethtool_coalesce *coal,
-			      struct kernel_ethtool_coalesce *kernel_coal,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_coalesce *coal)
 {
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 	int ret;
@@ -128,13 +124,16 @@ static void ipoib_get_ethtool_stats(struct net_device *dev,
 static void ipoib_get_strings(struct net_device __always_unused *dev,
 			      u32 stringset, u8 *data)
 {
+	u8 *p = data;
 	int i;
 
 	switch (stringset) {
 	case ETH_SS_STATS:
-		for (i = 0; i < IPOIB_GLOBAL_STATS_LEN; i++)
-			ethtool_puts(&data,
-				     ipoib_gstrings_stats[i].stat_string);
+		for (i = 0; i < IPOIB_GLOBAL_STATS_LEN; i++) {
+			memcpy(p, ipoib_gstrings_stats[i].stat_string,
+				ETH_GSTRING_LEN);
+			p += ETH_GSTRING_LEN;
+		}
 		break;
 	default:
 		break;
@@ -167,12 +166,6 @@ static inline int ib_speed_enum_to_int(int speed)
 		return SPEED_14000;
 	case IB_SPEED_EDR:
 		return SPEED_25000;
-	case IB_SPEED_HDR:
-		return SPEED_50000;
-	case IB_SPEED_NDR:
-		return SPEED_100000;
-	case IB_SPEED_XDR:
-		return SPEED_200000;
 	}
 
 	return SPEED_UNKNOWN;

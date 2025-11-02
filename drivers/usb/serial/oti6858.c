@@ -106,7 +106,7 @@ struct oti6858_control_pkt {
 #define PIN_DTR			0x04	/* output pin */
 #define PIN_RI			0x02	/* input pin, active low */
 #define PIN_DCD			0x01	/* input pin, active low */
-	u8	rx_bytes_avail;		/* number of bytes in rx buffer */
+	u8	rx_bytes_avail;		/* number of bytes in rx buffer */;
 };
 
 #define OTI6858_CTRL_PKT_SIZE	sizeof(struct oti6858_control_pkt)
@@ -119,25 +119,25 @@ struct oti6858_control_pkt {
 static int oti6858_open(struct tty_struct *tty, struct usb_serial_port *port);
 static void oti6858_close(struct usb_serial_port *port);
 static void oti6858_set_termios(struct tty_struct *tty,
-				struct usb_serial_port *port,
-				const struct ktermios *old_termios);
+			struct usb_serial_port *port, struct ktermios *old);
 static void oti6858_init_termios(struct tty_struct *tty);
 static void oti6858_read_int_callback(struct urb *urb);
 static void oti6858_read_bulk_callback(struct urb *urb);
 static void oti6858_write_bulk_callback(struct urb *urb);
 static int oti6858_write(struct tty_struct *tty, struct usb_serial_port *port,
 			const unsigned char *buf, int count);
-static unsigned int oti6858_write_room(struct tty_struct *tty);
-static unsigned int oti6858_chars_in_buffer(struct tty_struct *tty);
+static int oti6858_write_room(struct tty_struct *tty);
+static int oti6858_chars_in_buffer(struct tty_struct *tty);
 static int oti6858_tiocmget(struct tty_struct *tty);
 static int oti6858_tiocmset(struct tty_struct *tty,
 				unsigned int set, unsigned int clear);
 static int oti6858_port_probe(struct usb_serial_port *port);
-static void oti6858_port_remove(struct usb_serial_port *port);
+static int oti6858_port_remove(struct usb_serial_port *port);
 
 /* device info */
 static struct usb_serial_driver oti6858_device = {
 	.driver = {
+		.owner =	THIS_MODULE,
 		.name =		"oti6858",
 	},
 	.id_table =		id_table,
@@ -344,12 +344,14 @@ static int oti6858_port_probe(struct usb_serial_port *port)
 	return 0;
 }
 
-static void oti6858_port_remove(struct usb_serial_port *port)
+static int oti6858_port_remove(struct usb_serial_port *port)
 {
 	struct oti6858_private *priv;
 
 	priv = usb_get_serial_port_data(port);
 	kfree(priv);
+
+	return 0;
 }
 
 static int oti6858_write(struct tty_struct *tty, struct usb_serial_port *port,
@@ -363,10 +365,10 @@ static int oti6858_write(struct tty_struct *tty, struct usb_serial_port *port,
 	return count;
 }
 
-static unsigned int oti6858_write_room(struct tty_struct *tty)
+static int oti6858_write_room(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
-	unsigned int room;
+	int room = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&port->lock, flags);
@@ -376,10 +378,10 @@ static unsigned int oti6858_write_room(struct tty_struct *tty)
 	return room;
 }
 
-static unsigned int oti6858_chars_in_buffer(struct tty_struct *tty)
+static int oti6858_chars_in_buffer(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
-	unsigned int chars;
+	int chars = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&port->lock, flags);
@@ -395,8 +397,7 @@ static void oti6858_init_termios(struct tty_struct *tty)
 }
 
 static void oti6858_set_termios(struct tty_struct *tty,
-				struct usb_serial_port *port,
-				const struct ktermios *old_termios)
+		struct usb_serial_port *port, struct ktermios *old_termios)
 {
 	struct oti6858_private *priv = usb_get_serial_port_data(port);
 	unsigned long flags;
@@ -408,6 +409,7 @@ static void oti6858_set_termios(struct tty_struct *tty,
 	cflag = tty->termios.c_cflag;
 
 	spin_lock_irqsave(&priv->lock, flags);
+	divisor = priv->pending_setup.divisor;
 	frame_fmt = priv->pending_setup.frame_fmt;
 	control = priv->pending_setup.control;
 	spin_unlock_irqrestore(&priv->lock, flags);

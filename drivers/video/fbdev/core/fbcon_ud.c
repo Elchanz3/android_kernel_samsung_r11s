@@ -64,14 +64,15 @@ static void ud_bmove(struct vc_data *vc, struct fb_info *info, int sy,
 }
 
 static void ud_clear(struct vc_data *vc, struct fb_info *info, int sy,
-		     int sx, int height, int width, int fg, int bg)
+		     int sx, int height, int width)
 {
 	struct fbcon_ops *ops = info->fbcon_par;
 	struct fb_fillrect region;
+	int bgshift = (vc->vc_hi_font_mask) ? 13 : 12;
 	u32 vyres = GETVYRES(ops->p, info);
 	u32 vxres = GETVXRES(ops->p, info);
 
-	region.color = bg;
+	region.color = attr_bgcol_ec(bgshift,vc,info);
 	region.dy = vyres - ((sy + height) * vc->vc_font.height);
 	region.dx = vxres - ((sx + width) *  vc->vc_font.width);
 	region.width = width * vc->vc_font.width;
@@ -247,7 +248,7 @@ static void ud_clear_margins(struct vc_data *vc, struct fb_info *info,
 	}
 }
 
-static void ud_cursor(struct vc_data *vc, struct fb_info *info, bool enable,
+static void ud_cursor(struct vc_data *vc, struct fb_info *info, int mode,
 		      int fg, int bg)
 {
 	struct fb_cursor cursor;
@@ -371,7 +372,16 @@ static void ud_cursor(struct vc_data *vc, struct fb_info *info, bool enable,
 			mask[i++] = ~msk;
 	}
 
-	ops->cursor_state.enable = enable && !use_sw;
+	switch (mode) {
+	case CM_ERASE:
+		ops->cursor_state.enable = 0;
+		break;
+	case CM_DRAW:
+	case CM_MOVE:
+	default:
+		ops->cursor_state.enable = (use_sw) ? 0 : 1;
+		break;
+	}
 
 	cursor.image.data = src;
 	cursor.image.fg_color = ops->cursor_state.image.fg_color;
@@ -426,3 +436,4 @@ void fbcon_rotate_ud(struct fbcon_ops *ops)
 	ops->cursor = ud_cursor;
 	ops->update_start = ud_update_start;
 }
+EXPORT_SYMBOL(fbcon_rotate_ud);

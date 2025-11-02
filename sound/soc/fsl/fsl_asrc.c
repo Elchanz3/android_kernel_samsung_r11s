@@ -11,7 +11,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
-#include <linux/dma/imx-dma.h>
+#include <linux/platform_data/dma-imx.h>
 #include <linux/pm_runtime.h>
 #include <sound/dmaengine_pcm.h>
 #include <sound/pcm_params.h>
@@ -20,16 +20,12 @@
 
 #define IDEAL_RATIO_DECIMAL_DEPTH 26
 #define DIVIDER_NUM  64
-#define INIT_RETRY_NUM 50
 
 #define pair_err(fmt, ...) \
 	dev_err(&asrc->pdev->dev, "Pair %c: " fmt, 'A' + index, ##__VA_ARGS__)
 
 #define pair_dbg(fmt, ...) \
 	dev_dbg(&asrc->pdev->dev, "Pair %c: " fmt, 'A' + index, ##__VA_ARGS__)
-
-#define pair_warn(fmt, ...) \
-	dev_warn(&asrc->pdev->dev, "Pair %c: " fmt, 'A' + index, ##__VA_ARGS__)
 
 /* Corresponding to process_option */
 static unsigned int supported_asrc_rate[] = {
@@ -517,8 +513,7 @@ static int fsl_asrc_config_pair(struct fsl_asrc_pair *pair, bool use_ideal_rate)
 	regmap_update_bits(asrc->regmap, REG_ASRCTR,
 			   ASRCTR_ATSi_MASK(index), ASRCTR_ATS(index));
 	regmap_update_bits(asrc->regmap, REG_ASRCTR,
-			   ASRCTR_IDRi_MASK(index) | ASRCTR_USRi_MASK(index),
-			   ASRCTR_USR(index));
+			   ASRCTR_USRi_MASK(index), 0);
 
 	/* Set the input and output clock sources */
 	regmap_update_bits(asrc->regmap, REG_ASRCSR,
@@ -584,7 +579,7 @@ static void fsl_asrc_start_pair(struct fsl_asrc_pair *pair)
 {
 	struct fsl_asrc *asrc = pair->asrc;
 	enum asrc_pair_index index = pair->index;
-	int reg, retry = INIT_RETRY_NUM, i;
+	int reg, retry = 10, i;
 
 	/* Enable the current pair */
 	regmap_update_bits(asrc->regmap, REG_ASRCTR,
@@ -596,10 +591,6 @@ static void fsl_asrc_start_pair(struct fsl_asrc_pair *pair)
 		regmap_read(asrc->regmap, REG_ASRCFG, &reg);
 		reg &= ASRCFG_INIRQi_MASK(index);
 	} while (!reg && --retry);
-
-	/* NOTE: Doesn't treat initialization timeout as an error */
-	if (!retry)
-		pair_warn("initialization isn't finished\n");
 
 	/* Make the input fifo to ASRC STALL level */
 	regmap_read(asrc->regmap, REG_ASRCNCR, &reg);
@@ -667,7 +658,7 @@ static void fsl_asrc_select_clk(struct fsl_asrc_priv *asrc_priv,
 	struct asrc_config *config = pair_priv->config;
 	int rate[2], select_clk[2]; /* Array size 2 means IN and OUT */
 	int clk_rate, clk_index;
-	int i, j;
+	int i = 0, j = 0;
 
 	rate[IN] = in_rate;
 	rate[OUT] = out_rate;
@@ -781,6 +772,13 @@ static int fsl_asrc_dai_trigger(struct snd_pcm_substream *substream, int cmd,
 	return 0;
 }
 
+static const struct snd_soc_dai_ops fsl_asrc_dai_ops = {
+	.startup      = fsl_asrc_dai_startup,
+	.hw_params    = fsl_asrc_dai_hw_params,
+	.hw_free      = fsl_asrc_dai_hw_free,
+	.trigger      = fsl_asrc_dai_trigger,
+};
+
 static int fsl_asrc_dai_probe(struct snd_soc_dai *dai)
 {
 	struct fsl_asrc *asrc = snd_soc_dai_get_drvdata(dai);
@@ -791,19 +789,12 @@ static int fsl_asrc_dai_probe(struct snd_soc_dai *dai)
 	return 0;
 }
 
-static const struct snd_soc_dai_ops fsl_asrc_dai_ops = {
-	.probe		= fsl_asrc_dai_probe,
-	.startup	= fsl_asrc_dai_startup,
-	.hw_params	= fsl_asrc_dai_hw_params,
-	.hw_free	= fsl_asrc_dai_hw_free,
-	.trigger	= fsl_asrc_dai_trigger,
-};
-
 #define FSL_ASRC_FORMATS	(SNDRV_PCM_FMTBIT_S24_LE | \
 				 SNDRV_PCM_FMTBIT_S16_LE | \
 				 SNDRV_PCM_FMTBIT_S24_3LE)
 
 static struct snd_soc_dai_driver fsl_asrc_dai = {
+	.probe = fsl_asrc_dai_probe,
 	.playback = {
 		.stream_name = "ASRC-Playback",
 		.channels_min = 1,
@@ -931,7 +922,7 @@ static bool fsl_asrc_writeable_reg(struct device *dev, unsigned int reg)
 	}
 }
 
-static const struct reg_default fsl_asrc_reg[] = {
+static struct reg_default fsl_asrc_reg[] = {
 	{ REG_ASRCTR, 0x0000 }, { REG_ASRIER, 0x0000 },
 	{ REG_ASRCNCR, 0x0000 }, { REG_ASRCFG, 0x0000 },
 	{ REG_ASRCSR, 0x0000 }, { REG_ASRCDR1, 0x0000 },
@@ -1064,142 +1055,6 @@ static int fsl_asrc_get_fifo_addr(u8 dir, enum asrc_pair_index index)
 	return REG_ASRDx(dir, index);
 }
 
-/* Get sample numbers in FIFO */
-static unsigned int fsl_asrc_get_output_fifo_size(struct fsl_asrc_pair *pair)
-{
-	struct fsl_asrc *asrc = pair->asrc;
-	enum asrc_pair_index index = pair->index;
-	u32 val;
-
-	regmap_read(asrc->regmap, REG_ASRFST(index), &val);
-
-	val &= ASRFSTi_OUTPUT_FIFO_MASK;
-
-	return val >> ASRFSTi_OUTPUT_FIFO_SHIFT;
-}
-
-static int fsl_asrc_m2m_prepare(struct fsl_asrc_pair *pair)
-{
-	struct fsl_asrc_pair_priv *pair_priv = pair->private;
-	struct fsl_asrc *asrc = pair->asrc;
-	struct device *dev = &asrc->pdev->dev;
-	struct asrc_config config;
-	int ret;
-
-	/* fill config */
-	config.pair = pair->index;
-	config.channel_num = pair->channels;
-	config.input_sample_rate = pair->rate[IN];
-	config.output_sample_rate = pair->rate[OUT];
-	config.input_format = pair->sample_format[IN];
-	config.output_format = pair->sample_format[OUT];
-	config.inclk = INCLK_NONE;
-	config.outclk = OUTCLK_ASRCK1_CLK;
-
-	pair_priv->config = &config;
-	ret = fsl_asrc_config_pair(pair, true);
-	if (ret) {
-		dev_err(dev, "failed to config pair: %d\n", ret);
-		return ret;
-	}
-
-	pair->first_convert = 1;
-
-	return 0;
-}
-
-static int fsl_asrc_m2m_start(struct fsl_asrc_pair *pair)
-{
-	if (pair->first_convert) {
-		fsl_asrc_start_pair(pair);
-		pair->first_convert = 0;
-	}
-	/*
-	 * Clear DMA request during the stall state of ASRC:
-	 * During STALL state, the remaining in input fifo would never be
-	 * smaller than the input threshold while the output fifo would not
-	 * be bigger than output one. Thus the DMA request would be cleared.
-	 */
-	fsl_asrc_set_watermarks(pair, ASRC_FIFO_THRESHOLD_MIN,
-				ASRC_FIFO_THRESHOLD_MAX);
-
-	/* Update the real input threshold to raise DMA request */
-	fsl_asrc_set_watermarks(pair, ASRC_M2M_INPUTFIFO_WML,
-				ASRC_M2M_OUTPUTFIFO_WML);
-
-	return 0;
-}
-
-static int fsl_asrc_m2m_stop(struct fsl_asrc_pair *pair)
-{
-	if (!pair->first_convert) {
-		fsl_asrc_stop_pair(pair);
-		pair->first_convert = 1;
-	}
-
-	return 0;
-}
-
-/* calculate capture data length according to output data length and sample rate */
-static int fsl_asrc_m2m_calc_out_len(struct fsl_asrc_pair *pair, int input_buffer_length)
-{
-	unsigned int in_width, out_width;
-	unsigned int channels = pair->channels;
-	unsigned int in_samples, out_samples;
-	unsigned int out_length;
-
-	in_width = snd_pcm_format_physical_width(pair->sample_format[IN]) / 8;
-	out_width = snd_pcm_format_physical_width(pair->sample_format[OUT]) / 8;
-
-	in_samples = input_buffer_length / in_width / channels;
-	out_samples = pair->rate[OUT] * in_samples / pair->rate[IN];
-	out_length = (out_samples - ASRC_OUTPUT_LAST_SAMPLE) * out_width * channels;
-
-	return out_length;
-}
-
-static int fsl_asrc_m2m_get_maxburst(u8 dir, struct fsl_asrc_pair *pair)
-{
-	struct fsl_asrc *asrc = pair->asrc;
-	struct fsl_asrc_priv *asrc_priv = asrc->private;
-	int wml = (dir == IN) ? ASRC_M2M_INPUTFIFO_WML : ASRC_M2M_OUTPUTFIFO_WML;
-
-	if (!asrc_priv->soc->use_edma)
-		return wml * pair->channels;
-	else
-		return 1;
-}
-
-static int fsl_asrc_m2m_get_cap(struct fsl_asrc_m2m_cap *cap)
-{
-	cap->fmt_in = FSL_ASRC_FORMATS;
-	cap->fmt_out = FSL_ASRC_FORMATS | SNDRV_PCM_FMTBIT_S8;
-
-	cap->rate_in = supported_asrc_rate;
-	cap->rate_in_count = ARRAY_SIZE(supported_asrc_rate);
-	cap->rate_out = supported_asrc_rate;
-	cap->rate_out_count = ARRAY_SIZE(supported_asrc_rate);
-	cap->chan_min = 1;
-	cap->chan_max = 10;
-
-	return 0;
-}
-
-static int fsl_asrc_m2m_pair_resume(struct fsl_asrc_pair *pair)
-{
-	struct fsl_asrc *asrc = pair->asrc;
-	int i;
-
-	for (i = 0; i < pair->channels * 4; i++)
-		regmap_write(asrc->regmap, REG_ASRDI(pair->index), 0);
-
-	pair->first_convert = 1;
-	return 0;
-}
-
-static int fsl_asrc_runtime_resume(struct device *dev);
-static int fsl_asrc_runtime_suspend(struct device *dev);
-
 static int fsl_asrc_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
@@ -1208,7 +1063,6 @@ static int fsl_asrc_probe(struct platform_device *pdev)
 	struct resource *res;
 	void __iomem *regs;
 	int irq, ret, i;
-	u32 asrc_fmt = 0;
 	u32 map_idx;
 	char tmp[16];
 	u32 width;
@@ -1225,13 +1079,15 @@ static int fsl_asrc_probe(struct platform_device *pdev)
 	asrc->private = asrc_priv;
 
 	/* Get the addresses and IRQ */
-	regs = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	regs = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
 	asrc->paddr = res->start;
 
-	asrc->regmap = devm_regmap_init_mmio(&pdev->dev, regs, &fsl_asrc_regmap_config);
+	asrc->regmap = devm_regmap_init_mmio_clk(&pdev->dev, "mem", regs,
+						 &fsl_asrc_regmap_config);
 	if (IS_ERR(asrc->regmap)) {
 		dev_err(&pdev->dev, "failed to init regmap\n");
 		return PTR_ERR(asrc->regmap);
@@ -1274,21 +1130,17 @@ static int fsl_asrc_probe(struct platform_device *pdev)
 	}
 
 	asrc_priv->soc = of_device_get_match_data(&pdev->dev);
+	if (!asrc_priv->soc) {
+		dev_err(&pdev->dev, "failed to get soc data\n");
+		return -ENODEV;
+	}
+
 	asrc->use_edma = asrc_priv->soc->use_edma;
 	asrc->get_dma_channel = fsl_asrc_get_dma_channel;
 	asrc->request_pair = fsl_asrc_request_pair;
 	asrc->release_pair = fsl_asrc_release_pair;
 	asrc->get_fifo_addr = fsl_asrc_get_fifo_addr;
 	asrc->pair_priv_size = sizeof(struct fsl_asrc_pair_priv);
-
-	asrc->m2m_prepare = fsl_asrc_m2m_prepare;
-	asrc->m2m_start = fsl_asrc_m2m_start;
-	asrc->m2m_stop = fsl_asrc_m2m_stop;
-	asrc->get_output_fifo_size = fsl_asrc_get_output_fifo_size;
-	asrc->m2m_calc_out_len = fsl_asrc_m2m_calc_out_len;
-	asrc->m2m_get_maxburst = fsl_asrc_m2m_get_maxburst;
-	asrc->m2m_pair_resume = fsl_asrc_m2m_pair_resume;
-	asrc->m2m_get_cap = fsl_asrc_m2m_get_cap;
 
 	if (of_device_is_compatible(np, "fsl,imx35-asrc")) {
 		asrc_priv->clk_map[IN] = input_clk_map_imx35;
@@ -1317,6 +1169,12 @@ static int fsl_asrc_probe(struct platform_device *pdev)
 		}
 	}
 
+	ret = fsl_asrc_init(asrc);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to init asrc %d\n", ret);
+		return ret;
+	}
+
 	asrc->channel_avail = 10;
 
 	ret = of_property_read_u32(np, "fsl,asrc-rate",
@@ -1326,8 +1184,7 @@ static int fsl_asrc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = of_property_read_u32(np, "fsl,asrc-format", &asrc_fmt);
-	asrc->asrc_format = (__force snd_pcm_format_t)asrc_fmt;
+	ret = of_property_read_u32(np, "fsl,asrc-format", &asrc->asrc_format);
 	if (ret) {
 		ret = of_property_read_u32(np, "fsl,asrc-width", &width);
 		if (ret) {
@@ -1350,73 +1207,31 @@ static int fsl_asrc_probe(struct platform_device *pdev)
 		}
 	}
 
-	if (!(FSL_ASRC_FORMATS & pcm_format_to_bits(asrc->asrc_format))) {
+	if (!(FSL_ASRC_FORMATS & (1ULL << asrc->asrc_format))) {
 		dev_warn(&pdev->dev, "unsupported width, use default S24_LE\n");
 		asrc->asrc_format = SNDRV_PCM_FORMAT_S24_LE;
 	}
 
 	platform_set_drvdata(pdev, asrc);
-	spin_lock_init(&asrc->lock);
 	pm_runtime_enable(&pdev->dev);
-	if (!pm_runtime_enabled(&pdev->dev)) {
-		ret = fsl_asrc_runtime_resume(&pdev->dev);
-		if (ret)
-			goto err_pm_disable;
-	}
-
-	ret = pm_runtime_resume_and_get(&pdev->dev);
-	if (ret < 0)
-		goto err_pm_get_sync;
-
-	ret = fsl_asrc_init(asrc);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to init asrc %d\n", ret);
-		goto err_pm_get_sync;
-	}
-
-	ret = pm_runtime_put_sync(&pdev->dev);
-	if (ret < 0 && ret != -ENOSYS)
-		goto err_pm_get_sync;
+	spin_lock_init(&asrc->lock);
+	regcache_cache_only(asrc->regmap, true);
 
 	ret = devm_snd_soc_register_component(&pdev->dev, &fsl_asrc_component,
 					      &fsl_asrc_dai, 1);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to register ASoC DAI\n");
-		goto err_pm_get_sync;
-	}
-
-	ret = fsl_asrc_m2m_init(asrc);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to init m2m device %d\n", ret);
 		return ret;
 	}
 
 	return 0;
-
-err_pm_get_sync:
-	if (!pm_runtime_status_suspended(&pdev->dev))
-		fsl_asrc_runtime_suspend(&pdev->dev);
-err_pm_disable:
-	pm_runtime_disable(&pdev->dev);
-	return ret;
 }
 
-static void fsl_asrc_remove(struct platform_device *pdev)
-{
-	struct fsl_asrc *asrc = dev_get_drvdata(&pdev->dev);
-
-	fsl_asrc_m2m_exit(asrc);
-
-	pm_runtime_disable(&pdev->dev);
-	if (!pm_runtime_status_suspended(&pdev->dev))
-		fsl_asrc_runtime_suspend(&pdev->dev);
-}
-
+#ifdef CONFIG_PM
 static int fsl_asrc_runtime_resume(struct device *dev)
 {
 	struct fsl_asrc *asrc = dev_get_drvdata(dev);
 	struct fsl_asrc_priv *asrc_priv = asrc->private;
-	int reg, retry = INIT_RETRY_NUM;
 	int i, ret;
 	u32 asrctr;
 
@@ -1455,24 +1270,6 @@ static int fsl_asrc_runtime_resume(struct device *dev)
 	regmap_update_bits(asrc->regmap, REG_ASRCTR,
 			   ASRCTR_ASRCEi_ALL_MASK, asrctr);
 
-	/* Wait for status of initialization for all enabled pairs */
-	do {
-		udelay(5);
-		regmap_read(asrc->regmap, REG_ASRCFG, &reg);
-		reg = (reg >> ASRCFG_INIRQi_SHIFT(0)) & 0x7;
-	} while ((reg != ((asrctr >> ASRCTR_ASRCEi_SHIFT(0)) & 0x7)) && --retry);
-
-	/*
-	 * NOTE: Doesn't treat initialization timeout as an error
-	 * Some of the pairs may success, then still can continue.
-	 */
-	if (!retry) {
-		for (i = ASRC_PAIR_A; i < ASRC_PAIR_MAX_NUM; i++) {
-			if ((asrctr & ASRCTR_ASRCEi_MASK(i)) && !(reg & (1 << i)))
-				dev_warn(dev, "Pair %c initialization isn't finished\n", 'A' + i);
-		}
-	}
-
 	return 0;
 
 disable_asrck_clk:
@@ -1507,30 +1304,12 @@ static int fsl_asrc_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-
-static int fsl_asrc_suspend(struct device *dev)
-{
-	struct fsl_asrc *asrc = dev_get_drvdata(dev);
-	int ret;
-
-	fsl_asrc_m2m_suspend(asrc);
-	ret = pm_runtime_force_suspend(dev);
-	return ret;
-}
-
-static int fsl_asrc_resume(struct device *dev)
-{
-	struct fsl_asrc *asrc = dev_get_drvdata(dev);
-	int ret;
-
-	ret = pm_runtime_force_resume(dev);
-	fsl_asrc_m2m_resume(asrc);
-	return ret;
-}
+#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops fsl_asrc_pm = {
-	RUNTIME_PM_OPS(fsl_asrc_runtime_suspend, fsl_asrc_runtime_resume, NULL)
-	SYSTEM_SLEEP_PM_OPS(fsl_asrc_suspend, fsl_asrc_resume)
+	SET_RUNTIME_PM_OPS(fsl_asrc_runtime_suspend, fsl_asrc_runtime_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
 };
 
 static const struct fsl_asrc_soc_data fsl_asrc_imx35_data = {
@@ -1564,11 +1343,10 @@ MODULE_DEVICE_TABLE(of, fsl_asrc_ids);
 
 static struct platform_driver fsl_asrc_driver = {
 	.probe = fsl_asrc_probe,
-	.remove = fsl_asrc_remove,
 	.driver = {
 		.name = "fsl-asrc",
 		.of_match_table = fsl_asrc_ids,
-		.pm = pm_ptr(&fsl_asrc_pm),
+		.pm = &fsl_asrc_pm,
 	},
 };
 module_platform_driver(fsl_asrc_driver);

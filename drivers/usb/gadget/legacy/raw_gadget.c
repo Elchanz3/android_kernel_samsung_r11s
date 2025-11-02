@@ -3,8 +3,7 @@
  * USB Raw Gadget driver.
  * See Documentation/usb/raw-gadget.rst for more details.
  *
- * Copyright (c) 2020 Google, Inc.
- * Author: Andrey Konovalov <andreyknvl@gmail.com>
+ * Andrey Konovalov <andreyknvl@gmail.com>
  */
 
 #include <linux/compiler.h>
@@ -25,7 +24,6 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/ch11.h>
 #include <linux/usb/gadget.h>
-#include <linux/usb/composite.h>
 
 #include <uapi/linux/usb/raw_gadget.h>
 
@@ -65,7 +63,7 @@ static int raw_event_queue_add(struct raw_event_queue *queue,
 	struct usb_raw_event *event;
 
 	spin_lock_irqsave(&queue->lock, flags);
-	if (queue->size >= RAW_EVENT_QUEUE_SIZE) {
+	if (WARN_ON(queue->size >= RAW_EVENT_QUEUE_SIZE)) {
 		spin_unlock_irqrestore(&queue->lock, flags);
 		return -ENOMEM;
 	}
@@ -311,10 +309,9 @@ static int gadget_bind(struct usb_gadget *gadget,
 	dev->eps_num = i;
 	spin_unlock_irqrestore(&dev->lock, flags);
 
-	dev_dbg(&gadget->dev, "gadget connected\n");
 	ret = raw_queue_event(dev, USB_RAW_EVENT_CONNECT, 0, NULL);
 	if (ret < 0) {
-		dev_err(&gadget->dev, "failed to queue connect event\n");
+		dev_err(&gadget->dev, "failed to queue event\n");
 		set_gadget_data(gadget, NULL);
 		return ret;
 	}
@@ -359,65 +356,20 @@ static int gadget_setup(struct usb_gadget *gadget,
 
 	ret = raw_queue_event(dev, USB_RAW_EVENT_CONTROL, sizeof(*ctrl), ctrl);
 	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue control event\n");
+		dev_err(&gadget->dev, "failed to queue event\n");
 	goto out;
 
 out_unlock:
 	spin_unlock_irqrestore(&dev->lock, flags);
 out:
-	if (ret == 0 && ctrl->wLength == 0) {
-		/*
-		 * Return USB_GADGET_DELAYED_STATUS as a workaround to stop
-		 * some UDC drivers (e.g. dwc3) from automatically proceeding
-		 * with the status stage for 0-length transfers.
-		 * Should be removed once all UDC drivers are fixed to always
-		 * delay the status stage until a response is queued to EP0.
-		 */
-		return USB_GADGET_DELAYED_STATUS;
-	}
 	return ret;
 }
 
-static void gadget_disconnect(struct usb_gadget *gadget)
-{
-	struct raw_dev *dev = get_gadget_data(gadget);
-	int ret;
-
-	dev_dbg(&gadget->dev, "gadget disconnected\n");
-	ret = raw_queue_event(dev, USB_RAW_EVENT_DISCONNECT, 0, NULL);
-	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue disconnect event\n");
-}
-static void gadget_suspend(struct usb_gadget *gadget)
-{
-	struct raw_dev *dev = get_gadget_data(gadget);
-	int ret;
-
-	dev_dbg(&gadget->dev, "gadget suspended\n");
-	ret = raw_queue_event(dev, USB_RAW_EVENT_SUSPEND, 0, NULL);
-	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue suspend event\n");
-}
-static void gadget_resume(struct usb_gadget *gadget)
-{
-	struct raw_dev *dev = get_gadget_data(gadget);
-	int ret;
-
-	dev_dbg(&gadget->dev, "gadget resumed\n");
-	ret = raw_queue_event(dev, USB_RAW_EVENT_RESUME, 0, NULL);
-	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue resume event\n");
-}
-static void gadget_reset(struct usb_gadget *gadget)
-{
-	struct raw_dev *dev = get_gadget_data(gadget);
-	int ret;
-
-	dev_dbg(&gadget->dev, "gadget reset\n");
-	ret = raw_queue_event(dev, USB_RAW_EVENT_RESET, 0, NULL);
-	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue reset event\n");
-}
+/* These are currently unused but present in case UDC driver requires them. */
+static void gadget_disconnect(struct usb_gadget *gadget) { }
+static void gadget_suspend(struct usb_gadget *gadget) { }
+static void gadget_resume(struct usb_gadget *gadget) { }
+static void gadget_reset(struct usb_gadget *gadget) { }
 
 /*----------------------------------------------------------------------*/
 
@@ -592,12 +544,12 @@ static int raw_ioctl_run(struct raw_dev *dev, unsigned long value)
 	dev->state = STATE_DEV_REGISTERING;
 	spin_unlock_irqrestore(&dev->lock, flags);
 
-	ret = usb_gadget_register_driver(&dev->driver);
+	ret = usb_gadget_probe_driver(&dev->driver);
 
 	spin_lock_irqsave(&dev->lock, flags);
 	if (ret) {
 		dev_err(dev->dev,
-			"fail, usb_gadget_register_driver returned %d\n", ret);
+			"fail, usb_gadget_probe_driver returned %d\n", ret);
 		dev->state = STATE_DEV_FAILED;
 		goto out_unlock;
 	}
@@ -667,6 +619,8 @@ static void *raw_alloc_io_data(struct usb_raw_ep_io *io, void __user *ptr,
 		return ERR_PTR(-EINVAL);
 	if (!usb_raw_io_flags_valid(io->flags))
 		return ERR_PTR(-EINVAL);
+	if (io->length > PAGE_SIZE)
+		return ERR_PTR(-EINVAL);
 	if (get_from_user)
 		data = memdup_user(ptr + sizeof(*io), io->length);
 	else {
@@ -727,6 +681,7 @@ static int raw_process_ep0_io(struct raw_dev *dev, struct usb_raw_ep_io *io,
 		dev_err(&dev->gadget->dev,
 				"fail, usb_ep_queue returned %d\n", ret);
 		spin_lock_irqsave(&dev->lock, flags);
+		dev->state = STATE_DEV_FAILED;
 		goto out_queue_failed;
 	}
 
@@ -780,7 +735,7 @@ static int raw_ioctl_ep0_read(struct raw_dev *dev, unsigned long value)
 	if (ret < 0)
 		goto free;
 
-	length = min_t(unsigned int, io.length, ret);
+	length = min(io.length, (unsigned int)ret);
 	if (copy_to_user((void __user *)(value + sizeof(io)), data, length))
 		ret = -EFAULT;
 	else
@@ -840,7 +795,6 @@ static int raw_ioctl_ep_enable(struct raw_dev *dev, unsigned long value)
 	unsigned long flags;
 	struct usb_endpoint_descriptor *desc;
 	struct raw_ep *ep;
-	bool ep_props_matched = false;
 
 	desc = memdup_user((void __user *)value, sizeof(*desc));
 	if (IS_ERR(desc))
@@ -870,13 +824,12 @@ static int raw_ioctl_ep_enable(struct raw_dev *dev, unsigned long value)
 
 	for (i = 0; i < dev->eps_num; i++) {
 		ep = &dev->eps[i];
+		if (ep->state != STATE_EP_DISABLED)
+			continue;
 		if (ep->addr != usb_endpoint_num(desc) &&
 				ep->addr != USB_RAW_EP_ADDR_ANY)
 			continue;
 		if (!usb_gadget_ep_match_desc(dev->gadget, ep->ep, desc, NULL))
-			continue;
-		ep_props_matched = true;
-		if (ep->state != STATE_EP_DISABLED)
 			continue;
 		ep->ep->desc = desc;
 		ret = usb_ep_enable(ep->ep);
@@ -899,13 +852,8 @@ static int raw_ioctl_ep_enable(struct raw_dev *dev, unsigned long value)
 		goto out_unlock;
 	}
 
-	if (!ep_props_matched) {
-		dev_dbg(&dev->gadget->dev, "fail, bad endpoint descriptor\n");
-		ret = -EINVAL;
-	} else {
-		dev_dbg(&dev->gadget->dev, "fail, no endpoints available\n");
-		ret = -EBUSY;
-	}
+	dev_dbg(&dev->gadget->dev, "fail, no gadget endpoints available\n");
+	ret = -EBUSY;
 
 out_free:
 	kfree(desc);
@@ -1113,6 +1061,7 @@ static int raw_process_ep_io(struct raw_dev *dev, struct usb_raw_ep_io *io,
 		dev_err(&dev->gadget->dev,
 				"fail, usb_ep_queue returned %d\n", ret);
 		spin_lock_irqsave(&dev->lock, flags);
+		dev->state = STATE_DEV_FAILED;
 		goto out_queue_failed;
 	}
 
@@ -1166,7 +1115,7 @@ static int raw_ioctl_ep_read(struct raw_dev *dev, unsigned long value)
 	if (ret < 0)
 		goto free;
 
-	length = min_t(unsigned int, io.length, ret);
+	length = min(io.length, (unsigned int)ret);
 	if (copy_to_user((void __user *)(value + sizeof(io)), data, length))
 		ret = -EFAULT;
 	else
@@ -1248,7 +1197,7 @@ static int raw_ioctl_eps_info(struct raw_dev *dev, unsigned long value)
 	struct usb_raw_eps_info *info;
 	struct raw_ep *ep;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (!info) {
 		ret = -ENOMEM;
 		goto out;
@@ -1268,6 +1217,7 @@ static int raw_ioctl_eps_info(struct raw_dev *dev, unsigned long value)
 		goto out_free;
 	}
 
+	memset(info, 0, sizeof(*info));
 	for (i = 0; i < dev->eps_num; i++) {
 		ep = &dev->eps[i];
 		strscpy(&info->eps[i].name[0], ep->ep->name,
@@ -1362,6 +1312,7 @@ static const struct file_operations raw_fops = {
 	.unlocked_ioctl =	raw_ioctl,
 	.compat_ioctl =		raw_ioctl,
 	.release =		raw_release,
+	.llseek =		no_llseek,
 };
 
 static struct miscdevice raw_misc_device = {

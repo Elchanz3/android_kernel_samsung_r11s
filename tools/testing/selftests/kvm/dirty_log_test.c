@@ -4,26 +4,22 @@
  *
  * Copyright (C) 2018, Red Hat, Inc.
  */
+
+#define _GNU_SOURCE /* for program_invocation_name */
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
 #include <pthread.h>
-#include <semaphore.h>
-#include <sys/types.h>
-#include <signal.h>
-#include <errno.h>
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
-#include <linux/atomic.h>
-#include <asm/barrier.h>
 
-#include "kvm_util.h"
 #include "test_util.h"
-#include "guest_modes.h"
+#include "kvm_util.h"
 #include "processor.h"
-#include "ucall_common.h"
 
-#define DIRTY_MEM_BITS 30 /* 1G */
-#define PAGE_SHIFT_4K  12
+#define VCPU_ID				1
 
 /* The memory slot index to track dirty pages */
 #define TEST_MEM_SLOT_INDEX		1
@@ -31,42 +27,35 @@
 /* Default guest test virtual memory offset */
 #define DEFAULT_GUEST_TEST_MEM		0xc0000000
 
+/* How many pages to dirty for each guest loop */
+#define TEST_PAGES_PER_LOOP		1024
+
 /* How many host loops to run (one KVM_GET_DIRTY_LOG for each loop) */
 #define TEST_HOST_LOOP_N		32UL
 
 /* Interval for each host loop (ms) */
 #define TEST_HOST_LOOP_INTERVAL		10UL
 
-/*
- * Ensure the vCPU is able to perform a reasonable number of writes in each
- * iteration to provide a lower bound on coverage.
- */
-#define TEST_MIN_WRITES_PER_ITERATION	0x100
-
 /* Dirty bitmaps are always little endian, so we need to swap on big endian */
 #if defined(__s390x__)
 # define BITOP_LE_SWIZZLE	((BITS_PER_LONG-1) & ~0x7)
 # define test_bit_le(nr, addr) \
 	test_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
-# define __set_bit_le(nr, addr) \
-	__set_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
-# define __clear_bit_le(nr, addr) \
-	__clear_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
-# define __test_and_set_bit_le(nr, addr) \
-	__test_and_set_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
-# define __test_and_clear_bit_le(nr, addr) \
-	__test_and_clear_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
+# define set_bit_le(nr, addr) \
+	set_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
+# define clear_bit_le(nr, addr) \
+	clear_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
+# define test_and_set_bit_le(nr, addr) \
+	test_and_set_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
+# define test_and_clear_bit_le(nr, addr) \
+	test_and_clear_bit((nr) ^ BITOP_LE_SWIZZLE, addr)
 #else
-# define test_bit_le			test_bit
-# define __set_bit_le			__set_bit
-# define __clear_bit_le			__clear_bit
-# define __test_and_set_bit_le		__test_and_set_bit
-# define __test_and_clear_bit_le	__test_and_clear_bit
+# define test_bit_le		test_bit
+# define set_bit_le		set_bit
+# define clear_bit_le		clear_bit
+# define test_and_set_bit_le	test_and_set_bit
+# define test_and_clear_bit_le	test_and_clear_bit
 #endif
-
-#define TEST_DIRTY_RING_COUNT		65536
-
-#define SIG_IPI SIGUSR1
 
 /*
  * Guest/Host shared variables. Ensure addr_gva2hva() and/or
@@ -77,9 +66,8 @@
 static uint64_t host_page_size;
 static uint64_t guest_page_size;
 static uint64_t guest_num_pages;
+static uint64_t random_array[TEST_PAGES_PER_LOOP];
 static uint64_t iteration;
-static uint64_t nr_writes;
-static bool vcpu_stop;
 
 /*
  * Guest physical memory offset of the testing memory slot.
@@ -101,9 +89,7 @@ static uint64_t guest_test_virt_mem = DEFAULT_GUEST_TEST_MEM;
 static void guest_code(void)
 {
 	uint64_t addr;
-
-#ifdef __s390x__
-	uint64_t i;
+	int i;
 
 	/*
 	 * On s390x, all pages of a 1M segment are initially marked as dirty
@@ -113,22 +99,19 @@ static void guest_code(void)
 	 */
 	for (i = 0; i < guest_num_pages; i++) {
 		addr = guest_test_virt_mem + i * guest_page_size;
-		vcpu_arch_put_guest(*(uint64_t *)addr, READ_ONCE(iteration));
-		nr_writes++;
+		*(uint64_t *)addr = READ_ONCE(iteration);
 	}
-#endif
 
 	while (true) {
-		while (!READ_ONCE(vcpu_stop)) {
+		for (i = 0; i < TEST_PAGES_PER_LOOP; i++) {
 			addr = guest_test_virt_mem;
-			addr += (guest_random_u64(&guest_rng) % guest_num_pages)
+			addr += (READ_ONCE(random_array[i]) % guest_num_pages)
 				* guest_page_size;
-			addr = align_down(addr, host_page_size);
-
-			vcpu_arch_put_guest(*(uint64_t *)addr, READ_ONCE(iteration));
-			nr_writes++;
+			addr &= ~(host_page_size - 1);
+			*(uint64_t *)addr = READ_ONCE(iteration);
 		}
 
+		/* Tell the host that we need more random numbers */
 		GUEST_SYNC(1);
 	}
 }
@@ -143,77 +126,7 @@ static uint64_t host_num_pages;
 /* For statistics only */
 static uint64_t host_dirty_count;
 static uint64_t host_clear_count;
-
-/* Whether dirty ring reset is requested, or finished */
-static sem_t sem_vcpu_stop;
-static sem_t sem_vcpu_cont;
-
-/*
- * This is updated by the vcpu thread to tell the host whether it's a
- * ring-full event.  It should only be read until a sem_wait() of
- * sem_vcpu_stop and before vcpu continues to run.
- */
-static bool dirty_ring_vcpu_ring_full;
-
-/*
- * This is only used for verifying the dirty pages.  Dirty ring has a very
- * tricky case when the ring just got full, kvm will do userspace exit due to
- * ring full.  When that happens, the very last PFN is set but actually the
- * data is not changed (the guest WRITE is not really applied yet), because
- * we found that the dirty ring is full, refused to continue the vcpu, and
- * recorded the dirty gfn with the old contents.
- *
- * For this specific case, it's safe to skip checking this pfn for this
- * bit, because it's a redundant bit, and when the write happens later the bit
- * will be set again.  We use this variable to always keep track of the latest
- * dirty gfn we've collected, so that if a mismatch of data found later in the
- * verifying process, we let it pass.
- */
-static uint64_t dirty_ring_last_page = -1ULL;
-
-/*
- * In addition to the above, it is possible (especially if this
- * test is run nested) for the above scenario to repeat multiple times:
- *
- * The following can happen:
- *
- * - L1 vCPU:        Memory write is logged to PML but not committed.
- *
- * - L1 test thread: Ignores the write because its last dirty ring entry
- *                   Resets the dirty ring which:
- *                     - Resets the A/D bits in EPT
- *                     - Issues tlb flush (invept), which is intercepted by L0
- *
- * - L0: frees the whole nested ept mmu root as the response to invept,
- *       and thus ensures that when memory write is retried, it will fault again
- *
- * - L1 vCPU:        Same memory write is logged to the PML but not committed again.
- *
- * - L1 test thread: Ignores the write because its last dirty ring entry (again)
- *                   Resets the dirty ring which:
- *                     - Resets the A/D bits in EPT (again)
- *                     - Issues tlb flush (again) which is intercepted by L0
- *
- * ...
- *
- * N times
- *
- * - L1 vCPU:        Memory write is logged in the PML and then committed.
- *                   Lots of other memory writes are logged and committed.
- * ...
- *
- * - L1 test thread: Sees the memory write along with other memory writes
- *                   in the dirty ring, and since the write is usually not
- *                   the last entry in the dirty-ring and has a very outdated
- *                   iteration, the test fails.
- *
- *
- * Note that this is only possible when the write was the last log entry
- * write during iteration N-1, thus remember last iteration last log entry
- * and also don't fail when it is reported in the next iteration, together with
- * an outdated iteration count.
- */
-static uint64_t dirty_ring_prev_iteration_last_page;
+static uint64_t host_track_next_count;
 
 enum log_mode_t {
 	/* Only use KVM_GET_DIRTY_LOG for logging */
@@ -221,9 +134,6 @@ enum log_mode_t {
 
 	/* Use both KVM_[GET|CLEAR]_DIRTY_LOG for logging */
 	LOG_MODE_CLEAR_LOG = 1,
-
-	/* Use dirty ring for logging */
-	LOG_MODE_DIRTY_RING = 2,
 
 	LOG_MODE_NUM,
 
@@ -235,165 +145,37 @@ enum log_mode_t {
 static enum log_mode_t host_log_mode_option = LOG_MODE_ALL;
 /* Logging mode for current run */
 static enum log_mode_t host_log_mode;
-static pthread_t vcpu_thread;
-static uint32_t test_dirty_ring_count = TEST_DIRTY_RING_COUNT;
 
 static bool clear_log_supported(void)
 {
-	return kvm_has_cap(KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2);
+	return kvm_check_cap(KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2);
 }
 
 static void clear_log_create_vm_done(struct kvm_vm *vm)
 {
+	struct kvm_enable_cap cap = {};
 	u64 manual_caps;
 
 	manual_caps = kvm_check_cap(KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2);
 	TEST_ASSERT(manual_caps, "MANUAL_CAPS is zero!");
 	manual_caps &= (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE |
 			KVM_DIRTY_LOG_INITIALLY_SET);
-	vm_enable_cap(vm, KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2, manual_caps);
+	cap.cap = KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2;
+	cap.args[0] = manual_caps;
+	vm_enable_cap(vm, &cap);
 }
 
-static void dirty_log_collect_dirty_pages(struct kvm_vcpu *vcpu, int slot,
-					  void *bitmap, uint32_t num_pages,
-					  uint32_t *unused)
+static void dirty_log_collect_dirty_pages(struct kvm_vm *vm, int slot,
+					  void *bitmap, uint32_t num_pages)
 {
-	kvm_vm_get_dirty_log(vcpu->vm, slot, bitmap);
+	kvm_vm_get_dirty_log(vm, slot, bitmap);
 }
 
-static void clear_log_collect_dirty_pages(struct kvm_vcpu *vcpu, int slot,
-					  void *bitmap, uint32_t num_pages,
-					  uint32_t *unused)
+static void clear_log_collect_dirty_pages(struct kvm_vm *vm, int slot,
+					  void *bitmap, uint32_t num_pages)
 {
-	kvm_vm_get_dirty_log(vcpu->vm, slot, bitmap);
-	kvm_vm_clear_dirty_log(vcpu->vm, slot, bitmap, 0, num_pages);
-}
-
-/* Should only be called after a GUEST_SYNC */
-static void vcpu_handle_sync_stop(void)
-{
-	if (READ_ONCE(vcpu_stop)) {
-		sem_post(&sem_vcpu_stop);
-		sem_wait(&sem_vcpu_cont);
-	}
-}
-
-static void default_after_vcpu_run(struct kvm_vcpu *vcpu)
-{
-	struct kvm_run *run = vcpu->run;
-
-	TEST_ASSERT(get_ucall(vcpu, NULL) == UCALL_SYNC,
-		    "Invalid guest sync status: exit_reason=%s",
-		    exit_reason_str(run->exit_reason));
-
-	vcpu_handle_sync_stop();
-}
-
-static bool dirty_ring_supported(void)
-{
-	return (kvm_has_cap(KVM_CAP_DIRTY_LOG_RING) ||
-		kvm_has_cap(KVM_CAP_DIRTY_LOG_RING_ACQ_REL));
-}
-
-static void dirty_ring_create_vm_done(struct kvm_vm *vm)
-{
-	uint64_t pages;
-	uint32_t limit;
-
-	/*
-	 * We rely on vcpu exit due to full dirty ring state. Adjust
-	 * the ring buffer size to ensure we're able to reach the
-	 * full dirty ring state.
-	 */
-	pages = (1ul << (DIRTY_MEM_BITS - vm->page_shift)) + 3;
-	pages = vm_adjust_num_guest_pages(vm->mode, pages);
-	if (vm->page_size < getpagesize())
-		pages = vm_num_host_pages(vm->mode, pages);
-
-	limit = 1 << (31 - __builtin_clz(pages));
-	test_dirty_ring_count = 1 << (31 - __builtin_clz(test_dirty_ring_count));
-	test_dirty_ring_count = min(limit, test_dirty_ring_count);
-	pr_info("dirty ring count: 0x%x\n", test_dirty_ring_count);
-
-	/*
-	 * Switch to dirty ring mode after VM creation but before any
-	 * of the vcpu creation.
-	 */
-	vm_enable_dirty_ring(vm, test_dirty_ring_count *
-			     sizeof(struct kvm_dirty_gfn));
-}
-
-static inline bool dirty_gfn_is_dirtied(struct kvm_dirty_gfn *gfn)
-{
-	return smp_load_acquire(&gfn->flags) == KVM_DIRTY_GFN_F_DIRTY;
-}
-
-static inline void dirty_gfn_set_collected(struct kvm_dirty_gfn *gfn)
-{
-	smp_store_release(&gfn->flags, KVM_DIRTY_GFN_F_RESET);
-}
-
-static uint32_t dirty_ring_collect_one(struct kvm_dirty_gfn *dirty_gfns,
-				       int slot, void *bitmap,
-				       uint32_t num_pages, uint32_t *fetch_index)
-{
-	struct kvm_dirty_gfn *cur;
-	uint32_t count = 0;
-
-	while (true) {
-		cur = &dirty_gfns[*fetch_index % test_dirty_ring_count];
-		if (!dirty_gfn_is_dirtied(cur))
-			break;
-		TEST_ASSERT(cur->slot == slot, "Slot number didn't match: "
-			    "%u != %u", cur->slot, slot);
-		TEST_ASSERT(cur->offset < num_pages, "Offset overflow: "
-			    "0x%llx >= 0x%x", cur->offset, num_pages);
-		__set_bit_le(cur->offset, bitmap);
-		dirty_ring_last_page = cur->offset;
-		dirty_gfn_set_collected(cur);
-		(*fetch_index)++;
-		count++;
-	}
-
-	return count;
-}
-
-static void dirty_ring_collect_dirty_pages(struct kvm_vcpu *vcpu, int slot,
-					   void *bitmap, uint32_t num_pages,
-					   uint32_t *ring_buf_idx)
-{
-	uint32_t count, cleared;
-
-	/* Only have one vcpu */
-	count = dirty_ring_collect_one(vcpu_map_dirty_ring(vcpu),
-				       slot, bitmap, num_pages,
-				       ring_buf_idx);
-
-	cleared = kvm_vm_reset_dirty_ring(vcpu->vm);
-
-	/*
-	 * Cleared pages should be the same as collected, as KVM is supposed to
-	 * clear only the entries that have been harvested.
-	 */
-	TEST_ASSERT(cleared == count, "Reset dirty pages (%u) mismatch "
-		    "with collected (%u)", cleared, count);
-}
-
-static void dirty_ring_after_vcpu_run(struct kvm_vcpu *vcpu)
-{
-	struct kvm_run *run = vcpu->run;
-
-	/* A ucall-sync or ring-full event is allowed */
-	if (get_ucall(vcpu, NULL) == UCALL_SYNC) {
-		vcpu_handle_sync_stop();
-	} else if (run->exit_reason == KVM_EXIT_DIRTY_RING_FULL) {
-		WRITE_ONCE(dirty_ring_vcpu_ring_full, true);
-		vcpu_handle_sync_stop();
-	} else {
-		TEST_ASSERT(false, "Invalid guest sync status: "
-			    "exit_reason=%s",
-			    exit_reason_str(run->exit_reason));
-	}
+	kvm_vm_get_dirty_log(vm, slot, bitmap);
+	kvm_vm_clear_dirty_log(vm, slot, bitmap, 0, num_pages);
 }
 
 struct log_mode {
@@ -403,32 +185,29 @@ struct log_mode {
 	/* Hook when the vm creation is done (before vcpu creation) */
 	void (*create_vm_done)(struct kvm_vm *vm);
 	/* Hook to collect the dirty pages into the bitmap provided */
-	void (*collect_dirty_pages) (struct kvm_vcpu *vcpu, int slot,
-				     void *bitmap, uint32_t num_pages,
-				     uint32_t *ring_buf_idx);
-	/* Hook to call when after each vcpu run */
-	void (*after_vcpu_run)(struct kvm_vcpu *vcpu);
+	void (*collect_dirty_pages) (struct kvm_vm *vm, int slot,
+				     void *bitmap, uint32_t num_pages);
 } log_modes[LOG_MODE_NUM] = {
 	{
 		.name = "dirty-log",
 		.collect_dirty_pages = dirty_log_collect_dirty_pages,
-		.after_vcpu_run = default_after_vcpu_run,
 	},
 	{
 		.name = "clear-log",
 		.supported = clear_log_supported,
 		.create_vm_done = clear_log_create_vm_done,
 		.collect_dirty_pages = clear_log_collect_dirty_pages,
-		.after_vcpu_run = default_after_vcpu_run,
-	},
-	{
-		.name = "dirty-ring",
-		.supported = dirty_ring_supported,
-		.create_vm_done = dirty_ring_create_vm_done,
-		.collect_dirty_pages = dirty_ring_collect_dirty_pages,
-		.after_vcpu_run = dirty_ring_after_vcpu_run,
 	},
 };
+
+/*
+ * We use this bitmap to track some pages that should have its dirty
+ * bit set in the _next_ iteration.  For example, if we detected the
+ * page value changed to current iteration but at the same time the
+ * page bit is cleared in the latest bitmap, then the system must
+ * report that write in the next get dirty log call.
+ */
+static unsigned long *host_bmap_track;
 
 static void log_modes_dump(void)
 {
@@ -458,151 +237,150 @@ static void log_mode_create_vm_done(struct kvm_vm *vm)
 		mode->create_vm_done(vm);
 }
 
-static void log_mode_collect_dirty_pages(struct kvm_vcpu *vcpu, int slot,
-					 void *bitmap, uint32_t num_pages,
-					 uint32_t *ring_buf_idx)
+static void log_mode_collect_dirty_pages(struct kvm_vm *vm, int slot,
+					 void *bitmap, uint32_t num_pages)
 {
 	struct log_mode *mode = &log_modes[host_log_mode];
 
 	TEST_ASSERT(mode->collect_dirty_pages != NULL,
 		    "collect_dirty_pages() is required for any log mode!");
-	mode->collect_dirty_pages(vcpu, slot, bitmap, num_pages, ring_buf_idx);
+	mode->collect_dirty_pages(vm, slot, bitmap, num_pages);
 }
 
-static void log_mode_after_vcpu_run(struct kvm_vcpu *vcpu)
+static void generate_random_array(uint64_t *guest_array, uint64_t size)
 {
-	struct log_mode *mode = &log_modes[host_log_mode];
+	uint64_t i;
 
-	if (mode->after_vcpu_run)
-		mode->after_vcpu_run(vcpu);
+	for (i = 0; i < size; i++)
+		guest_array[i] = random();
 }
 
 static void *vcpu_worker(void *data)
 {
-	struct kvm_vcpu *vcpu = data;
+	int ret;
+	struct kvm_vm *vm = data;
+	uint64_t *guest_array;
+	uint64_t pages_count = 0;
+	struct kvm_run *run;
 
-	sem_wait(&sem_vcpu_cont);
+	run = vcpu_state(vm, VCPU_ID);
+
+	guest_array = addr_gva2hva(vm, (vm_vaddr_t)random_array);
+	generate_random_array(guest_array, TEST_PAGES_PER_LOOP);
 
 	while (!READ_ONCE(host_quit)) {
 		/* Let the guest dirty the random pages */
-		vcpu_run(vcpu);
-		log_mode_after_vcpu_run(vcpu);
+		ret = _vcpu_run(vm, VCPU_ID);
+		TEST_ASSERT(ret == 0, "vcpu_run failed: %d\n", ret);
+		if (get_ucall(vm, VCPU_ID, NULL) == UCALL_SYNC) {
+			pages_count += TEST_PAGES_PER_LOOP;
+			generate_random_array(guest_array, TEST_PAGES_PER_LOOP);
+		} else {
+			TEST_FAIL("Invalid guest sync status: "
+				  "exit_reason=%s\n",
+				  exit_reason_str(run->exit_reason));
+		}
 	}
+
+	pr_info("Dirtied %"PRIu64" pages\n", pages_count);
 
 	return NULL;
 }
 
-static void vm_dirty_log_verify(enum vm_guest_mode mode, unsigned long **bmap)
+static void vm_dirty_log_verify(enum vm_guest_mode mode, unsigned long *bmap)
 {
-	uint64_t page, nr_dirty_pages = 0, nr_clean_pages = 0;
 	uint64_t step = vm_num_host_pages(mode, 1);
+	uint64_t page;
+	uint64_t *value_ptr;
 
 	for (page = 0; page < host_num_pages; page += step) {
-		uint64_t val = *(uint64_t *)(host_test_mem + page * host_page_size);
-		bool bmap0_dirty = __test_and_clear_bit_le(page, bmap[0]);
+		value_ptr = host_test_mem + page * host_page_size;
 
-		/*
-		 * Ensure both bitmaps are cleared, as a page can be written
-		 * multiple times per iteration, i.e. can show up in both
-		 * bitmaps, and the dirty ring is additive, i.e. doesn't purge
-		 * bitmap entries from previous collections.
-		 */
-		if (__test_and_clear_bit_le(page, bmap[1]) || bmap0_dirty) {
-			nr_dirty_pages++;
+		/* If this is a special page that we were tracking... */
+		if (test_and_clear_bit_le(page, host_bmap_track)) {
+			host_track_next_count++;
+			TEST_ASSERT(test_bit_le(page, bmap),
+				    "Page %"PRIu64" should have its dirty bit "
+				    "set in this iteration but it is missing",
+				    page);
+		}
 
+		if (test_and_clear_bit_le(page, bmap)) {
+			host_dirty_count++;
 			/*
-			 * If the page is dirty, the value written to memory
-			 * should be the current iteration number.
+			 * If the bit is set, the value written onto
+			 * the corresponding page should be either the
+			 * previous iteration number or the current one.
 			 */
-			if (val == iteration)
-				continue;
-
-			if (host_log_mode == LOG_MODE_DIRTY_RING) {
-				/*
-				 * The last page in the ring from previous
-				 * iteration can be written with the value
-				 * from the previous iteration, as the value to
-				 * be written may be cached in a CPU register.
-				 */
-				if (page == dirty_ring_prev_iteration_last_page &&
-				    val == iteration - 1)
-					continue;
-
-				/*
-				 * Any value from a previous iteration is legal
-				 * for the last entry, as the write may not yet
-				 * have retired, i.e. the page may hold whatever
-				 * it had before this iteration started.
-				 */
-				if (page == dirty_ring_last_page &&
-				    val < iteration)
-					continue;
-			} else if (!val && iteration == 1 && bmap0_dirty) {
-				/*
-				 * When testing get+clear, the dirty bitmap
-				 * starts with all bits set, and so the first
-				 * iteration can observe a "dirty" page that
-				 * was never written, but only in the first
-				 * bitmap (collecting the bitmap also clears
-				 * all dirty pages).
-				 */
-				continue;
-			}
-
-			TEST_FAIL("Dirty page %lu value (%lu) != iteration (%lu) "
-				  "(last = %lu, prev_last = %lu)",
-				  page, val, iteration, dirty_ring_last_page,
-				  dirty_ring_prev_iteration_last_page);
+			TEST_ASSERT(*value_ptr == iteration ||
+				    *value_ptr == iteration - 1,
+				    "Set page %"PRIu64" value %"PRIu64
+				    " incorrect (iteration=%"PRIu64")",
+				    page, *value_ptr, iteration);
 		} else {
-			nr_clean_pages++;
+			host_clear_count++;
 			/*
 			 * If cleared, the value written can be any
-			 * value smaller than the iteration number.
+			 * value smaller or equals to the iteration
+			 * number.  Note that the value can be exactly
+			 * (iteration-1) if that write can happen
+			 * like this:
+			 *
+			 * (1) increase loop count to "iteration-1"
+			 * (2) write to page P happens (with value
+			 *     "iteration-1")
+			 * (3) get dirty log for "iteration-1"; we'll
+			 *     see that page P bit is set (dirtied),
+			 *     and not set the bit in host_bmap_track
+			 * (4) increase loop count to "iteration"
+			 *     (which is current iteration)
+			 * (5) get dirty log for current iteration,
+			 *     we'll see that page P is cleared, with
+			 *     value "iteration-1".
 			 */
-			TEST_ASSERT(val < iteration,
-				    "Clear page %lu value (%lu) >= iteration (%lu) "
-				    "(last = %lu, prev_last = %lu)",
-				    page, val, iteration, dirty_ring_last_page,
-				    dirty_ring_prev_iteration_last_page);
+			TEST_ASSERT(*value_ptr <= iteration,
+				    "Clear page %"PRIu64" value %"PRIu64
+				    " incorrect (iteration=%"PRIu64")",
+				    page, *value_ptr, iteration);
+			if (*value_ptr == iteration) {
+				/*
+				 * This page is _just_ modified; it
+				 * should report its dirtyness in the
+				 * next run
+				 */
+				set_bit_le(page, host_bmap_track);
+			}
 		}
 	}
-
-	pr_info("Iteration %2ld: dirty: %-6lu clean: %-6lu writes: %-6lu\n",
-		iteration, nr_dirty_pages, nr_clean_pages, nr_writes);
-
-	host_dirty_count += nr_dirty_pages;
-	host_clear_count += nr_clean_pages;
 }
 
-static struct kvm_vm *create_vm(enum vm_guest_mode mode, struct kvm_vcpu **vcpu,
+static struct kvm_vm *create_vm(enum vm_guest_mode mode, uint32_t vcpuid,
 				uint64_t extra_mem_pages, void *guest_code)
 {
 	struct kvm_vm *vm;
+	uint64_t extra_pg_pages = extra_mem_pages / 512 * 2;
 
 	pr_info("Testing guest mode: %s\n", vm_guest_mode_string(mode));
 
-	vm = __vm_create(VM_SHAPE(mode), 1, extra_mem_pages);
-
+	vm = vm_create(mode, DEFAULT_GUEST_PHY_PAGES + extra_pg_pages, O_RDWR);
+	kvm_vm_elf_load(vm, program_invocation_name, 0, 0);
+#ifdef __x86_64__
+	vm_create_irqchip(vm);
+#endif
 	log_mode_create_vm_done(vm);
-	*vcpu = vm_vcpu_add(vm, 0, guest_code);
-	kvm_arch_vm_finalize_vcpus(vm);
+	vm_vcpu_add_default(vm, vcpuid, guest_code);
 	return vm;
 }
 
-struct test_params {
-	unsigned long iterations;
-	unsigned long interval;
-	uint64_t phys_offset;
-};
+#define DIRTY_MEM_BITS 30 /* 1G */
+#define PAGE_SHIFT_4K  12
 
-static void run_test(enum vm_guest_mode mode, void *arg)
+static void run_test(enum vm_guest_mode mode, unsigned long iterations,
+		     unsigned long interval, uint64_t phys_offset)
 {
-	struct test_params *p = arg;
-	struct kvm_vcpu *vcpu;
+	pthread_t vcpu_thread;
 	struct kvm_vm *vm;
-	unsigned long *bmap[2];
-	uint32_t ring_buf_idx = 0;
-	int sem_val;
+	unsigned long *bmap;
 
 	if (!log_mode_supported()) {
 		print_skip("Log mode '%s' not supported",
@@ -618,46 +396,39 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 	 * (e.g., 64K page size guest will need even less memory for
 	 * page tables).
 	 */
-	vm = create_vm(mode, &vcpu,
-		       2ul << (DIRTY_MEM_BITS - PAGE_SHIFT_4K), guest_code);
+	vm = create_vm(mode, VCPU_ID,
+		       2ul << (DIRTY_MEM_BITS - PAGE_SHIFT_4K),
+		       guest_code);
 
-	guest_page_size = vm->page_size;
+	guest_page_size = vm_get_page_size(vm);
 	/*
 	 * A little more than 1G of guest page sized pages.  Cover the
 	 * case where the size is not aligned to 64 pages.
 	 */
-	guest_num_pages = (1ul << (DIRTY_MEM_BITS - vm->page_shift)) + 3;
+	guest_num_pages = (1ul << (DIRTY_MEM_BITS -
+				   vm_get_page_shift(vm))) + 3;
 	guest_num_pages = vm_adjust_num_guest_pages(mode, guest_num_pages);
 
 	host_page_size = getpagesize();
 	host_num_pages = vm_num_host_pages(mode, guest_num_pages);
 
-	if (!p->phys_offset) {
-		guest_test_phys_mem = (vm->max_gfn - guest_num_pages) *
-				      guest_page_size;
-		guest_test_phys_mem = align_down(guest_test_phys_mem, host_page_size);
+	if (!phys_offset) {
+		guest_test_phys_mem = (vm_get_max_gfn(vm) -
+				       guest_num_pages) * guest_page_size;
+		guest_test_phys_mem &= ~(host_page_size - 1);
 	} else {
-		guest_test_phys_mem = p->phys_offset;
+		guest_test_phys_mem = phys_offset;
 	}
 
 #ifdef __s390x__
 	/* Align to 1M (segment size) */
-	guest_test_phys_mem = align_down(guest_test_phys_mem, 1 << 20);
-
-	/*
-	 * The workaround in guest_code() to write all pages prior to the first
-	 * iteration isn't compatible with the dirty ring, as the dirty ring
-	 * support relies on the vCPU to actually stop when vcpu_stop is set so
-	 * that the vCPU doesn't hang waiting for the dirty ring to be emptied.
-	 */
-	TEST_ASSERT(host_log_mode != LOG_MODE_DIRTY_RING,
-		    "Test needs to be updated to support s390 dirty ring");
+	guest_test_phys_mem &= ~((1 << 20) - 1);
 #endif
 
 	pr_info("guest physical test memory offset: 0x%lx\n", guest_test_phys_mem);
 
-	bmap[0] = bitmap_zalloc(host_num_pages);
-	bmap[1] = bitmap_zalloc(host_num_pages);
+	bmap = bitmap_alloc(host_num_pages);
+	host_bmap_track = bitmap_alloc(host_num_pages);
 
 	/* Add an extra memory slot for testing dirty logging */
 	vm_userspace_mem_region_add(vm, VM_MEM_SRC_ANONYMOUS,
@@ -667,10 +438,15 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 				    KVM_MEM_LOG_DIRTY_PAGES);
 
 	/* Do mapping for the dirty track memory slot */
-	virt_map(vm, guest_test_virt_mem, guest_test_phys_mem, guest_num_pages);
+	virt_map(vm, guest_test_virt_mem, guest_test_phys_mem, guest_num_pages, 0);
 
 	/* Cache the HVA pointer of the region */
 	host_test_mem = addr_gpa2hva(vm, (vm_paddr_t)guest_test_phys_mem);
+
+#ifdef __x86_64__
+	vcpu_set_cpuid(vm, VCPU_ID, kvm_get_supported_cpuid());
+#endif
+	ucall_init(vm, NULL);
 
 	/* Export the shared variables to the guest */
 	sync_global_to_guest(vm, host_page_size);
@@ -678,144 +454,58 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 	sync_global_to_guest(vm, guest_test_virt_mem);
 	sync_global_to_guest(vm, guest_num_pages);
 
+	/* Start the iterations */
+	iteration = 1;
+	sync_global_to_guest(vm, iteration);
+	host_quit = false;
 	host_dirty_count = 0;
 	host_clear_count = 0;
-	WRITE_ONCE(host_quit, false);
+	host_track_next_count = 0;
 
-	/*
-	 * Ensure the previous iteration didn't leave a dangling semaphore, i.e.
-	 * that the main task and vCPU worker were synchronized and completed
-	 * verification of all iterations.
-	 */
-	sem_getvalue(&sem_vcpu_stop, &sem_val);
-	TEST_ASSERT_EQ(sem_val, 0);
-	sem_getvalue(&sem_vcpu_cont, &sem_val);
-	TEST_ASSERT_EQ(sem_val, 0);
+	pthread_create(&vcpu_thread, NULL, vcpu_worker, vm);
 
-	TEST_ASSERT_EQ(vcpu_stop, false);
-
-	pthread_create(&vcpu_thread, NULL, vcpu_worker, vcpu);
-
-	for (iteration = 1; iteration <= p->iterations; iteration++) {
-		unsigned long i;
-
-		sync_global_to_guest(vm, iteration);
-
-		WRITE_ONCE(nr_writes, 0);
-		sync_global_to_guest(vm, nr_writes);
-
-		dirty_ring_prev_iteration_last_page = dirty_ring_last_page;
-		WRITE_ONCE(dirty_ring_vcpu_ring_full, false);
-
-		sem_post(&sem_vcpu_cont);
-
-		/*
-		 * Let the vCPU run beyond the configured interval until it has
-		 * performed the minimum number of writes.  This verifies the
-		 * guest is making forward progress, e.g. isn't stuck because
-		 * of a KVM bug, and puts a firm floor on test coverage.
-		 */
-		for (i = 0; i < p->interval || nr_writes < TEST_MIN_WRITES_PER_ITERATION; i++) {
-			/*
-			 * Sleep in 1ms chunks to keep the interval math simple
-			 * and so that the test doesn't run too far beyond the
-			 * specified interval.
-			 */
-			usleep(1000);
-
-			sync_global_from_guest(vm, nr_writes);
-
-			/*
-			 * Reap dirty pages while the guest is running so that
-			 * dirty ring full events are resolved, i.e. so that a
-			 * larger interval doesn't always end up with a vCPU
-			 * that's effectively blocked.  Collecting while the
-			 * guest is running also verifies KVM doesn't lose any
-			 * state.
-			 *
-			 * For bitmap modes, KVM overwrites the entire bitmap,
-			 * i.e. collecting the bitmaps is destructive.  Collect
-			 * the bitmap only on the first pass, otherwise this
-			 * test would lose track of dirty pages.
-			 */
-			if (i && host_log_mode != LOG_MODE_DIRTY_RING)
-				continue;
-
-			/*
-			 * For the dirty ring, empty the ring on subsequent
-			 * passes only if the ring was filled at least once,
-			 * to verify KVM's handling of a full ring (emptying
-			 * the ring on every pass would make it unlikely the
-			 * vCPU would ever fill the fing).
-			 */
-			if (i && !READ_ONCE(dirty_ring_vcpu_ring_full))
-				continue;
-
-			log_mode_collect_dirty_pages(vcpu, TEST_MEM_SLOT_INDEX,
-						     bmap[0], host_num_pages,
-						     &ring_buf_idx);
-		}
-
-		/*
-		 * Stop the vCPU prior to collecting and verifying the dirty
-		 * log.  If the vCPU is allowed to run during collection, then
-		 * pages that are written during this iteration may be missed,
-		 * i.e. collected in the next iteration.  And if the vCPU is
-		 * writing memory during verification, pages that this thread
-		 * sees as clean may be written with this iteration's value.
-		 */
-		WRITE_ONCE(vcpu_stop, true);
-		sync_global_to_guest(vm, vcpu_stop);
-		sem_wait(&sem_vcpu_stop);
-
-		/*
-		 * Clear vcpu_stop after the vCPU thread has acknowledge the
-		 * stop request and is waiting, i.e. is definitely not running!
-		 */
-		WRITE_ONCE(vcpu_stop, false);
-		sync_global_to_guest(vm, vcpu_stop);
-
-		/*
-		 * Sync the number of writes performed before verification, the
-		 * info will be printed along with the dirty/clean page counts.
-		 */
-		sync_global_from_guest(vm, nr_writes);
-
-		/*
-		 * NOTE: for dirty ring, it's possible that we didn't stop at
-		 * GUEST_SYNC but instead we stopped because ring is full;
-		 * that's okay too because ring full means we're only missing
-		 * the flush of the last page, and since we handle the last
-		 * page specially verification will succeed anyway.
-		 */
-		log_mode_collect_dirty_pages(vcpu, TEST_MEM_SLOT_INDEX,
-					     bmap[1], host_num_pages,
-					     &ring_buf_idx);
+	while (iteration < iterations) {
+		/* Give the vcpu thread some time to dirty some pages */
+		usleep(interval * 1000);
+		log_mode_collect_dirty_pages(vm, TEST_MEM_SLOT_INDEX,
+					     bmap, host_num_pages);
 		vm_dirty_log_verify(mode, bmap);
+		iteration++;
+		sync_global_to_guest(vm, iteration);
 	}
 
-	WRITE_ONCE(host_quit, true);
-	sem_post(&sem_vcpu_cont);
-
+	/* Tell the vcpu thread to quit */
+	host_quit = true;
 	pthread_join(vcpu_thread, NULL);
 
-	pr_info("Total bits checked: dirty (%lu), clear (%lu)\n",
-		host_dirty_count, host_clear_count);
+	pr_info("Total bits checked: dirty (%"PRIu64"), clear (%"PRIu64"), "
+		"track_next (%"PRIu64")\n", host_dirty_count, host_clear_count,
+		host_track_next_count);
 
-	free(bmap[0]);
-	free(bmap[1]);
+	free(bmap);
+	free(host_bmap_track);
+	ucall_uninit(vm);
 	kvm_vm_free(vm);
 }
 
+struct guest_mode {
+	bool supported;
+	bool enabled;
+};
+static struct guest_mode guest_modes[NUM_VM_MODES];
+
+#define guest_mode_init(mode, supported, enabled) ({ \
+	guest_modes[mode] = (struct guest_mode){ supported, enabled }; \
+})
+
 static void help(char *name)
 {
+	int i;
+
 	puts("");
 	printf("usage: %s [-h] [-i iterations] [-I interval] "
 	       "[-p offset] [-m mode]\n", name);
 	puts("");
-	printf(" -c: hint to dirty ring size, in number of entries\n");
-	printf("     (only useful for dirty-ring test; default: %"PRIu32")\n",
-	       TEST_DIRTY_RING_COUNT);
 	printf(" -i: specify iteration counts (default: %"PRIu64")\n",
 	       TEST_HOST_LOOP_N);
 	printf(" -I: specify interval in ms (default: %"PRIu64" ms)\n",
@@ -825,40 +515,70 @@ static void help(char *name)
 	printf(" -M: specify the host logging mode "
 	       "(default: run all log modes).  Supported modes: \n\t");
 	log_modes_dump();
-	guest_modes_help();
+	printf(" -m: specify the guest mode ID to test "
+	       "(default: test all supported modes)\n"
+	       "     This option may be used multiple times.\n"
+	       "     Guest mode IDs:\n");
+	for (i = 0; i < NUM_VM_MODES; ++i) {
+		printf("         %d:    %s%s\n", i, vm_guest_mode_string(i),
+		       guest_modes[i].supported ? " (supported)" : "");
+	}
 	puts("");
 	exit(0);
 }
 
 int main(int argc, char *argv[])
 {
-	struct test_params p = {
-		.iterations = TEST_HOST_LOOP_N,
-		.interval = TEST_HOST_LOOP_INTERVAL,
-	};
-	int opt, i;
+	unsigned long iterations = TEST_HOST_LOOP_N;
+	unsigned long interval = TEST_HOST_LOOP_INTERVAL;
+	bool mode_selected = false;
+	uint64_t phys_offset = 0;
+	unsigned int mode;
+	int opt, i, j;
 
-	sem_init(&sem_vcpu_stop, 0, 0);
-	sem_init(&sem_vcpu_cont, 0, 0);
+#ifdef __x86_64__
+	guest_mode_init(VM_MODE_PXXV48_4K, true, true);
+#endif
+#ifdef __aarch64__
+	guest_mode_init(VM_MODE_P40V48_4K, true, true);
+	guest_mode_init(VM_MODE_P40V48_64K, true, true);
 
-	guest_modes_append_default();
+	{
+		unsigned int limit = kvm_check_cap(KVM_CAP_ARM_VM_IPA_SIZE);
 
-	while ((opt = getopt(argc, argv, "c:hi:I:p:m:M:")) != -1) {
+		if (limit >= 52)
+			guest_mode_init(VM_MODE_P52V48_64K, true, true);
+		if (limit >= 48) {
+			guest_mode_init(VM_MODE_P48V48_4K, true, true);
+			guest_mode_init(VM_MODE_P48V48_64K, true, true);
+		}
+	}
+#endif
+#ifdef __s390x__
+	guest_mode_init(VM_MODE_P40V48_4K, true, true);
+#endif
+
+	while ((opt = getopt(argc, argv, "hi:I:p:m:M:")) != -1) {
 		switch (opt) {
-		case 'c':
-			test_dirty_ring_count = strtol(optarg, NULL, 10);
-			break;
 		case 'i':
-			p.iterations = strtol(optarg, NULL, 10);
+			iterations = strtol(optarg, NULL, 10);
 			break;
 		case 'I':
-			p.interval = strtol(optarg, NULL, 10);
+			interval = strtol(optarg, NULL, 10);
 			break;
 		case 'p':
-			p.phys_offset = strtoull(optarg, NULL, 0);
+			phys_offset = strtoull(optarg, NULL, 0);
 			break;
 		case 'm':
-			guest_modes_cmdline(optarg);
+			if (!mode_selected) {
+				for (i = 0; i < NUM_VM_MODES; ++i)
+					guest_modes[i].enabled = false;
+				mode_selected = true;
+			}
+			mode = strtoul(optarg, NULL, 10);
+			TEST_ASSERT(mode < NUM_VM_MODES,
+				    "Guest mode ID %d too big", mode);
+			guest_modes[mode].enabled = true;
 			break;
 		case 'M':
 			if (!strcmp(optarg, "all")) {
@@ -887,22 +607,32 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	TEST_ASSERT(p.iterations > 0, "Iterations must be greater than zero");
-	TEST_ASSERT(p.interval > 0, "Interval must be greater than zero");
+	TEST_ASSERT(iterations > 2, "Iterations must be greater than two");
+	TEST_ASSERT(interval > 0, "Interval must be greater than zero");
 
 	pr_info("Test iterations: %"PRIu64", interval: %"PRIu64" (ms)\n",
-		p.iterations, p.interval);
+		iterations, interval);
 
-	if (host_log_mode_option == LOG_MODE_ALL) {
-		/* Run each log mode */
-		for (i = 0; i < LOG_MODE_NUM; i++) {
-			pr_info("Testing Log Mode '%s'\n", log_modes[i].name);
-			host_log_mode = i;
-			for_each_guest_mode(run_test, &p);
+	srandom(time(0));
+
+	for (i = 0; i < NUM_VM_MODES; ++i) {
+		if (!guest_modes[i].enabled)
+			continue;
+		TEST_ASSERT(guest_modes[i].supported,
+			    "Guest mode ID %d (%s) not supported.",
+			    i, vm_guest_mode_string(i));
+		if (host_log_mode_option == LOG_MODE_ALL) {
+			/* Run each log mode */
+			for (j = 0; j < LOG_MODE_NUM; j++) {
+				pr_info("Testing Log Mode '%s'\n",
+					log_modes[j].name);
+				host_log_mode = j;
+				run_test(i, iterations, interval, phys_offset);
+			}
+		} else {
+			host_log_mode = host_log_mode_option;
+			run_test(i, iterations, interval, phys_offset);
 		}
-	} else {
-		host_log_mode = host_log_mode_option;
-		for_each_guest_mode(run_test, &p);
 	}
 
 	return 0;

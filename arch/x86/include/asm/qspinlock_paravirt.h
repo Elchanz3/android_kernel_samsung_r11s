@@ -2,10 +2,6 @@
 #ifndef __ASM_QSPINLOCK_PARAVIRT_H
 #define __ASM_QSPINLOCK_PARAVIRT_H
 
-#include <asm/ibt.h>
-
-void __lockfunc __pv_queued_spin_unlock_slowpath(struct qspinlock *lock, u8 locked);
-
 /*
  * For x86-64, PV_CALLEE_SAVE_REGS_THUNK() saves and restores 8 64-bit
  * registers. For i386, however, only 1 32-bit register needs to be saved
@@ -14,20 +10,21 @@ void __lockfunc __pv_queued_spin_unlock_slowpath(struct qspinlock *lock, u8 lock
  */
 #ifdef CONFIG_64BIT
 
-__PV_CALLEE_SAVE_REGS_THUNK(__pv_queued_spin_unlock_slowpath, ".spinlock.text");
+PV_CALLEE_SAVE_REGS_THUNK(__pv_queued_spin_unlock_slowpath);
 #define __pv_queued_spin_unlock	__pv_queued_spin_unlock
+#define PV_UNLOCK		"__raw_callee_save___pv_queued_spin_unlock"
+#define PV_UNLOCK_SLOWPATH	"__raw_callee_save___pv_queued_spin_unlock_slowpath"
 
 /*
  * Optimized assembly version of __raw_callee_save___pv_queued_spin_unlock
  * which combines the registers saving trunk and the body of the following
- * C code.  Note that it puts the code in the .spinlock.text section which
- * is equivalent to adding __lockfunc in the C code:
+ * C code:
  *
- * void __lockfunc __pv_queued_spin_unlock(struct qspinlock *lock)
+ * void __pv_queued_spin_unlock(struct qspinlock *lock)
  * {
- *	u8 lockval = _Q_LOCKED_VAL;
+ *	u8 lockval = cmpxchg(&lock->locked, _Q_LOCKED_VAL, 0);
  *
- *	if (try_cmpxchg(&lock->locked, &lockval, 0))
+ *	if (likely(lockval == _Q_LOCKED_VAL))
  *		return;
  *	pv_queued_spin_unlock_slowpath(lock, lockval);
  * }
@@ -37,31 +34,36 @@ __PV_CALLEE_SAVE_REGS_THUNK(__pv_queued_spin_unlock_slowpath, ".spinlock.text");
  *   rsi = lockval           (second argument)
  *   rdx = internal variable (set to 0)
  */
-#define PV_UNLOCK_ASM							\
-	FRAME_BEGIN							\
-	"push  %rdx\n\t"						\
-	"mov   $" __stringify(_Q_LOCKED_VAL) ",%eax\n\t"		\
-	"xor   %edx,%edx\n\t"						\
-	LOCK_PREFIX "cmpxchg %dl,(%rdi)\n\t"				\
-	"jne   .slowpath\n\t"						\
-	"pop   %rdx\n\t"						\
-	FRAME_END							\
-	ASM_RET								\
-	".slowpath:\n\t"						\
-	"push   %rsi\n\t"						\
-	"movzbl %al,%esi\n\t"						\
-	"call __raw_callee_save___pv_queued_spin_unlock_slowpath\n\t"	\
-	"pop    %rsi\n\t"						\
-	"pop    %rdx\n\t"						\
+asm    (".pushsection .text;"
+	".globl " PV_UNLOCK ";"
+	".type " PV_UNLOCK ", @function;"
+	".align 4,0x90;"
+	PV_UNLOCK ": "
+	FRAME_BEGIN
+	"push  %rdx;"
+	"mov   $0x1,%eax;"
+	"xor   %edx,%edx;"
+	LOCK_PREFIX "cmpxchg %dl,(%rdi);"
+	"cmp   $0x1,%al;"
+	"jne   .slowpath;"
+	"pop   %rdx;"
 	FRAME_END
-
-DEFINE_ASM_FUNC(__raw_callee_save___pv_queued_spin_unlock,
-		PV_UNLOCK_ASM, .spinlock.text);
+	ASM_RET
+	".slowpath: "
+	"push   %rsi;"
+	"movzbl %al,%esi;"
+	"call " PV_UNLOCK_SLOWPATH ";"
+	"pop    %rsi;"
+	"pop    %rdx;"
+	FRAME_END
+	ASM_RET
+	".size " PV_UNLOCK ", .-" PV_UNLOCK ";"
+	".popsection");
 
 #else /* CONFIG_64BIT */
 
-extern void __lockfunc __pv_queued_spin_unlock(struct qspinlock *lock);
-__PV_CALLEE_SAVE_REGS_THUNK(__pv_queued_spin_unlock, ".spinlock.text");
+extern void __pv_queued_spin_unlock(struct qspinlock *lock);
+PV_CALLEE_SAVE_REGS_THUNK(__pv_queued_spin_unlock);
 
 #endif /* CONFIG_64BIT */
 #endif

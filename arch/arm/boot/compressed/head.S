@@ -11,12 +11,6 @@
 
 #include "efi-header.S"
 
-#ifdef __ARMEB__
-#define OF_DT_MAGIC 0xd00dfeed
-#else
-#define OF_DT_MAGIC 0xedfe0dd0
-#endif
-
  AR_CLASS(	.arch	armv7-a	)
  M_CLASS(	.arch	armv7-m	)
 
@@ -67,7 +61,11 @@
 #if defined(CONFIG_ARCH_SA1100)
 		.macro	loadsp, rb, tmp1, tmp2
 		mov	\rb, #0x80000000	@ physical base address
+#ifdef CONFIG_DEBUG_LL_SER3
+		add	\rb, \rb, #0x00050000	@ Ser3
+#else
 		add	\rb, \rb, #0x00010000	@ Ser1
+#endif
 		.endm
 #else
 		.macro	loadsp,	rb, tmp1, tmp2
@@ -276,40 +274,10 @@ not_angel:
 		 * are already placing their zImage in (eg) the top 64MB
 		 * of this range.
 		 */
-		mov	r0, pc
-		and	r0, r0, #0xf8000000
-#ifdef CONFIG_USE_OF
-		adr	r1, LC1
-#ifdef CONFIG_ARM_APPENDED_DTB
-		/*
-		 * Look for an appended DTB.  If found, we cannot use it to
-		 * validate the calculated start of physical memory, as its
-		 * memory nodes may need to be augmented by ATAGS stored at
-		 * an offset from the same start of physical memory.
-		 */
-		ldr	r2, [r1, #4]	@ get &_edata
-		add	r2, r2, r1	@ relocate it
-		ldr	r2, [r2]	@ get DTB signature
-		ldr	r3, =OF_DT_MAGIC
-		cmp	r2, r3		@ do we have a DTB there?
-		beq	1f		@ if yes, skip validation
-#endif /* CONFIG_ARM_APPENDED_DTB */
-
-		/*
-		 * Make sure we have some stack before calling C code.
-		 * No GOT fixup has occurred yet, but none of the code we're
-		 * about to call uses any global variables.
-		 */
-		ldr	sp, [r1]	@ get stack location
-		add	sp, sp, r1	@ apply relocation
-
-		/* Validate calculated start against passed DTB */
-		mov	r1, r8
-		bl	fdt_check_mem_start
-1:
-#endif /* CONFIG_USE_OF */
+		mov	r4, pc
+		and	r4, r4, #0xf8000000
 		/* Determine final kernel image address. */
-		add	r4, r0, #TEXT_OFFSET
+		add	r4, r4, #TEXT_OFFSET
 #else
 		ldr	r4, =zreladdr
 #endif
@@ -365,7 +333,11 @@ restart:	adr	r0, LC1
  */
 
 		ldr	lr, [r6, #0]
-		ldr	r1, =OF_DT_MAGIC
+#ifndef __ARMEB__
+		ldr	r1, =0xedfe0dd0		@ sig is 0xd00dfeed big endian
+#else
+		ldr	r1, =0xd00dfeed
+#endif
 		cmp	lr, r1
 		bne	dtb_check_done		@ not found
 
@@ -492,10 +464,15 @@ dtb_check_done:
 
 		/*
 		 * Compute the address of the hyp vectors after relocation.
+		 * This requires some arithmetic since we cannot directly
+		 * reference __hyp_stub_vectors in a PC-relative way.
 		 * Call __hyp_set_vectors with the new address so that we
 		 * can HVC again after the copy.
 		 */
-		adr_l	r0, __hyp_stub_vectors
+0:		adr	r0, 0b
+		movw	r1, #:lower16:__hyp_stub_vectors - 0b
+		movt	r1, #:upper16:__hyp_stub_vectors - 0b
+		add	r0, r0, r1
 		sub	r0, r0, r5
 		add	r0, r0, r10
 		bl	__hyp_set_vectors
@@ -646,11 +623,17 @@ not_relocated:	mov	r0, #0
 		cmp	r0, #HYP_MODE		@ if not booted in HYP mode...
 		bne	__enter_kernel		@ boot kernel directly
 
-		adr_l	r0, __hyp_reentry_vectors
+		adr	r12, .L__hyp_reentry_vectors_offset
+		ldr	r0, [r12]
+		add	r0, r0, r12
+
 		bl	__hyp_set_vectors
 		__HVC(0)			@ otherwise bounce to hyp mode
 
 		b	.			@ should never be reached
+
+		.align	2
+.L__hyp_reentry_vectors_offset:	.long	__hyp_reentry_vectors - .
 #else
 		b	__enter_kernel
 #endif

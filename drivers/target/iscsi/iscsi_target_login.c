@@ -8,6 +8,7 @@
  *
  ******************************************************************************/
 
+#include <crypto/hash.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/kthread.h>
@@ -34,7 +35,7 @@
 
 #include <target/iscsi/iscsi_transport.h>
 
-static struct iscsi_login *iscsi_login_init_conn(struct iscsit_conn *conn)
+static struct iscsi_login *iscsi_login_init_conn(struct iscsi_conn *conn)
 {
 	struct iscsi_login *login;
 
@@ -70,8 +71,48 @@ out_login:
 	return NULL;
 }
 
+/*
+ * Used by iscsi_target_nego.c:iscsi_target_locate_portal() to setup
+ * per struct iscsi_conn libcrypto contexts for crc32c and crc32-intel
+ */
+int iscsi_login_setup_crypto(struct iscsi_conn *conn)
+{
+	struct crypto_ahash *tfm;
+
+	/*
+	 * Setup slicing by CRC32C algorithm for RX and TX libcrypto contexts
+	 * which will default to crc32c_intel.ko for cpu_has_xmm4_2, or fallback
+	 * to software 1x8 byte slicing from crc32c.ko
+	 */
+	tfm = crypto_alloc_ahash("crc32c", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(tfm)) {
+		pr_err("crypto_alloc_ahash() failed\n");
+		return -ENOMEM;
+	}
+
+	conn->conn_rx_hash = ahash_request_alloc(tfm, GFP_KERNEL);
+	if (!conn->conn_rx_hash) {
+		pr_err("ahash_request_alloc() failed for conn_rx_hash\n");
+		crypto_free_ahash(tfm);
+		return -ENOMEM;
+	}
+	ahash_request_set_callback(conn->conn_rx_hash, 0, NULL, NULL);
+
+	conn->conn_tx_hash = ahash_request_alloc(tfm, GFP_KERNEL);
+	if (!conn->conn_tx_hash) {
+		pr_err("ahash_request_alloc() failed for conn_tx_hash\n");
+		ahash_request_free(conn->conn_rx_hash);
+		conn->conn_rx_hash = NULL;
+		crypto_free_ahash(tfm);
+		return -ENOMEM;
+	}
+	ahash_request_set_callback(conn->conn_tx_hash, 0, NULL, NULL);
+
+	return 0;
+}
+
 static int iscsi_login_check_initiator_version(
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	u8 version_max,
 	u8 version_min)
 {
@@ -87,12 +128,12 @@ static int iscsi_login_check_initiator_version(
 	return 0;
 }
 
-int iscsi_check_for_session_reinstatement(struct iscsit_conn *conn)
+int iscsi_check_for_session_reinstatement(struct iscsi_conn *conn)
 {
 	int sessiontype;
 	struct iscsi_param *initiatorname_param = NULL, *sessiontype_param = NULL;
 	struct iscsi_portal_group *tpg = conn->tpg;
-	struct iscsit_session *sess = NULL, *sess_p = NULL;
+	struct iscsi_session *sess = NULL, *sess_p = NULL;
 	struct se_portal_group *se_tpg = &tpg->tpg_se_tpg;
 	struct se_session *se_sess, *se_sess_tmp;
 
@@ -163,8 +204,8 @@ int iscsi_check_for_session_reinstatement(struct iscsit_conn *conn)
 }
 
 static int iscsi_login_set_conn_values(
-	struct iscsit_session *sess,
-	struct iscsit_conn *conn,
+	struct iscsi_session *sess,
+	struct iscsi_conn *conn,
 	__be16 cid)
 {
 	int ret;
@@ -185,7 +226,7 @@ static int iscsi_login_set_conn_values(
 }
 
 __printf(2, 3) int iscsi_change_param_sprintf(
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	const char *fmt, ...)
 {
 	va_list args;
@@ -212,14 +253,14 @@ EXPORT_SYMBOL(iscsi_change_param_sprintf);
  *	or session reinstatement.
  */
 static int iscsi_login_zero_tsih_s1(
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	unsigned char *buf)
 {
-	struct iscsit_session *sess = NULL;
+	struct iscsi_session *sess = NULL;
 	struct iscsi_login_req *pdu = (struct iscsi_login_req *)buf;
 	int ret;
 
-	sess = kzalloc(sizeof(struct iscsit_session), GFP_KERNEL);
+	sess = kzalloc(sizeof(struct iscsi_session), GFP_KERNEL);
 	if (!sess) {
 		iscsit_tx_login_rsp(conn, ISCSI_STATUS_CLS_TARGET_ERR,
 				ISCSI_LOGIN_STATUS_NO_RESOURCES);
@@ -296,11 +337,10 @@ free_sess:
 }
 
 static int iscsi_login_zero_tsih_s2(
-	struct iscsit_conn *conn)
+	struct iscsi_conn *conn)
 {
 	struct iscsi_node_attrib *na;
-	struct iscsit_session *sess = conn->sess;
-	struct iscsi_param *param;
+	struct iscsi_session *sess = conn->sess;
 	bool iser = false;
 
 	sess->tpg = conn->tpg;
@@ -333,18 +373,6 @@ static int iscsi_login_zero_tsih_s2(
 				conn->param_list);
 
 	na = iscsit_tpg_get_node_attrib(sess);
-
-	/*
-	 * If ACL allows non-authorized access in TPG with CHAP,
-	 * then set None to AuthMethod.
-	 */
-	param = iscsi_find_param_from_key(AUTHMETHOD, conn->param_list);
-	if (param && !strstr(param->value, NONE)) {
-		if (!iscsi_conn_auth_required(conn))
-			if (iscsi_change_param_sprintf(conn, "AuthMethod=%s",
-						       NONE))
-				return -1;
-	}
 
 	/*
 	 * Need to send TargetPortalGroupTag back in first login response
@@ -430,7 +458,7 @@ check_prot:
 }
 
 static int iscsi_login_non_zero_tsih_s1(
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	unsigned char *buf)
 {
 	struct iscsi_login_req *pdu = (struct iscsi_login_req *)buf;
@@ -442,11 +470,11 @@ static int iscsi_login_non_zero_tsih_s1(
  *	Add a new connection to an existing session.
  */
 static int iscsi_login_non_zero_tsih_s2(
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	unsigned char *buf)
 {
 	struct iscsi_portal_group *tpg = conn->tpg;
-	struct iscsit_session *sess = NULL, *sess_p = NULL;
+	struct iscsi_session *sess = NULL, *sess_p = NULL;
 	struct se_portal_group *se_tpg = &tpg->tpg_se_tpg;
 	struct se_session *se_sess, *se_sess_tmp;
 	struct iscsi_login_req *pdu = (struct iscsi_login_req *)buf;
@@ -456,7 +484,7 @@ static int iscsi_login_non_zero_tsih_s2(
 	list_for_each_entry_safe(se_sess, se_sess_tmp, &se_tpg->tpg_sess_list,
 			sess_list) {
 
-		sess_p = (struct iscsit_session *)se_sess->fabric_sess_ptr;
+		sess_p = (struct iscsi_session *)se_sess->fabric_sess_ptr;
 		if (atomic_read(&sess_p->session_fall_back_to_erl0) ||
 		    atomic_read(&sess_p->session_logout) ||
 		    atomic_read(&sess_p->session_close) ||
@@ -518,13 +546,13 @@ static int iscsi_login_non_zero_tsih_s2(
 }
 
 int iscsi_login_post_auth_non_zero_tsih(
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	u16 cid,
 	u32 exp_statsn)
 {
-	struct iscsit_conn *conn_ptr = NULL;
+	struct iscsi_conn *conn_ptr = NULL;
 	struct iscsi_conn_recovery *cr = NULL;
-	struct iscsit_session *sess = conn->sess;
+	struct iscsi_session *sess = conn->sess;
 
 	/*
 	 * By following item 5 in the login table,  if we have found
@@ -584,9 +612,9 @@ int iscsi_login_post_auth_non_zero_tsih(
 	return 0;
 }
 
-static void iscsi_post_login_start_timers(struct iscsit_conn *conn)
+static void iscsi_post_login_start_timers(struct iscsi_conn *conn)
 {
-	struct iscsit_session *sess = conn->sess;
+	struct iscsi_session *sess = conn->sess;
 	/*
 	 * FIXME: Unsolicited NopIN support for ISER
 	 */
@@ -597,7 +625,7 @@ static void iscsi_post_login_start_timers(struct iscsit_conn *conn)
 		iscsit_start_nopin_timer(conn);
 }
 
-int iscsit_start_kthreads(struct iscsit_conn *conn)
+int iscsit_start_kthreads(struct iscsi_conn *conn)
 {
 	int ret = 0;
 
@@ -645,11 +673,11 @@ out_bitmap:
 
 void iscsi_post_login_handler(
 	struct iscsi_np *np,
-	struct iscsit_conn *conn,
+	struct iscsi_conn *conn,
 	u8 zero_tsih)
 {
 	int stop_timer = 0;
-	struct iscsit_session *sess = conn->sess;
+	struct iscsi_session *sess = conn->sess;
 	struct se_session *se_sess = sess->se_sess;
 	struct iscsi_portal_group *tpg = sess->tpg;
 	struct se_portal_group *se_tpg = &tpg->tpg_se_tpg;
@@ -687,7 +715,7 @@ void iscsi_post_login_handler(
 
 		list_add_tail(&conn->conn_list, &sess->sess_conn_list);
 		atomic_inc(&sess->nconn);
-		pr_debug("Incremented iSCSI Connection count to %d"
+		pr_debug("Incremented iSCSI Connection count to %hu"
 			" from node: %s\n", atomic_read(&sess->nconn),
 			sess->sess_ops->InitiatorName);
 		spin_unlock_bh(&sess->conn_lock);
@@ -702,7 +730,7 @@ void iscsi_post_login_handler(
 		conn->conn_tx_reset_cpumask = 1;
 		/*
 		 * Wakeup the sleeping iscsi_target_rx_thread() now that
-		 * iscsit_conn is in TARG_CONN_STATE_LOGGED_IN state.
+		 * iscsi_conn is in TARG_CONN_STATE_LOGGED_IN state.
 		 */
 		complete(&conn->rx_login_comp);
 		iscsit_dec_conn_usage_count(conn);
@@ -735,7 +763,7 @@ void iscsi_post_login_handler(
 	spin_lock_bh(&sess->conn_lock);
 	list_add_tail(&conn->conn_list, &sess->sess_conn_list);
 	atomic_inc(&sess->nconn);
-	pr_debug("Incremented iSCSI Connection count to %d from node:"
+	pr_debug("Incremented iSCSI Connection count to %hu from node:"
 		" %s\n", atomic_read(&sess->nconn),
 		sess->sess_ops->InitiatorName);
 	spin_unlock_bh(&sess->conn_lock);
@@ -764,10 +792,63 @@ void iscsi_post_login_handler(
 	conn->conn_tx_reset_cpumask = 1;
 	/*
 	 * Wakeup the sleeping iscsi_target_rx_thread() now that
-	 * iscsit_conn is in TARG_CONN_STATE_LOGGED_IN state.
+	 * iscsi_conn is in TARG_CONN_STATE_LOGGED_IN state.
 	 */
 	complete(&conn->rx_login_comp);
 	iscsit_dec_conn_usage_count(conn);
+}
+
+void iscsi_handle_login_thread_timeout(struct timer_list *t)
+{
+	struct iscsi_np *np = from_timer(np, t, np_login_timer);
+
+	spin_lock_bh(&np->np_thread_lock);
+	pr_err("iSCSI Login timeout on Network Portal %pISpc\n",
+			&np->np_sockaddr);
+
+	if (np->np_login_timer_flags & ISCSI_TF_STOP) {
+		spin_unlock_bh(&np->np_thread_lock);
+		return;
+	}
+
+	if (np->np_thread)
+		send_sig(SIGINT, np->np_thread, 1);
+
+	np->np_login_timer_flags &= ~ISCSI_TF_RUNNING;
+	spin_unlock_bh(&np->np_thread_lock);
+}
+
+static void iscsi_start_login_thread_timer(struct iscsi_np *np)
+{
+	/*
+	 * This used the TA_LOGIN_TIMEOUT constant because at this
+	 * point we do not have access to ISCSI_TPG_ATTRIB(tpg)->login_timeout
+	 */
+	spin_lock_bh(&np->np_thread_lock);
+	np->np_login_timer_flags &= ~ISCSI_TF_STOP;
+	np->np_login_timer_flags |= ISCSI_TF_RUNNING;
+	mod_timer(&np->np_login_timer, jiffies + TA_LOGIN_TIMEOUT * HZ);
+
+	pr_debug("Added timeout timer to iSCSI login request for"
+			" %u seconds.\n", TA_LOGIN_TIMEOUT);
+	spin_unlock_bh(&np->np_thread_lock);
+}
+
+static void iscsi_stop_login_thread_timer(struct iscsi_np *np)
+{
+	spin_lock_bh(&np->np_thread_lock);
+	if (!(np->np_login_timer_flags & ISCSI_TF_RUNNING)) {
+		spin_unlock_bh(&np->np_thread_lock);
+		return;
+	}
+	np->np_login_timer_flags |= ISCSI_TF_STOP;
+	spin_unlock_bh(&np->np_thread_lock);
+
+	del_timer_sync(&np->np_login_timer);
+
+	spin_lock_bh(&np->np_thread_lock);
+	np->np_login_timer_flags &= ~ISCSI_TF_RUNNING;
+	spin_unlock_bh(&np->np_thread_lock);
 }
 
 int iscsit_setup_np(
@@ -815,7 +896,7 @@ int iscsit_setup_np(
 	else
 		len = sizeof(struct sockaddr_in);
 	/*
-	 * Set SO_REUSEADDR, and disable Nagle Algorithm with TCP_NODELAY.
+	 * Set SO_REUSEADDR, and disable Nagel Algorithm with TCP_NODELAY.
 	 */
 	if (np->np_network_transport == ISCSI_TCP)
 		tcp_sock_set_nodelay(sock->sk);
@@ -863,7 +944,7 @@ int iscsi_target_setup_login_socket(
 	return 0;
 }
 
-int iscsit_accept_np(struct iscsi_np *np, struct iscsit_conn *conn)
+int iscsit_accept_np(struct iscsi_np *np, struct iscsi_conn *conn)
 {
 	struct socket *new_sock, *sock = np->np_socket;
 	struct sockaddr_in sock_in;
@@ -924,7 +1005,7 @@ int iscsit_accept_np(struct iscsi_np *np, struct iscsit_conn *conn)
 	return 0;
 }
 
-int iscsit_get_login_rx(struct iscsit_conn *conn, struct iscsi_login *login)
+int iscsit_get_login_rx(struct iscsi_conn *conn, struct iscsi_login *login)
 {
 	struct iscsi_login_req *login_req;
 	u32 padding = 0, payload_length;
@@ -969,7 +1050,7 @@ int iscsit_get_login_rx(struct iscsit_conn *conn, struct iscsi_login *login)
 	return 0;
 }
 
-int iscsit_put_login_tx(struct iscsit_conn *conn, struct iscsi_login *login,
+int iscsit_put_login_tx(struct iscsi_conn *conn, struct iscsi_login *login,
 			u32 length)
 {
 	if (iscsi_login_tx_data(conn, login->rsp, login->rsp_buf, length) < 0)
@@ -979,7 +1060,7 @@ int iscsit_put_login_tx(struct iscsit_conn *conn, struct iscsi_login *login,
 }
 
 static int
-iscsit_conn_set_transport(struct iscsit_conn *conn, struct iscsit_transport *t)
+iscsit_conn_set_transport(struct iscsi_conn *conn, struct iscsit_transport *t)
 {
 	int rc;
 
@@ -998,11 +1079,11 @@ iscsit_conn_set_transport(struct iscsit_conn *conn, struct iscsit_transport *t)
 	return 0;
 }
 
-static struct iscsit_conn *iscsit_alloc_conn(struct iscsi_np *np)
+static struct iscsi_conn *iscsit_alloc_conn(struct iscsi_np *np)
 {
-	struct iscsit_conn *conn;
+	struct iscsi_conn *conn;
 
-	conn = kzalloc(sizeof(struct iscsit_conn), GFP_KERNEL);
+	conn = kzalloc(sizeof(struct iscsi_conn), GFP_KERNEL);
 	if (!conn) {
 		pr_err("Could not allocate memory for new connection\n");
 		return NULL;
@@ -1029,13 +1110,10 @@ static struct iscsit_conn *iscsit_alloc_conn(struct iscsi_np *np)
 	spin_lock_init(&conn->nopin_timer_lock);
 	spin_lock_init(&conn->response_queue_lock);
 	spin_lock_init(&conn->state_lock);
-	spin_lock_init(&conn->login_worker_lock);
-	spin_lock_init(&conn->login_timer_lock);
 
 	timer_setup(&conn->nopin_response_timer,
 		    iscsit_handle_nopin_response_timeout, 0);
 	timer_setup(&conn->nopin_timer, iscsit_handle_nopin_timeout, 0);
-	timer_setup(&conn->login_timer, iscsit_login_timeout, 0);
 
 	if (iscsit_conn_set_transport(conn, np->np_transport) < 0)
 		goto free_conn;
@@ -1051,21 +1129,8 @@ static struct iscsit_conn *iscsit_alloc_conn(struct iscsi_np *np)
 		goto free_conn_ops;
 	}
 
-	if (!zalloc_cpumask_var(&conn->allowed_cpumask, GFP_KERNEL)) {
-		pr_err("Unable to allocate conn->allowed_cpumask\n");
-		goto free_conn_cpumask;
-	}
-
-	conn->cmd_cnt = target_alloc_cmd_counter();
-	if (!conn->cmd_cnt)
-		goto free_conn_allowed_cpumask;
-
 	return conn;
 
-free_conn_allowed_cpumask:
-	free_cpumask_var(conn->allowed_cpumask);
-free_conn_cpumask:
-	free_cpumask_var(conn->conn_cpumask);
 free_conn_ops:
 	kfree(conn->conn_ops);
 put_transport:
@@ -1075,17 +1140,15 @@ free_conn:
 	return NULL;
 }
 
-void iscsit_free_conn(struct iscsit_conn *conn)
+void iscsit_free_conn(struct iscsi_conn *conn)
 {
-	target_free_cmd_counter(conn->cmd_cnt);
-	free_cpumask_var(conn->allowed_cpumask);
 	free_cpumask_var(conn->conn_cpumask);
 	kfree(conn->conn_ops);
 	iscsit_put_transport(conn->conn_transport);
 	kfree(conn);
 }
 
-void iscsi_target_login_sess_out(struct iscsit_conn *conn,
+void iscsi_target_login_sess_out(struct iscsi_conn *conn,
 				 bool zero_tsih, bool new_sess)
 {
 	if (!new_sess)
@@ -1124,6 +1187,15 @@ old_sess_out:
 		iscsit_dec_session_usage_count(conn->sess);
 	}
 
+	ahash_request_free(conn->conn_tx_hash);
+	if (conn->conn_rx_hash) {
+		struct crypto_ahash *tfm;
+
+		tfm = crypto_ahash_reqtfm(conn->conn_rx_hash);
+		ahash_request_free(conn->conn_rx_hash);
+		crypto_free_ahash(tfm);
+	}
+
 	if (conn->param_list) {
 		iscsi_release_param_list(conn->param_list);
 		conn->param_list = NULL;
@@ -1148,7 +1220,7 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 {
 	u8 *buffer, zero_tsih = 0;
 	int ret = 0, rc;
-	struct iscsit_conn *conn = NULL;
+	struct iscsi_conn *conn = NULL;
 	struct iscsi_login *login;
 	struct iscsi_portal_group *tpg = NULL;
 	struct iscsi_login_req *pdu;
@@ -1204,7 +1276,7 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 		goto new_sess_out;
 	}
 
-	iscsit_start_login_timer(conn, current);
+	iscsi_start_login_thread_timer(np);
 
 	pr_debug("Moving to TARG_CONN_STATE_XPT_UP.\n");
 	conn->conn_state = TARG_CONN_STATE_XPT_UP;
@@ -1291,7 +1363,7 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 
 	tpg = conn->tpg;
 	if (!tpg) {
-		pr_err("Unable to locate struct iscsit_conn->tpg\n");
+		pr_err("Unable to locate struct iscsi_conn->tpg\n");
 		goto new_sess_out;
 	}
 
@@ -1317,6 +1389,8 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 	if (ret < 0)
 		goto new_sess_out;
 
+	iscsi_stop_login_thread_timer(np);
+
 	if (ret == 1) {
 		tpg_np = conn->tpg_np;
 
@@ -1332,7 +1406,7 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 new_sess_out:
 	new_sess = true;
 old_sess_out:
-	iscsit_stop_login_timer(conn);
+	iscsi_stop_login_thread_timer(np);
 	tpg_np = conn->tpg_np;
 	iscsi_target_login_sess_out(conn, zero_tsih, new_sess);
 	new_sess = false;
@@ -1346,6 +1420,7 @@ old_sess_out:
 	return 1;
 
 exit:
+	iscsi_stop_login_thread_timer(np);
 	spin_lock_bh(&np->np_thread_lock);
 	np->np_thread_state = ISCSI_NP_THREAD_EXIT;
 	spin_unlock_bh(&np->np_thread_lock);

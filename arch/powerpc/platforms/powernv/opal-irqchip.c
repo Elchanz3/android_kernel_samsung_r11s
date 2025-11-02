@@ -46,20 +46,23 @@ void opal_handle_events(void)
 	e = READ_ONCE(last_outstanding_events) & opal_event_irqchip.mask;
 again:
 	while (e) {
-		int hwirq;
+		int virq, hwirq;
 
 		hwirq = fls64(e) - 1;
 		e &= ~BIT_ULL(hwirq);
 
 		local_irq_disable();
-		irq_enter();
-		generic_handle_domain_irq(opal_event_irqchip.domain, hwirq);
-		irq_exit();
+		virq = irq_find_mapping(opal_event_irqchip.domain, hwirq);
+		if (virq) {
+			irq_enter();
+			generic_handle_irq(virq);
+			irq_exit();
+		}
 		local_irq_enable();
 
 		cond_resched();
 	}
-	WRITE_ONCE(last_outstanding_events, 0);
+	last_outstanding_events = 0;
 	if (opal_poll_events(&events) != OPAL_SUCCESS)
 		return;
 	e = be64_to_cpu(events) & opal_event_irqchip.mask;
@@ -69,7 +72,7 @@ again:
 
 bool opal_have_pending_events(void)
 {
-	if (READ_ONCE(last_outstanding_events) & opal_event_irqchip.mask)
+	if (last_outstanding_events & opal_event_irqchip.mask)
 		return true;
 	return false;
 }
@@ -124,7 +127,7 @@ static irqreturn_t opal_interrupt(int irq, void *data)
 	__be64 events;
 
 	opal_handle_interrupt(virq_to_hw(irq), &events);
-	WRITE_ONCE(last_outstanding_events, be64_to_cpu(events));
+	last_outstanding_events = be64_to_cpu(events);
 	if (opal_have_pending_events())
 		opal_wake_poller();
 
@@ -191,8 +194,7 @@ int __init opal_event_init(void)
 	 * fall back to the legacy method (opal_event_request(...))
 	 * anyway. */
 	dn = of_find_compatible_node(NULL, NULL, "ibm,opal-event");
-	opal_event_irqchip.domain = irq_domain_create_linear(of_fwnode_handle(dn),
-				MAX_NUM_EVENTS,
+	opal_event_irqchip.domain = irq_domain_add_linear(dn, MAX_NUM_EVENTS,
 				&opal_event_domain_ops, &opal_event_irqchip);
 	of_node_put(dn);
 	if (!opal_event_irqchip.domain) {
@@ -283,7 +285,6 @@ int __init opal_event_init(void)
 				 name, NULL);
 		if (rc) {
 			pr_warn("Error %d requesting OPAL irq %d\n", rc, (int)r->start);
-			kfree(name);
 			continue;
 		}
 	}

@@ -11,10 +11,12 @@ struct us122l {
 
 	struct mutex		mutex;
 	struct file		*first;
-	unsigned int		second_periods_polled;
+	unsigned		second_periods_polled;
 	struct file		*master;
 	struct file		*slave;
 	struct list_head	midi_list;
+
+	atomic_t		mmap_count;
 
 	bool			is_us144;
 };

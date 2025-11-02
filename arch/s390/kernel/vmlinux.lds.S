@@ -5,16 +5,12 @@
 
 #include <asm/thread_info.h>
 #include <asm/page.h>
-#include <asm/ftrace.lds.h>
 
 /*
  * Put .bss..swapper_pg_dir as the first thing in .bss. This will
  * make sure it has 16k alignment.
  */
-#define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir) \
-			   *(.bss..invalid_pg_dir)
-
-#define RO_EXCEPTION_TABLE_ALIGN	16
+#define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
 
 /* Handle ro_after_init data on our own. */
 #define RO_AFTER_INIT_DATA
@@ -39,19 +35,20 @@ PHDRS {
 
 SECTIONS
 {
-	. = TEXT_OFFSET;
+	. = 0x100000;
 	.text : {
 		_stext = .;		/* Start of text section */
 		_text = .;		/* Text and read-only data */
 		HEAD_TEXT
 		TEXT_TEXT
 		SCHED_TEXT
+		CPUIDLE_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
 		IRQENTRY_TEXT
 		SOFTIRQENTRY_TEXT
-		FTRACE_HOTPATCH_TRAMPOLINES_TEXT
 		*(.text.*_indirect_*)
+		*(.fixup)
 		*(.gnu.warning)
 		. = ALIGN(PAGE_SIZE);
 		_etext = .;		/* End of text section */
@@ -68,39 +65,13 @@ SECTIONS
 		 *(.data..ro_after_init)
 		JUMP_TABLE_DATA
 	} :data
+	EXCEPTION_TABLE(16)
 	. = ALIGN(PAGE_SIZE);
 	__end_ro_after_init = .;
 
-	. = ALIGN(8);
-	.skey_region_table : {
-		__skey_region_start = .;
-		KEEP(*(.skey_region))
-		__skey_region_end = .;
-	}
-
-	.data.rel.ro : {
-		*(.data.rel.ro .data.rel.ro.*)
-	}
-	.got : {
-		__got_start = .;
-		*(.got)
-		__got_end = .;
-	}
-
 	RW_DATA(0x100, PAGE_SIZE, THREAD_SIZE)
-	.data.rel : {
-		*(.data.rel*)
-	}
 	BOOT_DATA_PRESERVED
 
-	. = ALIGN(8);
-	.amode31.refs : {
-		_start_amode31_refs = .;
-		*(.amode31.refs)
-		_end_amode31_refs = .;
-	}
-
-	. = ALIGN(PAGE_SIZE);
 	_edata = .;		/* End of data section */
 
 	/* will be freed after init */
@@ -167,80 +138,36 @@ SECTIONS
 
 	BOOT_DATA
 
-	/*
-	 * .amode31 section for code, data, ex_table that need to stay
-	 * below 2 GB, even when the kernel is relocated above 2 GB.
-	 */
-	. = ALIGN(PAGE_SIZE);
-	_samode31 = .;
-	.amode31.text : {
-		_stext_amode31 = .;
-		*(.amode31.text)
-		*(.amode31.text.*_indirect_*)
-		. = ALIGN(PAGE_SIZE);
-		_etext_amode31 = .;
-	}
-	. = ALIGN(16);
-	.amode31.ex_table : {
-		_start_amode31_ex_table = .;
-		KEEP(*(.amode31.ex_table))
-		_stop_amode31_ex_table = .;
-	}
-	. = ALIGN(PAGE_SIZE);
-	.amode31.data : {
-		*(.amode31.data)
-	}
-	. = _samode31 + AMODE31_SIZE;
-	_eamode31 = .;
-
 	/* early.c uses stsi, which requires page aligned data. */
 	. = ALIGN(PAGE_SIZE);
 	INIT_DATA_SECTION(0x100)
 
-	RUNTIME_CONST_VARIABLES
-
 	PERCPU_SECTION(0x100)
+
+	.dynsym ALIGN(8) : {
+		__dynsym_start = .;
+		*(.dynsym)
+		__dynsym_end = .;
+	}
+	.rela.dyn ALIGN(8) : {
+		__rela_dyn_start = .;
+		*(.rela*)
+		__rela_dyn_end = .;
+	}
 
 	. = ALIGN(PAGE_SIZE);
 	__init_end = .;		/* freed after init ends here */
 
 	BSS_SECTION(PAGE_SIZE, 4 * PAGE_SIZE, PAGE_SIZE)
 
-	. = ALIGN(PAGE_SIZE);
 	_end = . ;
-
-	/* Debugging sections.	*/
-	STABS_DEBUG
-	DWARF_DEBUG
-	ELF_DETAILS
-
-	/*
-	 * Make sure that the .got.plt is either completely empty or it
-	 * contains only the three reserved double words.
-	 */
-	.got.plt : {
-		*(.got.plt)
-	}
-	ASSERT(SIZEOF(.got.plt) == 0 || SIZEOF(.got.plt) == 0x18, "Unexpected GOT/PLT entries detected!")
-
-	/*
-	 * Sections that should stay zero sized, which is safer to
-	 * explicitly check instead of blindly discarding.
-	 */
-	.plt : {
-		*(.plt) *(.plt.*) *(.iplt) *(.igot .igot.plt)
-	}
-	ASSERT(SIZEOF(.plt) == 0, "Unexpected run-time procedure linkages detected!")
-	.rela.dyn : {
-		*(.rela.*) *(.rela_*)
-	}
-	ASSERT(SIZEOF(.rela.dyn) == 0, "Unexpected run-time relocations (.rela) detected!")
 
 	/*
 	 * uncompressed image info used by the decompressor
 	 * it should match struct vmlinux_info
 	 */
 	.vmlinux.info 0 (INFO) : {
+		QUAD(_stext)					/* default_lma */
 		QUAD(startup_continue)				/* entry */
 		QUAD(__bss_start - _stext)			/* image_size */
 		QUAD(__bss_stop - __bss_start)			/* bss_size */
@@ -249,22 +176,15 @@ SECTIONS
 		QUAD(__boot_data_preserved_start)		/* bootdata_preserved_off */
 		QUAD(__boot_data_preserved_end -
 		     __boot_data_preserved_start)		/* bootdata_preserved_size */
-		QUAD(__got_start)				/* got_start */
-		QUAD(__got_end)					/* got_end */
-		QUAD(_eamode31 - _samode31)			/* amode31_size */
-		QUAD(init_mm)
-		QUAD(swapper_pg_dir)
-		QUAD(invalid_pg_dir)
-		QUAD(__alt_instructions)
-		QUAD(__alt_instructions_end)
-#ifdef CONFIG_KASAN
-		QUAD(kasan_early_shadow_page)
-		QUAD(kasan_early_shadow_pte)
-		QUAD(kasan_early_shadow_pmd)
-		QUAD(kasan_early_shadow_pud)
-		QUAD(kasan_early_shadow_p4d)
-#endif
+		QUAD(__dynsym_start)				/* dynsym_start */
+		QUAD(__rela_dyn_start)				/* rela_dyn_start */
+		QUAD(__rela_dyn_end)				/* rela_dyn_end */
 	} :NONE
+
+	/* Debugging sections.	*/
+	STABS_DEBUG
+	DWARF_DEBUG
+	ELF_DETAILS
 
 	/* Sections to be discarded */
 	DISCARDS

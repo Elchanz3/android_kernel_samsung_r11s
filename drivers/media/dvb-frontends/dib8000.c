@@ -13,7 +13,7 @@
 #include <linux/mutex.h>
 #include <asm/div64.h>
 
-#include <linux/int_log.h>
+#include <media/dvb_math.h>
 
 #include <media/dvb_frontend.h>
 
@@ -1584,7 +1584,7 @@ static int dib8096p_set_output_mode(struct dvb_frontend *fe, int mode)
 				dib8096p_configMpegMux(state, 3, 1, 1);
 				dib8096p_setHostBusMux(state, MPEG_ON_HOSTBUS);
 			} else {/* Use Smooth block */
-				dprintk("dib8096P setting output mode TS_SERIAL using Smooth block\n");
+				dprintk("dib8096P setting output mode TS_SERIAL using Smooth bloc\n");
 				dib8096p_setHostBusMux(state,
 						DEMOUT_ON_HOSTBUS);
 				outreg |= (2 << 6) | (0 << 1);
@@ -1612,8 +1612,7 @@ static int dib8096p_set_output_mode(struct dvb_frontend *fe, int mode)
 
 	case OUTMODE_MPEG2_FIFO:
 			/* Using Smooth block because not supported
-			 * by new Mpeg Mux block
-			 */
+			   by new Mpeg Mux bloc */
 			dprintk("dib8096P setting output mode TS_FIFO using Smooth block\n");
 			dib8096p_setHostBusMux(state, DEMOUT_ON_HOSTBUS);
 			outreg |= (5 << 6);
@@ -2702,11 +2701,8 @@ static void dib8000_set_dds(struct dib8000_state *state, s32 offset_khz)
 	u8 ratio;
 
 	if (state->revision == 0x8090) {
-		u32 internal = dib8000_read32(state, 23) / 1000;
-
 		ratio = 4;
-
-		unit_khz_dds_val = (1<<26) / (internal ?: 1);
+		unit_khz_dds_val = (1<<26) / (dib8000_read32(state, 23) / 1000);
 		if (offset_khz < 0)
 			dds = (1 << 26) - (abs_offset_khz * unit_khz_dds_val);
 		else
@@ -3216,7 +3212,7 @@ static int dib8000_tune(struct dvb_frontend *fe)
 
 	case CT_DEMOD_STEP_6: /* (36)  if there is an input (diversity) */
 		if ((state->fe[1] != NULL) && (state->output_mode != OUTMODE_DIVERSITY)) {
-			/* if there is a diversity fe in input and this fe is has not already failed : wait here until this fe has succeeded or failed */
+			/* if there is a diversity fe in input and this fe is has not already failed : wait here until this this fe has succedeed or failed */
 			if (dib8000_get_status(state->fe[1]) <= FE_STATUS_STD_SUCCESS) /* Something is locked on the input fe */
 				*tune_state = CT_DEMOD_STEP_8; /* go for mpeg */
 			else if (dib8000_get_status(state->fe[1]) >= FE_STATUS_TUNE_TIME_TOO_SHORT) { /* fe in input failed also, break the current one */

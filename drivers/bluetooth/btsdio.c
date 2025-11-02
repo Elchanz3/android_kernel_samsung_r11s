@@ -32,6 +32,9 @@ static const struct sdio_device_id btsdio_table[] = {
 	/* Generic Bluetooth Type-B SDIO device */
 	{ SDIO_DEVICE_CLASS(SDIO_CLASS_BT_B) },
 
+	/* Generic Bluetooth AMP controller */
+	{ SDIO_DEVICE_CLASS(SDIO_CLASS_BT_AMP) },
+
 	{ }	/* Terminating entry */
 };
 
@@ -292,10 +295,7 @@ static int btsdio_probe(struct sdio_func *func,
 		switch (func->device) {
 		case SDIO_DEVICE_ID_BROADCOM_43341:
 		case SDIO_DEVICE_ID_BROADCOM_43430:
-		case SDIO_DEVICE_ID_BROADCOM_4345:
-		case SDIO_DEVICE_ID_BROADCOM_43455:
 		case SDIO_DEVICE_ID_BROADCOM_4356:
-		case SDIO_DEVICE_ID_BROADCOM_CYPRESS_4373:
 			return -ENODEV;
 		}
 	}
@@ -317,6 +317,11 @@ static int btsdio_probe(struct sdio_func *func,
 	hdev->bus = HCI_SDIO;
 	hci_set_drvdata(hdev, data);
 
+	if (id->class == SDIO_CLASS_BT_AMP)
+		hdev->dev_type = HCI_AMP;
+	else
+		hdev->dev_type = HCI_PRIMARY;
+
 	data->hdev = hdev;
 
 	SET_HCIDEV_DEV(hdev, &func->dev);
@@ -327,7 +332,7 @@ static int btsdio_probe(struct sdio_func *func,
 	hdev->send     = btsdio_send_frame;
 
 	if (func->vendor == 0x0104 && func->device == 0x00c5)
-		hci_set_quirk(hdev, HCI_QUIRK_RESET_ON_CLOSE);
+		set_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
 
 	err = hci_register_dev(hdev);
 	if (err < 0) {
@@ -351,6 +356,7 @@ static void btsdio_remove(struct sdio_func *func)
 		return;
 
 	cancel_work_sync(&data->work);
+
 	hdev = data->hdev;
 
 	sdio_set_drvdata(func, NULL);

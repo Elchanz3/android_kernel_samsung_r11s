@@ -18,9 +18,9 @@
 #include <linux/of.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 #include <linux/cpu.h>
 #include <linux/hashtable.h>
+#include <trace/events/power.h>
 
 #include <asm/cputhreads.h>
 #include <asm/firmware.h>
@@ -28,9 +28,6 @@
 #include <asm/smp.h> /* Required for cpu_sibling_mask() in UP configs */
 #include <asm/opal.h>
 #include <linux/timer.h>
-
-#define CREATE_TRACE_POINTS
-#include "powernv-trace.h"
 
 #define POWERNV_MAX_PSTATES_ORDER  8
 #define POWERNV_MAX_PSTATES	(1UL << (POWERNV_MAX_PSTATES_ORDER))
@@ -284,7 +281,7 @@ next:
 	pr_info("cpufreq pstate min 0x%x nominal 0x%x max 0x%x\n", pstate_min,
 		pstate_nominal, pstate_max);
 	pr_info("Workload Optimized Frequency is %s in the platform\n",
-		str_enabled_disabled(powernv_pstate_info.wof_enabled));
+		(powernv_pstate_info.wof_enabled) ? "enabled" : "disabled");
 
 	pstate_ids = of_get_property(power_mgt, "ibm,pstate-ids", &len_ids);
 	if (!pstate_ids) {
@@ -388,8 +385,12 @@ static ssize_t cpuinfo_nominal_freq_show(struct cpufreq_policy *policy,
 static struct freq_attr cpufreq_freq_attr_cpuinfo_nominal_freq =
 	__ATTR_RO(cpuinfo_nominal_freq);
 
+#define SCALING_BOOST_FREQS_ATTR_INDEX		2
+
 static struct freq_attr *powernv_cpu_freq_attr[] = {
+	&cpufreq_freq_attr_scaling_available_freqs,
 	&cpufreq_freq_attr_cpuinfo_nominal_freq,
+	&cpufreq_freq_attr_scaling_boost_freqs,
 	NULL,
 };
 
@@ -669,8 +670,7 @@ static inline void  queue_gpstate_timer(struct global_pstate_info *gpstates)
  */
 static void gpstate_timer_handler(struct timer_list *t)
 {
-	struct global_pstate_info *gpstates = timer_container_of(gpstates, t,
-								 timer);
+	struct global_pstate_info *gpstates = from_timer(gpstates, t, timer);
 	struct cpufreq_policy *policy = gpstates->policy;
 	int gpstate_idx, lpstate_idx;
 	unsigned long val;
@@ -692,7 +692,7 @@ static void gpstate_timer_handler(struct timer_list *t)
 	}
 
 	/*
-	 * If PMCR was last updated was using fast_switch then
+	 * If PMCR was last updated was using fast_swtich then
 	 * We may have wrong in gpstate->last_lpstate_idx
 	 * value. Hence, read from PMCR to get correct data.
 	 */
@@ -805,7 +805,7 @@ static int powernv_cpufreq_target_index(struct cpufreq_policy *policy,
 	if (gpstate_idx != new_index)
 		queue_gpstate_timer(gpstates);
 	else
-		timer_delete_sync(&gpstates->timer);
+		del_timer_sync(&gpstates->timer);
 
 gpstates_done:
 	freq_data.gpstate_id = idx_to_pstate(gpstate_idx);
@@ -874,18 +874,12 @@ static int powernv_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	return 0;
 }
 
-static void powernv_cpufreq_cpu_exit(struct cpufreq_policy *policy)
+static int powernv_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 {
-	struct powernv_smp_call_data freq_data;
-	struct global_pstate_info *gpstates = policy->driver_data;
-
-	freq_data.pstate_id = idx_to_pstate(powernv_pstate_info.min);
-	freq_data.gpstate_id = idx_to_pstate(powernv_pstate_info.min);
-	smp_call_function_single(policy->cpu, set_pstate, &freq_data, 1);
-	if (gpstates)
-		timer_delete_sync(&gpstates->timer);
-
+	/* timer is deleted in cpufreq_cpu_stop() */
 	kfree(policy->driver_data);
+
+	return 0;
 }
 
 static int powernv_cpufreq_reboot_notifier(struct notifier_block *nb,
@@ -917,7 +911,7 @@ static void powernv_cpufreq_work_fn(struct work_struct *work)
 	unsigned int cpu;
 	cpumask_t mask;
 
-	cpus_read_lock();
+	get_online_cpus();
 	cpumask_and(&mask, &chip->mask, cpu_online_mask);
 	smp_call_function_any(&mask,
 			      powernv_cpufreq_throttle_check, NULL, 0);
@@ -932,13 +926,13 @@ static void powernv_cpufreq_work_fn(struct work_struct *work)
 		policy = cpufreq_cpu_get(cpu);
 		if (!policy)
 			continue;
-		index = cpufreq_table_find_index_c(policy, policy->cur, false);
+		index = cpufreq_table_find_index_c(policy, policy->cur);
 		powernv_cpufreq_target_index(policy, index);
 		cpumask_andnot(&mask, &mask, policy->cpus);
 		cpufreq_cpu_put(policy);
 	}
 out:
-	cpus_read_unlock();
+	put_online_cpus();
 }
 
 static int powernv_cpufreq_occ_msg(struct notifier_block *nb,
@@ -1014,13 +1008,25 @@ static struct notifier_block powernv_cpufreq_opal_nb = {
 	.priority	= 0,
 };
 
+static void powernv_cpufreq_stop_cpu(struct cpufreq_policy *policy)
+{
+	struct powernv_smp_call_data freq_data;
+	struct global_pstate_info *gpstates = policy->driver_data;
+
+	freq_data.pstate_id = idx_to_pstate(powernv_pstate_info.min);
+	freq_data.gpstate_id = idx_to_pstate(powernv_pstate_info.min);
+	smp_call_function_single(policy->cpu, set_pstate, &freq_data, 1);
+	if (gpstates)
+		del_timer_sync(&gpstates->timer);
+}
+
 static unsigned int powernv_fast_switch(struct cpufreq_policy *policy,
 					unsigned int target_freq)
 {
 	int index;
 	struct powernv_smp_call_data freq_data;
 
-	index = cpufreq_table_find_index_dl(policy, target_freq, false);
+	index = cpufreq_table_find_index_dl(policy, target_freq);
 	freq_data.pstate_id = powernv_freqs[index].driver_data;
 	freq_data.gpstate_id = powernv_freqs[index].driver_data;
 	set_pstate(&freq_data);
@@ -1037,6 +1043,7 @@ static struct cpufreq_driver powernv_cpufreq_driver = {
 	.target_index	= powernv_cpufreq_target_index,
 	.fast_switch	= powernv_fast_switch,
 	.get		= powernv_cpufreq_get,
+	.stop_cpu	= powernv_cpufreq_stop_cpu,
 	.attr		= powernv_cpu_freq_attr,
 };
 
@@ -1127,13 +1134,18 @@ static int __init powernv_cpufreq_init(void)
 		goto out;
 
 	if (powernv_pstate_info.wof_enabled)
-		powernv_cpufreq_driver.set_boost = cpufreq_boost_set_sw;
+		powernv_cpufreq_driver.boost_enabled = true;
+	else
+		powernv_cpu_freq_attr[SCALING_BOOST_FREQS_ATTR_INDEX] = NULL;
 
 	rc = cpufreq_register_driver(&powernv_cpufreq_driver);
 	if (rc) {
 		pr_info("Failed to register the cpufreq driver (%d)\n", rc);
 		goto cleanup;
 	}
+
+	if (powernv_pstate_info.wof_enabled)
+		cpufreq_enable_boost_support();
 
 	register_reboot_notifier(&powernv_cpufreq_reboot_nb);
 	opal_message_notifier_register(OPAL_MSG_OCC, &powernv_cpufreq_opal_nb);
@@ -1155,6 +1167,5 @@ static void __exit powernv_cpufreq_exit(void)
 }
 module_exit(powernv_cpufreq_exit);
 
-MODULE_DESCRIPTION("cpufreq driver for IBM/OpenPOWER powernv systems");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Vaidyanathan Srinivasan <svaidy at linux.vnet.ibm.com>");

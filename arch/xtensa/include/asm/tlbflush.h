@@ -20,14 +20,14 @@
 #define ITLB_HIT_BIT	3
 #define DTLB_HIT_BIT	4
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 /* TLB flushing:
  *
  *  - flush_tlb_all() flushes all processes TLB entries
  *  - flush_tlb_mm(mm) flushes the specified mm context TLB entries
- *  - flush_tlb_page(vma, page) flushes a single page
- *  - flush_tlb_range(vma, vmaddr, end) flushes a range of pages
+ *  - flush_tlb_page(mm, vmaddr) flushes a single page
+ *  - flush_tlb_range(mm, start, end) flushes a range of pages
  */
 
 void local_flush_tlb_all(void);
@@ -201,5 +201,5 @@ static inline unsigned long read_itlb_translation (int way)
 	return tmp;
 }
 
-#endif	/* __ASSEMBLER__ */
+#endif	/* __ASSEMBLY__ */
 #endif	/* _XTENSA_TLBFLUSH_H */

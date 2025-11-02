@@ -63,11 +63,11 @@ static inline int __i2c_check_suspended(struct i2c_adapter *adap)
 #ifdef CONFIG_ACPI
 void i2c_acpi_register_devices(struct i2c_adapter *adap);
 
-int i2c_acpi_get_irq(struct i2c_client *client, bool *wake_capable);
+int i2c_acpi_get_irq(struct i2c_client *client);
 #else /* CONFIG_ACPI */
 static inline void i2c_acpi_register_devices(struct i2c_adapter *adap) { }
 
-static inline int i2c_acpi_get_irq(struct i2c_client *client, bool *wake_capable)
+static inline int i2c_acpi_get_irq(struct i2c_client *client)
 {
 	return 0;
 }
@@ -84,25 +84,7 @@ static inline void i2c_acpi_remove_space_handler(struct i2c_adapter *adapter) { 
 
 #ifdef CONFIG_OF
 void of_i2c_register_devices(struct i2c_adapter *adap);
-const struct of_device_id *i2c_of_match_device(const struct of_device_id *matches,
-					       struct i2c_client *client);
-
 #else
 static inline void of_i2c_register_devices(struct i2c_adapter *adap) { }
-static inline
-const struct of_device_id *i2c_of_match_device(const struct of_device_id *matches,
-					       struct i2c_client *client)
-{
-	return NULL;
-}
 #endif
 extern struct notifier_block i2c_of_notifier;
-
-#if IS_ENABLED(CONFIG_I2C_SMBUS)
-int i2c_setup_smbus_alert(struct i2c_adapter *adap);
-#else
-static inline int i2c_setup_smbus_alert(struct i2c_adapter *adap)
-{
-	return 0;
-}
-#endif

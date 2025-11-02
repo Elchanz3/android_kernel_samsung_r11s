@@ -10,10 +10,8 @@
 #include <linux/perf_event.h>
 
 #include <asm/perf_event_p4.h>
-#include <asm/cpu_device_id.h>
 #include <asm/hardirq.h>
 #include <asm/apic.h>
-#include <asm/msr.h>
 
 #include "../perf_event.h"
 
@@ -26,7 +24,7 @@ struct p4_event_bind {
 	unsigned int escr_msr[2];		/* ESCR MSR for this event */
 	unsigned int escr_emask;		/* valid ESCR EventMask bits */
 	unsigned int shared;			/* event is shared across threads */
-	signed char cntr[2][P4_CNTR_LIMIT];	/* counter index (offset), -1 on absence */
+	char cntr[2][P4_CNTR_LIMIT];		/* counter index (offset), -1 on abscence */
 };
 
 struct p4_pebs_bind {
@@ -47,7 +45,7 @@ struct p4_pebs_bind {
  * it's needed for mapping P4_PEBS_CONFIG_METRIC_MASK bits of
  * event configuration to find out which values are to be
  * written into MSR_IA32_PEBS_ENABLE and MSR_P4_PEBS_MATRIX_VERT
- * registers
+ * resgisters
  */
 static struct p4_pebs_bind p4_pebs_bind_map[] = {
 	P4_GEN_PEBS_BIND(1stl_cache_load_miss_retired,	0x0000001, 0x0000001),
@@ -734,9 +732,9 @@ static bool p4_event_match_cpu_model(unsigned int event_idx)
 {
 	/* INSTR_COMPLETED event only exist for model 3, 4, 6 (Prescott) */
 	if (event_idx == P4_EVENT_INSTR_COMPLETED) {
-		if (boot_cpu_data.x86_vfm != INTEL_P4_PRESCOTT &&
-		    boot_cpu_data.x86_vfm != INTEL_P4_PRESCOTT_2M &&
-		    boot_cpu_data.x86_vfm != INTEL_P4_CEDARMILL)
+		if (boot_cpu_data.x86_model != 3 &&
+			boot_cpu_data.x86_model != 4 &&
+			boot_cpu_data.x86_model != 6)
 			return false;
 	}
 
@@ -778,7 +776,7 @@ static int p4_validate_raw_event(struct perf_event *event)
 	 * the user needs special permissions to be able to use it
 	 */
 	if (p4_ht_active() && p4_event_bind_map[v].shared) {
-		v = perf_allow_cpu();
+		v = perf_allow_cpu(&event->attr);
 		if (v)
 			return v;
 	}
@@ -860,9 +858,9 @@ static inline int p4_pmu_clear_cccr_ovf(struct hw_perf_event *hwc)
 	u64 v;
 
 	/* an official way for overflow indication */
-	rdmsrq(hwc->config_base, v);
+	rdmsrl(hwc->config_base, v);
 	if (v & P4_CCCR_OVF) {
-		wrmsrq(hwc->config_base, v & ~P4_CCCR_OVF);
+		wrmsrl(hwc->config_base, v & ~P4_CCCR_OVF);
 		return 1;
 	}
 
@@ -873,7 +871,7 @@ static inline int p4_pmu_clear_cccr_ovf(struct hw_perf_event *hwc)
 	 * the counter has reached zero value and continued counting before
 	 * real NMI signal was received:
 	 */
-	rdmsrq(hwc->event_base, v);
+	rdmsrl(hwc->event_base, v);
 	if (!(v & ARCH_P4_UNFLAGGED_BIT))
 		return 1;
 
@@ -898,8 +896,8 @@ static void p4_pmu_disable_pebs(void)
 	 * So at moment let leave metrics turned on forever -- it's
 	 * ok for now but need to be revisited!
 	 *
-	 * (void)wrmsrq_safe(MSR_IA32_PEBS_ENABLE, 0);
-	 * (void)wrmsrq_safe(MSR_P4_PEBS_MATRIX_VERT, 0);
+	 * (void)wrmsrl_safe(MSR_IA32_PEBS_ENABLE, 0);
+	 * (void)wrmsrl_safe(MSR_P4_PEBS_MATRIX_VERT, 0);
 	 */
 }
 
@@ -912,7 +910,7 @@ static inline void p4_pmu_disable_event(struct perf_event *event)
 	 * state we need to clear P4_CCCR_OVF, otherwise interrupt get
 	 * asserted again and again
 	 */
-	(void)wrmsrq_safe(hwc->config_base,
+	(void)wrmsrl_safe(hwc->config_base,
 		p4_config_unpack_cccr(hwc->config) & ~P4_CCCR_ENABLE & ~P4_CCCR_OVF & ~P4_CCCR_RESERVED);
 }
 
@@ -921,7 +919,7 @@ static void p4_pmu_disable_all(void)
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	int idx;
 
-	for_each_set_bit(idx, x86_pmu.cntr_mask, X86_PMC_IDX_MAX) {
+	for (idx = 0; idx < x86_pmu.num_counters; idx++) {
 		struct perf_event *event = cpuc->events[idx];
 		if (!test_bit(idx, cpuc->active_mask))
 			continue;
@@ -945,11 +943,11 @@ static void p4_pmu_enable_pebs(u64 config)
 
 	bind = &p4_pebs_bind_map[idx];
 
-	(void)wrmsrq_safe(MSR_IA32_PEBS_ENABLE,	(u64)bind->metric_pebs);
-	(void)wrmsrq_safe(MSR_P4_PEBS_MATRIX_VERT,	(u64)bind->metric_vert);
+	(void)wrmsrl_safe(MSR_IA32_PEBS_ENABLE,	(u64)bind->metric_pebs);
+	(void)wrmsrl_safe(MSR_P4_PEBS_MATRIX_VERT,	(u64)bind->metric_vert);
 }
 
-static void __p4_pmu_enable_event(struct perf_event *event)
+static void p4_pmu_enable_event(struct perf_event *event)
 {
 	struct hw_perf_event *hwc = &event->hw;
 	int thread = p4_ht_config_thread(hwc->config);
@@ -980,19 +978,9 @@ static void __p4_pmu_enable_event(struct perf_event *event)
 	 */
 	p4_pmu_enable_pebs(hwc->config);
 
-	(void)wrmsrq_safe(escr_addr, escr_conf);
-	(void)wrmsrq_safe(hwc->config_base,
+	(void)wrmsrl_safe(escr_addr, escr_conf);
+	(void)wrmsrl_safe(hwc->config_base,
 				(cccr & ~P4_CCCR_RESERVED) | P4_CCCR_ENABLE);
-}
-
-static DEFINE_PER_CPU(unsigned long [BITS_TO_LONGS(X86_PMC_IDX_MAX)], p4_running);
-
-static void p4_pmu_enable_event(struct perf_event *event)
-{
-	int idx = event->hw.idx;
-
-	__set_bit(idx, per_cpu(p4_running, smp_processor_id()));
-	__p4_pmu_enable_event(event);
 }
 
 static void p4_pmu_enable_all(int added)
@@ -1000,35 +988,12 @@ static void p4_pmu_enable_all(int added)
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	int idx;
 
-	for_each_set_bit(idx, x86_pmu.cntr_mask, X86_PMC_IDX_MAX) {
+	for (idx = 0; idx < x86_pmu.num_counters; idx++) {
 		struct perf_event *event = cpuc->events[idx];
 		if (!test_bit(idx, cpuc->active_mask))
 			continue;
-		__p4_pmu_enable_event(event);
+		p4_pmu_enable_event(event);
 	}
-}
-
-static int p4_pmu_set_period(struct perf_event *event)
-{
-	struct hw_perf_event *hwc = &event->hw;
-	s64 left = this_cpu_read(pmc_prev_left[hwc->idx]);
-	int ret;
-
-	ret = x86_perf_event_set_period(event);
-
-	if (hwc->event_base) {
-		/*
-		 * This handles erratum N15 in intel doc 249199-029,
-		 * the counter may not be updated correctly on write
-		 * so we need a second write operation to do the trick
-		 * (the official workaround didn't work)
-		 *
-		 * the former idea is taken from OProfile code
-		 */
-		wrmsrq(hwc->event_base, (u64)(-left) & x86_pmu.cntval_mask);
-	}
-
-	return ret;
 }
 
 static int p4_pmu_handle_irq(struct pt_regs *regs)
@@ -1042,12 +1007,12 @@ static int p4_pmu_handle_irq(struct pt_regs *regs)
 
 	cpuc = this_cpu_ptr(&cpu_hw_events);
 
-	for_each_set_bit(idx, x86_pmu.cntr_mask, X86_PMC_IDX_MAX) {
+	for (idx = 0; idx < x86_pmu.num_counters; idx++) {
 		int overflow;
 
 		if (!test_bit(idx, cpuc->active_mask)) {
 			/* catch in-flight IRQs */
-			if (__test_and_clear_bit(idx, per_cpu(p4_running, smp_processor_id())))
+			if (__test_and_clear_bit(idx, cpuc->running))
 				handled++;
 			continue;
 		}
@@ -1069,11 +1034,12 @@ static int p4_pmu_handle_irq(struct pt_regs *regs)
 		/* event overflow for sure */
 		perf_sample_data_init(&data, 0, hwc->last_period);
 
-		if (!static_call(x86_pmu_set_period)(event))
+		if (!x86_perf_event_set_period(event))
 			continue;
 
 
-		perf_event_overflow(event, &data, regs);
+		if (perf_event_overflow(event, &data, regs))
+			x86_pmu_stop(event, 0);
 	}
 
 	if (handled)
@@ -1340,9 +1306,6 @@ static __initconst const struct x86_pmu p4_pmu = {
 	.enable_all		= p4_pmu_enable_all,
 	.enable			= p4_pmu_enable_event,
 	.disable		= p4_pmu_disable_event,
-
-	.set_period		= p4_pmu_set_period,
-
 	.eventsel		= MSR_P4_BPU_CCCR0,
 	.perfctr		= MSR_P4_BPU_PERFCTR0,
 	.event_map		= p4_pmu_event_map,
@@ -1350,17 +1313,26 @@ static __initconst const struct x86_pmu p4_pmu = {
 	.get_event_constraints	= x86_get_event_constraints,
 	/*
 	 * IF HT disabled we may need to use all
-	 * ARCH_P4_MAX_CCCR counters simultaneously
+	 * ARCH_P4_MAX_CCCR counters simulaneously
 	 * though leave it restricted at moment assuming
 	 * HT is on
 	 */
-	.cntr_mask64		= GENMASK_ULL(ARCH_P4_MAX_CCCR - 1, 0),
+	.num_counters		= ARCH_P4_MAX_CCCR,
 	.apic			= 1,
 	.cntval_bits		= ARCH_P4_CNTRVAL_BITS,
 	.cntval_mask		= ARCH_P4_CNTRVAL_MASK,
 	.max_period		= (1ULL << (ARCH_P4_CNTRVAL_BITS - 1)) - 1,
 	.hw_config		= p4_hw_config,
 	.schedule_events	= p4_pmu_schedule_events,
+	/*
+	 * This handles erratum N15 in intel doc 249199-029,
+	 * the counter may not be updated correctly on write
+	 * so we need a second write operation to do the trick
+	 * (the official workaround didn't work)
+	 *
+	 * the former idea is taken from OProfile code
+	 */
+	.perfctr_second_write	= 1,
 
 	.format_attrs		= intel_p4_formats_attr,
 };
@@ -1396,9 +1368,9 @@ __init int p4_pmu_init(void)
 	 *
 	 * Solve this by zero'ing out the registers to mimic a reset.
 	 */
-	for_each_set_bit(i, x86_pmu.cntr_mask, X86_PMC_IDX_MAX) {
+	for (i = 0; i < x86_pmu.num_counters; i++) {
 		reg = x86_pmu_config_addr(i);
-		wrmsrq_safe(reg, 0ULL);
+		wrmsrl_safe(reg, 0ULL);
 	}
 
 	return 0;

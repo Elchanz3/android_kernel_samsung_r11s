@@ -17,8 +17,6 @@
 #include <linux/regulator/consumer.h>
 
 #include <linux/phy/phy-dp.h>
-#include <linux/phy/phy-hdmi.h>
-#include <linux/phy/phy-lvds.h>
 #include <linux/phy/phy-mipi-dphy.h>
 
 struct phy;
@@ -43,14 +41,7 @@ enum phy_mode {
 	PHY_MODE_MIPI_DPHY,
 	PHY_MODE_SATA,
 	PHY_MODE_LVDS,
-	PHY_MODE_DP,
-	PHY_MODE_HDMI,
-};
-
-enum phy_media {
-	PHY_MEDIA_DEFAULT,
-	PHY_MEDIA_SR,
-	PHY_MEDIA_DAC,
+	PHY_MODE_DP
 };
 
 /**
@@ -60,16 +51,10 @@ enum phy_media {
  *		the MIPI_DPHY phy mode.
  * @dp:		Configuration set applicable for phys supporting
  *		the DisplayPort protocol.
- * @lvds:	Configuration set applicable for phys supporting
- *		the LVDS phy mode.
- * @hdmi:	Configuration set applicable for phys supporting
- *		the HDMI phy mode.
  */
 union phy_configure_opts {
 	struct phy_configure_opts_mipi_dphy	mipi_dphy;
 	struct phy_configure_opts_dp		dp;
-	struct phy_configure_opts_lvds		lvds;
-	struct phy_configure_opts_hdmi		hdmi;
 };
 
 /**
@@ -79,8 +64,6 @@ union phy_configure_opts {
  * @power_on: powering on the phy
  * @power_off: powering off the phy
  * @set_mode: set the mode of the phy
- * @set_media: set the media type of the phy (optional)
- * @set_speed: set the speed of the phy (optional)
  * @reset: resetting the phy
  * @calibrate: calibrate the phy
  * @release: ops to be performed while the consumer relinquishes the PHY
@@ -92,8 +75,6 @@ struct phy_ops {
 	int	(*power_on)(struct phy *phy);
 	int	(*power_off)(struct phy *phy);
 	int	(*set_mode)(struct phy *phy, enum phy_mode mode, int submode);
-	int	(*set_media)(struct phy *phy, enum phy_media media);
-	int	(*set_speed)(struct phy *phy, int speed);
 
 	/**
 	 * @configure:
@@ -127,11 +108,6 @@ struct phy_ops {
 			    union phy_configure_opts *opts);
 	int	(*reset)(struct phy *phy);
 	int	(*calibrate)(struct phy *phy);
-
-	/* notify phy connect status change */
-	int	(*connect)(struct phy *phy, int port);
-	int	(*disconnect)(struct phy *phy, int port);
-
 	void	(*release)(struct phy *phy);
 	struct module *owner;
 };
@@ -139,7 +115,7 @@ struct phy_ops {
 /**
  * struct phy_attrs - represents phy attributes
  * @bus_width: Data path width implemented by PHY
- * @max_link_rate: Maximum link rate supported by PHY (units to be decided by producer and consumer)
+ * @max_link_rate: Maximum link rate supported by PHY (in Mbps)
  * @mode: PHY mode
  */
 struct phy_attrs {
@@ -154,24 +130,20 @@ struct phy_attrs {
  * @id: id of the phy device
  * @ops: function pointers for performing phy operations
  * @mutex: mutex to protect phy_ops
- * @lockdep_key: lockdep information for this mutex
  * @init_count: used to protect when the PHY is used by multiple consumers
  * @power_count: used to protect when the PHY is used by multiple consumers
  * @attrs: used to specify PHY specific attributes
  * @pwr: power regulator associated with the phy
- * @debugfs: debugfs directory
  */
 struct phy {
 	struct device		dev;
 	int			id;
 	const struct phy_ops	*ops;
 	struct mutex		mutex;
-	struct lock_class_key	lockdep_key;
 	int			init_count;
 	int			power_count;
 	struct phy_attrs	attrs;
 	struct regulator	*pwr;
-	struct dentry		*debugfs;
 };
 
 /**
@@ -188,7 +160,7 @@ struct phy_provider {
 	struct module		*owner;
 	struct list_head	list;
 	struct phy * (*of_xlate)(struct device *dev,
-				 const struct of_phandle_args *args);
+		struct of_phandle_args *args);
 };
 
 /**
@@ -234,15 +206,21 @@ int phy_pm_runtime_get(struct phy *phy);
 int phy_pm_runtime_get_sync(struct phy *phy);
 int phy_pm_runtime_put(struct phy *phy);
 int phy_pm_runtime_put_sync(struct phy *phy);
+void phy_pm_runtime_allow(struct phy *phy);
+void phy_pm_runtime_forbid(struct phy *phy);
 int phy_init(struct phy *phy);
 int phy_exit(struct phy *phy);
 int phy_power_on(struct phy *phy);
 int phy_power_off(struct phy *phy);
+/*
+ * usb uses phy_set_mode_ext for hw workaround.
+ * it's called in spinlock section so we skip mutex.
+ * USB_SET_MODE_MUTEX_SKIP is flag for submode.
+ */
+#define USB_SET_MODE_MUTEX_SKIP 20
 int phy_set_mode_ext(struct phy *phy, enum phy_mode mode, int submode);
 #define phy_set_mode(phy, mode) \
 	phy_set_mode_ext(phy, mode, 0)
-int phy_set_media(struct phy *phy, enum phy_media media);
-int phy_set_speed(struct phy *phy, int speed);
 int phy_configure(struct phy *phy, union phy_configure_opts *opts);
 int phy_validate(struct phy *phy, enum phy_mode mode, int submode,
 		 union phy_configure_opts *opts);
@@ -253,8 +231,6 @@ static inline enum phy_mode phy_get_mode(struct phy *phy)
 }
 int phy_reset(struct phy *phy);
 int phy_calibrate(struct phy *phy);
-int phy_notify_connect(struct phy *phy, int port);
-int phy_notify_disconnect(struct phy *phy, int port);
 static inline int phy_get_bus_width(struct phy *phy)
 {
 	return phy->attrs.bus_width;
@@ -264,12 +240,11 @@ static inline void phy_set_bus_width(struct phy *phy, int bus_width)
 	phy->attrs.bus_width = bus_width;
 }
 struct phy *phy_get(struct device *dev, const char *string);
+struct phy *phy_optional_get(struct device *dev, const char *string);
 struct phy *devm_phy_get(struct device *dev, const char *string);
 struct phy *devm_phy_optional_get(struct device *dev, const char *string);
 struct phy *devm_of_phy_get(struct device *dev, struct device_node *np,
 			    const char *con_id);
-struct phy *devm_of_phy_optional_get(struct device *dev, struct device_node *np,
-				     const char *con_id);
 struct phy *devm_of_phy_get_by_index(struct device *dev, struct device_node *np,
 				     int index);
 void of_phy_put(struct phy *phy);
@@ -277,7 +252,7 @@ void phy_put(struct device *dev, struct phy *phy);
 void devm_phy_put(struct device *dev, struct phy *phy);
 struct phy *of_phy_get(struct device_node *np, const char *con_id);
 struct phy *of_phy_simple_xlate(struct device *dev,
-				const struct of_phandle_args *args);
+	struct of_phandle_args *args);
 struct phy *phy_create(struct device *dev, struct device_node *node,
 		       const struct phy_ops *ops);
 struct phy *devm_phy_create(struct device *dev, struct device_node *node,
@@ -287,11 +262,11 @@ void devm_phy_destroy(struct device *dev, struct phy *phy);
 struct phy_provider *__of_phy_provider_register(struct device *dev,
 	struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 const struct of_phandle_args *args));
+				 struct of_phandle_args *args));
 struct phy_provider *__devm_of_phy_provider_register(struct device *dev,
 	struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 const struct of_phandle_args *args));
+				 struct of_phandle_args *args));
 void of_phy_provider_unregister(struct phy_provider *phy_provider);
 void devm_of_phy_provider_unregister(struct device *dev,
 	struct phy_provider *phy_provider);
@@ -324,6 +299,16 @@ static inline int phy_pm_runtime_put_sync(struct phy *phy)
 	if (!phy)
 		return 0;
 	return -ENOSYS;
+}
+
+static inline void phy_pm_runtime_allow(struct phy *phy)
+{
+	return;
+}
+
+static inline void phy_pm_runtime_forbid(struct phy *phy)
+{
+	return;
 }
 
 static inline int phy_init(struct phy *phy)
@@ -365,20 +350,6 @@ static inline int phy_set_mode_ext(struct phy *phy, enum phy_mode mode,
 #define phy_set_mode(phy, mode) \
 	phy_set_mode_ext(phy, mode, 0)
 
-static inline int phy_set_media(struct phy *phy, enum phy_media media)
-{
-	if (!phy)
-		return 0;
-	return -ENODEV;
-}
-
-static inline int phy_set_speed(struct phy *phy, int speed)
-{
-	if (!phy)
-		return 0;
-	return -ENODEV;
-}
-
 static inline enum phy_mode phy_get_mode(struct phy *phy)
 {
 	return PHY_MODE_INVALID;
@@ -392,20 +363,6 @@ static inline int phy_reset(struct phy *phy)
 }
 
 static inline int phy_calibrate(struct phy *phy)
-{
-	if (!phy)
-		return 0;
-	return -ENOSYS;
-}
-
-static inline int phy_notify_connect(struct phy *phy, int index)
-{
-	if (!phy)
-		return 0;
-	return -ENOSYS;
-}
-
-static inline int phy_notify_disconnect(struct phy *phy, int index)
 {
 	if (!phy)
 		return 0;
@@ -445,6 +402,12 @@ static inline struct phy *phy_get(struct device *dev, const char *string)
 	return ERR_PTR(-ENOSYS);
 }
 
+static inline struct phy *phy_optional_get(struct device *dev,
+					   const char *string)
+{
+	return ERR_PTR(-ENOSYS);
+}
+
 static inline struct phy *devm_phy_get(struct device *dev, const char *string)
 {
 	return ERR_PTR(-ENOSYS);
@@ -461,13 +424,6 @@ static inline struct phy *devm_of_phy_get(struct device *dev,
 					  const char *con_id)
 {
 	return ERR_PTR(-ENOSYS);
-}
-
-static inline struct phy *devm_of_phy_optional_get(struct device *dev,
-						   struct device_node *np,
-						   const char *con_id)
-{
-	return NULL;
 }
 
 static inline struct phy *devm_of_phy_get_by_index(struct device *dev,
@@ -495,7 +451,7 @@ static inline struct phy *of_phy_get(struct device_node *np, const char *con_id)
 }
 
 static inline struct phy *of_phy_simple_xlate(struct device *dev,
-					      const struct of_phandle_args *args)
+	struct of_phandle_args *args)
 {
 	return ERR_PTR(-ENOSYS);
 }
@@ -525,7 +481,7 @@ static inline void devm_phy_destroy(struct device *dev, struct phy *phy)
 static inline struct phy_provider *__of_phy_provider_register(
 	struct device *dev, struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 const struct of_phandle_args *args))
+				 struct of_phandle_args *args))
 {
 	return ERR_PTR(-ENOSYS);
 }
@@ -533,7 +489,7 @@ static inline struct phy_provider *__of_phy_provider_register(
 static inline struct phy_provider *__devm_of_phy_provider_register(struct device
 	*dev, struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 const struct of_phandle_args *args))
+				 struct of_phandle_args *args))
 {
 	return ERR_PTR(-ENOSYS);
 }

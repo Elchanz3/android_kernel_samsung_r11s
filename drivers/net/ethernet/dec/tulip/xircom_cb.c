@@ -143,7 +143,7 @@ static const struct pci_device_id xircom_pci_table[] = {
 };
 MODULE_DEVICE_TABLE(pci, xircom_pci_table);
 
-static struct pci_driver xircom_driver = {
+static struct pci_driver xircom_ops = {
 	.name		= "xircom_cb",
 	.id_table	= xircom_pci_table,
 	.probe		= xircom_probe,
@@ -1015,14 +1015,12 @@ static void read_mac_address(struct xircom_private *card)
 		xw32(CSR10, i + 3);
 		data_count = xr32(CSR9);
 		if ((tuple == 0x22) && (data_id == 0x04) && (data_count == 0x06)) {
-			u8 addr[ETH_ALEN];
 			int j;
 
 			for (j = 0; j < 6; j++) {
 				xw32(CSR10, i + j + 4);
-				addr[j] = xr32(CSR9) & 0xff;
+				card->dev->dev_addr[j] = xr32(CSR9) & 0xff;
 			}
-			eth_hw_addr_set(card->dev, addr);
 			break;
 		} else if (link == 0) {
 			break;
@@ -1169,4 +1167,4 @@ investigate_write_descriptor(struct net_device *dev,
 	}
 }
 
-module_pci_driver(xircom_driver);
+module_pci_driver(xircom_ops);

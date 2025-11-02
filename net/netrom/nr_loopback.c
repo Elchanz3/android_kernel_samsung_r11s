@@ -59,7 +59,8 @@ static void nr_loopback_timer(struct timer_list *unused)
 		if (dev == NULL || nr_rx_frame(skb, dev) == 0)
 			kfree_skb(skb);
 
-		dev_put(dev);
+		if (dev != NULL)
+			dev_put(dev);
 
 		if (!skb_queue_empty(&loopback_queue) && !nr_loopback_running())
 			mod_timer(&loopback_timer, jiffies + 10);
@@ -68,6 +69,6 @@ static void nr_loopback_timer(struct timer_list *unused)
 
 void nr_loopback_clear(void)
 {
-	timer_delete_sync(&loopback_timer);
+	del_timer_sync(&loopback_timer);
 	skb_queue_purge(&loopback_queue);
 }

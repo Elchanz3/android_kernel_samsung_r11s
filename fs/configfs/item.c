@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  * item.c - library routines for handling generic config items
  *
  * Based on kobject:
@@ -66,7 +68,7 @@ int config_item_set_name(struct config_item *item, const char *fmt, ...)
 		name = kvasprintf(GFP_KERNEL, fmt, args);
 		va_end(args);
 		if (!name)
-			return -ENOMEM;
+			return -EFAULT;
 	}
 
 	/* Free the old name, if necessary. */

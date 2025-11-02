@@ -113,7 +113,6 @@ struct dce_audio_shift {
 	uint8_t DCCG_AUDIO_DTO2_USE_512FBR_DTO;
 	uint32_t DCCG_AUDIO_DTO0_USE_512FBR_DTO;
 	uint32_t DCCG_AUDIO_DTO1_USE_512FBR_DTO;
-	uint32_t CLOCK_GATING_DISABLE;
 };
 
 struct dce_audio_mask {
@@ -133,7 +132,6 @@ struct dce_audio_mask {
 	uint32_t DCCG_AUDIO_DTO2_USE_512FBR_DTO;
 	uint32_t DCCG_AUDIO_DTO0_USE_512FBR_DTO;
 	uint32_t DCCG_AUDIO_DTO1_USE_512FBR_DTO;
-	uint32_t CLOCK_GATING_DISABLE;
 
 };
 
@@ -166,13 +164,11 @@ void dce_aud_hw_init(struct audio *audio);
 
 void dce_aud_az_enable(struct audio *audio);
 void dce_aud_az_disable(struct audio *audio);
-void dce_aud_az_disable_hbr_audio(struct audio *audio);
 
 void dce_aud_az_configure(struct audio *audio,
 	enum signal_type signal,
 	const struct audio_crtc_info *crtc_info,
-	const struct audio_info *audio_info,
-	const struct audio_dp_link_info *dp_link_info);
+	const struct audio_info *audio_info);
 
 void dce_aud_wall_dto_setup(struct audio *audio,
 	enum signal_type signal,

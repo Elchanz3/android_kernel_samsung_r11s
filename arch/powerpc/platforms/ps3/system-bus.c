@@ -64,10 +64,9 @@ static int ps3_open_hv_device_sb(struct ps3_system_bus_device *dev)
 	result = lv1_open_device(dev->bus_id, dev->dev_id, 0);
 
 	if (result) {
-		pr_warn("%s:%d: lv1_open_device dev=%u.%u(%s) failed: %s\n",
-			__func__, __LINE__, dev->match_id, dev->match_sub_id,
-			dev_name(&dev->core), ps3_result(result));
-		result = -EPERM;
+		pr_debug("%s:%d: lv1_open_device failed: %s\n", __func__,
+			__LINE__, ps3_result(result));
+			result = -EPERM;
 	}
 
 done:
@@ -121,7 +120,7 @@ static int ps3_open_hv_device_gpu(struct ps3_system_bus_device *dev)
 	result = lv1_gpu_open(0);
 
 	if (result) {
-		pr_warn("%s:%d: lv1_gpu_open failed: %s\n", __func__,
+		pr_debug("%s:%d: lv1_gpu_open failed: %s\n", __func__,
 			__LINE__, ps3_result(result));
 			result = -EPERM;
 	}
@@ -333,10 +332,10 @@ int ps3_mmio_region_init(struct ps3_system_bus_device *dev,
 EXPORT_SYMBOL_GPL(ps3_mmio_region_init);
 
 static int ps3_system_bus_match(struct device *_dev,
-	const struct device_driver *_drv)
+	struct device_driver *_drv)
 {
 	int result;
-	const struct ps3_system_bus_driver *drv = ps3_drv_to_system_bus_drv(_drv);
+	struct ps3_system_bus_driver *drv = ps3_drv_to_system_bus_drv(_drv);
 	struct ps3_system_bus_device *dev = ps3_dev_to_system_bus_dev(_dev);
 
 	if (!dev->match_sub_id)
@@ -381,8 +380,9 @@ static int ps3_system_bus_probe(struct device *_dev)
 	return result;
 }
 
-static void ps3_system_bus_remove(struct device *_dev)
+static int ps3_system_bus_remove(struct device *_dev)
 {
+	int result = 0;
 	struct ps3_system_bus_device *dev = ps3_dev_to_system_bus_dev(_dev);
 	struct ps3_system_bus_driver *drv;
 
@@ -393,12 +393,13 @@ static void ps3_system_bus_remove(struct device *_dev)
 	BUG_ON(!drv);
 
 	if (drv->remove)
-		drv->remove(dev);
+		result = drv->remove(dev);
 	else
 		dev_dbg(&dev->core, "%s:%d %s: no remove method\n",
 			__func__, __LINE__, drv->core.name);
 
 	pr_debug(" <- %s:%d: %s\n", __func__, __LINE__, dev_name(&dev->core));
+	return result;
 }
 
 static void ps3_system_bus_shutdown(struct device *_dev)
@@ -439,7 +440,7 @@ static void ps3_system_bus_shutdown(struct device *_dev)
 	dev_dbg(&dev->core, " <- %s:%d\n", __func__, __LINE__);
 }
 
-static int ps3_system_bus_uevent(const struct device *_dev, struct kobj_uevent_env *env)
+static int ps3_system_bus_uevent(struct device *_dev, struct kobj_uevent_env *env)
 {
 	struct ps3_system_bus_device *dev = ps3_dev_to_system_bus_dev(_dev);
 
@@ -453,9 +454,10 @@ static ssize_t modalias_show(struct device *_dev, struct device_attribute *a,
 	char *buf)
 {
 	struct ps3_system_bus_device *dev = ps3_dev_to_system_bus_dev(_dev);
+	int len = snprintf(buf, PAGE_SIZE, "ps3:%d:%d\n", dev->match_id,
+			   dev->match_sub_id);
 
-	return sysfs_emit(buf, "ps3:%d:%d\n", dev->match_id,
-			  dev->match_sub_id);
+	return (len >= PAGE_SIZE) ? (PAGE_SIZE - 1) : len;
 }
 static DEVICE_ATTR_RO(modalias);
 
@@ -465,7 +467,7 @@ static struct attribute *ps3_system_bus_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(ps3_system_bus_dev);
 
-static struct bus_type ps3_system_bus_type = {
+struct bus_type ps3_system_bus_type = {
 	.name = "ps3_system_bus",
 	.match = ps3_system_bus_match,
 	.uevent = ps3_system_bus_uevent,
@@ -600,9 +602,9 @@ static dma_addr_t ps3_ioc0_map_page(struct device *_dev, struct page *page,
 		iopte_flag |= CBE_IOPTE_PP_W | CBE_IOPTE_SO_RW;
 		break;
 	default:
-		/* not happened */
+		/* not happned */
 		BUG();
-	}
+	};
 	result = ps3_dma_map(dev->d_region, (unsigned long)ptr, size,
 			     &bus_addr, iopte_flag);
 
@@ -661,7 +663,7 @@ static int ps3_ioc0_map_sg(struct device *_dev, struct scatterlist *sg,
 			   unsigned long attrs)
 {
 	BUG();
-	return -EINVAL;
+	return 0;
 }
 
 static void ps3_sb_unmap_sg(struct device *_dev, struct scatterlist *sg,
@@ -694,7 +696,7 @@ static const struct dma_map_ops ps3_sb_dma_ops = {
 	.unmap_page = ps3_unmap_page,
 	.mmap = dma_common_mmap,
 	.get_sgtable = dma_common_get_sgtable,
-	.alloc_pages_op = dma_common_alloc_pages,
+	.alloc_pages = dma_common_alloc_pages,
 	.free_pages = dma_common_free_pages,
 };
 
@@ -708,7 +710,7 @@ static const struct dma_map_ops ps3_ioc0_dma_ops = {
 	.unmap_page = ps3_unmap_page,
 	.mmap = dma_common_mmap,
 	.get_sgtable = dma_common_get_sgtable,
-	.alloc_pages_op = dma_common_alloc_pages,
+	.alloc_pages = dma_common_alloc_pages,
 	.free_pages = dma_common_free_pages,
 };
 
@@ -761,7 +763,7 @@ int ps3_system_bus_device_register(struct ps3_system_bus_device *dev)
 		break;
 	default:
 		BUG();
-	}
+	};
 
 	dev->core.of_node = NULL;
 	set_dev_node(&dev->core, 0);

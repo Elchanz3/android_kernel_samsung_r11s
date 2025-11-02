@@ -66,8 +66,60 @@ void __init bootmem_init(void)
 	memblock_dump_all();
 }
 
-static void __init print_vm_layout(void)
+
+void __init zones_init(void)
 {
+	/* All pages are DMA-able, so we put them all in the DMA zone. */
+	unsigned long max_zone_pfn[MAX_NR_ZONES] = {
+		[ZONE_NORMAL] = max_low_pfn,
+#ifdef CONFIG_HIGHMEM
+		[ZONE_HIGHMEM] = max_pfn,
+#endif
+	};
+	free_area_init(max_zone_pfn);
+}
+
+static void __init free_highpages(void)
+{
+#ifdef CONFIG_HIGHMEM
+	unsigned long max_low = max_low_pfn;
+	phys_addr_t range_start, range_end;
+	u64 i;
+
+	/* set highmem page free */
+	for_each_free_mem_range(i, NUMA_NO_NODE, MEMBLOCK_NONE,
+				&range_start, &range_end, NULL) {
+		unsigned long start = PFN_UP(range_start);
+		unsigned long end = PFN_DOWN(range_end);
+
+		/* Ignore complete lowmem entries */
+		if (end <= max_low)
+			continue;
+
+		/* Truncate partial highmem entries */
+		if (start < max_low)
+			start = max_low;
+
+		for (; start < end; start++)
+			free_highmem_page(pfn_to_page(start));
+	}
+#endif
+}
+
+/*
+ * Initialize memory pages.
+ */
+
+void __init mem_init(void)
+{
+	free_highpages();
+
+	max_mapnr = max_pfn - ARCH_PFN_OFFSET;
+	high_memory = (void *)__va(max_low_pfn << PAGE_SHIFT);
+
+	memblock_free_all();
+
+	mem_init_print_info(NULL);
 	pr_info("virtual kernel memory layout:\n"
 #ifdef CONFIG_KASAN
 		"    kasan   : 0x%08lx - 0x%08lx  (%5lu MB)\n"
@@ -95,8 +147,8 @@ static void __init print_vm_layout(void)
 #ifdef CONFIG_HIGHMEM
 		PKMAP_BASE, PKMAP_BASE + LAST_PKMAP * PAGE_SIZE,
 		(LAST_PKMAP*PAGE_SIZE) >> 10,
-		FIXADDR_START, FIXADDR_END,
-		(FIXADDR_END - FIXADDR_START) >> 10,
+		FIXADDR_START, FIXADDR_TOP,
+		(FIXADDR_TOP - FIXADDR_START) >> 10,
 #endif
 		PAGE_OFFSET, PAGE_OFFSET +
 		(max_low_pfn - min_low_pfn) * PAGE_SIZE,
@@ -114,19 +166,6 @@ static void __init print_vm_layout(void)
 		(unsigned long)(__init_end - __init_begin) >> 10,
 		(unsigned long)__bss_start, (unsigned long)__bss_stop,
 		(unsigned long)(__bss_stop - __bss_start) >> 10);
-}
-
-void __init zones_init(void)
-{
-	/* All pages are DMA-able, so we put them all in the DMA zone. */
-	unsigned long max_zone_pfn[MAX_NR_ZONES] = {
-		[ZONE_NORMAL] = max_low_pfn,
-#ifdef CONFIG_HIGHMEM
-		[ZONE_HIGHMEM] = max_pfn,
-#endif
-	};
-	free_area_init(max_zone_pfn);
-	print_vm_layout();
 }
 
 static void __init parse_memmap_one(char *p)
@@ -178,25 +217,3 @@ static int __init parse_memmap_opt(char *str)
 	return 0;
 }
 early_param("memmap", parse_memmap_opt);
-
-#ifdef CONFIG_MMU
-static const pgprot_t protection_map[16] = {
-	[VM_NONE]					= PAGE_NONE,
-	[VM_READ]					= PAGE_READONLY,
-	[VM_WRITE]					= PAGE_COPY,
-	[VM_WRITE | VM_READ]				= PAGE_COPY,
-	[VM_EXEC]					= PAGE_READONLY_EXEC,
-	[VM_EXEC | VM_READ]				= PAGE_READONLY_EXEC,
-	[VM_EXEC | VM_WRITE]				= PAGE_COPY_EXEC,
-	[VM_EXEC | VM_WRITE | VM_READ]			= PAGE_COPY_EXEC,
-	[VM_SHARED]					= PAGE_NONE,
-	[VM_SHARED | VM_READ]				= PAGE_READONLY,
-	[VM_SHARED | VM_WRITE]				= PAGE_SHARED,
-	[VM_SHARED | VM_WRITE | VM_READ]		= PAGE_SHARED,
-	[VM_SHARED | VM_EXEC]				= PAGE_READONLY_EXEC,
-	[VM_SHARED | VM_EXEC | VM_READ]			= PAGE_READONLY_EXEC,
-	[VM_SHARED | VM_EXEC | VM_WRITE]		= PAGE_SHARED_EXEC,
-	[VM_SHARED | VM_EXEC | VM_WRITE | VM_READ]	= PAGE_SHARED_EXEC
-};
-DECLARE_VM_GET_PAGE_PROT
-#endif

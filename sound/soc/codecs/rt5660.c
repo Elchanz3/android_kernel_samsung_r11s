@@ -11,9 +11,11 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
+#include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
 #include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/acpi.h>
@@ -905,11 +907,11 @@ static int rt5660_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		rt5660->master[dai->id] = 1;
 		break;
 
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		reg_val |= RT5660_I2S_MS_S;
 		rt5660->master[dai->id] = 0;
 		break;
@@ -1044,7 +1046,7 @@ static int rt5660_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 
 	ret = rl6231_pll_calc(freq_in, freq_out, &pll_code);
 	if (ret < 0) {
-		dev_err(component->dev, "Unsupported input clock %d\n", freq_in);
+		dev_err(component->dev, "Unsupport input clock %d\n", freq_in);
 		return ret;
 	}
 
@@ -1055,8 +1057,8 @@ static int rt5660_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 	snd_soc_component_write(component, RT5660_PLL_CTRL1,
 		pll_code.n_code << RT5660_PLL_N_SFT | pll_code.k_code);
 	snd_soc_component_write(component, RT5660_PLL_CTRL2,
-		((pll_code.m_bp ? 0 : pll_code.m_code) << RT5660_PLL_M_SFT) |
-		(pll_code.m_bp << RT5660_PLL_M_BP_SFT));
+		(pll_code.m_bp ? 0 : pll_code.m_code) << RT5660_PLL_M_SFT |
+		pll_code.m_bp << RT5660_PLL_M_BP_SFT);
 
 	rt5660->pll_in = freq_in;
 	rt5660->pll_out = freq_out;
@@ -1078,6 +1080,9 @@ static int rt5660_set_bias_level(struct snd_soc_component *component,
 	case SND_SOC_BIAS_PREPARE:
 		snd_soc_component_update_bits(component, RT5660_GEN_CTRL1,
 			RT5660_DIG_GATE_CTRL, RT5660_DIG_GATE_CTRL);
+
+		if (IS_ERR(rt5660->mclk))
+			break;
 
 		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
 			clk_disable_unprepare(rt5660->mclk);
@@ -1203,6 +1208,7 @@ static const struct snd_soc_component_driver soc_component_dev_rt5660 = {
 	.num_dapm_routes	= ARRAY_SIZE(rt5660_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config rt5660_regmap = {
@@ -1216,7 +1222,7 @@ static const struct regmap_config rt5660_regmap = {
 	.volatile_reg = rt5660_volatile_register,
 	.readable_reg = rt5660_readable_register,
 
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 	.reg_defaults = rt5660_reg,
 	.num_reg_defaults = ARRAY_SIZE(rt5660_reg),
 	.ranges = rt5660_ranges,
@@ -1224,24 +1230,22 @@ static const struct regmap_config rt5660_regmap = {
 };
 
 static const struct i2c_device_id rt5660_i2c_id[] = {
-	{ "rt5660" },
+	{ "rt5660", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5660_i2c_id);
 
-#ifdef CONFIG_OF
 static const struct of_device_id rt5660_of_match[] = {
 	{ .compatible = "realtek,rt5660", },
-	{ }
+	{},
 };
 MODULE_DEVICE_TABLE(of, rt5660_of_match);
-#endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt5660_acpi_match[] = {
-	{ "10EC3277" },
-	{ "10EC5660" },
-	{ }
+	{ "10EC5660", 0 },
+	{ "10EC3277", 0 },
+	{ },
 };
 MODULE_DEVICE_TABLE(acpi, rt5660_acpi_match);
 #endif
@@ -1260,7 +1264,8 @@ static int rt5660_parse_dt(struct rt5660_priv *rt5660, struct device *dev)
 	return 0;
 }
 
-static int rt5660_i2c_probe(struct i2c_client *i2c)
+static int rt5660_i2c_probe(struct i2c_client *i2c,
+		    const struct i2c_device_id *id)
 {
 	struct rt5660_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	struct rt5660_priv *rt5660;
@@ -1274,9 +1279,9 @@ static int rt5660_i2c_probe(struct i2c_client *i2c)
 		return -ENOMEM;
 
 	/* Check if MCLK provided */
-	rt5660->mclk = devm_clk_get_optional(&i2c->dev, "mclk");
-	if (IS_ERR(rt5660->mclk))
-		return PTR_ERR(rt5660->mclk);
+	rt5660->mclk = devm_clk_get(&i2c->dev, "mclk");
+	if (PTR_ERR(rt5660->mclk) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
 
 	i2c_set_clientdata(i2c, rt5660);
 
@@ -1315,17 +1320,14 @@ static int rt5660_i2c_probe(struct i2c_client *i2c)
 		regmap_update_bits(rt5660->regmap, RT5660_GPIO_CTRL1,
 			RT5660_GP1_PIN_MASK, RT5660_GP1_PIN_DMIC1_SCL);
 
-		if (rt5660->pdata.dmic1_data_pin == RT5660_DMIC1_DATA_GPIO2) {
+		if (rt5660->pdata.dmic1_data_pin == RT5660_DMIC1_DATA_GPIO2)
 			regmap_update_bits(rt5660->regmap, RT5660_DMIC_CTRL1,
 				RT5660_SEL_DMIC_DATA_MASK,
 				RT5660_SEL_DMIC_DATA_GPIO2);
-			regmap_update_bits(rt5660->regmap, RT5660_GPIO_CTRL1,
-				RT5660_GP2_PIN_MASK, RT5660_GP2_PIN_DMIC1_SDA);
-		} else if (rt5660->pdata.dmic1_data_pin == RT5660_DMIC1_DATA_IN1P) {
+		else if (rt5660->pdata.dmic1_data_pin == RT5660_DMIC1_DATA_IN1P)
 			regmap_update_bits(rt5660->regmap, RT5660_DMIC_CTRL1,
 				RT5660_SEL_DMIC_DATA_MASK,
 				RT5660_SEL_DMIC_DATA_IN1P);
-		}
 	}
 
 	return devm_snd_soc_register_component(&i2c->dev,

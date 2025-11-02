@@ -222,7 +222,7 @@ The CCIR - I uses the PAL colorsystem, and is used in Great Britain, Hong Kong,
 Ireland, Nigeria, South Africa.
 
 The CCIR - N uses the PAL colorsystem and PAL frame size but the NTSC framerate,
-and is used in Argentina, Uruguay, an a few others
+and is used in Argentinia, Uruguay, an a few others
 
 We do not talk about how the audio is broadcast !
 
@@ -319,7 +319,7 @@ Conexant bt866 TV encoder
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - is used in AVS6EYES, and
-- can generate: NTSC/PAL, PAL-M, PAL-N
+- can generate: NTSC/PAL, PAL­M, PAL­N
 
 The adv717x, should be able to produce PAL N. But you find nothing PAL N
 specific in the registers. Seem that you have to reuse a other standard

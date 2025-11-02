@@ -17,7 +17,7 @@ static int qla24xx_vport_disable(struct fc_vport *, bool);
 
 static ssize_t
 qla2x00_sysfs_read_fw_dump(struct file *filp, struct kobject *kobj,
-			   const struct bin_attribute *bin_attr,
+			   struct bin_attribute *bin_attr,
 			   char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -58,7 +58,7 @@ qla2x00_sysfs_read_fw_dump(struct file *filp, struct kobject *kobj,
 
 static ssize_t
 qla2x00_sysfs_write_fw_dump(struct file *filp, struct kobject *kobj,
-			    const struct bin_attribute *bin_attr,
+			    struct bin_attribute *bin_attr,
 			    char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -168,7 +168,7 @@ qla2x00_sysfs_write_fw_dump(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_fw_dump_attr = {
+static struct bin_attribute sysfs_fw_dump_attr = {
 	.attr = {
 		.name = "fw_dump",
 		.mode = S_IRUSR | S_IWUSR,
@@ -180,7 +180,7 @@ static const struct bin_attribute sysfs_fw_dump_attr = {
 
 static ssize_t
 qla2x00_sysfs_read_nvram(struct file *filp, struct kobject *kobj,
-			 const struct bin_attribute *bin_attr,
+			 struct bin_attribute *bin_attr,
 			 char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -220,7 +220,7 @@ skip:
 
 static ssize_t
 qla2x00_sysfs_write_nvram(struct file *filp, struct kobject *kobj,
-			  const struct bin_attribute *bin_attr,
+			  struct bin_attribute *bin_attr,
 			  char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -282,7 +282,7 @@ qla2x00_sysfs_write_nvram(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_nvram_attr = {
+static struct bin_attribute sysfs_nvram_attr = {
 	.attr = {
 		.name = "nvram",
 		.mode = S_IRUSR | S_IWUSR,
@@ -294,7 +294,7 @@ static const struct bin_attribute sysfs_nvram_attr = {
 
 static ssize_t
 qla2x00_sysfs_read_optrom(struct file *filp, struct kobject *kobj,
-			  const struct bin_attribute *bin_attr,
+			  struct bin_attribute *bin_attr,
 			  char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -318,7 +318,7 @@ out:
 
 static ssize_t
 qla2x00_sysfs_write_optrom(struct file *filp, struct kobject *kobj,
-			   const struct bin_attribute *bin_attr,
+			   struct bin_attribute *bin_attr,
 			   char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -344,7 +344,7 @@ qla2x00_sysfs_write_optrom(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_optrom_attr = {
+static struct bin_attribute sysfs_optrom_attr = {
 	.attr = {
 		.name = "optrom",
 		.mode = S_IRUSR | S_IWUSR,
@@ -356,7 +356,7 @@ static const struct bin_attribute sysfs_optrom_attr = {
 
 static ssize_t
 qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
-			       const struct bin_attribute *bin_attr,
+			       struct bin_attribute *bin_attr,
 			       char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -529,7 +529,7 @@ out:
 	return rval;
 }
 
-static const struct bin_attribute sysfs_optrom_ctl_attr = {
+static struct bin_attribute sysfs_optrom_ctl_attr = {
 	.attr = {
 		.name = "optrom_ctl",
 		.mode = S_IWUSR,
@@ -540,7 +540,7 @@ static const struct bin_attribute sysfs_optrom_ctl_attr = {
 
 static ssize_t
 qla2x00_sysfs_read_vpd(struct file *filp, struct kobject *kobj,
-		       const struct bin_attribute *bin_attr,
+		       struct bin_attribute *bin_attr,
 		       char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -587,7 +587,7 @@ skip:
 
 static ssize_t
 qla2x00_sysfs_write_vpd(struct file *filp, struct kobject *kobj,
-			const struct bin_attribute *bin_attr,
+			struct bin_attribute *bin_attr,
 			char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -642,7 +642,7 @@ qla2x00_sysfs_write_vpd(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_vpd_attr = {
+static struct bin_attribute sysfs_vpd_attr = {
 	.attr = {
 		.name = "vpd",
 		.mode = S_IRUSR | S_IWUSR,
@@ -654,7 +654,7 @@ static const struct bin_attribute sysfs_vpd_attr = {
 
 static ssize_t
 qla2x00_sysfs_read_sfp(struct file *filp, struct kobject *kobj,
-		       const struct bin_attribute *bin_attr,
+		       struct bin_attribute *bin_attr,
 		       char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -679,7 +679,7 @@ qla2x00_sysfs_read_sfp(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_sfp_attr = {
+static struct bin_attribute sysfs_sfp_attr = {
 	.attr = {
 		.name = "sfp",
 		.mode = S_IRUSR | S_IWUSR,
@@ -690,7 +690,7 @@ static const struct bin_attribute sysfs_sfp_attr = {
 
 static ssize_t
 qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
-			const struct bin_attribute *bin_attr,
+			struct bin_attribute *bin_attr,
 			char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -709,12 +709,6 @@ qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
 	case 0x2025c:
 		ql_log(ql_log_info, vha, 0x706e,
 		    "Issuing ISP reset.\n");
-
-		if (vha->hw->flags.port_isolated) {
-			ql_log(ql_log_info, vha, 0x706e,
-			       "Port is isolated, returning.\n");
-			return -EINVAL;
-		}
 
 		scsi_block_requests(vha->host);
 		if (IS_QLA82XX(ha)) {
@@ -823,7 +817,7 @@ qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_reset_attr = {
+static struct bin_attribute sysfs_reset_attr = {
 	.attr = {
 		.name = "reset",
 		.mode = S_IWUSR,
@@ -834,8 +828,8 @@ static const struct bin_attribute sysfs_reset_attr = {
 
 static ssize_t
 qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
-		   const struct bin_attribute *bin_attr,
-		   char *buf, loff_t off, size_t count)
+			struct bin_attribute *bin_attr,
+			char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
 	    struct device, kobj)));
@@ -866,7 +860,7 @@ qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute sysfs_issue_logo_attr = {
+static struct bin_attribute sysfs_issue_logo_attr = {
 	.attr = {
 		.name = "issue_logo",
 		.mode = S_IWUSR,
@@ -877,7 +871,7 @@ static const struct bin_attribute sysfs_issue_logo_attr = {
 
 static ssize_t
 qla2x00_sysfs_read_xgmac_stats(struct file *filp, struct kobject *kobj,
-		       const struct bin_attribute *bin_attr,
+		       struct bin_attribute *bin_attr,
 		       char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -929,7 +923,7 @@ do_read:
 	return count;
 }
 
-static const struct bin_attribute sysfs_xgmac_stats_attr = {
+static struct bin_attribute sysfs_xgmac_stats_attr = {
 	.attr = {
 		.name = "xgmac_stats",
 		.mode = S_IRUSR,
@@ -940,7 +934,7 @@ static const struct bin_attribute sysfs_xgmac_stats_attr = {
 
 static ssize_t
 qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
-		       const struct bin_attribute *bin_attr,
+		       struct bin_attribute *bin_attr,
 		       char *buf, loff_t off, size_t count)
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
@@ -951,9 +945,9 @@ qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
 	if (!capable(CAP_SYS_ADMIN) || off != 0 || count > DCBX_TLV_DATA_SIZE)
 		return 0;
 
-	mutex_lock(&vha->hw->optrom_mutex);
 	if (ha->dcbx_tlv)
 		goto do_read;
+	mutex_lock(&vha->hw->optrom_mutex);
 	if (qla2x00_chip_is_down(vha)) {
 		mutex_unlock(&vha->hw->optrom_mutex);
 		return 0;
@@ -987,7 +981,7 @@ do_read:
 	return count;
 }
 
-static const struct bin_attribute sysfs_dcbx_tlv_attr = {
+static struct bin_attribute sysfs_dcbx_tlv_attr = {
 	.attr = {
 		.name = "dcbx_tlv",
 		.mode = S_IRUSR,
@@ -998,7 +992,7 @@ static const struct bin_attribute sysfs_dcbx_tlv_attr = {
 
 static struct sysfs_entry {
 	char *name;
-	const struct bin_attribute *attr;
+	struct bin_attribute *attr;
 	int type;
 } bin_file_entries[] = {
 	{ "fw_dump", &sysfs_fw_dump_attr, },
@@ -1066,6 +1060,13 @@ qla2x00_free_sysfs_attr(scsi_qla_host_t *vha, bool stop_beacon)
 }
 
 /* Scsi_Host attributes. */
+
+static ssize_t
+qla2x00_driver_version_show(struct device *dev,
+			  struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%s\n", qla2x00_version_str);
+}
 
 static ssize_t
 qla2x00_fw_version_show(struct device *dev,
@@ -1897,30 +1898,6 @@ qla2x00_port_speed_show(struct device *dev, struct device_attribute *attr,
 	return scnprintf(buf, PAGE_SIZE, "%s\n", speed);
 }
 
-static ssize_t
-qla2x00_mpi_pause_store(struct device *dev,
-	struct device_attribute *attr, const char *buf, size_t count)
-{
-	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-	int rval = 0;
-
-	if (sscanf(buf, "%d", &rval) != 1)
-		return -EINVAL;
-
-	ql_log(ql_log_warn, vha, 0x7089, "Pausing MPI...\n");
-
-	rval = qla83xx_wr_reg(vha, 0x002012d4, 0x30000001);
-
-	if (rval != QLA_SUCCESS) {
-		ql_log(ql_log_warn, vha, 0x708a, "Unable to pause MPI.\n");
-		count = 0;
-	}
-
-	return count;
-}
-
-static DEVICE_ATTR(mpi_pause, S_IWUSR, NULL, qla2x00_mpi_pause_store);
-
 /* ----- */
 
 static ssize_t
@@ -2405,7 +2382,7 @@ qla2x00_dport_diagnostics_show(struct device *dev,
 static DEVICE_ATTR(dport_diagnostics, 0444,
 	   qla2x00_dport_diagnostics_show, NULL);
 
-static DEVICE_STRING_ATTR_RO(driver_version, S_IRUGO, qla2x00_version_str);
+static DEVICE_ATTR(driver_version, S_IRUGO, qla2x00_driver_version_show, NULL);
 static DEVICE_ATTR(fw_version, S_IRUGO, qla2x00_fw_version_show, NULL);
 static DEVICE_ATTR(serial_num, S_IRUGO, qla2x00_serial_num_show, NULL);
 static DEVICE_ATTR(isp_name, S_IRUGO, qla2x00_isp_name_show, NULL);
@@ -2470,76 +2447,70 @@ static DEVICE_ATTR(port_speed, 0644, qla2x00_port_speed_show,
 static DEVICE_ATTR(port_no, 0444, qla2x00_port_no_show, NULL);
 static DEVICE_ATTR(fw_attr, 0444, qla2x00_fw_attr_show, NULL);
 
-static struct attribute *qla2x00_host_attrs[] = {
-	&dev_attr_driver_version.attr.attr,
-	&dev_attr_fw_version.attr,
-	&dev_attr_serial_num.attr,
-	&dev_attr_isp_name.attr,
-	&dev_attr_isp_id.attr,
-	&dev_attr_model_name.attr,
-	&dev_attr_model_desc.attr,
-	&dev_attr_pci_info.attr,
-	&dev_attr_link_state.attr,
-	&dev_attr_zio.attr,
-	&dev_attr_zio_timer.attr,
-	&dev_attr_beacon.attr,
-	&dev_attr_beacon_config.attr,
-	&dev_attr_optrom_bios_version.attr,
-	&dev_attr_optrom_efi_version.attr,
-	&dev_attr_optrom_fcode_version.attr,
-	&dev_attr_optrom_fw_version.attr,
-	&dev_attr_84xx_fw_version.attr,
-	&dev_attr_total_isp_aborts.attr,
-	&dev_attr_serdes_version.attr,
-	&dev_attr_mpi_version.attr,
-	&dev_attr_phy_version.attr,
-	&dev_attr_flash_block_size.attr,
-	&dev_attr_vlan_id.attr,
-	&dev_attr_vn_port_mac_address.attr,
-	&dev_attr_fabric_param.attr,
-	&dev_attr_fw_state.attr,
-	&dev_attr_optrom_gold_fw_version.attr,
-	&dev_attr_thermal_temp.attr,
-	&dev_attr_diag_requests.attr,
-	&dev_attr_diag_megabytes.attr,
-	&dev_attr_fw_dump_size.attr,
-	&dev_attr_allow_cna_fw_dump.attr,
-	&dev_attr_pep_version.attr,
-	&dev_attr_min_supported_speed.attr,
-	&dev_attr_max_supported_speed.attr,
-	&dev_attr_zio_threshold.attr,
-	&dev_attr_dif_bundle_statistics.attr,
-	&dev_attr_port_speed.attr,
-	&dev_attr_port_no.attr,
-	&dev_attr_fw_attr.attr,
-	&dev_attr_dport_diagnostics.attr,
-	&dev_attr_mpi_pause.attr,
-	&dev_attr_qlini_mode.attr,
-	&dev_attr_ql2xiniexchg.attr,
-	&dev_attr_ql2xexchoffld.attr,
+
+struct device_attribute *qla2x00_host_attrs[] = {
+	&dev_attr_driver_version,
+	&dev_attr_fw_version,
+	&dev_attr_serial_num,
+	&dev_attr_isp_name,
+	&dev_attr_isp_id,
+	&dev_attr_model_name,
+	&dev_attr_model_desc,
+	&dev_attr_pci_info,
+	&dev_attr_link_state,
+	&dev_attr_zio,
+	&dev_attr_zio_timer,
+	&dev_attr_beacon,
+	&dev_attr_beacon_config,
+	&dev_attr_optrom_bios_version,
+	&dev_attr_optrom_efi_version,
+	&dev_attr_optrom_fcode_version,
+	&dev_attr_optrom_fw_version,
+	&dev_attr_84xx_fw_version,
+	&dev_attr_total_isp_aborts,
+	&dev_attr_serdes_version,
+	&dev_attr_mpi_version,
+	&dev_attr_phy_version,
+	&dev_attr_flash_block_size,
+	&dev_attr_vlan_id,
+	&dev_attr_vn_port_mac_address,
+	&dev_attr_fabric_param,
+	&dev_attr_fw_state,
+	&dev_attr_optrom_gold_fw_version,
+	&dev_attr_thermal_temp,
+	&dev_attr_diag_requests,
+	&dev_attr_diag_megabytes,
+	&dev_attr_fw_dump_size,
+	&dev_attr_allow_cna_fw_dump,
+	&dev_attr_pep_version,
+	&dev_attr_min_supported_speed,
+	&dev_attr_max_supported_speed,
+	&dev_attr_zio_threshold,
+	&dev_attr_dif_bundle_statistics,
+	&dev_attr_port_speed,
+	&dev_attr_port_no,
+	&dev_attr_fw_attr,
+	&dev_attr_dport_diagnostics,
+	NULL, /* reserve for qlini_mode */
+	NULL, /* reserve for ql2xiniexchg */
+	NULL, /* reserve for ql2xexchoffld */
 	NULL,
 };
 
-static umode_t qla_host_attr_is_visible(struct kobject *kobj,
-					struct attribute *attr, int i)
+void qla_insert_tgt_attrs(void)
 {
-	if (ql2x_ini_mode != QLA2XXX_INI_MODE_DUAL &&
-	    (attr == &dev_attr_qlini_mode.attr ||
-	     attr == &dev_attr_ql2xiniexchg.attr ||
-	     attr == &dev_attr_ql2xexchoffld.attr))
-		return 0;
-	return attr->mode;
+	struct device_attribute **attr;
+
+	/* advance to empty slot */
+	for (attr = &qla2x00_host_attrs[0]; *attr; ++attr)
+		continue;
+
+	*attr = &dev_attr_qlini_mode;
+	attr++;
+	*attr = &dev_attr_ql2xiniexchg;
+	attr++;
+	*attr = &dev_attr_ql2xexchoffld;
 }
-
-static const struct attribute_group qla2x00_host_attr_group = {
-	.is_visible = qla_host_attr_is_visible,
-	.attrs = qla2x00_host_attrs
-};
-
-const struct attribute_group *qla2x00_host_groups[] = {
-	&qla2x00_host_attr_group,
-	NULL
-};
 
 /* Host attributes. */
 
@@ -2688,13 +2659,7 @@ qla2x00_get_starget_port_id(struct scsi_target *starget)
 static inline void
 qla2x00_set_rport_loss_tmo(struct fc_rport *rport, uint32_t timeout)
 {
-	fc_port_t *fcport = *(fc_port_t **)rport->dd_data;
-
 	rport->dev_loss_tmo = timeout ? timeout : 1;
-
-	if (IS_ENABLED(CONFIG_NVME_FC) && fcport && fcport->nvme_remote_port)
-		nvme_fc_set_remoteport_devloss(fcport->nvme_remote_port,
-					       rport->dev_loss_tmo);
 }
 
 static void
@@ -2707,27 +2672,17 @@ qla2x00_dev_loss_tmo_callbk(struct fc_rport *rport)
 	if (!fcport)
 		return;
 
-	ql_dbg(ql_dbg_async, fcport->vha, 0x5101,
-	       DBG_FCPORT_PRFMT(fcport, "dev_loss_tmo expiry, rport_state=%d",
-				rport->port_state));
-
-	/*
-	 * Now that the rport has been deleted, set the fcport state to
-	 * FCS_DEVICE_DEAD, if the fcport is still lost.
-	 */
-	if (fcport->scan_state != QLA_FCPORT_FOUND)
-		qla2x00_set_fcport_state(fcport, FCS_DEVICE_DEAD);
+	/* Now that the rport has been deleted, set the fcport state to
+	   FCS_DEVICE_DEAD */
+	qla2x00_set_fcport_state(fcport, FCS_DEVICE_DEAD);
 
 	/*
 	 * Transport has effectively 'deleted' the rport, clear
 	 * all local references.
 	 */
 	spin_lock_irqsave(host->host_lock, flags);
-	/* Confirm port has not reappeared before clearing pointers. */
-	if (rport->port_state != FC_PORTSTATE_ONLINE) {
-		fcport->rport = NULL;
-		*((fc_port_t **)rport->dd_data) = NULL;
-	}
+	fcport->rport = fcport->drport = NULL;
+	*((fc_port_t **)rport->dd_data) = NULL;
 	spin_unlock_irqrestore(host->host_lock, flags);
 
 	if (test_bit(ABORT_ISP_ACTIVE, &fcport->vha->dpc_flags))
@@ -2774,24 +2729,14 @@ qla2x00_terminate_rport_io(struct fc_rport *rport)
 	/*
 	 * At this point all fcport's software-states are cleared.  Perform any
 	 * final cleanup of firmware resources (PCBs and XCBs).
-	 *
-	 * Attempt to cleanup only lost devices.
 	 */
 	if (fcport->loop_id != FC_NO_LOOP_ID) {
-		if (IS_FWI2_CAPABLE(fcport->vha->hw) &&
-		    fcport->scan_state != QLA_FCPORT_FOUND) {
-			if (fcport->loop_id != FC_NO_LOOP_ID)
-				fcport->logout_on_delete = 1;
-
-			if (!EDIF_NEGOTIATION_PENDING(fcport)) {
-				ql_dbg(ql_dbg_disc, fcport->vha, 0x911e,
-				       "%s %d schedule session deletion\n", __func__,
-				       __LINE__);
-				qlt_schedule_sess_for_deletion(fcport);
-			}
-		} else if (!IS_FWI2_CAPABLE(fcport->vha->hw)) {
+		if (IS_FWI2_CAPABLE(fcport->vha->hw))
+			fcport->vha->hw->isp_ops->fabric_logout(fcport->vha,
+			    fcport->loop_id, fcport->d_id.b.domain,
+			    fcport->d_id.b.area, fcport->d_id.b.al_pa);
+		else
 			qla2x00_port_logout(fcport->vha, fcport);
-		}
 	}
 
 	/* check for any straggling io left behind */
@@ -2810,9 +2755,6 @@ qla2x00_issue_lip(struct Scsi_Host *shost)
 	scsi_qla_host_t *vha = shost_priv(shost);
 
 	if (IS_QLAFX00(vha->hw))
-		return 0;
-
-	if (vha->hw->flags.port_isolated)
 		return 0;
 
 	qla2x00_loop_reset(vha);
@@ -3185,7 +3127,8 @@ qla24xx_vport_delete(struct fc_vport *fc_vport)
 
 	set_bit(VPORT_DELETE, &vha->dpc_flags);
 
-	while (test_bit(LOOP_RESYNC_ACTIVE, &vha->dpc_flags))
+	while (test_bit(LOOP_RESYNC_ACTIVE, &vha->dpc_flags) ||
+	    test_bit(FCPORT_UPDATE_NEEDED, &vha->dpc_flags))
 		msleep(1000);
 
 
@@ -3193,9 +3136,6 @@ qla24xx_vport_delete(struct fc_vport *fc_vport)
 	qla2x00_wait_for_sess_deletion(vha);
 
 	qla_nvme_delete(vha);
-	qla_enode_stop(vha);
-	qla_edb_stop(vha);
-
 	vha->flags.delete_progress = 1;
 
 	qlt_remove_target(ha, vha);
@@ -3304,7 +3244,6 @@ struct fc_function_template qla2xxx_transport_vport_functions = {
 	.show_host_node_name = 1,
 	.show_host_port_name = 1,
 	.show_host_supported_classes = 1,
-	.show_host_supported_speeds = 1,
 
 	.get_host_port_id = qla2x00_get_host_port_id,
 	.show_host_port_id = 1,

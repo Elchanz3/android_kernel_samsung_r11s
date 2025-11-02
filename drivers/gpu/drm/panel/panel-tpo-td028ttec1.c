@@ -86,7 +86,11 @@ struct td028ttec1_panel {
 
 #define to_td028ttec1_device(p) container_of(p, struct td028ttec1_panel, panel)
 
-static int
+/*
+ * noinline_for_stack so we don't get multiple copies of tx_buf
+ * on the stack in case of gcc-plugin-structleak
+ */
+static int noinline_for_stack
 jbt_ret_write_0(struct td028ttec1_panel *lcd, u8 reg, int *err)
 {
 	struct spi_device *spi = lcd->spi;
@@ -238,8 +242,13 @@ static int td028ttec1_prepare(struct drm_panel *panel)
 static int td028ttec1_enable(struct drm_panel *panel)
 {
 	struct td028ttec1_panel *lcd = to_td028ttec1_device(panel);
+	int ret;
 
-	return jbt_ret_write_0(lcd, JBT_REG_DISPLAY_ON, NULL);
+	ret = jbt_ret_write_0(lcd, JBT_REG_DISPLAY_ON, NULL);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 static int td028ttec1_disable(struct drm_panel *panel)
@@ -318,11 +327,9 @@ static int td028ttec1_probe(struct spi_device *spi)
 	struct td028ttec1_panel *lcd;
 	int ret;
 
-	lcd = devm_drm_panel_alloc(&spi->dev, struct td028ttec1_panel, panel,
-				   &td028ttec1_funcs,
-				   DRM_MODE_CONNECTOR_DPI);
-	if (IS_ERR(lcd))
-		return PTR_ERR(lcd);
+	lcd = devm_kzalloc(&spi->dev, sizeof(*lcd), GFP_KERNEL);
+	if (!lcd)
+		return -ENOMEM;
 
 	spi_set_drvdata(spi, lcd);
 	lcd->spi = spi;
@@ -336,6 +343,9 @@ static int td028ttec1_probe(struct spi_device *spi)
 		return ret;
 	}
 
+	drm_panel_init(&lcd->panel, &lcd->spi->dev, &td028ttec1_funcs,
+		       DRM_MODE_CONNECTOR_DPI);
+
 	ret = drm_panel_of_backlight(&lcd->panel);
 	if (ret)
 		return ret;
@@ -345,13 +355,15 @@ static int td028ttec1_probe(struct spi_device *spi)
 	return 0;
 }
 
-static void td028ttec1_remove(struct spi_device *spi)
+static int td028ttec1_remove(struct spi_device *spi)
 {
 	struct td028ttec1_panel *lcd = spi_get_drvdata(spi);
 
 	drm_panel_remove(&lcd->panel);
 	drm_panel_disable(&lcd->panel);
 	drm_panel_unprepare(&lcd->panel);
+
+	return 0;
 }
 
 static const struct of_device_id td028ttec1_of_match[] = {

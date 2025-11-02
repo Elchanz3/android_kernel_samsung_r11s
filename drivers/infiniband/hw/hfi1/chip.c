@@ -1,7 +1,48 @@
-// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2020 Intel Corporation.
- * Copyright(c) 2021 Cornelis Networks.
+ *
+ * This file is provided under a dual BSD/GPLv2 license.  When using or
+ * redistributing this file, you may do so under either license.
+ *
+ * GPL LICENSE SUMMARY
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * BSD LICENSE
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ *  - Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  - Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *  - Neither the name of Intel Corporation nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 /*
@@ -251,7 +292,7 @@ struct flag_table {
 /*
  * CCE Error flags.
  */
-static const struct flag_table cce_err_status_flags[] = {
+static struct flag_table cce_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY0("CceCsrParityErr",
 		CCE_ERR_STATUS_CCE_CSR_PARITY_ERR_SMASK),
 /* 1*/	FLAG_ENTRY0("CceCsrReadBadAddrErr",
@@ -341,7 +382,7 @@ static const struct flag_table cce_err_status_flags[] = {
  * Misc Error flags
  */
 #define MES(text) MISC_ERR_STATUS_MISC_##text##_ERR_SMASK
-static const struct flag_table misc_err_status_flags[] = {
+static struct flag_table misc_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY0("CSR_PARITY", MES(CSR_PARITY)),
 /* 1*/	FLAG_ENTRY0("CSR_READ_BAD_ADDR", MES(CSR_READ_BAD_ADDR)),
 /* 2*/	FLAG_ENTRY0("CSR_WRITE_BAD_ADDR", MES(CSR_WRITE_BAD_ADDR)),
@@ -360,7 +401,7 @@ static const struct flag_table misc_err_status_flags[] = {
 /*
  * TXE PIO Error flags and consequences
  */
-static const struct flag_table pio_err_status_flags[] = {
+static struct flag_table pio_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY("PioWriteBadCtxt",
 	SEC_WRITE_DROPPED,
 	SEND_PIO_ERR_STATUS_PIO_WRITE_BAD_CTXT_ERR_SMASK),
@@ -502,7 +543,7 @@ static const struct flag_table pio_err_status_flags[] = {
 /*
  * TXE SDMA Error flags
  */
-static const struct flag_table sdma_err_status_flags[] = {
+static struct flag_table sdma_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY0("SDmaRpyTagErr",
 		SEND_DMA_ERR_STATUS_SDMA_RPY_TAG_ERR_SMASK),
 /* 1*/	FLAG_ENTRY0("SDmaCsrParityErr",
@@ -530,7 +571,7 @@ static const struct flag_table sdma_err_status_flags[] = {
  * TXE Egress Error flags
  */
 #define SEES(text) SEND_EGRESS_ERR_STATUS_##text##_ERR_SMASK
-static const struct flag_table egress_err_status_flags[] = {
+static struct flag_table egress_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY0("TxPktIntegrityMemCorErr", SEES(TX_PKT_INTEGRITY_MEM_COR)),
 /* 1*/	FLAG_ENTRY0("TxPktIntegrityMemUncErr", SEES(TX_PKT_INTEGRITY_MEM_UNC)),
 /* 2 reserved */
@@ -631,7 +672,7 @@ static const struct flag_table egress_err_status_flags[] = {
  * TXE Egress Error Info flags
  */
 #define SEEI(text) SEND_EGRESS_ERR_INFO_##text##_ERR_SMASK
-static const struct flag_table egress_err_info_flags[] = {
+static struct flag_table egress_err_info_flags[] = {
 /* 0*/	FLAG_ENTRY0("Reserved", 0ull),
 /* 1*/	FLAG_ENTRY0("VLErr", SEEI(VL)),
 /* 2*/	FLAG_ENTRY0("JobKeyErr", SEEI(JOB_KEY)),
@@ -680,7 +721,7 @@ static const struct flag_table egress_err_info_flags[] = {
  * TXE Send error flags
  */
 #define SES(name) SEND_ERR_STATUS_SEND_##name##_ERR_SMASK
-static const struct flag_table send_err_status_flags[] = {
+static struct flag_table send_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY0("SendCsrParityErr", SES(CSR_PARITY)),
 /* 1*/	FLAG_ENTRY0("SendCsrReadBadAddrErr", SES(CSR_READ_BAD_ADDR)),
 /* 2*/	FLAG_ENTRY0("SendCsrWriteBadAddrErr", SES(CSR_WRITE_BAD_ADDR))
@@ -689,7 +730,7 @@ static const struct flag_table send_err_status_flags[] = {
 /*
  * TXE Send Context Error flags and consequences
  */
-static const struct flag_table sc_err_status_flags[] = {
+static struct flag_table sc_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY("InconsistentSop",
 		SEC_PACKET_DROPPED | SEC_SC_HALTED,
 		SEND_CTXT_ERR_STATUS_PIO_INCONSISTENT_SOP_ERR_SMASK),
@@ -712,7 +753,7 @@ static const struct flag_table sc_err_status_flags[] = {
  * RXE Receive Error flags
  */
 #define RXES(name) RCV_ERR_STATUS_RX_##name##_ERR_SMASK
-static const struct flag_table rxe_err_status_flags[] = {
+static struct flag_table rxe_err_status_flags[] = {
 /* 0*/	FLAG_ENTRY0("RxDmaCsrCorErr", RXES(DMA_CSR_COR)),
 /* 1*/	FLAG_ENTRY0("RxDcIntfParityErr", RXES(DC_INTF_PARITY)),
 /* 2*/	FLAG_ENTRY0("RxRcvHdrUncErr", RXES(RCV_HDR_UNC)),
@@ -847,7 +888,7 @@ static const struct flag_table rxe_err_status_flags[] = {
  * DCC Error Flags
  */
 #define DCCE(name) DCC_ERR_FLG_##name##_SMASK
-static const struct flag_table dcc_err_flags[] = {
+static struct flag_table dcc_err_flags[] = {
 	FLAG_ENTRY0("bad_l2_err", DCCE(BAD_L2_ERR)),
 	FLAG_ENTRY0("bad_sc_err", DCCE(BAD_SC_ERR)),
 	FLAG_ENTRY0("bad_mid_tail_err", DCCE(BAD_MID_TAIL_ERR)),
@@ -900,7 +941,7 @@ static const struct flag_table dcc_err_flags[] = {
  * LCB error flags
  */
 #define LCBE(name) DC_LCB_ERR_FLG_##name##_SMASK
-static const struct flag_table lcb_err_flags[] = {
+static struct flag_table lcb_err_flags[] = {
 /* 0*/	FLAG_ENTRY0("CSR_PARITY_ERR", LCBE(CSR_PARITY_ERR)),
 /* 1*/	FLAG_ENTRY0("INVALID_CSR_ADDR", LCBE(INVALID_CSR_ADDR)),
 /* 2*/	FLAG_ENTRY0("RST_FOR_FAILED_DESKEW", LCBE(RST_FOR_FAILED_DESKEW)),
@@ -943,7 +984,7 @@ static const struct flag_table lcb_err_flags[] = {
  * DC8051 Error Flags
  */
 #define D8E(name) DC_DC8051_ERR_FLG_##name##_SMASK
-static const struct flag_table dc8051_err_flags[] = {
+static struct flag_table dc8051_err_flags[] = {
 	FLAG_ENTRY0("SET_BY_8051", D8E(SET_BY_8051)),
 	FLAG_ENTRY0("LOST_8051_HEART_BEAT", D8E(LOST_8051_HEART_BEAT)),
 	FLAG_ENTRY0("CRAM_MBE", D8E(CRAM_MBE)),
@@ -962,7 +1003,7 @@ static const struct flag_table dc8051_err_flags[] = {
  *
  * Flags in DC8051_DBG_ERR_INFO_SET_BY_8051.ERROR field.
  */
-static const struct flag_table dc8051_info_err_flags[] = {
+static struct flag_table dc8051_info_err_flags[] = {
 	FLAG_ENTRY0("Spico ROM check failed",  SPICO_ROM_FAILED),
 	FLAG_ENTRY0("Unknown frame received",  UNKNOWN_FRAME),
 	FLAG_ENTRY0("Target BER not met",      TARGET_BER_NOT_MET),
@@ -986,7 +1027,7 @@ static const struct flag_table dc8051_info_err_flags[] = {
  *
  * Flags in DC8051_DBG_ERR_INFO_SET_BY_8051.HOST_MSG field.
  */
-static const struct flag_table dc8051_info_host_msg_flags[] = {
+static struct flag_table dc8051_info_host_msg_flags[] = {
 	FLAG_ENTRY0("Host request done", 0x0001),
 	FLAG_ENTRY0("BC PWR_MGM message", 0x0002),
 	FLAG_ENTRY0("BC SMA message", 0x0004),
@@ -1281,9 +1322,9 @@ CNTR_ELEM(#name, \
 	  access_ibp_##cntr)
 
 /**
- * hfi1_addr_from_offset - return addr for readq/writeq
- * @dd: the dd device
- * @offset: the offset of the CSR within bar0
+ * hfi_addr_from_offset - return addr for readq/writeq
+ * @dd - the dd device
+ * @offset - the offset of the CSR within bar0
  *
  * This routine selects the appropriate base address
  * based on the indicated offset.
@@ -1299,8 +1340,8 @@ static inline void __iomem *hfi1_addr_from_offset(
 
 /**
  * read_csr - read CSR at the indicated offset
- * @dd: the dd device
- * @offset: the offset of the CSR within bar0
+ * @dd - the dd device
+ * @offset - the offset of the CSR within bar0
  *
  * Return: the value read or all FF's if there
  * is no mapping
@@ -1314,9 +1355,9 @@ u64 read_csr(const struct hfi1_devdata *dd, u32 offset)
 
 /**
  * write_csr - write CSR at the indicated offset
- * @dd: the dd device
- * @offset: the offset of the CSR within bar0
- * @value: value to write
+ * @dd - the dd device
+ * @offset - the offset of the CSR within bar0
+ * @value - value to write
  */
 void write_csr(const struct hfi1_devdata *dd, u32 offset, u64 value)
 {
@@ -1332,8 +1373,8 @@ void write_csr(const struct hfi1_devdata *dd, u32 offset, u64 value)
 
 /**
  * get_csr_addr - return te iomem address for offset
- * @dd: the dd device
- * @offset: the offset of the CSR within bar0
+ * @dd - the dd device
+ * @offset - the offset of the CSR within bar0
  *
  * Return: The iomem address to use in subsequent
  * writeq/readq operations.
@@ -1461,8 +1502,7 @@ static u64 dc_access_lcb_cntr(const struct cntr_entry *entry, void *context,
 		ret = write_lcb_csr(dd, csr, data);
 
 	if (ret) {
-		if (!(dd->flags & HFI1_SHUTDOWN))
-			dd_dev_err(dd, "Could not acquire LCB for counter 0x%x", csr);
+		dd_dev_err(dd, "Could not acquire LCB for counter 0x%x", csr);
 		return 0;
 	}
 
@@ -5275,7 +5315,7 @@ done:
  * the buffer.  End in '*' if the buffer is too short.
  */
 static char *flag_string(char *buf, int buf_len, u64 flags,
-			 const struct flag_table *table, int table_size)
+			 struct flag_table *table, int table_size)
 {
 	char extra[32];
 	char *p = buf;
@@ -5334,7 +5374,7 @@ static const char * const cce_misc_names[] = {
 static char *is_misc_err_name(char *buf, size_t bsize, unsigned int source)
 {
 	if (source < ARRAY_SIZE(cce_misc_names))
-		strscpy_pad(buf, cce_misc_names[source], bsize);
+		strncpy(buf, cce_misc_names[source], bsize);
 	else
 		snprintf(buf, bsize, "Reserved%u",
 			 source + IS_GENERAL_ERR_START);
@@ -5374,7 +5414,7 @@ static const char * const various_names[] = {
 static char *is_various_name(char *buf, size_t bsize, unsigned int source)
 {
 	if (source < ARRAY_SIZE(various_names))
-		strscpy_pad(buf, various_names[source], bsize);
+		strncpy(buf, various_names[source], bsize);
 	else
 		snprintf(buf, bsize, "Reserved%u", source + IS_VARIOUS_START);
 	return buf;
@@ -5548,7 +5588,7 @@ static void handle_cce_err(struct hfi1_devdata *dd, u32 unused, u64 reg)
 #define RCVERR_CHECK_TIME 10
 static void update_rcverr_timer(struct timer_list *t)
 {
-	struct hfi1_devdata *dd = timer_container_of(dd, t, rcverr_timer);
+	struct hfi1_devdata *dd = from_timer(dd, t, rcverr_timer);
 	struct hfi1_pportdata *ppd = dd->pport;
 	u32 cur_ovfl_cnt = read_dev_cntr(dd, C_RCV_OVF, CNTR_INVALID_VL);
 
@@ -5576,7 +5616,7 @@ static int init_rcverr(struct hfi1_devdata *dd)
 static void free_rcverr(struct hfi1_devdata *dd)
 {
 	if (dd->rcverr_timer.function)
-		timer_delete_sync(&dd->rcverr_timer);
+		del_timer_sync(&dd->rcverr_timer);
 }
 
 static void handle_rxe_err(struct hfi1_devdata *dd, u32 unused, u64 reg)
@@ -6161,7 +6201,7 @@ static int request_host_lcb_access(struct hfi1_devdata *dd)
 	ret = do_8051_command(dd, HCMD_MISC,
 			      (u64)HCMD_MISC_REQUEST_LCB_ACCESS <<
 			      LOAD_DATA_FIELD_ID_SHIFT, NULL);
-	if (ret != HCMD_SUCCESS && !(dd->flags & HFI1_SHUTDOWN)) {
+	if (ret != HCMD_SUCCESS) {
 		dd_dev_err(dd, "%s: command failed with error %d\n",
 			   __func__, ret);
 	}
@@ -6242,8 +6282,7 @@ int acquire_lcb_access(struct hfi1_devdata *dd, int sleep_ok)
 	if (dd->lcb_access_count == 0) {
 		ret = request_host_lcb_access(dd);
 		if (ret) {
-			if (!(dd->flags & HFI1_SHUTDOWN))
-				dd_dev_err(dd,
+			dd_dev_err(dd,
 				   "%s: unable to acquire LCB access, err %d\n",
 				   __func__, ret);
 			goto done;
@@ -8277,7 +8316,7 @@ static void is_interrupt(struct hfi1_devdata *dd, unsigned int source)
 }
 
 /**
- * general_interrupt -  General interrupt handler
+ * gerneral_interrupt() -  General interrupt handler
  * @irq: MSIx IRQ vector
  * @data: hfi1 devdata
  *
@@ -8394,7 +8433,7 @@ static inline int check_packet_present(struct hfi1_ctxtdata *rcd)
 	return hfi1_rcd_head(rcd) != tail;
 }
 
-/*
+/**
  * Common code for receive contexts interrupt handlers.
  * Update traces, increment kernel IRQ counter and
  * setup ASPM when needed.
@@ -8408,7 +8447,7 @@ static void receive_interrupt_common(struct hfi1_ctxtdata *rcd)
 	aspm_ctx_disable(rcd);
 }
 
-/*
+/**
  * __hfi1_rcd_eoi_intr() - Make HW issue receive interrupt
  * when there are packets present in the queue. When calling
  * with interrupts enabled please use hfi1_rcd_eoi_intr.
@@ -8447,8 +8486,8 @@ static void hfi1_rcd_eoi_intr(struct hfi1_ctxtdata *rcd)
 
 /**
  * hfi1_netdev_rx_napi - napi poll function to move eoi inline
- * @napi: pointer to napi object
- * @budget: netdev budget
+ * @napi - pointer to napi object
+ * @budget - netdev budget
  */
 int hfi1_netdev_rx_napi(struct napi_struct *napi, int budget)
 {
@@ -8755,7 +8794,7 @@ static int do_8051_command(struct hfi1_devdata *dd, u32 type, u64 in_data,
 
 	/*
 	 * When writing a LCB CSR, out_data contains the full value to
-	 * be written, while in_data contains the relative LCB
+	 * to be written, while in_data contains the relative LCB
 	 * address in 7:0.  Do the work here, rather than the caller,
 	 * of distrubting the write data to where it needs to go:
 	 *
@@ -10105,7 +10144,7 @@ u32 lrh_max_header_bytes(struct hfi1_devdata *dd)
 
 /*
  * Set Send Length
- * @ppd: per port data
+ * @ppd - per port data
  *
  * Set the MTU by limiting how many DWs may be sent.  The SendLenCheck*
  * registers compare against LRH.PktLen, so use the max bytes included
@@ -12137,7 +12176,7 @@ void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 		set_intr_bits(dd, IS_RCVURGENT_START + rcd->ctxt,
 			      IS_RCVURGENT_START + rcd->ctxt, false);
 
-	hfi1_cdbg(RCVCTRL, "ctxt %d rcvctrl 0x%llx", ctxt, rcvctrl);
+	hfi1_cdbg(RCVCTRL, "ctxt %d rcvctrl 0x%llx\n", ctxt, rcvctrl);
 	write_kctxt_csr(dd, ctxt, RCV_CTXT_CTRL, rcvctrl);
 
 	/* work around sticky RcvCtxtStatus.BlockedRHQFull */
@@ -12207,10 +12246,10 @@ u32 hfi1_read_cntrs(struct hfi1_devdata *dd, char **namep, u64 **cntrp)
 			hfi1_cdbg(CNTR, "reading %s", entry->name);
 			if (entry->flags & CNTR_DISABLED) {
 				/* Nothing */
-				hfi1_cdbg(CNTR, "\tDisabled");
+				hfi1_cdbg(CNTR, "\tDisabled\n");
 			} else {
 				if (entry->flags & CNTR_VL) {
-					hfi1_cdbg(CNTR, "\tPer VL");
+					hfi1_cdbg(CNTR, "\tPer VL\n");
 					for (j = 0; j < C_VL_COUNT; j++) {
 						val = entry->rw_cntr(entry,
 								  dd, j,
@@ -12218,21 +12257,21 @@ u32 hfi1_read_cntrs(struct hfi1_devdata *dd, char **namep, u64 **cntrp)
 								  0);
 						hfi1_cdbg(
 						   CNTR,
-						   "\t\tRead 0x%llx for %d",
+						   "\t\tRead 0x%llx for %d\n",
 						   val, j);
 						dd->cntrs[entry->offset + j] =
 									    val;
 					}
 				} else if (entry->flags & CNTR_SDMA) {
 					hfi1_cdbg(CNTR,
-						  "\t Per SDMA Engine");
+						  "\t Per SDMA Engine\n");
 					for (j = 0; j < chip_sdma_engines(dd);
 					     j++) {
 						val =
 						entry->rw_cntr(entry, dd, j,
 							       CNTR_MODE_R, 0);
 						hfi1_cdbg(CNTR,
-							  "\t\tRead 0x%llx for %d",
+							  "\t\tRead 0x%llx for %d\n",
 							  val, j);
 						dd->cntrs[entry->offset + j] =
 									val;
@@ -12273,7 +12312,7 @@ u32 hfi1_read_portcntrs(struct hfi1_pportdata *ppd, char **namep, u64 **cntrp)
 			hfi1_cdbg(CNTR, "reading %s", entry->name);
 			if (entry->flags & CNTR_DISABLED) {
 				/* Nothing */
-				hfi1_cdbg(CNTR, "\tDisabled");
+				hfi1_cdbg(CNTR, "\tDisabled\n");
 				continue;
 			}
 
@@ -12308,7 +12347,7 @@ static void free_cntrs(struct hfi1_devdata *dd)
 	int i;
 
 	if (dd->synth_stats_timer.function)
-		timer_delete_sync(&dd->synth_stats_timer);
+		del_timer_sync(&dd->synth_stats_timer);
 	cancel_work_sync(&dd->update_cntr_work);
 	ppd = (struct hfi1_pportdata *)(dd + 1);
 	for (i = 0; i < dd->num_pports; i++, ppd++) {
@@ -12516,7 +12555,7 @@ static void do_update_synth_timer(struct work_struct *work)
 
 	hfi1_cdbg(
 	    CNTR,
-	    "[%d] curr tx=0x%llx rx=0x%llx :: last tx=0x%llx rx=0x%llx",
+	    "[%d] curr tx=0x%llx rx=0x%llx :: last tx=0x%llx rx=0x%llx\n",
 	    dd->unit, cur_tx, cur_rx, dd->last_tx, dd->last_rx);
 
 	if ((cur_tx < dd->last_tx) || (cur_rx < dd->last_rx)) {
@@ -12530,7 +12569,7 @@ static void do_update_synth_timer(struct work_struct *work)
 	} else {
 		total_flits = (cur_tx - dd->last_tx) + (cur_rx - dd->last_rx);
 		hfi1_cdbg(CNTR,
-			  "[%d] total flits 0x%llx limit 0x%llx", dd->unit,
+			  "[%d] total flits 0x%llx limit 0x%llx\n", dd->unit,
 			  total_flits, (u64)CNTR_32BIT_MAX);
 		if (total_flits >= CNTR_32BIT_MAX) {
 			hfi1_cdbg(CNTR, "[%d] 32bit limit hit, updating",
@@ -12587,7 +12626,7 @@ static void do_update_synth_timer(struct work_struct *work)
 
 static void update_synth_timer(struct timer_list *t)
 {
-	struct hfi1_devdata *dd = timer_container_of(dd, t, synth_stats_timer);
+	struct hfi1_devdata *dd = from_timer(dd, t, synth_stats_timer);
 
 	queue_work(dd->update_cntr_wq, &dd->update_cntr_work);
 	mod_timer(&dd->synth_stats_timer, jiffies + HZ * SYNTH_CNT_TIME);
@@ -12882,6 +12921,22 @@ u32 chip_to_opa_pstate(struct hfi1_devdata *dd, u32 chip_pstate)
 	}
 }
 
+/* return the OPA port logical state name */
+const char *opa_lstate_name(u32 lstate)
+{
+	static const char * const port_logical_names[] = {
+		"PORT_NOP",
+		"PORT_DOWN",
+		"PORT_INIT",
+		"PORT_ARMED",
+		"PORT_ACTIVE",
+		"PORT_ACTIVE_DEFER",
+	};
+	if (lstate < ARRAY_SIZE(port_logical_names))
+		return port_logical_names[lstate];
+	return "unknown";
+}
+
 /* return the OPA port physical state name */
 const char *opa_pstate_name(u32 pstate)
 {
@@ -12940,6 +12995,8 @@ static void update_statusp(struct hfi1_pportdata *ppd, u32 state)
 			break;
 		}
 	}
+	dd_dev_info(ppd->dd, "logical state changed to %s (0x%x)\n",
+		    opa_lstate_name(state), state);
 }
 
 /**
@@ -13167,16 +13224,15 @@ static void read_mod_write(struct hfi1_devdata *dd, u16 src, u64 bits,
 {
 	u64 reg;
 	u16 idx = src / BITS_PER_REGISTER;
-	unsigned long flags;
 
-	spin_lock_irqsave(&dd->irq_src_lock, flags);
+	spin_lock(&dd->irq_src_lock);
 	reg = read_csr(dd, CCE_INT_MASK + (8 * idx));
 	if (set)
 		reg |= bits;
 	else
 		reg &= ~bits;
 	write_csr(dd, CCE_INT_MASK + (8 * idx), reg);
-	spin_unlock_irqrestore(&dd->irq_src_lock, flags);
+	spin_unlock(&dd->irq_src_lock);
 }
 
 /**
@@ -13217,7 +13273,7 @@ int set_intr_bits(struct hfi1_devdata *dd, u16 first, u16 last, bool set)
 /*
  * Clear all interrupt sources on the chip.
  */
-static void clear_all_interrupts(struct hfi1_devdata *dd)
+void clear_all_interrupts(struct hfi1_devdata *dd)
 {
 	int i;
 
@@ -14138,7 +14194,7 @@ static void init_kdeth_qp(struct hfi1_devdata *dd)
 }
 
 /**
- * hfi1_get_qp_map - get qp map
+ * hfi1_get_qp_map
  * @dd: device data
  * @idx: index to read
  */
@@ -14151,10 +14207,10 @@ u8 hfi1_get_qp_map(struct hfi1_devdata *dd, u8 idx)
 }
 
 /**
- * init_qpmap_table - init qp map
- * @dd: device data
- * @first_ctxt: first context
- * @last_ctxt: first context
+ * init_qpmap_table
+ * @dd - device data
+ * @first_ctxt - first context
+ * @last_ctxt - first context
  *
  * This return sets the qpn mapping table that
  * is indexed by qpn[8:1].
@@ -14335,8 +14391,8 @@ no_qos:
 
 /**
  * init_qos - init RX qos
- * @dd: device data
- * @rmt: RSM map table
+ * @dd - device data
+ * @rmt - RSM map table
  *
  * This routine initializes Rule 0 and the RSM map table to implement
  * quality of service (qos).
@@ -14366,7 +14422,7 @@ static void init_qos(struct hfi1_devdata *dd, struct rsm_map_table *rmt)
 	if (rmt->used + rmt_entries >= NUM_MAP_ENTRIES)
 		goto bail;
 
-	/* add qos entries to the RSM map table */
+	/* add qos entries to the the RSM map table */
 	for (i = 0, ctxt = FIRST_KERNEL_KCTXT; i < num_vls; i++) {
 		unsigned tctxt;
 
@@ -14845,7 +14901,7 @@ int hfi1_clear_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt)
 }
 
 /*
- * Start doing the clean up the chip. Our clean up happens in multiple
+ * Start doing the clean up the the chip. Our clean up happens in multiple
  * stages and this is just the first.
  */
 void hfi1_start_cleanup(struct hfi1_devdata *dd)
@@ -14912,7 +14968,7 @@ static int obtain_boardname(struct hfi1_devdata *dd)
 {
 	/* generic board description */
 	const char generic[] =
-		"Cornelis Omni-Path Host Fabric Interface Adapter 100 Series";
+		"Intel Omni-Path Host Fabric Interface Adapter 100 Series";
 	unsigned long size;
 	int ret;
 
@@ -14974,7 +15030,8 @@ err_exit:
 
 /**
  * hfi1_init_dd() - Initialize most of the dd structure.
- * @dd: the dd device
+ * @dev: the pci_dev for hfi1_ib device
+ * @ent: pci_device_id struct for this dev
  *
  * This is global, and is called directly at init to set up the
  * chip-specific function pointers for later use.
@@ -15195,8 +15252,8 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 		 (dd->revision >> CCE_REVISION_SW_SHIFT)
 		    & CCE_REVISION_SW_MASK);
 
-	/* alloc VNIC/AIP rx data */
-	ret = hfi1_alloc_rx(dd);
+	/* alloc netdev data */
+	ret = hfi1_netdev_alloc(dd);
 	if (ret)
 		goto bail_cleanup;
 
@@ -15288,7 +15345,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	init_completion(&dd->user_comp);
 
 	/* The user refcount starts with one to inidicate an active device */
-	refcount_set(&dd->user_refcount, 1);
+	atomic_set(&dd->user_refcount, 1);
 
 	goto bail;
 
@@ -15300,7 +15357,7 @@ bail_clear_intr:
 	hfi1_comp_vectors_clean_up(dd);
 	msix_clean_up_interrupts(dd);
 bail_cleanup:
-	hfi1_free_rx(dd);
+	hfi1_netdev_free(dd);
 	hfi1_pcie_ddcleanup(dd);
 bail_free:
 	hfi1_free_devdata(dd);
@@ -15329,11 +15386,10 @@ static u16 delay_cycles(struct hfi1_pportdata *ppd, u32 desired_egress_rate,
 
 /**
  * create_pbc - build a pbc for transmission
- * @ppd: info of physical Hfi port
  * @flags: special case flags or-ed in built pbc
- * @srate_mbs: static rate
+ * @srate: static rate
  * @vl: vl
- * @dw_len: dword length (header words + data words + pbc words)
+ * @dwlen: dword length (header words + data words + pbc words)
  *
  * Create a PBC with the given flags, rate, VL, and length.
  *

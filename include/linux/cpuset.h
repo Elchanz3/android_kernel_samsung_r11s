@@ -34,8 +34,6 @@
  */
 extern struct static_key_false cpusets_pre_enable_key;
 extern struct static_key_false cpusets_enabled_key;
-extern struct static_key_false cpusets_insane_config_key;
-
 static inline bool cpusets_enabled(void)
 {
 	return static_branch_unlikely(&cpusets_enabled_key);
@@ -53,40 +51,35 @@ static inline void cpuset_dec(void)
 	static_branch_dec_cpuslocked(&cpusets_pre_enable_key);
 }
 
-/*
- * This will get enabled whenever a cpuset configuration is considered
- * unsupportable in general. E.g. movable only node which cannot satisfy
- * any non movable allocations (see update_nodemask). Page allocator
- * needs to make additional checks for those configurations and this
- * check is meant to guard those checks without any overhead for sane
- * configurations.
- */
-static inline bool cpusets_insane_config(void)
-{
-	return static_branch_unlikely(&cpusets_insane_config_key);
-}
-
 extern int cpuset_init(void);
 extern void cpuset_init_smp(void);
 extern void cpuset_force_rebuild(void);
 extern void cpuset_update_active_cpus(void);
+extern void cpuset_update_active_cpus_affine(int cpu);
+extern void cpuset_wait_for_hotplug(void);
 extern void inc_dl_tasks_cs(struct task_struct *task);
 extern void dec_dl_tasks_cs(struct task_struct *task);
 extern void cpuset_lock(void);
 extern void cpuset_unlock(void);
 extern void cpuset_cpus_allowed(struct task_struct *p, struct cpumask *mask);
-extern bool cpuset_cpus_allowed_fallback(struct task_struct *p);
-extern bool cpuset_cpu_is_isolated(int cpu);
+extern void cpuset_cpus_allowed_fallback(struct task_struct *p);
 extern nodemask_t cpuset_mems_allowed(struct task_struct *p);
 #define cpuset_current_mems_allowed (current->mems_allowed)
 void cpuset_init_current_mems_allowed(void);
 int cpuset_nodemask_valid_mems_allowed(nodemask_t *nodemask);
 
-extern bool cpuset_current_node_allowed(int node, gfp_t gfp_mask);
+extern bool __cpuset_node_allowed(int node, gfp_t gfp_mask);
+
+static inline bool cpuset_node_allowed(int node, gfp_t gfp_mask)
+{
+	if (cpusets_enabled())
+		return __cpuset_node_allowed(node, gfp_mask);
+	return true;
+}
 
 static inline bool __cpuset_zone_allowed(struct zone *z, gfp_t gfp_mask)
 {
-	return cpuset_current_node_allowed(zone_to_nid(z), gfp_mask);
+	return __cpuset_node_allowed(zone_to_nid(z), gfp_mask);
 }
 
 static inline bool cpuset_zone_allowed(struct zone *z, gfp_t gfp_mask)
@@ -99,7 +92,6 @@ static inline bool cpuset_zone_allowed(struct zone *z, gfp_t gfp_mask)
 extern int cpuset_mems_allowed_intersects(const struct task_struct *tsk1,
 					  const struct task_struct *tsk2);
 
-#ifdef CONFIG_CPUSETS_V1
 #define cpuset_memory_pressure_bump() 				\
 	do {							\
 		if (cpuset_memory_pressure_enabled)		\
@@ -107,9 +99,6 @@ extern int cpuset_mems_allowed_intersects(const struct task_struct *tsk1,
 	} while (0)
 extern int cpuset_memory_pressure_enabled;
 extern void __cpuset_memory_pressure_bump(void);
-#else
-static inline void cpuset_memory_pressure_bump(void) { }
-#endif
 
 extern void cpuset_task_status_allowed(struct seq_file *m,
 					struct task_struct *task);
@@ -117,19 +106,23 @@ extern int proc_cpuset_show(struct seq_file *m, struct pid_namespace *ns,
 			    struct pid *pid, struct task_struct *tsk);
 
 extern int cpuset_mem_spread_node(void);
+extern int cpuset_slab_spread_node(void);
 
 static inline int cpuset_do_page_mem_spread(void)
 {
 	return task_spread_page(current);
 }
 
+static inline int cpuset_do_slab_mem_spread(void)
+{
+	return task_spread_slab(current);
+}
+
 extern bool current_cpuset_is_being_rebound(void);
 
-extern void dl_rebuild_rd_accounting(void);
 extern void rebuild_sched_domains(void);
 
 extern void cpuset_print_current_mems_allowed(void);
-extern void cpuset_reset_sched_domains(void);
 
 /*
  * read_mems_allowed_begin is required when making decisions involving
@@ -173,22 +166,25 @@ static inline void set_mems_allowed(nodemask_t nodemask)
 	task_unlock(current);
 }
 
-extern bool cpuset_node_allowed(struct cgroup *cgroup, int nid);
+extern void cpuset_hotplug_workfn(struct work_struct *work);
+
 #else /* !CONFIG_CPUSETS */
 
 static inline bool cpusets_enabled(void) { return false; }
-
-static inline bool cpusets_insane_config(void) { return false; }
 
 static inline int cpuset_init(void) { return 0; }
 static inline void cpuset_init_smp(void) {}
 
 static inline void cpuset_force_rebuild(void) { }
 
+static inline void cpuset_update_active_cpus_affine(int cpu) {}
+
 static inline void cpuset_update_active_cpus(void)
 {
 	partition_sched_domains(1, NULL, NULL);
 }
+
+static inline void cpuset_wait_for_hotplug(void) { }
 
 static inline void inc_dl_tasks_cs(struct task_struct *task) { }
 static inline void dec_dl_tasks_cs(struct task_struct *task) { }
@@ -201,14 +197,8 @@ static inline void cpuset_cpus_allowed(struct task_struct *p,
 	cpumask_copy(mask, task_cpu_possible_mask(p));
 }
 
-static inline bool cpuset_cpus_allowed_fallback(struct task_struct *p)
+static inline void cpuset_cpus_allowed_fallback(struct task_struct *p)
 {
-	return false;
-}
-
-static inline bool cpuset_cpu_is_isolated(int cpu)
-{
-	return false;
 }
 
 static inline nodemask_t cpuset_mems_allowed(struct task_struct *p)
@@ -222,6 +212,11 @@ static inline void cpuset_init_current_mems_allowed(void) {}
 static inline int cpuset_nodemask_valid_mems_allowed(nodemask_t *nodemask)
 {
 	return 1;
+}
+
+static inline bool cpuset_node_allowed(int node, gfp_t gfp_mask)
+{
+	return true;
 }
 
 static inline bool __cpuset_zone_allowed(struct zone *z, gfp_t gfp_mask)
@@ -252,7 +247,17 @@ static inline int cpuset_mem_spread_node(void)
 	return 0;
 }
 
+static inline int cpuset_slab_spread_node(void)
+{
+	return 0;
+}
+
 static inline int cpuset_do_page_mem_spread(void)
+{
+	return 0;
+}
+
+static inline int cpuset_do_slab_mem_spread(void)
 {
 	return 0;
 }
@@ -262,16 +267,7 @@ static inline bool current_cpuset_is_being_rebound(void)
 	return false;
 }
 
-static inline void dl_rebuild_rd_accounting(void)
-{
-}
-
 static inline void rebuild_sched_domains(void)
-{
-	partition_sched_domains(1, NULL, NULL);
-}
-
-static inline void cpuset_reset_sched_domains(void)
 {
 	partition_sched_domains(1, NULL, NULL);
 }
@@ -294,10 +290,8 @@ static inline bool read_mems_allowed_retry(unsigned int seq)
 	return false;
 }
 
-static inline bool cpuset_node_allowed(struct cgroup *cgroup, int nid)
-{
-	return true;
-}
+static inline void cpuset_hotplug_workfn(struct work_struct *work) {}
+
 #endif /* !CONFIG_CPUSETS */
 
 #endif /* _LINUX_CPUSET_H */

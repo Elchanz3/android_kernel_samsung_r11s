@@ -6,18 +6,15 @@
 #ifndef __INTEL_DISPLAY_DEBUGFS_H__
 #define __INTEL_DISPLAY_DEBUGFS_H__
 
-struct intel_connector;
-struct intel_crtc;
-struct intel_display;
+struct drm_connector;
+struct drm_i915_private;
 
 #ifdef CONFIG_DEBUG_FS
-void intel_display_debugfs_register(struct intel_display *display);
-void intel_connector_debugfs_add(struct intel_connector *connector);
-void intel_crtc_debugfs_add(struct intel_crtc *crtc);
+void intel_display_debugfs_register(struct drm_i915_private *i915);
+int intel_connector_debugfs_add(struct drm_connector *connector);
 #else
-static inline void intel_display_debugfs_register(struct intel_display *display) {}
-static inline void intel_connector_debugfs_add(struct intel_connector *connector) {}
-static inline void intel_crtc_debugfs_add(struct intel_crtc *crtc) {}
+static inline void intel_display_debugfs_register(struct drm_i915_private *i915) {}
+static inline int intel_connector_debugfs_add(struct drm_connector *connector) { return 0; }
 #endif
 
 #endif /* __INTEL_DISPLAY_DEBUGFS_H__ */

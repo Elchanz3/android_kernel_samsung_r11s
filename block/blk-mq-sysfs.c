@@ -10,8 +10,10 @@
 #include <linux/workqueue.h>
 #include <linux/smp.h>
 
+#include <linux/blk-mq.h>
 #include "blk.h"
 #include "blk-mq.h"
+#include "blk-mq-tag.h"
 
 static void blk_mq_sysfs_release(struct kobject *kobj)
 {
@@ -34,16 +36,68 @@ static void blk_mq_hw_sysfs_release(struct kobject *kobj)
 	struct blk_mq_hw_ctx *hctx = container_of(kobj, struct blk_mq_hw_ctx,
 						  kobj);
 
+	if (hctx->flags & BLK_MQ_F_BLOCKING)
+		cleanup_srcu_struct(hctx->srcu);
+	blk_free_flush_queue(hctx->fq);
 	sbitmap_free(&hctx->ctx_map);
 	free_cpumask_var(hctx->cpumask);
 	kfree(hctx->ctxs);
 	kfree(hctx);
 }
 
+struct blk_mq_ctx_sysfs_entry {
+	struct attribute attr;
+	ssize_t (*show)(struct blk_mq_ctx *, char *);
+	ssize_t (*store)(struct blk_mq_ctx *, const char *, size_t);
+};
+
 struct blk_mq_hw_ctx_sysfs_entry {
 	struct attribute attr;
 	ssize_t (*show)(struct blk_mq_hw_ctx *, char *);
+	ssize_t (*store)(struct blk_mq_hw_ctx *, const char *, size_t);
 };
+
+static ssize_t blk_mq_sysfs_show(struct kobject *kobj, struct attribute *attr,
+				 char *page)
+{
+	struct blk_mq_ctx_sysfs_entry *entry;
+	struct blk_mq_ctx *ctx;
+	struct request_queue *q;
+	ssize_t res;
+
+	entry = container_of(attr, struct blk_mq_ctx_sysfs_entry, attr);
+	ctx = container_of(kobj, struct blk_mq_ctx, kobj);
+	q = ctx->queue;
+
+	if (!entry->show)
+		return -EIO;
+
+	mutex_lock(&q->sysfs_lock);
+	res = entry->show(ctx, page);
+	mutex_unlock(&q->sysfs_lock);
+	return res;
+}
+
+static ssize_t blk_mq_sysfs_store(struct kobject *kobj, struct attribute *attr,
+				  const char *page, size_t length)
+{
+	struct blk_mq_ctx_sysfs_entry *entry;
+	struct blk_mq_ctx *ctx;
+	struct request_queue *q;
+	ssize_t res;
+
+	entry = container_of(attr, struct blk_mq_ctx_sysfs_entry, attr);
+	ctx = container_of(kobj, struct blk_mq_ctx, kobj);
+	q = ctx->queue;
+
+	if (!entry->store)
+		return -EIO;
+
+	mutex_lock(&q->sysfs_lock);
+	res = entry->store(ctx, page, length);
+	mutex_unlock(&q->sysfs_lock);
+	return res;
+}
 
 static ssize_t blk_mq_hw_sysfs_show(struct kobject *kobj,
 				    struct attribute *attr, char *page)
@@ -60,9 +114,31 @@ static ssize_t blk_mq_hw_sysfs_show(struct kobject *kobj,
 	if (!entry->show)
 		return -EIO;
 
-	mutex_lock(&q->elevator_lock);
+	mutex_lock(&q->sysfs_lock);
 	res = entry->show(hctx, page);
-	mutex_unlock(&q->elevator_lock);
+	mutex_unlock(&q->sysfs_lock);
+	return res;
+}
+
+static ssize_t blk_mq_hw_sysfs_store(struct kobject *kobj,
+				     struct attribute *attr, const char *page,
+				     size_t length)
+{
+	struct blk_mq_hw_ctx_sysfs_entry *entry;
+	struct blk_mq_hw_ctx *hctx;
+	struct request_queue *q;
+	ssize_t res;
+
+	entry = container_of(attr, struct blk_mq_hw_ctx_sysfs_entry, attr);
+	hctx = container_of(kobj, struct blk_mq_hw_ctx, kobj);
+	q = hctx->queue;
+
+	if (!entry->store)
+		return -EIO;
+
+	mutex_lock(&q->sysfs_lock);
+	res = entry->store(hctx, page, length);
+	mutex_unlock(&q->sysfs_lock);
 	return res;
 }
 
@@ -122,19 +198,27 @@ static struct attribute *default_hw_ctx_attrs[] = {
 };
 ATTRIBUTE_GROUPS(default_hw_ctx);
 
-static const struct sysfs_ops blk_mq_hw_sysfs_ops = {
-	.show	= blk_mq_hw_sysfs_show,
+static const struct sysfs_ops blk_mq_sysfs_ops = {
+	.show	= blk_mq_sysfs_show,
+	.store	= blk_mq_sysfs_store,
 };
 
-static const struct kobj_type blk_mq_ktype = {
+static const struct sysfs_ops blk_mq_hw_sysfs_ops = {
+	.show	= blk_mq_hw_sysfs_show,
+	.store	= blk_mq_hw_sysfs_store,
+};
+
+static struct kobj_type blk_mq_ktype = {
+	.sysfs_ops	= &blk_mq_sysfs_ops,
 	.release	= blk_mq_sysfs_release,
 };
 
-static const struct kobj_type blk_mq_ctx_ktype = {
+static struct kobj_type blk_mq_ctx_ktype = {
+	.sysfs_ops	= &blk_mq_sysfs_ops,
 	.release	= blk_mq_ctx_sysfs_release,
 };
 
-static const struct kobj_type blk_mq_hw_ktype = {
+static struct kobj_type blk_mq_hw_ktype = {
 	.sysfs_ops	= &blk_mq_hw_sysfs_ops,
 	.default_groups = default_hw_ctx_groups,
 	.release	= blk_mq_hw_sysfs_release,
@@ -149,11 +233,9 @@ static void blk_mq_unregister_hctx(struct blk_mq_hw_ctx *hctx)
 		return;
 
 	hctx_for_each_ctx(hctx, ctx, i)
-		if (ctx->kobj.state_in_sysfs)
-			kobject_del(&ctx->kobj);
+		kobject_del(&ctx->kobj);
 
-	if (hctx->kobj.state_in_sysfs)
-		kobject_del(&hctx->kobj);
+	kobject_del(&hctx->kobj);
 }
 
 static int blk_mq_register_hctx(struct blk_mq_hw_ctx *hctx)
@@ -183,6 +265,23 @@ out:
 	}
 	kobject_del(&hctx->kobj);
 	return ret;
+}
+
+void blk_mq_unregister_dev(struct device *dev, struct request_queue *q)
+{
+	struct blk_mq_hw_ctx *hctx;
+	int i;
+
+	lockdep_assert_held(&q->sysfs_dir_lock);
+
+	queue_for_each_hw_ctx(q, hctx, i)
+		blk_mq_unregister_hctx(hctx);
+
+	kobject_uevent(q->mq_kobj, KOBJ_REMOVE);
+	kobject_del(q->mq_kobj);
+	kobject_put(&dev->kobj);
+
+	q->mq_sysfs_init_done = false;
 }
 
 void blk_mq_hctx_kobj_init(struct blk_mq_hw_ctx *hctx)
@@ -217,75 +316,65 @@ void blk_mq_sysfs_init(struct request_queue *q)
 	}
 }
 
-int blk_mq_sysfs_register(struct gendisk *disk)
+int __blk_mq_register_dev(struct device *dev, struct request_queue *q)
 {
-	struct request_queue *q = disk->queue;
 	struct blk_mq_hw_ctx *hctx;
-	unsigned long i, j;
-	int ret;
+	int ret, i;
 
-	ret = kobject_add(q->mq_kobj, &disk_to_dev(disk)->kobj, "mq");
+	WARN_ON_ONCE(!q->kobj.parent);
+	lockdep_assert_held(&q->sysfs_dir_lock);
+
+	ret = kobject_add(q->mq_kobj, kobject_get(&dev->kobj), "%s", "mq");
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	kobject_uevent(q->mq_kobj, KOBJ_ADD);
 
-	mutex_lock(&q->tag_set->tag_list_lock);
 	queue_for_each_hw_ctx(q, hctx, i) {
 		ret = blk_mq_register_hctx(hctx);
 		if (ret)
-			goto out_unreg;
+			goto unreg;
 	}
-	mutex_unlock(&q->tag_set->tag_list_lock);
-	return 0;
 
-out_unreg:
-	queue_for_each_hw_ctx(q, hctx, j) {
-		if (j < i)
-			blk_mq_unregister_hctx(hctx);
-	}
-	mutex_unlock(&q->tag_set->tag_list_lock);
+	q->mq_sysfs_init_done = true;
+
+out:
+	return ret;
+
+unreg:
+	while (--i >= 0)
+		blk_mq_unregister_hctx(q->queue_hw_ctx[i]);
 
 	kobject_uevent(q->mq_kobj, KOBJ_REMOVE);
 	kobject_del(q->mq_kobj);
+	kobject_put(&dev->kobj);
 	return ret;
 }
 
-void blk_mq_sysfs_unregister(struct gendisk *disk)
-{
-	struct request_queue *q = disk->queue;
-	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
-
-	mutex_lock(&q->tag_set->tag_list_lock);
-	queue_for_each_hw_ctx(q, hctx, i)
-		blk_mq_unregister_hctx(hctx);
-	mutex_unlock(&q->tag_set->tag_list_lock);
-
-	kobject_uevent(q->mq_kobj, KOBJ_REMOVE);
-	kobject_del(q->mq_kobj);
-}
-
-void blk_mq_sysfs_unregister_hctxs(struct request_queue *q)
+void blk_mq_sysfs_unregister(struct request_queue *q)
 {
 	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
+	int i;
 
-	if (!blk_queue_registered(q))
-		return;
+	mutex_lock(&q->sysfs_dir_lock);
+	if (!q->mq_sysfs_init_done)
+		goto unlock;
 
 	queue_for_each_hw_ctx(q, hctx, i)
 		blk_mq_unregister_hctx(hctx);
+
+unlock:
+	mutex_unlock(&q->sysfs_dir_lock);
 }
 
-int blk_mq_sysfs_register_hctxs(struct request_queue *q)
+int blk_mq_sysfs_register(struct request_queue *q)
 {
 	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
-	int ret = 0;
+	int i, ret = 0;
 
-	if (!blk_queue_registered(q))
-		goto out;
+	mutex_lock(&q->sysfs_dir_lock);
+	if (!q->mq_sysfs_init_done)
+		goto unlock;
 
 	queue_for_each_hw_ctx(q, hctx, i) {
 		ret = blk_mq_register_hctx(hctx);
@@ -293,6 +382,8 @@ int blk_mq_sysfs_register_hctxs(struct request_queue *q)
 			break;
 	}
 
-out:
+unlock:
+	mutex_unlock(&q->sysfs_dir_lock);
+
 	return ret;
 }

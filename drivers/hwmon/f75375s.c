@@ -85,7 +85,7 @@ struct f75375_data {
 	const char *name;
 	int kind;
 	struct mutex update_lock; /* protect register access */
-	bool valid;
+	char valid;
 	unsigned long last_updated;	/* In jiffies */
 	unsigned long last_limits;	/* In jiffies */
 
@@ -109,6 +109,31 @@ struct f75375_data {
 	s16 temp11[2];
 	s8 temp_high[2];
 	s8 temp_max_hyst[2];
+};
+
+static int f75375_detect(struct i2c_client *client,
+			 struct i2c_board_info *info);
+static int f75375_probe(struct i2c_client *client);
+static int f75375_remove(struct i2c_client *client);
+
+static const struct i2c_device_id f75375_id[] = {
+	{ "f75373", f75373 },
+	{ "f75375", f75375 },
+	{ "f75387", f75387 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, f75375_id);
+
+static struct i2c_driver f75375_driver = {
+	.class = I2C_CLASS_HWMON,
+	.driver = {
+		.name = "f75375",
+	},
+	.probe_new = f75375_probe,
+	.remove = f75375_remove,
+	.id_table = f75375_id,
+	.detect = f75375_detect,
+	.address_list = normal_i2c,
 };
 
 static inline int f75375_read8(struct i2c_client *client, u8 reg)
@@ -203,7 +228,7 @@ static struct f75375_data *f75375_update_device(struct device *dev)
 				f75375_read8(client, F75375_REG_VOLT(nr));
 
 		data->last_updated = jiffies;
-		data->valid = true;
+		data->valid = 1;
 	}
 
 	mutex_unlock(&data->update_lock);
@@ -805,7 +830,7 @@ static int f75375_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, data);
 	mutex_init(&data->update_lock);
-	data->kind = (uintptr_t)i2c_get_match_data(client);
+	data->kind = i2c_match_id(f75375_id, client)->driver_data;
 
 	err = sysfs_create_group(&client->dev.kobj, &f75375_group);
 	if (err)
@@ -839,11 +864,12 @@ exit_remove:
 	return err;
 }
 
-static void f75375_remove(struct i2c_client *client)
+static int f75375_remove(struct i2c_client *client)
 {
 	struct f75375_data *data = i2c_get_clientdata(client);
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &f75375_group);
+	return 0;
 }
 
 /* Return 0 if detection is successful, -ENODEV otherwise */
@@ -871,30 +897,11 @@ static int f75375_detect(struct i2c_client *client,
 
 	version = f75375_read8(client, F75375_REG_VERSION);
 	dev_info(&adapter->dev, "found %s version: %02X\n", name, version);
-	strscpy(info->type, name, I2C_NAME_SIZE);
+	strlcpy(info->type, name, I2C_NAME_SIZE);
 
 	return 0;
 }
 
-static const struct i2c_device_id f75375_id[] = {
-	{ "f75373", f75373 },
-	{ "f75375", f75375 },
-	{ "f75387", f75387 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, f75375_id);
-
-static struct i2c_driver f75375_driver = {
-	.class = I2C_CLASS_HWMON,
-	.driver = {
-		.name = "f75375",
-	},
-	.probe = f75375_probe,
-	.remove = f75375_remove,
-	.id_table = f75375_id,
-	.detect = f75375_detect,
-	.address_list = normal_i2c,
-};
 module_i2c_driver(f75375_driver);
 
 MODULE_AUTHOR("Riku Voipio");

@@ -1,5 +1,6 @@
-/* SPDX-License-Identifier: MIT */
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * Copyright © 2019 Intel Corporation
  */
 
@@ -16,6 +17,7 @@ struct intel_ring *
 intel_engine_create_ring(struct intel_engine_cs *engine, int size);
 
 u32 *intel_ring_begin(struct i915_request *rq, unsigned int num_dwords);
+int intel_ring_cacheline_align(struct i915_request *rq);
 
 unsigned int intel_ring_update_space(struct intel_ring *ring);
 
@@ -48,7 +50,6 @@ static inline void intel_ring_advance(struct i915_request *rq, u32 *cs)
 	 * intel_ring_begin()).
 	 */
 	GEM_BUG_ON((rq->ring->vaddr + rq->ring->emit) != cs);
-	GEM_BUG_ON(!IS_ALIGNED(rq->ring->emit, 8)); /* RING_TAIL qword align */
 }
 
 static inline u32 intel_ring_wrap(const struct intel_ring *ring, u32 pos)
@@ -81,7 +82,6 @@ static inline u32 intel_ring_offset(const struct i915_request *rq, void *addr)
 {
 	/* Don't write ring->size (equivalent to 0) as that hangs some GPUs. */
 	u32 offset = addr - rq->ring->vaddr;
-
 	GEM_BUG_ON(offset > rq->ring->size);
 	return intel_ring_wrap(rq->ring, offset);
 }

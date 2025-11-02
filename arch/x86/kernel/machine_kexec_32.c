@@ -23,6 +23,17 @@
 #include <asm/set_memory.h>
 #include <asm/debugreg.h>
 
+static void set_gdt(void *newgdt, __u16 limit)
+{
+	struct desc_ptr curgdt;
+
+	/* ia32 supports unaligned loads & stores */
+	curgdt.size    = limit;
+	curgdt.address = (unsigned long)newgdt;
+
+	load_gdt(&curgdt);
+}
+
 static void load_segments(void)
 {
 #define __STR(X) #X
@@ -42,7 +53,7 @@ static void load_segments(void)
 
 static void machine_kexec_free_page_tables(struct kimage *image)
 {
-	free_pages((unsigned long)image->arch.pgd, pgd_allocation_order());
+	free_pages((unsigned long)image->arch.pgd, PGD_ALLOCATION_ORDER);
 	image->arch.pgd = NULL;
 #ifdef CONFIG_X86_PAE
 	free_page((unsigned long)image->arch.pmd0);
@@ -59,7 +70,7 @@ static void machine_kexec_free_page_tables(struct kimage *image)
 static int machine_kexec_alloc_page_tables(struct kimage *image)
 {
 	image->arch.pgd = (pgd_t *)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
-						    pgd_allocation_order());
+						    PGD_ALLOCATION_ORDER);
 #ifdef CONFIG_X86_PAE
 	image->arch.pmd0 = (pmd_t *)get_zeroed_page(GFP_KERNEL);
 	image->arch.pmd1 = (pmd_t *)get_zeroed_page(GFP_KERNEL);
@@ -160,10 +171,15 @@ void machine_kexec_cleanup(struct kimage *image)
  */
 void machine_kexec(struct kimage *image)
 {
-	relocate_kernel_fn *relocate_kernel_ptr;
 	unsigned long page_list[PAGES_NR];
 	void *control_page;
 	int save_ftrace_enabled;
+	asmlinkage unsigned long
+		(*relocate_kernel_ptr)(unsigned long indirection_page,
+				       unsigned long control_page,
+				       unsigned long start_address,
+				       unsigned int has_pae,
+				       unsigned int preserve_context);
 
 #ifdef CONFIG_KEXEC_JUMP
 	if (image->preserve_context)
@@ -216,8 +232,8 @@ void machine_kexec(struct kimage *image)
 	 * The gdt & idt are now invalid.
 	 * If you want to load them you must set up your own idt & gdt.
 	 */
-	native_idt_invalidate();
-	native_gdt_invalidate();
+	idt_invalidate(phys_to_virt(0));
+	set_gdt(phys_to_virt(0), 0);
 
 	/* now call it */
 	image->start = relocate_kernel_ptr((unsigned long)image->head,

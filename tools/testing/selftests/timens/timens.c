@@ -22,6 +22,8 @@
 #define DAY_IN_SEC			(60*60*24)
 #define TEN_DAYS_IN_SEC			(10*DAY_IN_SEC)
 
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
 struct test_clock {
 	clockid_t id;
 	char *name;
@@ -150,8 +152,6 @@ int main(int argc, char *argv[])
 	unsigned int i;
 	time_t offset;
 	int ret = 0;
-
-	ksft_print_header();
 
 	nscheck();
 

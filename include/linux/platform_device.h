@@ -11,11 +11,11 @@
 #define _PLATFORM_DEVICE_H_
 
 #include <linux/device.h>
+#include <linux/android_kabi.h>
 
 #define PLATFORM_DEVID_NONE	(-1)
 #define PLATFORM_DEVID_AUTO	(-2)
 
-struct irq_affinity;
 struct mfd_cell;
 struct property_entry;
 struct platform_device_id;
@@ -35,13 +35,16 @@ struct platform_device {
 	 * Driver name to force a match.  Do not set directly, because core
 	 * frees it.  Use driver_set_override() to set or clear it.
 	 */
-	const char *driver_override;
+	char *driver_override;
 
 	/* MFD cell pointer */
 	struct mfd_cell *mfd_cell;
 
 	/* arch specific additions */
 	struct pdev_archdata	archdata;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #define platform_get_device_id(pdev)	((pdev)->id_entry)
@@ -52,19 +55,14 @@ struct platform_device {
 extern int platform_device_register(struct platform_device *);
 extern void platform_device_unregister(struct platform_device *);
 
-extern const struct bus_type platform_bus_type;
+extern struct bus_type platform_bus_type;
 extern struct device platform_bus;
 
 extern struct resource *platform_get_resource(struct platform_device *,
 					      unsigned int, unsigned int);
-extern struct resource *platform_get_mem_or_io(struct platform_device *,
-					       unsigned int);
-
 extern struct device *
 platform_find_device_by_driver(struct device *start,
 			       const struct device_driver *drv);
-
-#ifdef CONFIG_HAS_IOMEM
 extern void __iomem *
 devm_platform_get_and_ioremap_resource(struct platform_device *pdev,
 				unsigned int index, struct resource **res);
@@ -72,42 +70,14 @@ extern void __iomem *
 devm_platform_ioremap_resource(struct platform_device *pdev,
 			       unsigned int index);
 extern void __iomem *
+devm_platform_ioremap_resource_wc(struct platform_device *pdev,
+				  unsigned int index);
+extern void __iomem *
 devm_platform_ioremap_resource_byname(struct platform_device *pdev,
 				      const char *name);
-#else
-
-static inline void __iomem *
-devm_platform_get_and_ioremap_resource(struct platform_device *pdev,
-				unsigned int index, struct resource **res)
-{
-	return ERR_PTR(-EINVAL);
-}
-
-
-static inline void __iomem *
-devm_platform_ioremap_resource(struct platform_device *pdev,
-			       unsigned int index)
-{
-	return ERR_PTR(-EINVAL);
-}
-
-static inline void __iomem *
-devm_platform_ioremap_resource_byname(struct platform_device *pdev,
-				      const char *name)
-{
-	return ERR_PTR(-EINVAL);
-}
-
-#endif
-
 extern int platform_get_irq(struct platform_device *, unsigned int);
 extern int platform_get_irq_optional(struct platform_device *, unsigned int);
 extern int platform_irq_count(struct platform_device *);
-extern int devm_platform_get_irqs_affinity(struct platform_device *dev,
-					   struct irq_affinity *affd,
-					   unsigned int minvec,
-					   unsigned int maxvec,
-					   int **irqs);
 extern struct resource *platform_get_resource_byname(struct platform_device *,
 						     unsigned int,
 						     const char *);
@@ -132,6 +102,8 @@ struct platform_device_info {
 		u64 dma_mask;
 
 		const struct property_entry *properties;
+
+		ANDROID_KABI_RESERVE(1);
 };
 extern struct platform_device *platform_device_register_full(
 		const struct platform_device_info *pdevinfo);
@@ -229,27 +201,23 @@ extern int platform_device_add_resources(struct platform_device *pdev,
 					 unsigned int num);
 extern int platform_device_add_data(struct platform_device *pdev,
 				    const void *data, size_t size);
+extern int platform_device_add_properties(struct platform_device *pdev,
+				const struct property_entry *properties);
 extern int platform_device_add(struct platform_device *pdev);
 extern void platform_device_del(struct platform_device *pdev);
 extern void platform_device_put(struct platform_device *pdev);
 
 struct platform_driver {
 	int (*probe)(struct platform_device *);
-	void (*remove)(struct platform_device *);
+	int (*remove)(struct platform_device *);
 	void (*shutdown)(struct platform_device *);
 	int (*suspend)(struct platform_device *, pm_message_t state);
 	int (*resume)(struct platform_device *);
 	struct device_driver driver;
 	const struct platform_device_id *id_table;
 	bool prevent_deferred_probe;
-	/*
-	 * For most device drivers, no need to care about this flag as long as
-	 * all DMAs are handled through the kernel DMA API. For some special
-	 * ones, for example VFIO drivers, they know how to manage the DMA
-	 * themselves and set this flag so that the IOMMU layer will allow them
-	 * to setup and manage their own I/O address space.
-	 */
-	bool driver_managed_dma;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define to_platform_driver(drv)	(container_of((drv), struct platform_driver, \
@@ -367,6 +335,8 @@ extern int platform_pm_restore(struct device *dev);
 #define platform_pm_poweroff		NULL
 #define platform_pm_restore		NULL
 #endif
+
+extern int platform_dma_configure(struct device *dev);
 
 #ifdef CONFIG_PM_SLEEP
 #define USE_PLATFORM_PM_SLEEP_OPS \

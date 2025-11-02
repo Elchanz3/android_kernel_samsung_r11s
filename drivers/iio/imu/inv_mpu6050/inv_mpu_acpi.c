@@ -10,8 +10,6 @@
 #include <linux/i2c.h>
 #include <linux/dmi.h>
 #include <linux/acpi.h>
-#include <linux/wordpart.h>
-
 #include "inv_mpu_iio.h"
 
 enum inv_mpu_product_name {
@@ -39,7 +37,7 @@ static const struct dmi_system_id inv_mpu_dev_list[] = {
 		},
 	},
 	/* Add more matching tables here..*/
-	{ }
+	{}
 };
 
 static int asus_acpi_get_sensor_info(struct acpi_device *adev,
@@ -67,7 +65,7 @@ static int asus_acpi_get_sensor_info(struct acpi_device *adev,
 
 			sub_elem = &elem->package.elements[j];
 			if (sub_elem->type == ACPI_TYPE_STRING)
-				strscpy(info->type, sub_elem->string.pointer,
+				strlcpy(info->type, sub_elem->string.pointer,
 					sizeof(info->type));
 			else if (sub_elem->type == ACPI_TYPE_INTEGER) {
 				if (sub_elem->integer.value != client->addr) {
@@ -104,11 +102,14 @@ static int inv_mpu_process_acpi_config(struct i2c_client *client,
 				       unsigned short *secondary_addr)
 {
 	struct acpi_device *adev = ACPI_COMPANION(&client->dev);
+	const struct acpi_device_id *id;
 	u32 i2c_addr = 0;
 	LIST_HEAD(resources);
 	int ret;
 
-	if (!is_acpi_device_node(dev_fwnode(&client->dev)))
+	id = acpi_match_device(client->dev.driver->acpi_match_table,
+			       &client->dev);
+	if (!id)
 		return -ENODEV;
 
 	ret = acpi_dev_get_resources(adev, &resources,
@@ -117,8 +118,8 @@ static int inv_mpu_process_acpi_config(struct i2c_client *client,
 		return ret;
 
 	acpi_dev_free_resource_list(&resources);
-	*primary_addr = lower_16_bits(i2c_addr);
-	*secondary_addr = upper_16_bits(i2c_addr);
+	*primary_addr = i2c_addr & 0x0000ffff;
+	*secondary_addr = (i2c_addr & 0xffff0000) >> 16;
 
 	return 0;
 }
@@ -126,13 +127,16 @@ static int inv_mpu_process_acpi_config(struct i2c_client *client,
 int inv_mpu_acpi_create_mux_client(struct i2c_client *client)
 {
 	struct inv_mpu6050_state *st = iio_priv(dev_get_drvdata(&client->dev));
-	struct acpi_device *adev = ACPI_COMPANION(&client->dev);
 
 	st->mux_client = NULL;
-	if (adev) {
-		struct i2c_board_info info = { };
+	if (ACPI_HANDLE(&client->dev)) {
+		struct i2c_board_info info;
 		struct i2c_client *mux_client;
+		struct acpi_device *adev;
 		int ret = -1;
+
+		adev = ACPI_COMPANION(&client->dev);
+		memset(&info, 0, sizeof(info));
 
 		dmi_check_system(inv_mpu_dev_list);
 		switch (matched_product_name) {
@@ -155,7 +159,7 @@ int inv_mpu_acpi_create_mux_client(struct i2c_client *client)
 				char *name;
 
 				info.addr = secondary;
-				strscpy(info.type, dev_name(&adev->dev),
+				strlcpy(info.type, dev_name(&adev->dev),
 					sizeof(info.type));
 				name = strchr(info.type, ':');
 				if (name)

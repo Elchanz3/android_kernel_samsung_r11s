@@ -19,13 +19,11 @@
 
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/gpio/consumer.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
-#include <linux/math64.h>
-#include <linux/mod_devicetable.h>
-#include <linux/property.h>
+#include <linux/of_device.h>
+#include <linux/of_gpio.h>
 #include <linux/platform_data/tsc2007.h>
 #include "tsc2007.h"
 
@@ -69,7 +67,7 @@ static void tsc2007_read_values(struct tsc2007 *tsc, struct ts_event *tc)
 
 u32 tsc2007_calculate_resistance(struct tsc2007 *tsc, struct ts_event *tc)
 {
-	u64 rt = 0;
+	u32 rt = 0;
 
 	/* range filtering */
 	if (tc->x == MAX_12BIT)
@@ -80,13 +78,11 @@ u32 tsc2007_calculate_resistance(struct tsc2007 *tsc, struct ts_event *tc)
 		rt = tc->z2 - tc->z1;
 		rt *= tc->x;
 		rt *= tsc->x_plate_ohms;
-		rt = div_u64(rt, tc->z1);
+		rt /= tc->z1;
 		rt = (rt + 2047) >> 12;
 	}
 
-	if (rt > U32_MAX)
-		return U32_MAX;
-	return (u32) rt;
+	return rt;
 }
 
 bool tsc2007_is_pen_down(struct tsc2007 *ts)
@@ -145,7 +141,8 @@ static irqreturn_t tsc2007_soft_irq(int irq, void *handle)
 			rt = ts->max_rt - rt;
 
 			input_report_key(input, BTN_TOUCH, 1);
-			touchscreen_report_pos(input, &ts->prop, tc.x, tc.y, false);
+			input_report_abs(input, ABS_X, tc.x);
+			input_report_abs(input, ABS_Y, tc.y);
 			input_report_abs(input, ABS_PRESSURE, rt);
 
 			input_sync(input);
@@ -174,14 +171,26 @@ static irqreturn_t tsc2007_soft_irq(int irq, void *handle)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t tsc2007_hard_irq(int irq, void *handle)
+{
+	struct tsc2007 *ts = handle;
+
+	if (tsc2007_is_pen_down(ts))
+		return IRQ_WAKE_THREAD;
+
+	if (ts->clear_penirq)
+		ts->clear_penirq();
+
+	return IRQ_HANDLED;
+}
+
 static void tsc2007_stop(struct tsc2007 *ts)
 {
 	ts->stopped = true;
 	mb();
 	wake_up(&ts->wait);
 
-	if (ts->irq)
-		disable_irq(ts->irq);
+	disable_irq(ts->irq);
 }
 
 static int tsc2007_open(struct input_dev *input_dev)
@@ -192,8 +201,7 @@ static int tsc2007_open(struct input_dev *input_dev)
 	ts->stopped = false;
 	mb();
 
-	if (ts->irq)
-		enable_irq(ts->irq);
+	enable_irq(ts->irq);
 
 	/* Prepare for touch readings - power down ADC and enable PENIRQ */
 	err = tsc2007_xfer(ts, PWRDOWN);
@@ -212,58 +220,71 @@ static void tsc2007_close(struct input_dev *input_dev)
 	tsc2007_stop(ts);
 }
 
+#ifdef CONFIG_OF
 static int tsc2007_get_pendown_state_gpio(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct tsc2007 *ts = i2c_get_clientdata(client);
 
-	return gpiod_get_value_cansleep(ts->gpiod);
+	return !gpio_get_value(ts->gpio);
 }
 
-static int tsc2007_probe_properties(struct device *dev, struct tsc2007 *ts)
+static int tsc2007_probe_dt(struct i2c_client *client, struct tsc2007 *ts)
 {
+	struct device_node *np = client->dev.of_node;
 	u32 val32;
 	u64 val64;
 
-	if (!device_property_read_u32(dev, "ti,max-rt", &val32))
+	if (!np) {
+		dev_err(&client->dev, "missing device tree data\n");
+		return -EINVAL;
+	}
+
+	if (!of_property_read_u32(np, "ti,max-rt", &val32))
 		ts->max_rt = val32;
 	else
 		ts->max_rt = MAX_12BIT;
 
-	if (!device_property_read_u32(dev, "ti,fuzzx", &val32))
+	if (!of_property_read_u32(np, "ti,fuzzx", &val32))
 		ts->fuzzx = val32;
 
-	if (!device_property_read_u32(dev, "ti,fuzzy", &val32))
+	if (!of_property_read_u32(np, "ti,fuzzy", &val32))
 		ts->fuzzy = val32;
 
-	if (!device_property_read_u32(dev, "ti,fuzzz", &val32))
+	if (!of_property_read_u32(np, "ti,fuzzz", &val32))
 		ts->fuzzz = val32;
 
-	if (!device_property_read_u64(dev, "ti,poll-period", &val64))
+	if (!of_property_read_u64(np, "ti,poll-period", &val64))
 		ts->poll_period = msecs_to_jiffies(val64);
 	else
 		ts->poll_period = msecs_to_jiffies(1);
 
-	if (!device_property_read_u32(dev, "ti,x-plate-ohms", &val32)) {
+	if (!of_property_read_u32(np, "ti,x-plate-ohms", &val32)) {
 		ts->x_plate_ohms = val32;
 	} else {
-		dev_err(dev, "Missing ti,x-plate-ohms device property\n");
+		dev_err(&client->dev, "missing ti,x-plate-ohms devicetree property.");
 		return -EINVAL;
 	}
 
-	ts->gpiod = devm_gpiod_get_optional(dev, NULL, GPIOD_IN);
-	if (IS_ERR(ts->gpiod))
-		return PTR_ERR(ts->gpiod);
-
-	if (ts->gpiod)
+	ts->gpio = of_get_gpio(np, 0);
+	if (gpio_is_valid(ts->gpio))
 		ts->get_pendown_state = tsc2007_get_pendown_state_gpio;
 	else
-		dev_dbg(dev, "Pen down GPIO is not specified in properties\n");
+		dev_warn(&client->dev,
+			 "GPIO not specified in DT (of_get_gpio returned %d)\n",
+			 ts->gpio);
 
 	return 0;
 }
+#else
+static int tsc2007_probe_dt(struct i2c_client *client, struct tsc2007 *ts)
+{
+	dev_err(&client->dev, "platform data is required!\n");
+	return -EINVAL;
+}
+#endif
 
-static int tsc2007_probe_pdev(struct device *dev, struct tsc2007 *ts,
+static int tsc2007_probe_pdev(struct i2c_client *client, struct tsc2007 *ts,
 			      const struct tsc2007_platform_data *pdata,
 			      const struct i2c_device_id *id)
 {
@@ -278,7 +299,7 @@ static int tsc2007_probe_pdev(struct device *dev, struct tsc2007 *ts,
 	ts->fuzzz             = pdata->fuzzz;
 
 	if (pdata->x_plate_ohms == 0) {
-		dev_err(dev, "x_plate_ohms is not set up in platform data\n");
+		dev_err(&client->dev, "x_plate_ohms is not set up in platform data");
 		return -EINVAL;
 	}
 
@@ -293,9 +314,9 @@ static void tsc2007_call_exit_platform_hw(void *data)
 	pdata->exit_platform_hw();
 }
 
-static int tsc2007_probe(struct i2c_client *client)
+static int tsc2007_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	const struct tsc2007_platform_data *pdata =
 		dev_get_platdata(&client->dev);
 	struct tsc2007 *ts;
@@ -311,9 +332,9 @@ static int tsc2007_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	if (pdata)
-		err = tsc2007_probe_pdev(&client->dev, ts, pdata, id);
+		err = tsc2007_probe_pdev(client, ts, pdata, id);
 	else
-		err = tsc2007_probe_properties(&client->dev, ts);
+		err = tsc2007_probe_dt(client, ts);
 	if (err)
 		return err;
 
@@ -343,9 +364,9 @@ static int tsc2007_probe(struct i2c_client *client)
 	input_set_drvdata(input_dev, ts);
 
 	input_set_capability(input_dev, EV_KEY, BTN_TOUCH);
+
 	input_set_abs_params(input_dev, ABS_X, 0, MAX_12BIT, ts->fuzzx, 0);
 	input_set_abs_params(input_dev, ABS_Y, 0, MAX_12BIT, ts->fuzzy, 0);
-	touchscreen_parse_properties(input_dev, false, &ts->prop);
 	input_set_abs_params(input_dev, ABS_PRESSURE, 0, MAX_12BIT,
 			     ts->fuzzz, 0);
 
@@ -366,19 +387,17 @@ static int tsc2007_probe(struct i2c_client *client)
 			pdata->init_platform_hw();
 	}
 
-	if (ts->irq) {
-		err = devm_request_threaded_irq(&client->dev, ts->irq,
-						NULL, tsc2007_soft_irq,
-						IRQF_ONESHOT,
-						client->dev.driver->name, ts);
-		if (err) {
-			dev_err(&client->dev, "Failed to request irq %d: %d\n",
-				ts->irq, err);
-			return err;
-		}
-
-		tsc2007_stop(ts);
+	err = devm_request_threaded_irq(&client->dev, ts->irq,
+					tsc2007_hard_irq, tsc2007_soft_irq,
+					IRQF_ONESHOT,
+					client->dev.driver->name, ts);
+	if (err) {
+		dev_err(&client->dev, "Failed to request irq %d: %d\n",
+			ts->irq, err);
+		return err;
 	}
+
+	tsc2007_stop(ts);
 
 	/* power down the chip (TSC2007_SETUP does not ACK on I2C) */
 	err = tsc2007_xfer(ts, PWRDOWN);
@@ -406,22 +425,24 @@ static int tsc2007_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tsc2007_idtable[] = {
-	{ "tsc2007" },
+	{ "tsc2007", 0 },
 	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, tsc2007_idtable);
 
+#ifdef CONFIG_OF
 static const struct of_device_id tsc2007_of_match[] = {
 	{ .compatible = "ti,tsc2007" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, tsc2007_of_match);
+#endif
 
 static struct i2c_driver tsc2007_driver = {
 	.driver = {
 		.name	= "tsc2007",
-		.of_match_table = tsc2007_of_match,
+		.of_match_table = of_match_ptr(tsc2007_of_match),
 	},
 	.id_table	= tsc2007_idtable,
 	.probe		= tsc2007_probe,

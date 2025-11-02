@@ -25,6 +25,7 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/kfifo_buf.h>
 
+#define MAX30102_REGMAP_NAME	"max30102_regmap"
 #define MAX30102_DRV_NAME	"max30102"
 #define MAX30102_PART_NUMBER	0x15
 
@@ -111,7 +112,7 @@ struct max30102_data {
 };
 
 static const struct regmap_config max30102_regmap_config = {
-	.name = "max30102_regmap",
+	.name = MAX30102_REGMAP_NAME,
 
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -292,7 +293,7 @@ static irqreturn_t max30102_interrupt_handler(int irq, void *private)
 	struct iio_dev *indio_dev = private;
 	struct max30102_data *data = iio_priv(indio_dev);
 	unsigned int measurements = bitmap_weight(indio_dev->active_scan_mask,
-						  iio_get_masklength(indio_dev));
+						  indio_dev->masklength);
 	int ret, cnt = 0;
 
 	mutex_lock(&data->lock);
@@ -447,8 +448,9 @@ static int max30102_get_temp(struct max30102_data *data, int *val, bool en)
 	}
 
 	/* start acquisition */
-	ret = regmap_set_bits(data->regmap, MAX30102_REG_TEMP_CONFIG,
-			      MAX30102_REG_TEMP_CONFIG_TEMP_EN);
+	ret = regmap_update_bits(data->regmap, MAX30102_REG_TEMP_CONFIG,
+				 MAX30102_REG_TEMP_CONFIG_TEMP_EN,
+				 MAX30102_REG_TEMP_CONFIG_TEMP_EN);
 	if (ret)
 		goto out;
 
@@ -475,23 +477,12 @@ static int max30102_read_raw(struct iio_dev *indio_dev,
 		 * Temperature reading can only be acquired when not in
 		 * shutdown; leave shutdown briefly when buffer not running
 		 */
-any_mode_retry:
-		if (iio_device_claim_buffer_mode(indio_dev)) {
-			/*
-			 * This one is a *bit* hacky. If we cannot claim buffer
-			 * mode, then try direct mode so that we make sure
-			 * things cannot concurrently change. And we just keep
-			 * trying until we get one of the modes...
-			 */
-			if (!iio_device_claim_direct(indio_dev))
-				goto any_mode_retry;
-
+		mutex_lock(&indio_dev->mlock);
+		if (!iio_buffer_enabled(indio_dev))
 			ret = max30102_get_temp(data, val, true);
-			iio_device_release_direct(indio_dev);
-		} else {
+		else
 			ret = max30102_get_temp(data, val, false);
-			iio_device_release_buffer_mode(indio_dev);
-		}
+		mutex_unlock(&indio_dev->mlock);
 		if (ret)
 			return ret;
 
@@ -511,10 +502,11 @@ static const struct iio_info max30102_info = {
 	.read_raw = max30102_read_raw,
 };
 
-static int max30102_probe(struct i2c_client *client)
+static int max30102_probe(struct i2c_client *client,
+			  const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct max30102_data *data;
+	struct iio_buffer *buffer;
 	struct iio_dev *indio_dev;
 	int ret;
 	unsigned int reg;
@@ -523,9 +515,16 @@ static int max30102_probe(struct i2c_client *client)
 	if (!indio_dev)
 		return -ENOMEM;
 
+	buffer = devm_iio_kfifo_allocate(&client->dev);
+	if (!buffer)
+		return -ENOMEM;
+
+	iio_device_attach_buffer(indio_dev, buffer);
+
 	indio_dev->name = MAX30102_DRV_NAME;
 	indio_dev->info = &max30102_info;
-	indio_dev->modes = INDIO_DIRECT_MODE;
+	indio_dev->modes = (INDIO_BUFFER_SOFTWARE | INDIO_DIRECT_MODE);
+	indio_dev->setup_ops = &max30102_buffer_setup_ops;
 
 	data = iio_priv(indio_dev);
 	data->indio_dev = indio_dev;
@@ -549,11 +548,6 @@ static int max30102_probe(struct i2c_client *client)
 	default:
 		return -ENODEV;
 	}
-
-	ret = devm_iio_kfifo_buffer_setup(&client->dev, indio_dev,
-					  &max30102_buffer_setup_ops);
-	if (ret)
-		return ret;
 
 	data->regmap = devm_regmap_init_i2c(client, &max30102_regmap_config);
 	if (IS_ERR(data->regmap)) {
@@ -601,25 +595,25 @@ static int max30102_probe(struct i2c_client *client)
 	return iio_device_register(indio_dev);
 }
 
-static void max30102_remove(struct i2c_client *client)
+static int max30102_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct max30102_data *data = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
 	max30102_set_power(data, false);
+
+	return 0;
 }
 
 static const struct i2c_device_id max30102_id[] = {
-	{ "max30101", max30105 },
 	{ "max30102", max30102 },
 	{ "max30105", max30105 },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, max30102_id);
 
 static const struct of_device_id max30102_dt_ids[] = {
-	{ .compatible = "maxim,max30101" },
 	{ .compatible = "maxim,max30102" },
 	{ .compatible = "maxim,max30105" },
 	{ }

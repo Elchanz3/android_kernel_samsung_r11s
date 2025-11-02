@@ -16,8 +16,6 @@
 #include "nfs4session.h"
 #include "internal.h"
 #include "pnfs.h"
-#include "netns.h"
-#include "nfs4trace.h"
 
 #define NFSDBG_FACILITY		NFSDBG_PNFS
 
@@ -353,6 +351,53 @@ void pnfs_generic_recover_commit_reqs(struct list_head *dst,
 }
 EXPORT_SYMBOL_GPL(pnfs_generic_recover_commit_reqs);
 
+static struct nfs_page *
+pnfs_bucket_search_commit_reqs(struct pnfs_commit_bucket *buckets,
+		unsigned int nbuckets, struct page *page)
+{
+	struct nfs_page *req;
+	struct pnfs_commit_bucket *b;
+	unsigned int i;
+
+	/* Linearly search the commit lists for each bucket until a matching
+	 * request is found */
+	for (i = 0, b = buckets; i < nbuckets; i++, b++) {
+		list_for_each_entry(req, &b->written, wb_list) {
+			if (req->wb_page == page)
+				return req->wb_head;
+		}
+		list_for_each_entry(req, &b->committing, wb_list) {
+			if (req->wb_page == page)
+				return req->wb_head;
+		}
+	}
+	return NULL;
+}
+
+/* pnfs_generic_search_commit_reqs - Search lists in @cinfo for the head reqest
+ *				   for @page
+ * @cinfo - commit info for current inode
+ * @page - page to search for matching head request
+ *
+ * Returns a the head request if one is found, otherwise returns NULL.
+ */
+struct nfs_page *
+pnfs_generic_search_commit_reqs(struct nfs_commit_info *cinfo, struct page *page)
+{
+	struct pnfs_ds_commit_info *fl_cinfo = cinfo->ds;
+	struct pnfs_commit_array *array;
+	struct nfs_page *req;
+
+	list_for_each_entry(array, &fl_cinfo->commits, cinfo_list) {
+		req = pnfs_bucket_search_commit_reqs(array->buckets,
+				array->nbuckets, page);
+		if (req)
+			return req;
+	}
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(pnfs_generic_search_commit_reqs);
+
 static struct pnfs_layout_segment *
 pnfs_bucket_get_committing(struct list_head *head,
 			   struct pnfs_commit_bucket *bucket,
@@ -492,7 +537,7 @@ pnfs_generic_commit_pagelist(struct inode *inode, struct list_head *mds_pages,
 			nfs_initiate_commit(NFS_CLIENT(inode), data,
 					    NFS_PROTO(data->inode),
 					    data->mds_ops, how,
-					    RPC_TASK_CRED_NOREF, NULL);
+					    RPC_TASK_CRED_NOREF);
 		} else {
 			nfs_init_commit(data, NULL, data->lseg, cinfo);
 			initiate_commit(data, how);
@@ -506,14 +551,14 @@ EXPORT_SYMBOL_GPL(pnfs_generic_commit_pagelist);
 /*
  * Data server cache
  *
- * Data servers can be mapped to different device ids, but should
- * never be shared between net namespaces.
- *
- * nfs4_pnfs_ds reference counting:
+ * Data servers can be mapped to different device ids.
+ * nfs4_pnfs_ds reference counting
  *   - set to 1 on allocation
  *   - incremented when a device id maps a data server already in the cache.
  *   - decremented when deviceid is removed from the cache.
  */
+static DEFINE_SPINLOCK(nfs4_ds_cache_lock);
+static LIST_HEAD(nfs4_data_server_cache);
 
 /* Debug routines */
 static void
@@ -606,29 +651,14 @@ _same_data_server_addrs_locked(const struct list_head *dsaddrs1,
  * Lookup DS by addresses.  nfs4_ds_cache_lock is held
  */
 static struct nfs4_pnfs_ds *
-_data_server_lookup_locked(const struct nfs_net *nn, const struct list_head *dsaddrs)
+_data_server_lookup_locked(const struct list_head *dsaddrs)
 {
 	struct nfs4_pnfs_ds *ds;
 
-	list_for_each_entry(ds, &nn->nfs4_data_server_cache, ds_node)
+	list_for_each_entry(ds, &nfs4_data_server_cache, ds_node)
 		if (_same_data_server_addrs_locked(&ds->ds_addrs, dsaddrs))
 			return ds;
 	return NULL;
-}
-
-static struct nfs4_pnfs_ds_addr *nfs4_pnfs_ds_addr_alloc(gfp_t gfp_flags)
-{
-	struct nfs4_pnfs_ds_addr *da = kzalloc(sizeof(*da), gfp_flags);
-	if (da)
-		INIT_LIST_HEAD(&da->da_node);
-	return da;
-}
-
-static void nfs4_pnfs_ds_addr_free(struct nfs4_pnfs_ds_addr *da)
-{
-	kfree(da->da_remotestr);
-	kfree(da->da_netid);
-	kfree(da);
 }
 
 static void destroy_ds(struct nfs4_pnfs_ds *ds)
@@ -646,7 +676,8 @@ static void destroy_ds(struct nfs4_pnfs_ds *ds)
 				      struct nfs4_pnfs_ds_addr,
 				      da_node);
 		list_del_init(&da->da_node);
-		nfs4_pnfs_ds_addr_free(da);
+		kfree(da->da_remotestr);
+		kfree(da);
 	}
 
 	kfree(ds->ds_remotestr);
@@ -655,11 +686,10 @@ static void destroy_ds(struct nfs4_pnfs_ds *ds)
 
 void nfs4_pnfs_ds_put(struct nfs4_pnfs_ds *ds)
 {
-	struct nfs_net *nn = net_generic(ds->ds_net, nfs_net_id);
-
-	if (refcount_dec_and_lock(&ds->ds_count, &nn->nfs4_data_server_lock)) {
+	if (refcount_dec_and_lock(&ds->ds_count,
+				&nfs4_ds_cache_lock)) {
 		list_del_init(&ds->ds_node);
-		spin_unlock(&nn->nfs4_data_server_lock);
+		spin_unlock(&nfs4_ds_cache_lock);
 		destroy_ds(ds);
 	}
 }
@@ -719,9 +749,8 @@ out_err:
  * uncached and return cached struct nfs4_pnfs_ds.
  */
 struct nfs4_pnfs_ds *
-nfs4_pnfs_ds_add(const struct net *net, struct list_head *dsaddrs, gfp_t gfp_flags)
+nfs4_pnfs_ds_add(struct list_head *dsaddrs, gfp_t gfp_flags)
 {
-	struct nfs_net *nn = net_generic(net, nfs_net_id);
 	struct nfs4_pnfs_ds *tmp_ds, *ds = NULL;
 	char *remotestr;
 
@@ -737,17 +766,16 @@ nfs4_pnfs_ds_add(const struct net *net, struct list_head *dsaddrs, gfp_t gfp_fla
 	/* this is only used for debugging, so it's ok if its NULL */
 	remotestr = nfs4_pnfs_remotestr(dsaddrs, gfp_flags);
 
-	spin_lock(&nn->nfs4_data_server_lock);
-	tmp_ds = _data_server_lookup_locked(nn, dsaddrs);
+	spin_lock(&nfs4_ds_cache_lock);
+	tmp_ds = _data_server_lookup_locked(dsaddrs);
 	if (tmp_ds == NULL) {
 		INIT_LIST_HEAD(&ds->ds_addrs);
 		list_splice_init(dsaddrs, &ds->ds_addrs);
 		ds->ds_remotestr = remotestr;
 		refcount_set(&ds->ds_count, 1);
 		INIT_LIST_HEAD(&ds->ds_node);
-		ds->ds_net = net;
 		ds->ds_clp = NULL;
-		list_add(&ds->ds_node, &nn->nfs4_data_server_cache);
+		list_add(&ds->ds_node, &nfs4_data_server_cache);
 		dprintk("%s add new data server %s\n", __func__,
 			ds->ds_remotestr);
 	} else {
@@ -759,7 +787,7 @@ nfs4_pnfs_ds_add(const struct net *net, struct list_head *dsaddrs, gfp_t gfp_fla
 			refcount_read(&tmp_ds->ds_count));
 		ds = tmp_ds;
 	}
-	spin_unlock(&nn->nfs4_data_server_lock);
+	spin_unlock(&nfs4_ds_cache_lock);
 out:
 	return ds;
 }
@@ -779,7 +807,7 @@ static void nfs4_clear_ds_conn_bit(struct nfs4_pnfs_ds *ds)
 
 static struct nfs_client *(*get_v3_ds_connect)(
 			struct nfs_server *mds_srv,
-			const struct sockaddr_storage *ds_addr,
+			const struct sockaddr *ds_addr,
 			int ds_addrlen,
 			int ds_proto,
 			unsigned int ds_timeo,
@@ -810,13 +838,12 @@ static int _nfs4_pnfs_v3_ds_connect(struct nfs_server *mds_srv,
 {
 	struct nfs_client *clp = ERR_PTR(-EIO);
 	struct nfs4_pnfs_ds_addr *da;
-	unsigned long connect_timeout = timeo * (retrans + 1) * HZ / 10;
 	int status = 0;
 
 	dprintk("--> %s DS %s\n", __func__, ds->ds_remotestr);
 
 	if (!load_v3_ds_connect())
-		return -EPROTONOSUPPORT;
+		goto out;
 
 	list_for_each_entry(da, &ds->ds_addrs, da_node) {
 		dprintk("%s: DS %s: trying address %s\n",
@@ -824,36 +851,20 @@ static int _nfs4_pnfs_v3_ds_connect(struct nfs_server *mds_srv,
 
 		if (!IS_ERR(clp)) {
 			struct xprt_create xprt_args = {
-				.ident = da->da_transport,
+				.ident = XPRT_TRANSPORT_TCP,
 				.net = clp->cl_net,
 				.dstaddr = (struct sockaddr *)&da->da_addr,
 				.addrlen = da->da_addrlen,
 				.servername = clp->cl_hostname,
-				.connect_timeout = connect_timeout,
-				.reconnect_timeout = connect_timeout,
-				.xprtsec = clp->cl_xprtsec,
 			};
-
-			if (da->da_transport != clp->cl_proto &&
-			    clp->cl_proto != XPRT_TRANSPORT_TCP_TLS)
-				continue;
-			if (da->da_transport == XPRT_TRANSPORT_TCP &&
-			    mds_srv->nfs_client->cl_proto == XPRT_TRANSPORT_TCP_TLS)
-				xprt_args.ident = XPRT_TRANSPORT_TCP_TLS;
-
-			if (da->da_addr.ss_family != clp->cl_addr.ss_family)
-				continue;
 			/* Add this address as an alias */
 			rpc_clnt_add_xprt(clp->cl_rpcclient, &xprt_args,
 					rpc_clnt_test_and_add_xprt, NULL);
 			continue;
 		}
-		if (da->da_transport == XPRT_TRANSPORT_TCP &&
-		    mds_srv->nfs_client->cl_proto == XPRT_TRANSPORT_TCP_TLS)
-			da->da_transport = XPRT_TRANSPORT_TCP_TLS;
 		clp = get_v3_ds_connect(mds_srv,
-				&da->da_addr,
-				da->da_addrlen, da->da_transport,
+				(struct sockaddr *)&da->da_addr,
+				da->da_addrlen, IPPROTO_TCP,
 				timeo, retrans);
 		if (IS_ERR(clp))
 			continue;
@@ -886,87 +897,40 @@ static int _nfs4_pnfs_v4_ds_connect(struct nfs_server *mds_srv,
 	dprintk("--> %s DS %s\n", __func__, ds->ds_remotestr);
 
 	list_for_each_entry(da, &ds->ds_addrs, da_node) {
-		char servername[48];
-
 		dprintk("%s: DS %s: trying address %s\n",
 			__func__, ds->ds_remotestr, da->da_remotestr);
 
 		if (!IS_ERR(clp) && clp->cl_mvops->session_trunk) {
 			struct xprt_create xprt_args = {
-				.ident = da->da_transport,
+				.ident = XPRT_TRANSPORT_TCP,
 				.net = clp->cl_net,
 				.dstaddr = (struct sockaddr *)&da->da_addr,
 				.addrlen = da->da_addrlen,
 				.servername = clp->cl_hostname,
-				.xprtsec = clp->cl_xprtsec,
 			};
 			struct nfs4_add_xprt_data xprtdata = {
 				.clp = clp,
+				.cred = nfs4_get_clid_cred(clp),
 			};
 			struct rpc_add_xprt_test rpcdata = {
 				.add_xprt_test = clp->cl_mvops->session_trunk,
 				.data = &xprtdata,
 			};
 
-			if (da->da_transport != clp->cl_proto &&
-					clp->cl_proto != XPRT_TRANSPORT_TCP_TLS)
-				continue;
-			if (da->da_transport == XPRT_TRANSPORT_TCP &&
-				mds_srv->nfs_client->cl_proto ==
-					XPRT_TRANSPORT_TCP_TLS) {
-				struct sockaddr *addr =
-					(struct sockaddr *)&da->da_addr;
-				struct sockaddr_in *sin =
-					(struct sockaddr_in *)&da->da_addr;
-				struct sockaddr_in6 *sin6 =
-					(struct sockaddr_in6 *)&da->da_addr;
-
-				/* for NFS with TLS we need to supply a correct
-				 * servername of the trunked transport, not the
-				 * servername of the main transport stored in
-				 * clp->cl_hostname. And set the protocol to
-				 * indicate to use TLS
-				 */
-				servername[0] = '\0';
-				switch(addr->sa_family) {
-				case AF_INET:
-					snprintf(servername, sizeof(servername),
-						"%pI4", &sin->sin_addr.s_addr);
-					break;
-				case AF_INET6:
-					snprintf(servername, sizeof(servername),
-						"%pI6", &sin6->sin6_addr);
-					break;
-				default:
-					/* do not consider this address */
-					continue;
-				}
-				xprt_args.ident = XPRT_TRANSPORT_TCP_TLS;
-				xprt_args.servername = servername;
-			}
-			if (da->da_addr.ss_family != clp->cl_addr.ss_family)
-				continue;
-
 			/**
 			* Test this address for session trunking and
 			* add as an alias
 			*/
-			xprtdata.cred = nfs4_get_clid_cred(clp);
 			rpc_clnt_add_xprt(clp->cl_rpcclient, &xprt_args,
 					  rpc_clnt_setup_test_and_add_xprt,
 					  &rpcdata);
 			if (xprtdata.cred)
 				put_cred(xprtdata.cred);
 		} else {
-			if (da->da_transport == XPRT_TRANSPORT_TCP &&
-				mds_srv->nfs_client->cl_proto ==
-					XPRT_TRANSPORT_TCP_TLS)
-				da->da_transport = XPRT_TRANSPORT_TCP_TLS;
 			clp = nfs4_set_ds_client(mds_srv,
-						&da->da_addr,
-						da->da_addrlen,
-						da->da_transport, timeo,
-						retrans, minor_version);
+						(struct sockaddr *)&da->da_addr,
+						da->da_addrlen, IPPROTO_TCP,
+						timeo, retrans, minor_version);
 			if (IS_ERR(clp))
 				continue;
 
@@ -1008,10 +972,8 @@ int nfs4_pnfs_ds_connect(struct nfs_server *mds_srv, struct nfs4_pnfs_ds *ds,
 		err = nfs4_wait_ds_connect(ds);
 		if (err || ds->ds_clp)
 			goto out;
-		if (nfs4_test_deviceid_unavailable(devid)) {
-			err = -ENODEV;
-			goto out;
-		}
+		if (nfs4_test_deviceid_unavailable(devid))
+			return -ENODEV;
 	} while (test_and_set_bit(NFS4DS_CONNECTING, &ds->ds_state) != 0);
 
 	if (ds->ds_clp)
@@ -1041,12 +1003,11 @@ out:
 		if (!ds->ds_clp || !nfs_client_init_is_complete(ds->ds_clp)) {
 			WARN_ON_ONCE(ds->ds_clp ||
 				!nfs4_test_deviceid_unavailable(devid));
-			err = -EINVAL;
-		} else
-			err = nfs_client_init_status(ds->ds_clp);
+			return -EINVAL;
+		}
+		err = nfs_client_init_status(ds->ds_clp);
 	}
 
-	trace_pnfs_ds_connect(ds->ds_remotestr, err);
 	return err;
 }
 EXPORT_SYMBOL_GPL(nfs4_pnfs_ds_connect);
@@ -1060,26 +1021,55 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 	struct nfs4_pnfs_ds_addr *da = NULL;
 	char *buf, *portstr;
 	__be16 port;
-	ssize_t nlen, rlen;
+	int nlen, rlen;
 	int tmp[2];
-	char *netid;
-	size_t len;
+	__be32 *p;
+	char *netid, *match_netid;
+	size_t len, match_netid_len;
 	char *startsep = "";
 	char *endsep = "";
 
 
 	/* r_netid */
-	nlen = xdr_stream_decode_string_dup(xdr, &netid, XDR_MAX_NETOBJ,
-					    gfp_flags);
-	if (unlikely(nlen < 0))
+	p = xdr_inline_decode(xdr, 4);
+	if (unlikely(!p))
+		goto out_err;
+	nlen = be32_to_cpup(p++);
+
+	p = xdr_inline_decode(xdr, nlen);
+	if (unlikely(!p))
 		goto out_err;
 
+	netid = kmalloc(nlen+1, gfp_flags);
+	if (unlikely(!netid))
+		goto out_err;
+
+	netid[nlen] = '\0';
+	memcpy(netid, p, nlen);
+
 	/* r_addr: ip/ip6addr with port in dec octets - see RFC 5665 */
-	/* port is ".ABC.DEF", 8 chars max */
-	rlen = xdr_stream_decode_string_dup(xdr, &buf, INET6_ADDRSTRLEN +
-					    IPV6_SCOPE_ID_LEN + 8, gfp_flags);
-	if (unlikely(rlen < 0))
+	p = xdr_inline_decode(xdr, 4);
+	if (unlikely(!p))
 		goto out_free_netid;
+	rlen = be32_to_cpup(p);
+
+	p = xdr_inline_decode(xdr, rlen);
+	if (unlikely(!p))
+		goto out_free_netid;
+
+	/* port is ".ABC.DEF", 8 chars max */
+	if (rlen > INET6_ADDRSTRLEN + IPV6_SCOPE_ID_LEN + 8) {
+		dprintk("%s: Invalid address, length %d\n", __func__,
+			rlen);
+		goto out_free_netid;
+	}
+	buf = kmalloc(rlen + 1, gfp_flags);
+	if (!buf) {
+		dprintk("%s: Not enough memory\n", __func__);
+		goto out_free_netid;
+	}
+	buf[rlen] = '\0';
+	memcpy(buf, p, rlen);
 
 	/* replace port '.' with '-' */
 	portstr = strrchr(buf, '.');
@@ -1099,9 +1089,11 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 	}
 	*portstr = '\0';
 
-	da = nfs4_pnfs_ds_addr_alloc(gfp_flags);
+	da = kzalloc(sizeof(*da), gfp_flags);
 	if (unlikely(!da))
 		goto out_free_buf;
+
+	INIT_LIST_HEAD(&da->da_node);
 
 	if (!rpc_pton(net, buf, portstr-buf, (struct sockaddr *)&da->da_addr,
 		      sizeof(da->da_addr))) {
@@ -1117,11 +1109,15 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 	case AF_INET:
 		((struct sockaddr_in *)&da->da_addr)->sin_port = port;
 		da->da_addrlen = sizeof(struct sockaddr_in);
+		match_netid = "tcp";
+		match_netid_len = 3;
 		break;
 
 	case AF_INET6:
 		((struct sockaddr_in6 *)&da->da_addr)->sin6_port = port;
 		da->da_addrlen = sizeof(struct sockaddr_in6);
+		match_netid = "tcp6";
+		match_netid_len = 4;
 		startsep = "[";
 		endsep = "]";
 		break;
@@ -1132,14 +1128,11 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 		goto out_free_da;
 	}
 
-	da->da_transport = xprt_find_transport_ident(netid);
-	if (da->da_transport < 0) {
-		dprintk("%s: ERROR: unknown r_netid \"%s\"\n",
-			__func__, netid);
+	if (nlen != match_netid_len || strncmp(netid, match_netid, nlen)) {
+		dprintk("%s: ERROR: r_netid \"%s\" != \"%s\"\n",
+			__func__, netid, match_netid);
 		goto out_free_da;
 	}
-
-	da->da_netid = netid;
 
 	/* save human readable address */
 	len = strlen(startsep) + strlen(buf) + strlen(endsep) + 7;
@@ -1152,6 +1145,7 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 
 	dprintk("%s: Parsed DS addr %s\n", __func__, da->da_remotestr);
 	kfree(buf);
+	kfree(netid);
 	return da;
 
 out_free_da:
@@ -1195,7 +1189,7 @@ pnfs_layout_mark_request_commit(struct nfs_page *req,
 
 	nfs_request_add_commit_list_locked(req, list, cinfo);
 	mutex_unlock(&NFS_I(cinfo->inode)->commit_mutex);
-	nfs_folio_mark_unstable(nfs_page_to_folio(req), cinfo);
+	nfs_mark_page_unstable(req->wb_page, cinfo);
 	return;
 out_resched:
 	mutex_unlock(&NFS_I(cinfo->inode)->commit_mutex);

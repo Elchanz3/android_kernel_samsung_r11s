@@ -3,7 +3,7 @@
  * SGI IP30 miscellaneous setup bits.
  *
  * Copyright (C) 2004-2007 Stanislaw Skowronek <skylark@unaligned.org>
- *               2007 Joshua Kinard <linux@kumba.dev>
+ *               2007 Joshua Kinard <kumba@gentoo.org>
  *               2009 Johannes Dickgreber <tanzy@gmx.de>
  */
 
@@ -14,7 +14,6 @@
 #include <linux/percpu.h>
 #include <linux/memblock.h>
 
-#include <asm/bootinfo.h>
 #include <asm/smp-ops.h>
 #include <asm/sgialib.h>
 #include <asm/time.h>
@@ -70,10 +69,10 @@ static void __init ip30_mem_init(void)
 		total_mem += size;
 
 		if (addr >= IP30_REAL_MEMORY_START)
-			memblock_phys_free(addr, size);
+			memblock_free(addr, size);
 		else if ((addr + size) > IP30_REAL_MEMORY_START)
-			memblock_phys_free(IP30_REAL_MEMORY_START,
-					   size - IP30_MAX_PROM_MEMORY);
+			memblock_free(IP30_REAL_MEMORY_START,
+				     size - IP30_MAX_PROM_MEMORY);
 	}
 	pr_info("Detected %luMB of physical memory.\n", MEM_SHIFT(total_mem));
 }

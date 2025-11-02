@@ -454,7 +454,7 @@ static struct tracing_map_elt *get_free_elt(struct tracing_map *map)
 	struct tracing_map_elt *elt = NULL;
 	int idx;
 
-	idx = atomic_fetch_add_unless(&map->next_elt, 1, map->max_elts);
+	idx = atomic_inc_return(&map->next_elt);
 	if (idx < map->max_elts) {
 		elt = *(TRACING_MAP_ELT(map->elts, idx));
 		if (map->ops && map->ops->elt_init)
@@ -617,7 +617,7 @@ __tracing_map_insert(struct tracing_map *map, void *key, bool lookup_only)
  * signal that state.  There are two user-visible tracing_map
  * variables, 'hits' and 'drops', which are updated by this function.
  * Every time an element is either successfully inserted or retrieved,
- * the 'hits' value is incremented.  Every time an element insertion
+ * the 'hits' value is incrememented.  Every time an element insertion
  * fails, the 'drops' value is incremented.
  *
  * This is a lock-free tracing map insertion function implementing a
@@ -650,9 +650,9 @@ struct tracing_map_elt *tracing_map_insert(struct tracing_map *map, void *key)
  * tracing_map_elt.  This is a lock-free lookup; see
  * tracing_map_insert() for details on tracing_map and how it works.
  * Every time an element is retrieved, the 'hits' value is
- * incremented.  There is one user-visible tracing_map variable,
+ * incrememented.  There is one user-visible tracing_map variable,
  * 'hits', which is updated by this function.  Every time an element
- * is successfully retrieved, the 'hits' value is incremented.  The
+ * is successfully retrieved, the 'hits' value is incrememented.  The
  * 'drops' value is never updated by this function.
  *
  * Return: the tracing_map_elt pointer val associated with the key.
@@ -699,7 +699,7 @@ void tracing_map_clear(struct tracing_map *map)
 {
 	unsigned int i;
 
-	atomic_set(&map->next_elt, 0);
+	atomic_set(&map->next_elt, -1);
 	atomic64_set(&map->hits, 0);
 	atomic64_set(&map->drops, 0);
 
@@ -783,7 +783,7 @@ struct tracing_map *tracing_map_create(unsigned int map_bits,
 
 	map->map_bits = map_bits;
 	map->max_elts = (1 << map_bits);
-	atomic_set(&map->next_elt, 0);
+	atomic_set(&map->next_elt, -1);
 
 	map->map_size = (1 << (map_bits + 1));
 	map->ops = ops;
@@ -845,11 +845,15 @@ int tracing_map_init(struct tracing_map *map)
 static int cmp_entries_dup(const void *A, const void *B)
 {
 	const struct tracing_map_sort_entry *a, *b;
+	int ret = 0;
 
 	a = *(const struct tracing_map_sort_entry **)A;
 	b = *(const struct tracing_map_sort_entry **)B;
 
-	return memcmp(a->key, b->key, a->elt->map->key_size);
+	if (memcmp(a->key, b->key, a->elt->map->key_size))
+		ret = 1;
+
+	return ret;
 }
 
 static int cmp_entries_sum(const void *A, const void *B)
@@ -962,7 +966,7 @@ create_sort_entry(void *key, struct tracing_map_elt *elt)
 static void detect_dups(struct tracing_map_sort_entry **sort_entries,
 		      int n_entries, unsigned int key_size)
 {
-	unsigned int total_dups = 0;
+	unsigned int dups = 0, total_dups = 0;
 	int i;
 	void *key;
 
@@ -975,10 +979,11 @@ static void detect_dups(struct tracing_map_sort_entry **sort_entries,
 	key = sort_entries[0]->key;
 	for (i = 1; i < n_entries; i++) {
 		if (!memcmp(sort_entries[i]->key, key, key_size)) {
-			total_dups++;
+			dups++; total_dups++;
 			continue;
 		}
 		key = sort_entries[i]->key;
+		dups = 0;
 	}
 
 	WARN_ONCE(total_dups > 0,
@@ -1045,8 +1050,7 @@ static void sort_secondary(struct tracing_map *map,
 /**
  * tracing_map_sort_entries - Sort the current set of tracing_map_elts in a map
  * @map: The tracing_map
- * @sort_keys: The sort key to use for sorting
- * @n_sort_keys: hitcount, always have at least one
+ * @sort_key: The sort key to use for sorting
  * @sort_entries: outval: pointer to allocated and sorted array of entries
  *
  * tracing_map_sort_entries() sorts the current set of entries in the
@@ -1076,7 +1080,7 @@ int tracing_map_sort_entries(struct tracing_map *map,
 	struct tracing_map_sort_entry *sort_entry, **entries;
 	int i, n_entries, ret;
 
-	entries = vmalloc_array(map->max_elts, sizeof(sort_entry));
+	entries = vmalloc(array_size(sizeof(sort_entry), map->max_elts));
 	if (!entries)
 		return -ENOMEM;
 

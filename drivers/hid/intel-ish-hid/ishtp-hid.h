@@ -16,9 +16,14 @@
 #define	IS_RESPONSE	0x80
 
 /* Used to dump to Linux trace buffer, if enabled */
-extern ishtp_print_log ishtp_hid_print_trace;
+extern void (*hid_print_trace)(void *unused, const char *format, ...);
 #define hid_ishtp_trace(client, ...) \
-	(ishtp_hid_print_trace)(NULL, __VA_ARGS__)
+		(hid_print_trace)(NULL, __VA_ARGS__)
+
+/* ISH Transport protocol (ISHTP in short) GUID */
+static const guid_t hid_ishtp_guid =
+	GUID_INIT(0x33AECD58, 0xB679, 0x4E54,
+		  0x9B, 0xD9, 0xA0, 0x4D, 0x34, 0xF0, 0xC2, 0x26);
 
 /* ISH HID message structure */
 struct hostif_msg_hdr {
@@ -31,7 +36,6 @@ struct hostif_msg_hdr {
 
 struct hostif_msg {
 	struct hostif_msg_hdr	hdr;
-	uint8_t payload[];
 } __packed;
 
 struct hostif_msg_to_sensor {
@@ -53,17 +57,15 @@ struct ishtp_version {
 	uint16_t build;
 } __packed;
 
-struct report {
-	uint16_t size;
-	struct hostif_msg_hdr msg;
-} __packed;
-
 /* struct for ISHTP aggregated input data */
 struct report_list {
 	uint16_t total_size;
 	uint8_t	num_of_reports;
 	uint8_t	flags;
-	struct report reports[];
+	struct {
+		uint16_t	size_of_report;
+		uint8_t report[1];
+	} __packed reports[1];
 } __packed;
 
 /* HOSTIF commands */
@@ -138,7 +140,6 @@ struct ishtp_cl_data {
 	int multi_packet_cnt;
 
 	struct work_struct work;
-	struct work_struct resume_work;
 	struct ishtp_cl_device *cl_device;
 };
 

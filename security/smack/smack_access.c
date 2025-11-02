@@ -45,13 +45,11 @@ LIST_HEAD(smack_known_list);
  */
 static u32 smack_next_secid = 10;
 
-#ifdef CONFIG_AUDIT
 /*
  * what events do we log
  * can be overwritten at run-time by /smack/logging
  */
 int log_policy = SMACK_AUDIT_DENIED;
-#endif /* CONFIG_AUDIT */
 
 /**
  * smk_access_entry - look up matching access rule
@@ -244,7 +242,7 @@ int smk_tskacc(struct task_smack *tsp, struct smack_known *obj_known,
 	}
 
 	/*
-	 * Allow for privileged to override policy.
+	 * Allow for priviliged to override policy.
 	 */
 	if (rc != 0 && smack_privileged(CAP_MAC_OVERRIDE))
 		rc = 0;
@@ -277,14 +275,15 @@ int smk_curacc(struct smack_known *obj_known,
 	return smk_tskacc(tsp, obj_known, mode, a);
 }
 
+#ifdef CONFIG_AUDIT
 /**
- * smack_str_from_perm : helper to translate an int to a
+ * smack_str_from_perm : helper to transalate an int to a
  * readable string
  * @string : the string to fill
  * @access : the int
  *
  */
-int smack_str_from_perm(char *string, int access)
+static inline void smack_str_from_perm(char *string, int access)
 {
 	int i = 0;
 
@@ -300,15 +299,8 @@ int smack_str_from_perm(char *string, int access)
 		string[i++] = 't';
 	if (access & MAY_LOCK)
 		string[i++] = 'l';
-	if (access & MAY_BRINGUP)
-		string[i++] = 'b';
-	if (i == 0)
-		string[i++] = '-';
 	string[i] = '\0';
-	return i;
 }
-
-#ifdef CONFIG_AUDIT
 /**
  * smack_log_callback - SMACK specific information
  * will be called by generic audit code
@@ -339,7 +331,7 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
  *  @object_label  : smack label of the object being accessed
  *  @request: requested permissions
  *  @result: result from smk_access
- *  @ad:  auxiliary audit data
+ *  @a:  auxiliary audit data
  *
  * Audit the granting or denial of permissions in accordance
  * with the policy.
@@ -403,7 +395,6 @@ struct hlist_head smack_known_hash[SMACK_HASH_SLOTS];
 
 /**
  * smk_insert_entry - insert a smack label into a hash map,
- * @skp: smack label
  *
  * this function must be called under smack_known_lock
  */
@@ -473,18 +464,19 @@ char *smk_parse_smack(const char *string, int len)
 	if (i == 0 || i >= SMK_LONGLABEL)
 		return ERR_PTR(-EINVAL);
 
-	smack = kstrndup(string, i, GFP_NOFS);
-	if (!smack)
+	smack = kzalloc(i + 1, GFP_NOFS);
+	if (smack == NULL)
 		return ERR_PTR(-ENOMEM);
+
+	strncpy(smack, string, i);
+
 	return smack;
 }
 
 /**
  * smk_netlbl_mls - convert a catset to netlabel mls categories
- * @level: MLS sensitivity level
  * @catset: the Smack categories
  * @sap: where to put the netlabel categories
- * @len: number of bytes for the levels in a CIPSO IP option
  *
  * Allocates and fills attr.mls
  * Returns 0 on success, error code on failure.
@@ -695,9 +687,10 @@ bool smack_privileged_cred(int cap, const struct cred *cred)
 bool smack_privileged(int cap)
 {
 	/*
-	 * All kernel tasks are privileged
+	 * Kernel threads may not have credentials we can use.
+	 * The io_uring kernel threads do have reliable credentials.
 	 */
-	if (unlikely(current->flags & PF_KTHREAD))
+	if ((current->flags & (PF_KTHREAD | PF_IO_WORKER)) == PF_KTHREAD)
 		return true;
 
 	return smack_privileged_cred(cap, current_cred());

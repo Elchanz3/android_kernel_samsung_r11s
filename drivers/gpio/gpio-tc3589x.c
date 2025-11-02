@@ -49,7 +49,7 @@ static int tc3589x_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return !!(ret & mask);
 }
 
-static int tc3589x_gpio_set(struct gpio_chip *chip, unsigned int offset, int val)
+static void tc3589x_gpio_set(struct gpio_chip *chip, unsigned int offset, int val)
 {
 	struct tc3589x_gpio *tc3589x_gpio = gpiochip_get_data(chip);
 	struct tc3589x *tc3589x = tc3589x_gpio->tc3589x;
@@ -57,7 +57,7 @@ static int tc3589x_gpio_set(struct gpio_chip *chip, unsigned int offset, int val
 	unsigned int pos = offset % 8;
 	u8 data[] = {val ? BIT(pos) : 0, BIT(pos)};
 
-	return tc3589x_block_write(tc3589x, reg, ARRAY_SIZE(data), data);
+	tc3589x_block_write(tc3589x, reg, ARRAY_SIZE(data), data);
 }
 
 static int tc3589x_gpio_direction_output(struct gpio_chip *chip,
@@ -67,11 +67,8 @@ static int tc3589x_gpio_direction_output(struct gpio_chip *chip,
 	struct tc3589x *tc3589x = tc3589x_gpio->tc3589x;
 	u8 reg = TC3589x_GPIODIR0 + offset / 8;
 	unsigned int pos = offset % 8;
-	int ret;
 
-	ret = tc3589x_gpio_set(chip, offset, val);
-	if (ret)
-		return ret;
+	tc3589x_gpio_set(chip, offset, val);
 
 	return tc3589x_set_bits(tc3589x, reg, BIT(pos), BIT(pos));
 }
@@ -233,7 +230,6 @@ static void tc3589x_gpio_irq_mask(struct irq_data *d)
 
 	tc3589x_gpio->regs[REG_IE][regoffset] &= ~mask;
 	tc3589x_gpio->regs[REG_DIRECT][regoffset] |= mask;
-	gpiochip_disable_irq(gc, offset);
 }
 
 static void tc3589x_gpio_irq_unmask(struct irq_data *d)
@@ -244,20 +240,17 @@ static void tc3589x_gpio_irq_unmask(struct irq_data *d)
 	int regoffset = offset / 8;
 	int mask = BIT(offset % 8);
 
-	gpiochip_enable_irq(gc, offset);
 	tc3589x_gpio->regs[REG_IE][regoffset] |= mask;
 	tc3589x_gpio->regs[REG_DIRECT][regoffset] &= ~mask;
 }
 
-static const struct irq_chip tc3589x_gpio_irq_chip = {
+static struct irq_chip tc3589x_gpio_irq_chip = {
 	.name			= "tc3589x-gpio",
 	.irq_bus_lock		= tc3589x_gpio_irq_lock,
 	.irq_bus_sync_unlock	= tc3589x_gpio_irq_sync_unlock,
 	.irq_mask		= tc3589x_gpio_irq_mask,
 	.irq_unmask		= tc3589x_gpio_irq_unmask,
 	.irq_set_type		= tc3589x_gpio_irq_set_type,
-	.flags =		IRQCHIP_IMMUTABLE,
-	GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
 
 static irqreturn_t tc3589x_gpio_irq(int irq, void *dev)
@@ -326,9 +319,10 @@ static int tc3589x_gpio_probe(struct platform_device *pdev)
 	tc3589x_gpio->chip.ngpio = tc3589x->num_gpio;
 	tc3589x_gpio->chip.parent = &pdev->dev;
 	tc3589x_gpio->chip.base = -1;
+	tc3589x_gpio->chip.of_node = np;
 
 	girq = &tc3589x_gpio->chip.irq;
-	gpio_irq_chip_set_chip(girq, &tc3589x_gpio_irq_chip);
+	girq->chip = &tc3589x_gpio_irq_chip;
 	/* This will let us handle the parent IRQ in the driver */
 	girq->parent_handler = NULL;
 	girq->num_parents = 0;
@@ -363,7 +357,16 @@ static int tc3589x_gpio_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	return devm_gpiochip_add_data(&pdev->dev, &tc3589x_gpio->chip, tc3589x_gpio);
+	ret = devm_gpiochip_add_data(&pdev->dev, &tc3589x_gpio->chip,
+				     tc3589x_gpio);
+	if (ret) {
+		dev_err(&pdev->dev, "unable to add gpiochip: %d\n", ret);
+		return ret;
+	}
+
+	platform_set_drvdata(pdev, tc3589x_gpio);
+
+	return 0;
 }
 
 static struct platform_driver tc3589x_gpio_driver = {

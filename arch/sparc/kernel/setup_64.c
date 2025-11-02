@@ -15,6 +15,7 @@
 #include <linux/ptrace.h>
 #include <asm/smp.h>
 #include <linux/user.h>
+#include <linux/screen_info.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
@@ -66,6 +67,18 @@
  */
 DEFINE_SPINLOCK(ns87303_lock);
 EXPORT_SYMBOL(ns87303_lock);
+
+struct screen_info screen_info = {
+	0, 0,			/* orig-x, orig-y */
+	0,			/* unused */
+	0,			/* orig-video-page */
+	0,			/* orig-video-mode */
+	128,			/* orig-video-cols */
+	0, 0, 0,		/* unused, ega_bx, unused */
+	54,			/* orig-video-lines */
+	0,                      /* orig-video-isVGA */
+	16                      /* orig-video-points */
+};
 
 static void
 prom_console_write(struct console *con, const char *s, unsigned int n)
@@ -151,6 +164,8 @@ extern unsigned short ram_flags;
 extern int root_mountflags;
 
 char reboot_command[COMMAND_LINE_SIZE];
+
+static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
 static void __init per_cpu_patch(void)
 {
@@ -599,7 +614,7 @@ static void __init init_sparc64_elf_hwcap(void)
 		pause_patch();
 }
 
-static void __init alloc_irqstack_bootmem(void)
+void __init alloc_irqstack_bootmem(void)
 {
 	unsigned int i, node;
 
@@ -623,7 +638,7 @@ void __init setup_arch(char **cmdline_p)
 {
 	/* Initialize PROM console and command line. */
 	*cmdline_p = prom_getbootargs();
-	strscpy(boot_command_line, *cmdline_p, COMMAND_LINE_SIZE);
+	strlcpy(boot_command_line, *cmdline_p, COMMAND_LINE_SIZE);
 	parse_early_param();
 
 	boot_flags_init(*cmdline_p);
@@ -645,6 +660,8 @@ void __init setup_arch(char **cmdline_p)
 #ifdef CONFIG_BLK_DEV_RAM
 	rd_image_start = ram_flags & RAMDISK_IMAGE_START_MASK;
 #endif
+
+	task_thread_info(&init_task)->kregs = &fake_swapper_regs;
 
 #ifdef CONFIG_IP_PNP
 	if (!ic_set_manually) {

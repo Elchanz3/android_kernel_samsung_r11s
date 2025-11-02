@@ -77,7 +77,6 @@
 #include <scsi/scsi_host.h>
 #include <linux/libata.h>
 #include <linux/dmi.h>
-#include <trace/events/libata.h>
 
 #define DRV_NAME	"ata_piix"
 #define DRV_VERSION	"2.13"
@@ -817,15 +816,10 @@ static int piix_sidpr_set_lpm(struct ata_link *link, enum ata_lpm_policy policy,
 
 static bool piix_irq_check(struct ata_port *ap)
 {
-	unsigned char host_stat;
-
 	if (unlikely(!ap->ioaddr.bmdma_addr))
 		return false;
 
-	host_stat = ap->ops->bmdma_status(ap);
-	trace_ata_bmdma_status(ap, host_stat);
-
-	return host_stat & ATA_DMA_INTR;
+	return ap->ops->bmdma_status(ap) & ATA_DMA_INTR;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -993,8 +987,11 @@ static int piix_pci_device_suspend(struct pci_dev *pdev, pm_message_t mesg)
 {
 	struct ata_host *host = pci_get_drvdata(pdev);
 	unsigned long flags;
+	int rc = 0;
 
-	ata_host_suspend(host, mesg);
+	rc = ata_host_suspend(host, mesg);
+	if (rc)
+		return rc;
 
 	/* Some braindamaged ACPI suspend implementations expect the
 	 * controller to be awake on entry; otherwise, it burns cpu
@@ -1059,7 +1056,7 @@ static u8 piix_vmw_bmdma_status(struct ata_port *ap)
 	return ata_bmdma_status(ap) & ~ATA_DMA_ERR;
 }
 
-static const struct scsi_host_template piix_sht = {
+static struct scsi_host_template piix_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -1074,7 +1071,7 @@ static struct ata_port_operations piix_pata_ops = {
 	.cable_detect		= ata_cable_40wire,
 	.set_piomode		= piix_set_piomode,
 	.set_dmamode		= piix_set_dmamode,
-	.reset.prereset		= piix_pata_prereset,
+	.prereset		= piix_pata_prereset,
 };
 
 static struct ata_port_operations piix_vmw_ops = {
@@ -1088,22 +1085,19 @@ static struct ata_port_operations ich_pata_ops = {
 	.set_dmamode		= ich_set_dmamode,
 };
 
-static struct attribute *piix_sidpr_shost_attrs[] = {
-	&dev_attr_link_power_management_supported.attr,
-	&dev_attr_link_power_management_policy.attr,
+static struct device_attribute *piix_sidpr_shost_attrs[] = {
+	&dev_attr_link_power_management_policy,
 	NULL
 };
 
-ATTRIBUTE_GROUPS(piix_sidpr_shost);
-
-static const struct scsi_host_template piix_sidpr_sht = {
+static struct scsi_host_template piix_sidpr_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
-	.shost_groups		= piix_sidpr_shost_groups,
+	.shost_attrs		= piix_sidpr_shost_attrs,
 };
 
 static struct ata_port_operations piix_sidpr_sata_ops = {
 	.inherits		= &piix_sata_ops,
-	.reset.hardreset	= sata_std_hardreset,
+	.hardreset		= sata_std_hardreset,
 	.scr_read		= piix_sidpr_scr_read,
 	.scr_write		= piix_sidpr_scr_write,
 	.set_lpm		= piix_sidpr_set_lpm,
@@ -1349,6 +1343,7 @@ static void piix_init_pcs(struct ata_host *host,
 	new_pcs = pcs | map_db->port_enable;
 
 	if (new_pcs != pcs) {
+		DPRINTK("updating PCS from 0x%x to 0x%x\n", pcs, new_pcs);
 		pci_write_config_word(pdev, ICH5_PCS, new_pcs);
 		msleep(150);
 	}
@@ -1447,6 +1442,7 @@ static int piix_init_sidpr(struct ata_host *host)
 		if (hpriv->map[i] == IDE)
 			return 0;
 
+	/* is it blacklisted? */
 	if (piix_no_sidpr(host))
 		return 0;
 
@@ -1645,7 +1641,7 @@ static int piix_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct device *dev = &pdev->dev;
 	struct ata_port_info port_info[2];
 	const struct ata_port_info *ppi[] = { &port_info[0], &port_info[1] };
-	const struct scsi_host_template *sht = &piix_sht;
+	struct scsi_host_template *sht = &piix_sht;
 	unsigned long port_flags;
 	struct ata_host *host;
 	struct piix_host_priv *hpriv;
@@ -1726,7 +1722,7 @@ static int piix_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 * message-signalled interrupts currently).
 	 */
 	if (port_flags & PIIX_FLAG_CHECKINTR)
-		pcim_intx(pdev, 1);
+		pci_intx(pdev, 1);
 
 	if (piix_check_450nx_errata(pdev)) {
 		/* This writes into the master table but it does not
@@ -1771,12 +1767,14 @@ static int __init piix_init(void)
 {
 	int rc;
 
+	DPRINTK("pci_register_driver\n");
 	rc = pci_register_driver(&piix_pci_driver);
 	if (rc)
 		return rc;
 
 	in_module_init = 0;
 
+	DPRINTK("done\n");
 	return 0;
 }
 

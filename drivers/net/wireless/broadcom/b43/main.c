@@ -30,7 +30,7 @@
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #include "b43.h"
 #include "main.h"
@@ -105,7 +105,7 @@ int b43_modparam_verbose = B43_VERBOSITY_DEFAULT;
 module_param_named(verbose, b43_modparam_verbose, int, 0644);
 MODULE_PARM_DESC(verbose, "Log message verbosity: 0=error, 1=warn, 2=info(default), 3=debug");
 
-static int b43_modparam_pio;
+static int b43_modparam_pio = 0;
 module_param_named(pio, b43_modparam_pio, int, 0644);
 MODULE_PARM_DESC(pio, "Use PIO accesses by default: 0=DMA, 1=PIO");
 
@@ -366,7 +366,7 @@ static int b43_wireless_core_start(struct b43_wldev *dev);
 static void b43_op_bss_info_changed(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
 				    struct ieee80211_bss_conf *conf,
-				    u64 changed);
+				    u32 changed);
 
 static int b43_ratelimit(struct b43_wl *wl)
 {
@@ -1832,7 +1832,7 @@ static void b43_update_templates(struct b43_wl *wl)
 	 * the TIM field, but that would probably require resizing and
 	 * moving of data within the beacon template.
 	 * Simply request a new beacon and let mac80211 do the hard work. */
-	beacon = ieee80211_beacon_get(wl->hw, wl->vif, 0);
+	beacon = ieee80211_beacon_get(wl->hw, wl->vif);
 	if (unlikely(!beacon))
 		return;
 
@@ -2166,7 +2166,7 @@ static void b43_print_fw_helptext(struct b43_wl *wl, bool error)
 {
 	const char text[] =
 		"You must go to " \
-		"https://wireless.docs.kernel.org/en/latest/en/users/drivers/b43/developers.html#list-of-firmware " \
+		"https://wireless.wiki.kernel.org/en/users/Drivers/b43#devicefirmware " \
 		"and download the correct firmware for this driver version. " \
 		"Please carefully read all instructions on this website.\n";
 
@@ -3785,8 +3785,7 @@ static void b43_qos_init(struct b43_wldev *dev)
 }
 
 static int b43_op_conf_tx(struct ieee80211_hw *hw,
-			  struct ieee80211_vif *vif,
-			  unsigned int link_id, u16 _queue,
+			  struct ieee80211_vif *vif, u16 _queue,
 			  const struct ieee80211_tx_queue_params *params)
 {
 	struct b43_wl *wl = hw_to_b43_wl(hw);
@@ -3975,7 +3974,7 @@ static void b43_set_retry_limits(struct b43_wldev *dev,
 			long_retry);
 }
 
-static int b43_op_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
+static int b43_op_config(struct ieee80211_hw *hw, u32 changed)
 {
 	struct b43_wl *wl = hw_to_b43_wl(hw);
 	struct b43_wldev *dev = wl->current_dev;
@@ -4056,7 +4055,7 @@ static void b43_update_basic_rates(struct b43_wldev *dev, u32 brates)
 {
 	struct ieee80211_supported_band *sband =
 		dev->wl->hw->wiphy->bands[b43_current_band(dev->wl)];
-	const struct ieee80211_rate *rate;
+	struct ieee80211_rate *rate;
 	int i;
 	u16 basic, direct, offset, basic_offset, rateptr;
 
@@ -4100,7 +4099,7 @@ static void b43_update_basic_rates(struct b43_wldev *dev, u32 brates)
 static void b43_op_bss_info_changed(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
 				    struct ieee80211_bss_conf *conf,
-				    u64 changed)
+				    u32 changed)
 {
 	struct b43_wl *wl = hw_to_b43_wl(hw);
 	struct b43_wldev *dev;
@@ -4964,11 +4963,12 @@ static int b43_op_add_interface(struct ieee80211_hw *hw,
 	struct b43_wldev *dev;
 	int err = -EOPNOTSUPP;
 
-	/* TODO: allow AP devices to coexist */
+	/* TODO: allow WDS/AP devices to coexist */
 
 	if (vif->type != NL80211_IFTYPE_AP &&
 	    vif->type != NL80211_IFTYPE_MESH_POINT &&
 	    vif->type != NL80211_IFTYPE_STATION &&
+	    vif->type != NL80211_IFTYPE_WDS &&
 	    vif->type != NL80211_IFTYPE_ADHOC)
 		return -EOPNOTSUPP;
 
@@ -5073,12 +5073,12 @@ static int b43_op_start(struct ieee80211_hw *hw)
 	 * may hang the system.
 	 */
 	if (!err)
-		b43_op_config(hw, -1, ~0);
+		b43_op_config(hw, ~0);
 
 	return err;
 }
 
-static void b43_op_stop(struct ieee80211_hw *hw, bool suspend)
+static void b43_op_stop(struct ieee80211_hw *hw)
 {
 	struct b43_wl *wl = hw_to_b43_wl(hw);
 	struct b43_wldev *dev = wl->current_dev;
@@ -5172,12 +5172,7 @@ static int b43_op_get_survey(struct ieee80211_hw *hw, int idx,
 }
 
 static const struct ieee80211_ops b43_hw_ops = {
-	.add_chanctx = ieee80211_emulate_add_chanctx,
-	.remove_chanctx = ieee80211_emulate_remove_chanctx,
-	.change_chanctx = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx			= b43_op_tx,
-	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.conf_tx		= b43_op_conf_tx,
 	.add_interface		= b43_op_add_interface,
 	.remove_interface	= b43_op_remove_interface,
@@ -5248,7 +5243,7 @@ out:
 	}
 
 	/* reload configuration */
-	b43_op_config(wl->hw, -1, ~0);
+	b43_op_config(wl->hw, ~0);
 	if (wl->vif)
 		b43_op_bss_info_changed(wl->hw, wl->vif, &wl->vif->bss_conf, ~0);
 
@@ -5583,6 +5578,9 @@ static struct b43_wl *b43_wireless_init(struct b43_bus_dev *dev)
 		BIT(NL80211_IFTYPE_AP) |
 		BIT(NL80211_IFTYPE_MESH_POINT) |
 		BIT(NL80211_IFTYPE_STATION) |
+#ifdef CONFIG_WIRELESS_WDS
+		BIT(NL80211_IFTYPE_WDS) |
+#endif
 		BIT(NL80211_IFTYPE_ADHOC);
 
 	hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
@@ -5790,11 +5788,14 @@ void b43_controller_restart(struct b43_wldev *dev, const char *reason)
 
 static void b43_print_driverinfo(void)
 {
-	const char *feat_pci = "", *feat_nphy = "",
+	const char *feat_pci = "", *feat_pcmcia = "", *feat_nphy = "",
 		   *feat_leds = "", *feat_sdio = "";
 
 #ifdef CONFIG_B43_PCI_AUTOSELECT
 	feat_pci = "P";
+#endif
+#ifdef CONFIG_B43_PCMCIA
+	feat_pcmcia = "M";
 #endif
 #ifdef CONFIG_B43_PHY_N
 	feat_nphy = "N";
@@ -5806,8 +5807,9 @@ static void b43_print_driverinfo(void)
 	feat_sdio = "S";
 #endif
 	printk(KERN_INFO "Broadcom 43xx driver loaded "
-	       "[ Features: %s%s%s%s ]\n",
-	       feat_pci, feat_nphy, feat_leds, feat_sdio);
+	       "[ Features: %s%s%s%s%s ]\n",
+	       feat_pci, feat_pcmcia, feat_nphy,
+	       feat_leds, feat_sdio);
 }
 
 static int __init b43_init(void)

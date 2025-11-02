@@ -75,12 +75,9 @@ mv_cesa_skcipher_dma_cleanup(struct skcipher_request *req)
 static inline void mv_cesa_skcipher_cleanup(struct skcipher_request *req)
 {
 	struct mv_cesa_skcipher_req *creq = skcipher_request_ctx(req);
-	struct mv_cesa_engine *engine = creq->base.engine;
 
 	if (mv_cesa_req_get_type(&creq->base) == CESA_DMA_REQ)
 		mv_cesa_skcipher_dma_cleanup(req);
-
-	atomic_sub(req->cryptlen, &engine->load);
 }
 
 static void mv_cesa_skcipher_std_step(struct skcipher_request *req)
@@ -92,29 +89,22 @@ static void mv_cesa_skcipher_std_step(struct skcipher_request *req)
 			    CESA_SA_SRAM_PAYLOAD_SIZE);
 
 	mv_cesa_adjust_op(engine, &sreq->op);
-	if (engine->pool)
-		memcpy(engine->sram_pool, &sreq->op, sizeof(sreq->op));
-	else
-		memcpy_toio(engine->sram, &sreq->op, sizeof(sreq->op));
+	memcpy_toio(engine->sram, &sreq->op, sizeof(sreq->op));
 
-	len = mv_cesa_sg_copy_to_sram(engine, req->src, creq->src_nents,
-				      CESA_SA_DATA_SRAM_OFFSET, len,
-				      sreq->offset);
+	len = sg_pcopy_to_buffer(req->src, creq->src_nents,
+				 engine->sram + CESA_SA_DATA_SRAM_OFFSET,
+				 len, sreq->offset);
 
 	sreq->size = len;
 	mv_cesa_set_crypt_op_len(&sreq->op, len);
 
 	/* FIXME: only update enc_len field */
 	if (!sreq->skip_ctx) {
-		if (engine->pool)
-			memcpy(engine->sram_pool, &sreq->op, sizeof(sreq->op));
-		else
-			memcpy_toio(engine->sram, &sreq->op, sizeof(sreq->op));
+		memcpy_toio(engine->sram, &sreq->op, sizeof(sreq->op));
 		sreq->skip_ctx = true;
-	} else if (engine->pool)
-		memcpy(engine->sram_pool, &sreq->op, sizeof(sreq->op.desc));
-	else
+	} else {
 		memcpy_toio(engine->sram, &sreq->op, sizeof(sreq->op.desc));
+	}
 
 	mv_cesa_set_int_mask(engine, CESA_SA_INT_ACCEL0_DONE);
 	writel_relaxed(CESA_SA_CFG_PARA_DIS, engine->regs + CESA_SA_CFG);
@@ -131,9 +121,9 @@ static int mv_cesa_skcipher_std_process(struct skcipher_request *req,
 	struct mv_cesa_engine *engine = creq->base.engine;
 	size_t len;
 
-	len = mv_cesa_sg_copy_from_sram(engine, req->dst, creq->dst_nents,
-					CESA_SA_DATA_SRAM_OFFSET, sreq->size,
-					sreq->offset);
+	len = sg_pcopy_from_buffer(req->dst, creq->dst_nents,
+				   engine->sram + CESA_SA_DATA_SRAM_OFFSET,
+				   sreq->size, sreq->offset);
 
 	sreq->offset += len;
 	if (sreq->offset < req->cryptlen)
@@ -215,6 +205,7 @@ mv_cesa_skcipher_complete(struct crypto_async_request *req)
 	struct mv_cesa_engine *engine = creq->base.engine;
 	unsigned int ivsize;
 
+	atomic_sub(skreq->cryptlen, &engine->load);
 	ivsize = crypto_skcipher_ivsize(crypto_skcipher_reqtfm(skreq));
 
 	if (mv_cesa_req_get_type(&creq->base) == CESA_DMA_REQ) {
@@ -223,14 +214,11 @@ mv_cesa_skcipher_complete(struct crypto_async_request *req)
 		basereq = &creq->base;
 		memcpy(skreq->iv, basereq->chain.last->op->ctx.skcipher.iv,
 		       ivsize);
-	} else if (engine->pool)
-		memcpy(skreq->iv,
-		       engine->sram_pool + CESA_SA_CRYPT_IV_SRAM_OFFSET,
-		       ivsize);
-	else
+	} else {
 		memcpy_fromio(skreq->iv,
 			      engine->sram + CESA_SA_CRYPT_IV_SRAM_OFFSET,
 			      ivsize);
+	}
 }
 
 static const struct mv_cesa_req_ops mv_cesa_skcipher_req_ops = {
@@ -461,9 +449,6 @@ static int mv_cesa_skcipher_queue_req(struct skcipher_request *req,
 	struct mv_cesa_skcipher_req *creq = skcipher_request_ctx(req);
 	struct mv_cesa_engine *engine;
 
-	if (!req->cryptlen)
-		return 0;
-
 	ret = mv_cesa_skcipher_req_init(req, tmpl);
 	if (ret)
 		return ret;
@@ -494,7 +479,7 @@ static int mv_cesa_des_op(struct skcipher_request *req,
 
 static int mv_cesa_ecb_des_encrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_ECB |
@@ -505,7 +490,7 @@ static int mv_cesa_ecb_des_encrypt(struct skcipher_request *req)
 
 static int mv_cesa_ecb_des_decrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_ECB |
@@ -548,7 +533,7 @@ static int mv_cesa_cbc_des_op(struct skcipher_request *req,
 
 static int mv_cesa_cbc_des_encrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl, CESA_SA_DESC_CFG_DIR_ENC);
 
@@ -557,7 +542,7 @@ static int mv_cesa_cbc_des_encrypt(struct skcipher_request *req)
 
 static int mv_cesa_cbc_des_decrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl, CESA_SA_DESC_CFG_DIR_DEC);
 
@@ -601,7 +586,7 @@ static int mv_cesa_des3_op(struct skcipher_request *req,
 
 static int mv_cesa_ecb_des3_ede_encrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_ECB |
@@ -613,7 +598,7 @@ static int mv_cesa_ecb_des3_ede_encrypt(struct skcipher_request *req)
 
 static int mv_cesa_ecb_des3_ede_decrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_ECB |
@@ -654,7 +639,7 @@ static int mv_cesa_cbc_des3_op(struct skcipher_request *req,
 
 static int mv_cesa_cbc_des3_ede_encrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_CBC |
@@ -666,7 +651,7 @@ static int mv_cesa_cbc_des3_ede_encrypt(struct skcipher_request *req)
 
 static int mv_cesa_cbc_des3_ede_decrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_CBC |
@@ -730,7 +715,7 @@ static int mv_cesa_aes_op(struct skcipher_request *req,
 
 static int mv_cesa_ecb_aes_encrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_ECB |
@@ -741,7 +726,7 @@ static int mv_cesa_ecb_aes_encrypt(struct skcipher_request *req)
 
 static int mv_cesa_ecb_aes_decrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl,
 			   CESA_SA_DESC_CFG_CRYPTCM_ECB |
@@ -783,7 +768,7 @@ static int mv_cesa_cbc_aes_op(struct skcipher_request *req,
 
 static int mv_cesa_cbc_aes_encrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl, CESA_SA_DESC_CFG_DIR_ENC);
 
@@ -792,7 +777,7 @@ static int mv_cesa_cbc_aes_encrypt(struct skcipher_request *req)
 
 static int mv_cesa_cbc_aes_decrypt(struct skcipher_request *req)
 {
-	struct mv_cesa_op_ctx tmpl = { };
+	struct mv_cesa_op_ctx tmpl;
 
 	mv_cesa_set_op_cfg(&tmpl, CESA_SA_DESC_CFG_DIR_DEC);
 

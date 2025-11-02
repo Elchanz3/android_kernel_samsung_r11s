@@ -30,9 +30,8 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/io.h>
-#include <linux/math.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <dt-bindings/clock/bcm2835.h>
@@ -503,8 +502,6 @@ struct bcm2835_clock_data {
 	bool low_jitter;
 
 	u32 tcnt_mux;
-
-	bool round_up;
 };
 
 struct bcm2835_gate_data {
@@ -570,23 +567,18 @@ static long bcm2835_pll_rate_from_divisors(unsigned long parent_rate,
 	return rate >> A2W_PLL_FRAC_BITS;
 }
 
-static int bcm2835_pll_determine_rate(struct clk_hw *hw,
-				      struct clk_rate_request *req)
+static long bcm2835_pll_round_rate(struct clk_hw *hw, unsigned long rate,
+				   unsigned long *parent_rate)
 {
 	struct bcm2835_pll *pll = container_of(hw, struct bcm2835_pll, hw);
 	const struct bcm2835_pll_data *data = pll->data;
 	u32 ndiv, fdiv;
 
-	req->rate = clamp(req->rate, data->min_rate, data->max_rate);
+	rate = clamp(rate, data->min_rate, data->max_rate);
 
-	bcm2835_pll_choose_ndiv_and_fdiv(req->rate, req->best_parent_rate,
-					 &ndiv, &fdiv);
+	bcm2835_pll_choose_ndiv_and_fdiv(rate, *parent_rate, &ndiv, &fdiv);
 
-	req->rate = bcm2835_pll_rate_from_divisors(req->best_parent_rate,
-						   ndiv, fdiv,
-						   1);
-
-	return 0;
+	return bcm2835_pll_rate_from_divisors(*parent_rate, ndiv, fdiv, 1);
 }
 
 static unsigned long bcm2835_pll_get_rate(struct clk_hw *hw,
@@ -788,7 +780,7 @@ static const struct clk_ops bcm2835_pll_clk_ops = {
 	.unprepare = bcm2835_pll_off,
 	.recalc_rate = bcm2835_pll_get_rate,
 	.set_rate = bcm2835_pll_set_rate,
-	.determine_rate = bcm2835_pll_determine_rate,
+	.round_rate = bcm2835_pll_round_rate,
 	.debug_init = bcm2835_pll_debug_init,
 };
 
@@ -813,10 +805,11 @@ static int bcm2835_pll_divider_is_on(struct clk_hw *hw)
 	return !(cprman_read(cprman, data->a2w_reg) & A2W_PLL_CHANNEL_DISABLE);
 }
 
-static int bcm2835_pll_divider_determine_rate(struct clk_hw *hw,
-					      struct clk_rate_request *req)
+static long bcm2835_pll_divider_round_rate(struct clk_hw *hw,
+					   unsigned long rate,
+					   unsigned long *parent_rate)
 {
-	return clk_divider_ops.determine_rate(hw, req);
+	return clk_divider_ops.round_rate(hw, rate, parent_rate);
 }
 
 static unsigned long bcm2835_pll_divider_get_rate(struct clk_hw *hw,
@@ -908,7 +901,7 @@ static const struct clk_ops bcm2835_pll_divider_clk_ops = {
 	.unprepare = bcm2835_pll_divider_off,
 	.recalc_rate = bcm2835_pll_divider_get_rate,
 	.set_rate = bcm2835_pll_divider_set_rate,
-	.determine_rate = bcm2835_pll_divider_determine_rate,
+	.round_rate = bcm2835_pll_divider_round_rate,
 	.debug_init = bcm2835_pll_divider_debug_init,
 };
 
@@ -947,9 +940,10 @@ static u32 bcm2835_clock_choose_div(struct clk_hw *hw,
 	u32 unused_frac_mask =
 		GENMASK(CM_DIV_FRAC_BITS - data->frac_bits, 0) >> 1;
 	u64 temp = (u64)parent_rate << CM_DIV_FRAC_BITS;
+	u64 rem;
 	u32 div, mindiv, maxdiv;
 
-	do_div(temp, rate);
+	rem = do_div(temp, rate);
 	div = temp;
 	div &= ~unused_frac_mask;
 
@@ -1001,34 +995,12 @@ static unsigned long bcm2835_clock_rate_from_divisor(struct bcm2835_clock *clock
 	return temp;
 }
 
-static unsigned long bcm2835_round_rate(unsigned long rate)
-{
-	unsigned long scaler;
-	unsigned long limit;
-
-	limit = rate / 100000;
-
-	scaler = 1;
-	while (scaler < limit)
-		scaler *= 10;
-
-	/*
-	 * If increasing a clock by less than 0.1% changes it
-	 * from ..999.. to ..000.., round up.
-	 */
-	if ((rate + scaler - 1) / scaler % 1000 == 0)
-		rate = roundup(rate, scaler);
-
-	return rate;
-}
-
 static unsigned long bcm2835_clock_get_rate(struct clk_hw *hw,
 					    unsigned long parent_rate)
 {
 	struct bcm2835_clock *clock = bcm2835_clock_from_hw(hw);
 	struct bcm2835_cprman *cprman = clock->cprman;
 	const struct bcm2835_clock_data *data = clock->data;
-	unsigned long rate;
 	u32 div;
 
 	if (data->int_bits == 0 && data->frac_bits == 0)
@@ -1036,12 +1008,7 @@ static unsigned long bcm2835_clock_get_rate(struct clk_hw *hw,
 
 	div = cprman_read(cprman, data->div_reg);
 
-	rate = bcm2835_clock_rate_from_divisor(clock, parent_rate, div);
-
-	if (data->round_up)
-		rate = bcm2835_round_rate(rate);
-
-	return rate;
+	return bcm2835_clock_rate_from_divisor(clock, parent_rate, div);
 }
 
 static void bcm2835_clock_wait_busy(struct bcm2835_clock *clock)
@@ -1555,7 +1522,7 @@ static const char *const bcm2835_clock_osc_parents[] = {
 	.parents = bcm2835_clock_osc_parents,				\
 	__VA_ARGS__)
 
-/* main peripheral parent mux */
+/* main peripherial parent mux */
 static const char *const bcm2835_clock_per_parents[] = {
 	"gnd",
 	"xosc",
@@ -2178,8 +2145,7 @@ static const struct bcm2835_clk_desc clk_desc_array[] = {
 		.div_reg = CM_UARTDIV,
 		.int_bits = 10,
 		.frac_bits = 12,
-		.tcnt_mux = 28,
-		.round_up = true),
+		.tcnt_mux = 28),
 
 	/* TV encoder clock.  Only operating frequency is 108Mhz.  */
 	[BCM2835_CLOCK_VEC]	= REGISTER_PER_CLK(
@@ -2355,3 +2321,4 @@ builtin_platform_driver(bcm2835_clk_driver);
 
 MODULE_AUTHOR("Eric Anholt <eric@anholt.net>");
 MODULE_DESCRIPTION("BCM2835 clock driver");
+MODULE_LICENSE("GPL");

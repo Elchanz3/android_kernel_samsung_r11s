@@ -11,38 +11,58 @@ struct pt_regs;
 struct task_struct;
 
 #include <asm/ptrace.h>
+#include <registers.h>
 #include <sysdep/archsetjmp.h>
 
 #include <linux/prefetch.h>
 
-#include <asm/cpufeatures.h>
-
 struct mm_struct;
 
 struct thread_struct {
+	struct pt_regs regs;
 	struct pt_regs *segv_regs;
+	int singlestep_syscall;
+	void *fault_addr;
+	jmp_buf *fault_catcher;
 	struct task_struct *prev_sched;
 	struct arch_thread arch;
 	jmp_buf switch_buf;
+	bool is_running_test;
 	struct {
-		struct {
-			int (*proc)(void *);
-			void *arg;
-		} thread;
+		int op;
+		union {
+			struct {
+				int pid;
+			} fork, exec;
+			struct {
+				int (*proc)(void *);
+				void *arg;
+			} thread;
+			struct {
+				void (*proc)(void *);
+				void *arg;
+			} cb;
+		} u;
 	} request;
-
-	void *segv_continue;
-
-	/* Contains variable sized FP registers */
-	struct pt_regs regs;
 };
 
 #define INIT_THREAD \
 { \
 	.regs		   	= EMPTY_REGS,	\
+	.fault_addr		= NULL, \
 	.prev_sched		= NULL, \
 	.arch			= INIT_ARCH_THREAD, \
-	.request		= { } \
+	.request		= { 0 }, \
+	.is_running_test	= false, \
+}
+
+static inline void release_thread(struct task_struct *task)
+{
+}
+
+static inline void mm_copy_segments(struct mm_struct *from_mm,
+				    struct mm_struct *new_mm)
+{
 }
 
 /*
@@ -71,18 +91,15 @@ extern void start_thread(struct pt_regs *regs, unsigned long entry,
 
 struct cpuinfo_um {
 	unsigned long loops_per_jiffy;
-	int cache_alignment;
-	union {
-		__u32		x86_capability[NCAPINTS + NBUGINTS];
-		unsigned long	x86_capability_alignment;
-	};
+	int ipi_pipe[2];
 };
 
 extern struct cpuinfo_um boot_cpu_data;
 
-#define cache_line_size()	(boot_cpu_data.cache_alignment)
+#define cpu_data (&boot_cpu_data)
+#define current_cpu_data boot_cpu_data
 
 #define KSTK_REG(tsk, reg) get_thread_reg(reg, &tsk->thread.switch_buf)
-extern unsigned long __get_wchan(struct task_struct *p);
+extern unsigned long get_wchan(struct task_struct *p);
 
 #endif

@@ -19,7 +19,7 @@
  * @name: name of the symlink
  * @target: target node for the symlink to point to
  *
- * Return: the created node on success, ERR_PTR() value on error.
+ * Returns the created node on success, ERR_PTR() value on error.
  * Ownership of the link matches ownership of the target.
  */
 struct kernfs_node *kernfs_create_link(struct kernfs_node *parent,
@@ -36,7 +36,8 @@ struct kernfs_node *kernfs_create_link(struct kernfs_node *parent,
 		gid = target->iattr->ia_gid;
 	}
 
-	kn = kernfs_new_node(parent, name, S_IFLNK|0777, uid, gid, KERNFS_LINK);
+	kn = kernfs_new_node(parent, name, S_IFLNK|S_IRWXUGO, uid, gid,
+			     KERNFS_LINK);
 	if (!kn)
 		return ERR_PTR(-ENOMEM);
 
@@ -62,10 +63,10 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 
 	/* go up to the root, stop at the base */
 	base = parent;
-	while (kernfs_parent(base)) {
-		kn = kernfs_parent(target);
-		while (kernfs_parent(kn) && base != kn)
-			kn = kernfs_parent(kn);
+	while (base->parent) {
+		kn = target->parent;
+		while (kn->parent && base != kn)
+			kn = kn->parent;
 
 		if (base == kn)
 			break;
@@ -75,14 +76,14 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 
 		strcpy(s, "../");
 		s += 3;
-		base = kernfs_parent(base);
+		base = base->parent;
 	}
 
 	/* determine end of target string for reverse fillup */
 	kn = target;
-	while (kernfs_parent(kn) && kn != base) {
-		len += strlen(kernfs_rcu_name(kn)) + 1;
-		kn = kernfs_parent(kn);
+	while (kn->parent && kn != base) {
+		len += strlen(kn->name) + 1;
+		kn = kn->parent;
 	}
 
 	/* check limits */
@@ -94,16 +95,15 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 
 	/* reverse fillup of target string from target to base */
 	kn = target;
-	while (kernfs_parent(kn) && kn != base) {
-		const char *name = kernfs_rcu_name(kn);
-		int slen = strlen(name);
+	while (kn->parent && kn != base) {
+		int slen = strlen(kn->name);
 
 		len -= slen;
-		memcpy(s + len, name, slen);
+		memcpy(s + len, kn->name, slen);
 		if (len)
 			s[--len] = '/';
 
-		kn = kernfs_parent(kn);
+		kn = kn->parent;
 	}
 
 	return 0;
@@ -112,15 +112,13 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 static int kernfs_getlink(struct inode *inode, char *path)
 {
 	struct kernfs_node *kn = inode->i_private;
-	struct kernfs_node *parent;
+	struct kernfs_node *parent = kn->parent;
 	struct kernfs_node *target = kn->symlink.target_kn;
-	struct kernfs_root *root = kernfs_root(kn);
 	int error;
 
-	down_read(&root->kernfs_rwsem);
-	parent = kernfs_parent(kn);
+	mutex_lock(&kernfs_mutex);
 	error = kernfs_get_target_path(parent, target, path);
-	up_read(&root->kernfs_rwsem);
+	mutex_unlock(&kernfs_mutex);
 
 	return error;
 }

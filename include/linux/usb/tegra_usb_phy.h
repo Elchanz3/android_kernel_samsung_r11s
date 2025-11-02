@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2010 Google, Inc.
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
  */
 
 #ifndef __TEGRA_USB_PHY_H
 #define __TEGRA_USB_PHY_H
 
 #include <linux/clk.h>
-#include <linux/regmap.h>
+#include <linux/gpio.h>
 #include <linux/reset.h>
 #include <linux/usb/otg.h>
-
-struct gpio_desc;
 
 /*
  * utmi_pll_config_in_car_module: true if the UTMI PLL configuration registers
@@ -22,7 +30,6 @@ struct gpio_desc;
  *      enter host mode
  * requires_extra_tuning_parameters: true if xcvr_hsslew, hssquelch_level
  *      and hsdiscon_level should be set for adequate signal quality
- * requires_pmc_ao_power_up: true if USB AO is powered down by default
  */
 
 struct tegra_phy_soc_config {
@@ -30,7 +37,6 @@ struct tegra_phy_soc_config {
 	bool has_hostpc;
 	bool requires_usbmode_setup;
 	bool requires_extra_tuning_parameters;
-	bool requires_pmc_ao_power_up;
 };
 
 struct tegra_utmip_config {
@@ -56,7 +62,6 @@ enum tegra_usb_phy_port_speed {
 struct tegra_xtal_freq;
 
 struct tegra_usb_phy {
-	int irq;
 	int instance;
 	const struct tegra_xtal_freq *freq;
 	void __iomem *regs;
@@ -65,7 +70,6 @@ struct tegra_usb_phy {
 	struct clk *pll_u;
 	struct clk *pad_clk;
 	struct regulator *vbus;
-	struct regmap *pmc_regmap;
 	enum usb_dr_mode mode;
 	void *config;
 	const struct tegra_phy_soc_config *soc_config;
@@ -75,9 +79,16 @@ struct tegra_usb_phy {
 	bool is_ulpi_phy;
 	struct gpio_desc *reset_gpio;
 	struct reset_control *pad_rst;
-	bool wakeup_enabled;
-	bool pad_wakeup;
 	bool powered_on;
 };
+
+void tegra_usb_phy_preresume(struct usb_phy *phy);
+
+void tegra_usb_phy_postresume(struct usb_phy *phy);
+
+void tegra_ehci_phy_restore_start(struct usb_phy *phy,
+				 enum tegra_usb_phy_port_speed port_speed);
+
+void tegra_ehci_phy_restore_end(struct usb_phy *phy);
 
 #endif /* __TEGRA_USB_PHY_H */

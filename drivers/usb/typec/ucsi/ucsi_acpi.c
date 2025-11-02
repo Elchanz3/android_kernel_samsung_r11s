@@ -9,7 +9,6 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/acpi.h>
-#include <linux/dmi.h>
 
 #include "ucsi.h"
 
@@ -20,10 +19,10 @@
 struct ucsi_acpi {
 	struct device *dev;
 	struct ucsi *ucsi;
-	void *base;
-	bool check_bogus_event;
+	void __iomem *base;
+	struct completion complete;
+	unsigned long flags;
 	guid_t guid;
-	u64 cmd;
 };
 
 static int ucsi_acpi_dsm(struct ucsi_acpi *ua, int func)
@@ -42,7 +41,8 @@ static int ucsi_acpi_dsm(struct ucsi_acpi *ua, int func)
 	return 0;
 }
 
-static int ucsi_acpi_read_version(struct ucsi *ucsi, u16 *version)
+static int ucsi_acpi_read(struct ucsi *ucsi, unsigned int offset,
+			  void *val, size_t val_len)
 {
 	struct ucsi_acpi *ua = ucsi_get_drvdata(ucsi);
 	int ret;
@@ -51,108 +51,53 @@ static int ucsi_acpi_read_version(struct ucsi *ucsi, u16 *version)
 	if (ret)
 		return ret;
 
-	memcpy(version, ua->base + UCSI_VERSION, sizeof(*version));
+	memcpy(val, (const void __force *)(ua->base + offset), val_len);
 
 	return 0;
 }
 
-static int ucsi_acpi_read_cci(struct ucsi *ucsi, u32 *cci)
+static int ucsi_acpi_async_write(struct ucsi *ucsi, unsigned int offset,
+				 const void *val, size_t val_len)
 {
 	struct ucsi_acpi *ua = ucsi_get_drvdata(ucsi);
 
-	memcpy(cci, ua->base + UCSI_CCI, sizeof(*cci));
-
-	return 0;
-}
-
-static int ucsi_acpi_poll_cci(struct ucsi *ucsi, u32 *cci)
-{
-	struct ucsi_acpi *ua = ucsi_get_drvdata(ucsi);
-	int ret;
-
-	ret = ucsi_acpi_dsm(ua, UCSI_DSM_FUNC_READ);
-	if (ret)
-		return ret;
-
-	return ucsi_acpi_read_cci(ucsi, cci);
-}
-
-static int ucsi_acpi_read_message_in(struct ucsi *ucsi, void *val, size_t val_len)
-{
-	struct ucsi_acpi *ua = ucsi_get_drvdata(ucsi);
-
-	memcpy(val, ua->base + UCSI_MESSAGE_IN, val_len);
-
-	return 0;
-}
-
-static int ucsi_acpi_async_control(struct ucsi *ucsi, u64 command)
-{
-	struct ucsi_acpi *ua = ucsi_get_drvdata(ucsi);
-
-	memcpy(ua->base + UCSI_CONTROL, &command, sizeof(command));
-	ua->cmd = command;
+	memcpy((void __force *)(ua->base + offset), val, val_len);
 
 	return ucsi_acpi_dsm(ua, UCSI_DSM_FUNC_WRITE);
 }
 
-static const struct ucsi_operations ucsi_acpi_ops = {
-	.read_version = ucsi_acpi_read_version,
-	.read_cci = ucsi_acpi_read_cci,
-	.poll_cci = ucsi_acpi_poll_cci,
-	.read_message_in = ucsi_acpi_read_message_in,
-	.sync_control = ucsi_sync_control_common,
-	.async_control = ucsi_acpi_async_control
-};
-
-static int ucsi_gram_sync_control(struct ucsi *ucsi, u64 command, u32 *cci,
-				  void *val, size_t len)
+static int ucsi_acpi_sync_write(struct ucsi *ucsi, unsigned int offset,
+				const void *val, size_t val_len)
 {
-	u16 bogus_change = UCSI_CONSTAT_POWER_LEVEL_CHANGE |
-			   UCSI_CONSTAT_PDOS_CHANGE;
 	struct ucsi_acpi *ua = ucsi_get_drvdata(ucsi);
+	bool ack = UCSI_COMMAND(*(u64 *)val) == UCSI_ACK_CC_CI;
 	int ret;
 
-	ret = ucsi_sync_control_common(ucsi, command, cci, val, len);
-	if (ret < 0)
-		return ret;
+	if (ack)
+		set_bit(ACK_PENDING, &ua->flags);
+	else
+		set_bit(COMMAND_PENDING, &ua->flags);
 
-	if (UCSI_COMMAND(ua->cmd) == UCSI_GET_PDOS &&
-	    ua->cmd & UCSI_GET_PDOS_PARTNER_PDO(1) &&
-	    ua->cmd & UCSI_GET_PDOS_SRC_PDOS)
-		ua->check_bogus_event = true;
+	ret = ucsi_acpi_async_write(ucsi, offset, val, val_len);
+	if (ret)
+		goto out_clear_bit;
 
-	if (UCSI_COMMAND(ua->cmd) == UCSI_GET_CONNECTOR_STATUS &&
-	    ua->check_bogus_event) {
-		/* Clear the bogus change */
-		if (*(u16 *)val == bogus_change)
-			*(u16 *)val = 0;
+	if (!wait_for_completion_timeout(&ua->complete, 60 * HZ))
+		ret = -ETIMEDOUT;
 
-		ua->check_bogus_event = false;
-	}
+out_clear_bit:
+	if (ack)
+		clear_bit(ACK_PENDING, &ua->flags);
+	else
+		clear_bit(COMMAND_PENDING, &ua->flags);
 
 	return ret;
 }
 
-static const struct ucsi_operations ucsi_gram_ops = {
-	.read_version = ucsi_acpi_read_version,
-	.read_cci = ucsi_acpi_read_cci,
-	.poll_cci = ucsi_acpi_poll_cci,
-	.read_message_in = ucsi_acpi_read_message_in,
-	.sync_control = ucsi_gram_sync_control,
-	.async_control = ucsi_acpi_async_control
-};
-
-static const struct dmi_system_id ucsi_acpi_quirks[] = {
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
-			DMI_MATCH(DMI_PRODUCT_FAMILY, "LG gram PC"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "90Q"),
-		},
-		.driver_data = (void *)&ucsi_gram_ops,
-	},
-	{ }
+static const struct ucsi_operations ucsi_acpi_ops = {
+	.read = ucsi_acpi_read,
+	.sync_write = ucsi_acpi_sync_write,
+	.async_write = ucsi_acpi_async_write
 };
 
 static void ucsi_acpi_notify(acpi_handle handle, u32 event, void *data)
@@ -161,18 +106,23 @@ static void ucsi_acpi_notify(acpi_handle handle, u32 event, void *data)
 	u32 cci;
 	int ret;
 
-	ret = ua->ucsi->ops->read_cci(ua->ucsi, &cci);
+	ret = ucsi_acpi_read(ua->ucsi, UCSI_CCI, &cci, sizeof(cci));
 	if (ret)
 		return;
 
-	ucsi_notify_common(ua->ucsi, cci);
+	if (UCSI_CCI_CONNECTOR(cci))
+		ucsi_connector_change(ua->ucsi, UCSI_CCI_CONNECTOR(cci));
+
+	if (cci & UCSI_CCI_ACK_COMPLETE && test_bit(ACK_PENDING, &ua->flags))
+		complete(&ua->complete);
+	if (cci & UCSI_CCI_COMMAND_COMPLETE &&
+	    test_bit(COMMAND_PENDING, &ua->flags))
+		complete(&ua->complete);
 }
 
 static int ucsi_acpi_probe(struct platform_device *pdev)
 {
 	struct acpi_device *adev = ACPI_COMPANION(&pdev->dev);
-	const struct ucsi_operations *ops = &ucsi_acpi_ops;
-	const struct dmi_system_id *id;
 	struct ucsi_acpi *ua;
 	struct resource *res;
 	acpi_status status;
@@ -191,21 +141,29 @@ static int ucsi_acpi_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	ua->base = devm_memremap(&pdev->dev, res->start, resource_size(res), MEMREMAP_WB);
-	if (IS_ERR(ua->base))
-		return PTR_ERR(ua->base);
+	/* This will make sure we can use ioremap() */
+	status = acpi_release_memory(ACPI_HANDLE(&pdev->dev), res, 1);
+	if (ACPI_FAILURE(status))
+		return -ENOMEM;
+
+	/*
+	 * NOTE: The memory region for the data structures is used also in an
+	 * operation region, which means ACPI has already reserved it. Therefore
+	 * it can not be requested here, and we can not use
+	 * devm_ioremap_resource().
+	 */
+	ua->base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	if (!ua->base)
+		return -ENOMEM;
 
 	ret = guid_parse(UCSI_DSM_UUID, &ua->guid);
 	if (ret)
 		return ret;
 
+	init_completion(&ua->complete);
 	ua->dev = &pdev->dev;
 
-	id = dmi_first_match(ucsi_acpi_quirks);
-	if (id)
-		ops = id->driver_data;
-
-	ua->ucsi = ucsi_create(&pdev->dev, ops);
+	ua->ucsi = ucsi_create(&pdev->dev, &ucsi_acpi_ops);
 	if (IS_ERR(ua->ucsi))
 		return PTR_ERR(ua->ucsi);
 
@@ -234,7 +192,7 @@ static int ucsi_acpi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void ucsi_acpi_remove(struct platform_device *pdev)
+static int ucsi_acpi_remove(struct platform_device *pdev)
 {
 	struct ucsi_acpi *ua = platform_get_drvdata(pdev);
 
@@ -243,16 +201,9 @@ static void ucsi_acpi_remove(struct platform_device *pdev)
 
 	acpi_remove_notify_handler(ACPI_HANDLE(&pdev->dev), ACPI_DEVICE_NOTIFY,
 				   ucsi_acpi_notify);
+
+	return 0;
 }
-
-static int ucsi_acpi_resume(struct device *dev)
-{
-	struct ucsi_acpi *ua = dev_get_drvdata(dev);
-
-	return ucsi_resume(ua->ucsi);
-}
-
-static DEFINE_SIMPLE_DEV_PM_OPS(ucsi_acpi_pm_ops, NULL, ucsi_acpi_resume);
 
 static const struct acpi_device_id ucsi_acpi_match[] = {
 	{ "PNP0CA0", 0 },
@@ -263,7 +214,6 @@ MODULE_DEVICE_TABLE(acpi, ucsi_acpi_match);
 static struct platform_driver ucsi_acpi_platform_driver = {
 	.driver = {
 		.name = "ucsi_acpi",
-		.pm = pm_ptr(&ucsi_acpi_pm_ops),
 		.acpi_match_table = ACPI_PTR(ucsi_acpi_match),
 	},
 	.probe = ucsi_acpi_probe,

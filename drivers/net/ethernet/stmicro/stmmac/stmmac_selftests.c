@@ -36,7 +36,7 @@ struct stmmac_packet_attrs {
 	int vlan_id_in;
 	int vlan_id_out;
 	unsigned char *src;
-	const unsigned char *dst;
+	unsigned char *dst;
 	u32 ip_src;
 	u32 ip_dst;
 	int tcp;
@@ -249,8 +249,8 @@ static int stmmac_test_loopback_validate(struct sk_buff *skb,
 					 struct net_device *orig_ndev)
 {
 	struct stmmac_test_priv *tpriv = pt->af_packet_priv;
-	const unsigned char *dst = tpriv->packet->dst;
 	unsigned char *src = tpriv->packet->src;
+	unsigned char *dst = tpriv->packet->dst;
 	struct stmmachdr *shdr;
 	struct ethhdr *ehdr;
 	struct udphdr *uhdr;
@@ -382,14 +382,14 @@ static int stmmac_test_phy_loopback(struct stmmac_priv *priv)
 	if (!priv->dev->phydev)
 		return -EOPNOTSUPP;
 
-	ret = phy_loopback(priv->dev->phydev, true, 0);
+	ret = phy_loopback(priv->dev->phydev, true);
 	if (ret)
 		return ret;
 
 	attr.dst = priv->dev->dev_addr;
 	ret = __stmmac_test_loopback(priv, &attr);
 
-	phy_loopback(priv->dev->phydev, false, 0);
+	phy_loopback(priv->dev->phydev, false);
 	return ret;
 }
 
@@ -795,14 +795,14 @@ static int stmmac_test_flowctrl(struct stmmac_priv *priv)
 		struct stmmac_channel *ch = &priv->channel[i];
 		u32 tail;
 
-		tail = priv->dma_conf.rx_queue[i].dma_rx_phy +
-			(priv->dma_conf.dma_rx_size * sizeof(struct dma_desc));
+		tail = priv->rx_queue[i].dma_rx_phy +
+			(priv->dma_rx_size * sizeof(struct dma_desc));
 
 		stmmac_set_rx_tail_ptr(priv, priv->ioaddr, tail, i);
 		stmmac_start_rx(priv, priv->ioaddr, i);
 
 		local_bh_disable();
-		napi_schedule(&ch->rx_napi);
+		napi_reschedule(&ch->rx_napi);
 		local_bh_enable();
 	}
 
@@ -1355,7 +1355,7 @@ static int __stmmac_test_l3filt(struct stmmac_priv *priv, u32 dst, u32 src,
 		goto cleanup_rss;
 	}
 
-	dissector->used_keys |= (1ULL << FLOW_DISSECTOR_KEY_IPV4_ADDRS);
+	dissector->used_keys |= (1 << FLOW_DISSECTOR_KEY_IPV4_ADDRS);
 	dissector->offset[FLOW_DISSECTOR_KEY_IPV4_ADDRS] = 0;
 
 	cls = kzalloc(sizeof(*cls), GFP_KERNEL);
@@ -1481,8 +1481,8 @@ static int __stmmac_test_l4filt(struct stmmac_priv *priv, u32 dst, u32 src,
 		goto cleanup_rss;
 	}
 
-	dissector->used_keys |= (1ULL << FLOW_DISSECTOR_KEY_BASIC);
-	dissector->used_keys |= (1ULL << FLOW_DISSECTOR_KEY_PORTS);
+	dissector->used_keys |= (1 << FLOW_DISSECTOR_KEY_BASIC);
+	dissector->used_keys |= (1 << FLOW_DISSECTOR_KEY_PORTS);
 	dissector->offset[FLOW_DISSECTOR_KEY_BASIC] = 0;
 	dissector->offset[FLOW_DISSECTOR_KEY_PORTS] = offsetof(typeof(keys), key);
 
@@ -1684,7 +1684,7 @@ cleanup:
 static int __stmmac_test_jumbo(struct stmmac_priv *priv, u16 queue)
 {
 	struct stmmac_packet_attrs attr = { };
-	int size = priv->dma_conf.dma_buf_sz;
+	int size = priv->dma_buf_sz;
 
 	attr.dst = priv->dev->dev_addr;
 	attr.max_size = size - ETH_FCS_LEN;
@@ -1767,7 +1767,7 @@ static int stmmac_test_tbs(struct stmmac_priv *priv)
 
 	/* Find first TBS enabled Queue, if any */
 	for (i = 0; i < priv->plat->tx_queues_to_use; i++)
-		if (priv->dma_conf.tx_queue[i].tbs & STMMAC_TBS_AVAIL)
+		if (priv->tx_queue[i].tbs & STMMAC_TBS_AVAIL)
 			break;
 
 	if (i >= priv->plat->tx_queues_to_use)
@@ -1780,9 +1780,9 @@ static int stmmac_test_tbs(struct stmmac_priv *priv)
 	if (ret)
 		return ret;
 
-	read_lock_irqsave(&priv->ptp_lock, flags);
+	spin_lock_irqsave(&priv->ptp_lock, flags);
 	stmmac_get_systime(priv, priv->ptpaddr, &curr_time);
-	read_unlock_irqrestore(&priv->ptp_lock, flags);
+	spin_unlock_irqrestore(&priv->ptp_lock, flags);
 
 	if (!curr_time) {
 		ret = -EOPNOTSUPP;
@@ -1802,9 +1802,9 @@ static int stmmac_test_tbs(struct stmmac_priv *priv)
 		goto fail_disable;
 
 	/* Check if expected time has elapsed */
-	read_lock_irqsave(&priv->ptp_lock, flags);
+	spin_lock_irqsave(&priv->ptp_lock, flags);
 	stmmac_get_systime(priv, priv->ptpaddr, &curr_time);
-	read_unlock_irqrestore(&priv->ptp_lock, flags);
+	spin_unlock_irqrestore(&priv->ptp_lock, flags);
 
 	if ((curr_time - start_time) < STMMAC_TBS_LT_OFFSET)
 		ret = -EINVAL;
@@ -1985,7 +1985,7 @@ void stmmac_selftest_run(struct net_device *dev,
 		case STMMAC_LOOPBACK_PHY:
 			ret = -EOPNOTSUPP;
 			if (dev->phydev)
-				ret = phy_loopback(dev->phydev, true, 0);
+				ret = phy_loopback(dev->phydev, true);
 			if (!ret)
 				break;
 			fallthrough;
@@ -2018,7 +2018,7 @@ void stmmac_selftest_run(struct net_device *dev,
 		case STMMAC_LOOPBACK_PHY:
 			ret = -EOPNOTSUPP;
 			if (dev->phydev)
-				ret = phy_loopback(dev->phydev, false, 0);
+				ret = phy_loopback(dev->phydev, false);
 			if (!ret)
 				break;
 			fallthrough;

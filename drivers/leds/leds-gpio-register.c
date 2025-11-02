@@ -10,7 +10,6 @@
 
 /**
  * gpio_led_register_device - register a gpio-led device
- * @id: platform ID
  * @pdata: the platform data used for the new device
  *
  * Makes a copy of pdata and pdata->leds and registers a new leds-gpio device

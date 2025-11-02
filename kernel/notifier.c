@@ -5,34 +5,38 @@
 #include <linux/notifier.h>
 #include <linux/rcupdate.h>
 #include <linux/vmalloc.h>
+#include <linux/reboot.h>
+#include <linux/kernel.h>
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/notifier.h>
+/*
+ *	Notifier list for kernel code which wants to be called
+ *	at shutdown. This is used to stop any idling DMA operations
+ *	and the like.
+ */
+BLOCKING_NOTIFIER_HEAD(reboot_notifier_list);
 
 /*
  *	Notifier chain core routines.  The exported routines below
  *	are layered on top of these, with appropriate locking added.
  */
+#ifdef CONFIG_DEBUG_NOTIFIERS
+void notifier_call_print(struct notifier_block **nl, notifier_fn_t func, int en);
+#endif
 
 static int notifier_chain_register(struct notifier_block **nl,
-				   struct notifier_block *n,
-				   bool unique_priority)
+		struct notifier_block *n)
 {
 	while ((*nl) != NULL) {
 		if (unlikely((*nl) == n)) {
-			WARN(1, "notifier callback %ps already registered",
-			     n->notifier_call);
-			return -EEXIST;
+			WARN(1, "double register detected");
+			return 0;
 		}
 		if (n->priority > (*nl)->priority)
 			break;
-		if (n->priority == (*nl)->priority && unique_priority)
-			return -EBUSY;
 		nl = &((*nl)->next);
 	}
 	n->next = *nl;
 	rcu_assign_pointer(*nl, n);
-	trace_notifier_register((void *)n->notifier_call);
 	return 0;
 }
 
@@ -42,7 +46,6 @@ static int notifier_chain_unregister(struct notifier_block **nl,
 	while ((*nl) != NULL) {
 		if ((*nl) == n) {
 			rcu_assign_pointer(*nl, n->next);
-			trace_notifier_unregister((void *)n->notifier_call);
 			return 0;
 		}
 		nl = &((*nl)->next);
@@ -59,7 +62,7 @@ static int notifier_chain_unregister(struct notifier_block **nl,
  *			value of this parameter is -1.
  *	@nr_calls:	Records the number of notifications sent. Don't care
  *			value of this field is NULL.
- *	Return:		notifier_call_chain returns the value returned by the
+ *	@returns:	notifier_call_chain returns the value returned by the
  *			last notifier function called.
  */
 static int notifier_call_chain(struct notifier_block **nl,
@@ -80,9 +83,13 @@ static int notifier_call_chain(struct notifier_block **nl,
 			nb = next_nb;
 			continue;
 		}
-#endif
-		trace_notifier_run((void *)nb->notifier_call);
+
+		notifier_call_print(nl, nb->notifier_call, 1);
 		ret = nb->notifier_call(nb, val, v);
+		notifier_call_print(nl, nb->notifier_call, 3);
+#else
+		ret = nb->notifier_call(nb, val, v);
+#endif
 
 		if (nr_calls)
 			(*nr_calls)++;
@@ -103,13 +110,13 @@ NOKPROBE_SYMBOL(notifier_call_chain);
  * @val_up:	Value passed unmodified to the notifier function
  * @val_down:	Value passed unmodified to the notifier function when recovering
  *              from an error on @val_up
- * @v:		Pointer passed unmodified to the notifier function
+ * @v		Pointer passed unmodified to the notifier function
  *
  * NOTE:	It is important the @nl chain doesn't change between the two
  *		invocations of notifier_call_chain() such that we visit the
  *		exact same notifier callbacks; this rules out any RCU usage.
  *
- * Return:	the return value of the @val_up call.
+ * Returns:	the return value of the @val_up call.
  */
 static int notifier_call_chain_robust(struct notifier_block **nl,
 				     unsigned long val_up, unsigned long val_down,
@@ -136,7 +143,7 @@ static int notifier_call_chain_robust(struct notifier_block **nl,
  *
  *	Adds a notifier to an atomic notifier chain.
  *
- *	Returns 0 on success, %-EEXIST on error.
+ *	Currently always returns zero.
  */
 int atomic_notifier_chain_register(struct atomic_notifier_head *nh,
 		struct notifier_block *n)
@@ -145,34 +152,11 @@ int atomic_notifier_chain_register(struct atomic_notifier_head *nh,
 	int ret;
 
 	spin_lock_irqsave(&nh->lock, flags);
-	ret = notifier_chain_register(&nh->head, n, false);
+	ret = notifier_chain_register(&nh->head, n);
 	spin_unlock_irqrestore(&nh->lock, flags);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(atomic_notifier_chain_register);
-
-/**
- *	atomic_notifier_chain_register_unique_prio - Add notifier to an atomic notifier chain
- *	@nh: Pointer to head of the atomic notifier chain
- *	@n: New entry in notifier chain
- *
- *	Adds a notifier to an atomic notifier chain if there is no other
- *	notifier registered using the same priority.
- *
- *	Returns 0 on success, %-EEXIST or %-EBUSY on error.
- */
-int atomic_notifier_chain_register_unique_prio(struct atomic_notifier_head *nh,
-					       struct notifier_block *n)
-{
-	unsigned long flags;
-	int ret;
-
-	spin_lock_irqsave(&nh->lock, flags);
-	ret = notifier_chain_register(&nh->head, n, true);
-	spin_unlock_irqrestore(&nh->lock, flags);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(atomic_notifier_chain_register_unique_prio);
 
 /**
  *	atomic_notifier_chain_unregister - Remove notifier from an atomic notifier chain
@@ -196,6 +180,25 @@ int atomic_notifier_chain_unregister(struct atomic_notifier_head *nh,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(atomic_notifier_chain_unregister);
+
+int atomic_notifier_call_chain_robust(struct atomic_notifier_head *nh,
+		unsigned long val_up, unsigned long val_down, void *v)
+{
+	unsigned long flags;
+	int ret;
+
+	/*
+	 * Musn't use RCU; because then the notifier list can
+	 * change between the up and down traversal.
+	 */
+	spin_lock_irqsave(&nh->lock, flags);
+	ret = notifier_call_chain_robust(&nh->head, val_up, val_down, v);
+	spin_unlock_irqrestore(&nh->lock, flags);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(atomic_notifier_call_chain_robust);
+NOKPROBE_SYMBOL(atomic_notifier_call_chain_robust);
 
 /**
  *	atomic_notifier_call_chain - Call functions in an atomic notifier chain
@@ -228,43 +231,10 @@ int atomic_notifier_call_chain(struct atomic_notifier_head *nh,
 EXPORT_SYMBOL_GPL(atomic_notifier_call_chain);
 NOKPROBE_SYMBOL(atomic_notifier_call_chain);
 
-/**
- *	atomic_notifier_call_chain_is_empty - Check whether notifier chain is empty
- *	@nh: Pointer to head of the atomic notifier chain
- *
- *	Checks whether notifier chain is empty.
- *
- *	Returns true is notifier chain is empty, false otherwise.
- */
-bool atomic_notifier_call_chain_is_empty(struct atomic_notifier_head *nh)
-{
-	return !rcu_access_pointer(nh->head);
-}
-
 /*
  *	Blocking notifier chain routines.  All access to the chain is
  *	synchronized by an rwsem.
  */
-
-static int __blocking_notifier_chain_register(struct blocking_notifier_head *nh,
-					      struct notifier_block *n,
-					      bool unique_priority)
-{
-	int ret;
-
-	/*
-	 * This code gets used during boot-up, when task switching is
-	 * not yet working and interrupts must remain disabled.  At
-	 * such times we must not call down_write().
-	 */
-	if (unlikely(system_state == SYSTEM_BOOTING))
-		return notifier_chain_register(&nh->head, n, unique_priority);
-
-	down_write(&nh->rwsem);
-	ret = notifier_chain_register(&nh->head, n, unique_priority);
-	up_write(&nh->rwsem);
-	return ret;
-}
 
 /**
  *	blocking_notifier_chain_register - Add notifier to a blocking notifier chain
@@ -274,31 +244,27 @@ static int __blocking_notifier_chain_register(struct blocking_notifier_head *nh,
  *	Adds a notifier to a blocking notifier chain.
  *	Must be called in process context.
  *
- *	Returns 0 on success, %-EEXIST on error.
+ *	Currently always returns zero.
  */
 int blocking_notifier_chain_register(struct blocking_notifier_head *nh,
 		struct notifier_block *n)
 {
-	return __blocking_notifier_chain_register(nh, n, false);
+	int ret;
+
+	/*
+	 * This code gets used during boot-up, when task switching is
+	 * not yet working and interrupts must remain disabled.  At
+	 * such times we must not call down_write().
+	 */
+	if (unlikely(system_state == SYSTEM_BOOTING))
+		return notifier_chain_register(&nh->head, n);
+
+	down_write(&nh->rwsem);
+	ret = notifier_chain_register(&nh->head, n);
+	up_write(&nh->rwsem);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(blocking_notifier_chain_register);
-
-/**
- *	blocking_notifier_chain_register_unique_prio - Add notifier to a blocking notifier chain
- *	@nh: Pointer to head of the blocking notifier chain
- *	@n: New entry in notifier chain
- *
- *	Adds a notifier to an blocking notifier chain if there is no other
- *	notifier registered using the same priority.
- *
- *	Returns 0 on success, %-EEXIST or %-EBUSY on error.
- */
-int blocking_notifier_chain_register_unique_prio(struct blocking_notifier_head *nh,
-						 struct notifier_block *n)
-{
-	return __blocking_notifier_chain_register(nh, n, true);
-}
-EXPORT_SYMBOL_GPL(blocking_notifier_chain_register_unique_prio);
 
 /**
  *	blocking_notifier_chain_unregister - Remove notifier from a blocking notifier chain
@@ -397,12 +363,12 @@ EXPORT_SYMBOL_GPL(blocking_notifier_call_chain);
  *	Adds a notifier to a raw notifier chain.
  *	All locking must be provided by the caller.
  *
- *	Returns 0 on success, %-EEXIST on error.
+ *	Currently always returns zero.
  */
 int raw_notifier_chain_register(struct raw_notifier_head *nh,
 		struct notifier_block *n)
 {
-	return notifier_chain_register(&nh->head, n, false);
+	return notifier_chain_register(&nh->head, n);
 }
 EXPORT_SYMBOL_GPL(raw_notifier_chain_register);
 
@@ -454,6 +420,7 @@ int raw_notifier_call_chain(struct raw_notifier_head *nh,
 }
 EXPORT_SYMBOL_GPL(raw_notifier_call_chain);
 
+#ifdef CONFIG_SRCU
 /*
  *	SRCU notifier chain routines.    Registration and unregistration
  *	use a mutex, and call_chain is synchronized by SRCU (no locks).
@@ -467,7 +434,7 @@ EXPORT_SYMBOL_GPL(raw_notifier_call_chain);
  *	Adds a notifier to an SRCU notifier chain.
  *	Must be called in process context.
  *
- *	Returns 0 on success, %-EEXIST on error.
+ *	Currently always returns zero.
  */
 int srcu_notifier_chain_register(struct srcu_notifier_head *nh,
 		struct notifier_block *n)
@@ -480,10 +447,10 @@ int srcu_notifier_chain_register(struct srcu_notifier_head *nh,
 	 * such times we must not call mutex_lock().
 	 */
 	if (unlikely(system_state == SYSTEM_BOOTING))
-		return notifier_chain_register(&nh->head, n, false);
+		return notifier_chain_register(&nh->head, n);
 
 	mutex_lock(&nh->mutex);
-	ret = notifier_chain_register(&nh->head, n, false);
+	ret = notifier_chain_register(&nh->head, n);
 	mutex_unlock(&nh->mutex);
 	return ret;
 }
@@ -570,6 +537,8 @@ void srcu_init_notifier_head(struct srcu_notifier_head *nh)
 }
 EXPORT_SYMBOL_GPL(srcu_init_notifier_head);
 
+#endif /* CONFIG_SRCU */
+
 static ATOMIC_NOTIFIER_HEAD(die_chain);
 
 int notrace notify_die(enum die_val val, const char *str,
@@ -600,3 +569,33 @@ int unregister_die_notifier(struct notifier_block *nb)
 	return atomic_notifier_chain_unregister(&die_chain, nb);
 }
 EXPORT_SYMBOL_GPL(unregister_die_notifier);
+
+#ifdef CONFIG_DEBUG_NOTIFIERS
+static struct notifier_block **should_check_nl[] = {
+	(struct notifier_block **)(&panic_notifier_list.head),
+	(struct notifier_block **)(&reboot_notifier_list.head),
+	(struct notifier_block **)(&restart_handler_list.head),
+	(struct notifier_block **)(&die_chain.head),
+#if IS_ENABLED(CONFIG_PM_SLEEP)
+	(struct notifier_block **)(&pm_chain_head.head),
+#endif
+};
+
+void notifier_call_print(struct notifier_block **nl, notifier_fn_t func, int en)
+{
+	char notifier_name[KSYM_NAME_LEN];
+	char notifier_func_name[KSYM_NAME_LEN];
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(should_check_nl); i++) {
+		if (nl == should_check_nl[i]) {
+			sprint_symbol(notifier_name, (unsigned long)nl);
+			sprint_symbol(notifier_func_name, (unsigned long)func);
+
+			pr_info("%s -> %s call %s\n", notifier_name,
+				notifier_func_name, en == 1 ? "+" : "-");
+			break;
+		}
+	}
+}
+#endif

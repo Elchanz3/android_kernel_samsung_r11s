@@ -12,12 +12,14 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/irqchip/irq-msi-lib.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/msi.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
+#include <linux/of_platform.h>
 #include <linux/of_pci.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
@@ -90,7 +92,7 @@ static void mobiveil_pcie_isr(struct irq_desc *desc)
 	u32 msi_data, msi_addr_lo, msi_addr_hi;
 	u32 intr_status, msi_status;
 	unsigned long shifted_status;
-	u32 bit, val, mask;
+	u32 bit, virq, val, mask;
 
 	/*
 	 * The core provides a single interrupt for both INTx/MSI messages.
@@ -112,10 +114,11 @@ static void mobiveil_pcie_isr(struct irq_desc *desc)
 		shifted_status >>= PAB_INTX_START;
 		do {
 			for_each_set_bit(bit, &shifted_status, PCI_NUM_INTX) {
-				int ret;
-				ret = generic_handle_domain_irq(rp->intx_domain,
-								bit + 1);
-				if (ret)
+				virq = irq_find_mapping(rp->intx_domain,
+							bit + 1);
+				if (virq)
+					generic_handle_irq(virq);
+				else
 					dev_err_ratelimited(dev, "unexpected IRQ, INT%d\n",
 							    bit);
 
@@ -152,7 +155,9 @@ static void mobiveil_pcie_isr(struct irq_desc *desc)
 		dev_dbg(dev, "MSI registers, data: %08x, addr: %08x:%08x\n",
 			msi_data, msi_addr_hi, msi_addr_lo);
 
-		generic_handle_domain_irq(msi->dev_domain, msi_data);
+		virq = irq_find_mapping(msi->dev_domain, msi_data);
+		if (virq)
+			generic_handle_irq(virq);
 
 		msi_status = readl_relaxed(pcie->apb_csr_base +
 					   MSI_STATUS_OFFSET);
@@ -293,7 +298,7 @@ int mobiveil_host_init(struct mobiveil_pcie *pcie, bool reinit)
 	/* fixup for PCIe class register */
 	value = mobiveil_csr_readl(pcie, PAB_INTP_AXI_PIO_CLASS);
 	value &= 0xff;
-	value |= PCI_CLASS_BRIDGE_PCI_NORMAL << 8;
+	value |= (PCI_CLASS_BRIDGE_PCI << 16);
 	mobiveil_csr_writel(pcie, value, PAB_INTP_AXI_PIO_CLASS);
 
 	return 0;
@@ -301,11 +306,13 @@ int mobiveil_host_init(struct mobiveil_pcie *pcie, bool reinit)
 
 static void mobiveil_mask_intx_irq(struct irq_data *data)
 {
-	struct mobiveil_pcie *pcie = irq_data_get_irq_chip_data(data);
+	struct irq_desc *desc = irq_to_desc(data->irq);
+	struct mobiveil_pcie *pcie;
 	struct mobiveil_root_port *rp;
 	unsigned long flags;
 	u32 mask, shifted_val;
 
+	pcie = irq_desc_get_chip_data(desc);
 	rp = &pcie->rp;
 	mask = 1 << ((data->hwirq + PAB_INTX_START) - 1);
 	raw_spin_lock_irqsave(&rp->intx_mask_lock, flags);
@@ -317,11 +324,13 @@ static void mobiveil_mask_intx_irq(struct irq_data *data)
 
 static void mobiveil_unmask_intx_irq(struct irq_data *data)
 {
-	struct mobiveil_pcie *pcie = irq_data_get_irq_chip_data(data);
+	struct irq_desc *desc = irq_to_desc(data->irq);
+	struct mobiveil_pcie *pcie;
 	struct mobiveil_root_port *rp;
 	unsigned long flags;
 	u32 shifted_val, mask;
 
+	pcie = irq_desc_get_chip_data(desc);
 	rp = &pcie->rp;
 	mask = 1 << ((data->hwirq + PAB_INTX_START) - 1);
 	raw_spin_lock_irqsave(&rp->intx_mask_lock, flags);
@@ -354,19 +363,16 @@ static const struct irq_domain_ops intx_domain_ops = {
 	.map = mobiveil_pcie_intx_map,
 };
 
-#define MOBIVEIL_MSI_FLAGS_REQUIRED (MSI_FLAG_USE_DEF_DOM_OPS		| \
-				     MSI_FLAG_USE_DEF_CHIP_OPS		| \
-				     MSI_FLAG_NO_AFFINITY)
+static struct irq_chip mobiveil_msi_irq_chip = {
+	.name = "Mobiveil PCIe MSI",
+	.irq_mask = pci_msi_mask_irq,
+	.irq_unmask = pci_msi_unmask_irq,
+};
 
-#define MOBIVEIL_MSI_FLAGS_SUPPORTED (MSI_GENERIC_FLAGS_MASK		| \
-				      MSI_FLAG_PCI_MSIX)
-
-static const struct msi_parent_ops mobiveil_msi_parent_ops = {
-	.required_flags		= MOBIVEIL_MSI_FLAGS_REQUIRED,
-	.supported_flags	= MOBIVEIL_MSI_FLAGS_SUPPORTED,
-	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
-	.prefix			= "Mobiveil-",
-	.init_dev_msi_info	= msi_lib_init_dev_msi_info,
+static struct msi_domain_info mobiveil_msi_domain_info = {
+	.flags	= (MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
+		   MSI_FLAG_PCI_MSIX),
+	.chip	= &mobiveil_msi_irq_chip,
 };
 
 static void mobiveil_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
@@ -382,9 +388,16 @@ static void mobiveil_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 		(int)data->hwirq, msg->address_hi, msg->address_lo);
 }
 
+static int mobiveil_msi_set_affinity(struct irq_data *irq_data,
+				     const struct cpumask *mask, bool force)
+{
+	return -EINVAL;
+}
+
 static struct irq_chip mobiveil_msi_bottom_irq_chip = {
 	.name			= "Mobiveil MSI",
 	.irq_compose_msi_msg	= mobiveil_compose_msi_msg,
+	.irq_set_affinity	= mobiveil_msi_set_affinity,
 };
 
 static int mobiveil_irq_msi_domain_alloc(struct irq_domain *domain,
@@ -439,20 +452,23 @@ static const struct irq_domain_ops msi_domain_ops = {
 static int mobiveil_allocate_msi_domains(struct mobiveil_pcie *pcie)
 {
 	struct device *dev = &pcie->pdev->dev;
+	struct fwnode_handle *fwnode = of_node_to_fwnode(dev->of_node);
 	struct mobiveil_msi *msi = &pcie->rp.msi;
 
 	mutex_init(&msi->lock);
-
-	struct irq_domain_info info = {
-		.fwnode		= dev_fwnode(dev),
-		.ops		= &msi_domain_ops,
-		.host_data	= pcie,
-		.size		= msi->num_of_vectors,
-	};
-
-	msi->dev_domain = msi_create_parent_irq_domain(&info, &mobiveil_msi_parent_ops);
+	msi->dev_domain = irq_domain_add_linear(NULL, msi->num_of_vectors,
+						&msi_domain_ops, pcie);
 	if (!msi->dev_domain) {
+		dev_err(dev, "failed to create IRQ domain\n");
+		return -ENOMEM;
+	}
+
+	msi->msi_domain = pci_msi_create_irq_domain(fwnode,
+						    &mobiveil_msi_domain_info,
+						    msi->dev_domain);
+	if (!msi->msi_domain) {
 		dev_err(dev, "failed to create MSI domain\n");
+		irq_domain_remove(msi->dev_domain);
 		return -ENOMEM;
 	}
 
@@ -462,11 +478,13 @@ static int mobiveil_allocate_msi_domains(struct mobiveil_pcie *pcie)
 static int mobiveil_pcie_init_irq_domain(struct mobiveil_pcie *pcie)
 {
 	struct device *dev = &pcie->pdev->dev;
+	struct device_node *node = dev->of_node;
 	struct mobiveil_root_port *rp = &pcie->rp;
 
 	/* setup INTx */
-	rp->intx_domain = irq_domain_create_linear(dev_fwnode(dev), PCI_NUM_INTX, &intx_domain_ops,
-						   pcie);
+	rp->intx_domain = irq_domain_add_linear(node, PCI_NUM_INTX,
+						&intx_domain_ops, pcie);
+
 	if (!rp->intx_domain) {
 		dev_err(dev, "Failed to get a INTx IRQ domain\n");
 		return -ENOMEM;
@@ -531,7 +549,7 @@ static bool mobiveil_pcie_is_bridge(struct mobiveil_pcie *pcie)
 	u32 header_type;
 
 	header_type = mobiveil_csr_readb(pcie, PCI_HEADER_TYPE);
-	header_type &= PCI_HEADER_TYPE_MASK;
+	header_type &= 0x7f;
 
 	return header_type == PCI_HEADER_TYPE_BRIDGE;
 }

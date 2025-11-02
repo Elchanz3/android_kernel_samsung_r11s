@@ -23,6 +23,8 @@
  *
  */
 
+#include <linux/slab.h>
+
 #include "dm_services.h"
 
 #include "include/logger_interface.h"
@@ -38,9 +40,10 @@
 
 #include "ivsrcid/dcn/irqsrcs_dcn_1_0.h"
 
-static enum dc_irq_source to_dal_irq_source_dcn21(struct irq_service *irq_service,
-						  uint32_t src_id,
-						  uint32_t ext_id)
+enum dc_irq_source to_dal_irq_source_dcn21(
+		struct irq_service *irq_service,
+		uint32_t src_id,
+		uint32_t ext_id)
 {
 	switch (src_id) {
 	case DCN_1_0__SRCID__DC_D1_OTG_VSTARTUP:
@@ -55,20 +58,6 @@ static enum dc_irq_source to_dal_irq_source_dcn21(struct irq_service *irq_servic
 		return DC_IRQ_SOURCE_VBLANK5;
 	case DCN_1_0__SRCID__DC_D6_OTG_VSTARTUP:
 		return DC_IRQ_SOURCE_VBLANK6;
-	case DCN_1_0__SRCID__DMCUB_OUTBOX_LOW_PRIORITY_READY_INT:
-		return DC_IRQ_SOURCE_DMCUB_OUTBOX;
-	case DCN_1_0__SRCID__OTG1_VERTICAL_INTERRUPT0_CONTROL:
-		return DC_IRQ_SOURCE_DC1_VLINE0;
-	case DCN_1_0__SRCID__OTG2_VERTICAL_INTERRUPT0_CONTROL:
-		return DC_IRQ_SOURCE_DC2_VLINE0;
-	case DCN_1_0__SRCID__OTG3_VERTICAL_INTERRUPT0_CONTROL:
-		return DC_IRQ_SOURCE_DC3_VLINE0;
-	case DCN_1_0__SRCID__OTG4_VERTICAL_INTERRUPT0_CONTROL:
-		return DC_IRQ_SOURCE_DC4_VLINE0;
-	case DCN_1_0__SRCID__OTG5_VERTICAL_INTERRUPT0_CONTROL:
-		return DC_IRQ_SOURCE_DC5_VLINE0;
-	case DCN_1_0__SRCID__OTG6_VERTICAL_INTERRUPT0_CONTROL:
-		return DC_IRQ_SOURCE_DC6_VLINE0;
 	case DCN_1_0__SRCID__HUBP0_FLIP_INTERRUPT:
 		return DC_IRQ_SOURCE_PFLIP1;
 	case DCN_1_0__SRCID__HUBP1_FLIP_INTERRUPT:
@@ -132,37 +121,54 @@ static enum dc_irq_source to_dal_irq_source_dcn21(struct irq_service *irq_servic
 	return DC_IRQ_SOURCE_INVALID;
 }
 
-static struct irq_source_info_funcs hpd_irq_info_funcs  = {
+static bool hpd_ack(
+	struct irq_service *irq_service,
+	const struct irq_source_info *info)
+{
+	uint32_t addr = info->status_reg;
+	uint32_t value = dm_read_reg(irq_service->ctx, addr);
+	uint32_t current_status =
+		get_reg_field_value(
+			value,
+			HPD0_DC_HPD_INT_STATUS,
+			DC_HPD_SENSE_DELAYED);
+
+	dal_irq_service_ack_generic(irq_service, info);
+
+	value = dm_read_reg(irq_service->ctx, info->enable_reg);
+
+	set_reg_field_value(
+		value,
+		current_status ? 0 : 1,
+		HPD0_DC_HPD_INT_CONTROL,
+		DC_HPD_INT_POLARITY);
+
+	dm_write_reg(irq_service->ctx, info->enable_reg, value);
+
+	return true;
+}
+
+static const struct irq_source_info_funcs hpd_irq_info_funcs = {
 	.set = NULL,
-	.ack = hpd0_ack
+	.ack = hpd_ack
 };
 
-static struct irq_source_info_funcs hpd_rx_irq_info_funcs = {
+static const struct irq_source_info_funcs hpd_rx_irq_info_funcs = {
 	.set = NULL,
 	.ack = NULL
 };
 
-static struct irq_source_info_funcs pflip_irq_info_funcs = {
+static const struct irq_source_info_funcs pflip_irq_info_funcs = {
 	.set = NULL,
 	.ack = NULL
 };
 
-static struct irq_source_info_funcs vblank_irq_info_funcs = {
+static const struct irq_source_info_funcs vblank_irq_info_funcs = {
 	.set = NULL,
 	.ack = NULL
 };
 
-static struct irq_source_info_funcs vupdate_no_lock_irq_info_funcs = {
-	.set = NULL,
-	.ack = NULL
-};
-
-static struct irq_source_info_funcs dmub_outbox_irq_info_funcs = {
-	.set = NULL,
-	.ack = NULL
-};
-
-static struct irq_source_info_funcs vline0_irq_info_funcs = {
+static const struct irq_source_info_funcs vupdate_no_lock_irq_info_funcs = {
 	.set = NULL,
 	.ack = NULL
 };
@@ -179,9 +185,6 @@ static struct irq_source_info_funcs vline0_irq_info_funcs = {
 	BASE(mm ## block ## id ## _ ## reg_name ## _BASE_IDX) + \
 			mm ## block ## id ## _ ## reg_name
 
-#define SRI_DMUB(reg_name)\
-	BASE(mm ## reg_name ## _BASE_IDX) + \
-			mm ## reg_name
 
 #define IRQ_REG_ENTRY(block, reg_num, reg1, mask1, reg2, mask2)\
 	.enable_reg = SRI(reg1, block, reg_num),\
@@ -197,19 +200,7 @@ static struct irq_source_info_funcs vline0_irq_info_funcs = {
 	.ack_value = \
 		block ## reg_num ## _ ## reg2 ## __ ## mask2 ## _MASK \
 
-#define IRQ_REG_ENTRY_DMUB(reg1, mask1, reg2, mask2)\
-	.enable_reg = SRI_DMUB(reg1),\
-	.enable_mask = \
-		reg1 ## __ ## mask1 ## _MASK,\
-	.enable_value = {\
-		reg1 ## __ ## mask1 ## _MASK,\
-		~reg1 ## __ ## mask1 ## _MASK \
-	},\
-	.ack_reg = SRI_DMUB(reg2),\
-	.ack_mask = \
-		reg2 ## __ ## mask2 ## _MASK,\
-	.ack_value = \
-		reg2 ## __ ## mask2 ## _MASK \
+
 
 #define hpd_int_entry(reg_num)\
 	[DC_IRQ_SOURCE_HPD1 + reg_num] = {\
@@ -255,21 +246,6 @@ static struct irq_source_info_funcs vline0_irq_info_funcs = {
 		.funcs = &vblank_irq_info_funcs\
 	}
 
-#define vline0_int_entry(reg_num)\
-	[DC_IRQ_SOURCE_DC1_VLINE0 + reg_num] = {\
-		IRQ_REG_ENTRY(OTG, reg_num,\
-			OTG_VERTICAL_INTERRUPT0_CONTROL, OTG_VERTICAL_INTERRUPT0_INT_ENABLE,\
-			OTG_VERTICAL_INTERRUPT0_CONTROL, OTG_VERTICAL_INTERRUPT0_CLEAR),\
-		.funcs = &vline0_irq_info_funcs\
-	}
-
-#define dmub_outbox_int_entry()\
-	[DC_IRQ_SOURCE_DMCUB_OUTBOX] = {\
-		IRQ_REG_ENTRY_DMUB(DMCUB_INTERRUPT_ENABLE, DMCUB_OUTBOX1_READY_INT_EN,\
-			DMCUB_INTERRUPT_ACK, DMCUB_OUTBOX1_READY_INT_ACK),\
-		.funcs = &dmub_outbox_irq_info_funcs\
-	}
-
 #define dummy_irq_entry() \
 	{\
 		.funcs = &dummy_irq_info_funcs\
@@ -287,7 +263,7 @@ static struct irq_source_info_funcs vline0_irq_info_funcs = {
 #define dc_underflow_int_entry(reg_num) \
 	[DC_IRQ_SOURCE_DC ## reg_num ## UNDERFLOW] = dummy_irq_entry()
 
-static struct irq_source_info_funcs dummy_irq_info_funcs = {
+static const struct irq_source_info_funcs dummy_irq_info_funcs = {
 	.set = dal_irq_service_dummy_set,
 	.ack = dal_irq_service_dummy_ack
 };
@@ -376,13 +352,6 @@ irq_source_info_dcn21[DAL_IRQ_SOURCES_NUMBER] = {
 	vblank_int_entry(3),
 	vblank_int_entry(4),
 	vblank_int_entry(5),
-	vline0_int_entry(0),
-	vline0_int_entry(1),
-	vline0_int_entry(2),
-	vline0_int_entry(3),
-	vline0_int_entry(4),
-	vline0_int_entry(5),
-	dmub_outbox_int_entry(),
 };
 
 static const struct irq_service_funcs irq_service_funcs_dcn21 = {

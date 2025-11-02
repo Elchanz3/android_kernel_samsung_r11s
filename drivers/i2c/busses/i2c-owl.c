@@ -14,10 +14,8 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
-#include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
+#include <linux/of_device.h>
 
 /* I2C registers */
 #define OWL_I2C_REG_CTL		0x0000
@@ -78,7 +76,6 @@
 #define OWL_I2C_FIFOCTL_TFR	BIT(2)
 
 /* I2Cc_FIFOSTAT Bit Mask */
-#define OWL_I2C_FIFOSTAT_CECB	BIT(0)
 #define OWL_I2C_FIFOSTAT_RNB	BIT(1)
 #define OWL_I2C_FIFOSTAT_RFE	BIT(2)
 #define OWL_I2C_FIFOSTAT_TFF	BIT(5)
@@ -86,8 +83,7 @@
 #define OWL_I2C_FIFOSTAT_RFD	GENMASK(15, 8)
 
 /* I2C bus timeout */
-#define OWL_I2C_TIMEOUT_MS	(4 * 1000)
-#define OWL_I2C_TIMEOUT		msecs_to_jiffies(OWL_I2C_TIMEOUT_MS)
+#define OWL_I2C_TIMEOUT		msecs_to_jiffies(4 * 1000)
 
 #define OWL_I2C_MAX_RETRIES	50
 
@@ -165,21 +161,24 @@ static void owl_i2c_set_freq(struct owl_i2c_dev *i2c_dev)
 	writel(OWL_I2C_DIV_FACTOR(val), i2c_dev->base + OWL_I2C_REG_CLKDIV);
 }
 
-static void owl_i2c_xfer_data(struct owl_i2c_dev *i2c_dev)
+static irqreturn_t owl_i2c_interrupt(int irq, void *_dev)
 {
+	struct owl_i2c_dev *i2c_dev = _dev;
 	struct i2c_msg *msg = i2c_dev->msg;
 	unsigned int stat, fifostat;
 
+	spin_lock(&i2c_dev->lock);
+
 	i2c_dev->err = 0;
 
-	/* Handle NACK from target */
+	/* Handle NACK from slave */
 	fifostat = readl(i2c_dev->base + OWL_I2C_REG_FIFOSTAT);
 	if (fifostat & OWL_I2C_FIFOSTAT_RNB) {
 		i2c_dev->err = -ENXIO;
 		/* Clear NACK error bit by writing "1" */
 		owl_i2c_update_reg(i2c_dev->base + OWL_I2C_REG_FIFOSTAT,
 				   OWL_I2C_FIFOSTAT_RNB, true);
-		return;
+		goto stop;
 	}
 
 	/* Handle bus error */
@@ -189,7 +188,7 @@ static void owl_i2c_xfer_data(struct owl_i2c_dev *i2c_dev)
 		/* Clear BUS error bit by writing "1" */
 		owl_i2c_update_reg(i2c_dev->base + OWL_I2C_REG_STAT,
 				   OWL_I2C_STAT_BEB, true);
-		return;
+		goto stop;
 	}
 
 	/* Handle FIFO read */
@@ -207,16 +206,8 @@ static void owl_i2c_xfer_data(struct owl_i2c_dev *i2c_dev)
 			       i2c_dev->base + OWL_I2C_REG_TXDAT);
 		}
 	}
-}
 
-static irqreturn_t owl_i2c_interrupt(int irq, void *_dev)
-{
-	struct owl_i2c_dev *i2c_dev = _dev;
-
-	spin_lock(&i2c_dev->lock);
-
-	owl_i2c_xfer_data(i2c_dev);
-
+stop:
 	/* Clear pending interrupts */
 	owl_i2c_update_reg(i2c_dev->base + OWL_I2C_REG_STAT,
 			   OWL_I2C_STAT_IRQP, true);
@@ -249,8 +240,8 @@ static int owl_i2c_check_bus_busy(struct i2c_adapter *adap)
 	return 0;
 }
 
-static int owl_i2c_xfer_common(struct i2c_adapter *adap, struct i2c_msg *msgs,
-			       int num, bool atomic)
+static int owl_i2c_master_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
+			       int num)
 {
 	struct owl_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
 	struct i2c_msg *msg;
@@ -294,15 +285,14 @@ static int owl_i2c_xfer_common(struct i2c_adapter *adap, struct i2c_msg *msgs,
 		goto err_exit;
 	}
 
-	if (!atomic)
-		reinit_completion(&i2c_dev->msg_complete);
+	reinit_completion(&i2c_dev->msg_complete);
 
-	/* Enable/disable I2C controller interrupt */
+	/* Enable I2C controller interrupt */
 	owl_i2c_update_reg(i2c_dev->base + OWL_I2C_REG_CTL,
-			   OWL_I2C_CTL_IRQE, !atomic);
+			   OWL_I2C_CTL_IRQE, true);
 
 	/*
-	 * Select: FIFO enable, controller mode, Stop enable, Data count enable,
+	 * Select: FIFO enable, Master mode, Stop enable, Data count enable,
 	 * Send start bit
 	 */
 	i2c_cmd = OWL_I2C_CMD_SECL | OWL_I2C_CMD_MSS | OWL_I2C_CMD_SE |
@@ -314,7 +304,7 @@ static int owl_i2c_xfer_common(struct i2c_adapter *adap, struct i2c_msg *msgs,
 		i2c_cmd |= OWL_I2C_CMD_AS(msgs[0].len + 1) |
 			   OWL_I2C_CMD_SAS(1) | OWL_I2C_CMD_RBE;
 
-		/* Write target address */
+		/* Write slave address */
 		addr = i2c_8bit_addr_from_msg(&msgs[0]);
 		writel(addr, i2c_dev->base + OWL_I2C_REG_TXDAT);
 
@@ -367,32 +357,19 @@ static int owl_i2c_xfer_common(struct i2c_adapter *adap, struct i2c_msg *msgs,
 
 	spin_unlock_irqrestore(&i2c_dev->lock, flags);
 
-	if (atomic) {
-		/* Wait for Command Execute Completed or NACK Error bits */
-		ret = readl_poll_timeout_atomic(i2c_dev->base + OWL_I2C_REG_FIFOSTAT,
-						val, val & (OWL_I2C_FIFOSTAT_CECB |
-							    OWL_I2C_FIFOSTAT_RNB),
-						10, OWL_I2C_TIMEOUT_MS * 1000);
-	} else {
-		time_left = wait_for_completion_timeout(&i2c_dev->msg_complete,
-							adap->timeout);
-		if (!time_left)
-			ret = -ETIMEDOUT;
-	}
+	time_left = wait_for_completion_timeout(&i2c_dev->msg_complete,
+						adap->timeout);
 
 	spin_lock_irqsave(&i2c_dev->lock, flags);
-
-	if (ret) {
+	if (time_left == 0) {
 		dev_err(&adap->dev, "Transaction timed out\n");
 		/* Send stop condition and release the bus */
 		owl_i2c_update_reg(i2c_dev->base + OWL_I2C_REG_CTL,
 				   OWL_I2C_CTL_GBCC_STOP | OWL_I2C_CTL_RB,
 				   true);
+		ret = -ETIMEDOUT;
 		goto err_exit;
 	}
-
-	if (atomic)
-		owl_i2c_xfer_data(i2c_dev);
 
 	ret = i2c_dev->err < 0 ? i2c_dev->err : num;
 
@@ -407,22 +384,9 @@ unlocked_err_exit:
 	return ret;
 }
 
-static int owl_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
-			int num)
-{
-	return owl_i2c_xfer_common(adap, msgs, num, false);
-}
-
-static int owl_i2c_xfer_atomic(struct i2c_adapter *adap,
-			       struct i2c_msg *msgs, int num)
-{
-	return owl_i2c_xfer_common(adap, msgs, num, true);
-}
-
 static const struct i2c_algorithm owl_i2c_algorithm = {
-	.xfer = owl_i2c_xfer,
-	.xfer_atomic = owl_i2c_xfer_atomic,
-	.functionality = owl_i2c_func,
+	.master_xfer    = owl_i2c_master_xfer,
+	.functionality  = owl_i2c_func,
 };
 
 static const struct i2c_adapter_quirks owl_i2c_quirks = {
@@ -462,16 +426,21 @@ static int owl_i2c_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	i2c_dev->clk = devm_clk_get_enabled(dev, NULL);
+	i2c_dev->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(i2c_dev->clk)) {
-		dev_err(dev, "failed to enable clock\n");
+		dev_err(dev, "failed to get clock\n");
 		return PTR_ERR(i2c_dev->clk);
 	}
+
+	ret = clk_prepare_enable(i2c_dev->clk);
+	if (ret)
+		return ret;
 
 	i2c_dev->clk_rate = clk_get_rate(i2c_dev->clk);
 	if (!i2c_dev->clk_rate) {
 		dev_err(dev, "input clock rate should not be zero\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto disable_clk;
 	}
 
 	init_completion(&i2c_dev->msg_complete);
@@ -492,14 +461,18 @@ static int owl_i2c_probe(struct platform_device *pdev)
 			       i2c_dev);
 	if (ret) {
 		dev_err(dev, "failed to request irq %d\n", irq);
-		return ret;
+		goto disable_clk;
 	}
 
 	return i2c_add_adapter(&i2c_dev->adap);
+
+disable_clk:
+	clk_disable_unprepare(i2c_dev->clk);
+
+	return ret;
 }
 
 static const struct of_device_id owl_i2c_of_match[] = {
-	{ .compatible = "actions,s500-i2c" },
 	{ .compatible = "actions,s700-i2c" },
 	{ .compatible = "actions,s900-i2c" },
 	{ /* sentinel */ }
@@ -510,8 +483,7 @@ static struct platform_driver owl_i2c_driver = {
 	.probe		= owl_i2c_probe,
 	.driver		= {
 		.name	= "owl-i2c",
-		.of_match_table = owl_i2c_of_match,
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+		.of_match_table = of_match_ptr(owl_i2c_of_match),
 	},
 };
 module_platform_driver(owl_i2c_driver);

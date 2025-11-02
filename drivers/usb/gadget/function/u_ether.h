@@ -16,7 +16,7 @@
 #include <linux/usb/cdc.h>
 #include <linux/netdevice.h>
 
-#define QMULT_DEFAULT 5
+#define QMULT_DEFAULT 10
 
 /*
  * dev_addr: initial value
@@ -69,6 +69,9 @@ struct gether {
 	bool				is_fixed;
 	u32				fixed_out_len;
 	u32				fixed_in_len;
+	u32				ul_max_pkts_per_xfer;
+	u32				dl_max_pkts_per_xfer;
+	bool				multi_pkt_xfer;
 	bool				supports_multi_frame;
 	struct sk_buff			*(*wrap)(struct gether *port,
 						struct sk_buff *skb);
@@ -79,7 +82,6 @@ struct gether {
 	/* called on network open/close */
 	void				(*open)(struct gether *);
 	void				(*close)(struct gether *);
-	bool				is_suspend;
 };
 
 #define	DEFAULT_FILTER	(USB_CDC_PACKET_TYPE_BROADCAST \
@@ -259,9 +261,6 @@ int gether_set_ifname(struct net_device *net, const char *name, int len);
 
 void gether_cleanup(struct eth_dev *dev);
 
-void gether_suspend(struct gether *link);
-void gether_resume(struct gether *link);
-
 /* connect/disconnect is handled by individual functions */
 struct net_device *gether_connect(struct gether *);
 void gether_disconnect(struct gether *);
@@ -277,19 +276,6 @@ static inline bool can_support_ecm(struct usb_gadget *gadget)
 	 * your controller.  Add it above if it can't handle CDC.
 	 */
 	return true;
-}
-
-/* peak (theoretical) bulk transfer rate in bits-per-second */
-static inline unsigned int gether_bitrate(struct usb_gadget *g)
-{
-	if (g->speed >= USB_SPEED_SUPER_PLUS)
-		return 4250000000U;
-	if (g->speed == USB_SPEED_SUPER)
-		return 3750000000U;
-	else if (g->speed == USB_SPEED_HIGH)
-		return 13 * 512 * 8 * 1000 * 8;
-	else
-		return 19 * 64 * 1 * 1000 * 8;
 }
 
 #endif /* __U_ETHER_H */

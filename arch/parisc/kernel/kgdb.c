@@ -3,7 +3,6 @@
  * PA-RISC KGDB support
  *
  * Copyright (c) 2019 Sven Schnelle <svens@stackframe.org>
- * Copyright (c) 2022 Helge Deller <deller@gmx.de>
  *
  */
 
@@ -16,7 +15,7 @@
 #include <asm/ptrace.h>
 #include <asm/traps.h>
 #include <asm/processor.h>
-#include <asm/text-patching.h>
+#include <asm/patch.h>
 #include <asm/cacheflush.h>
 
 const struct kgdb_arch arch_kgdb_ops = {

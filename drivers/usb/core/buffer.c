@@ -34,13 +34,13 @@ void __init usb_init_pool_max(void)
 {
 	/*
 	 * The pool_max values must never be smaller than
-	 * ARCH_DMA_MINALIGN.
+	 * ARCH_KMALLOC_MINALIGN.
 	 */
-	if (ARCH_DMA_MINALIGN <= 32)
+	if (ARCH_KMALLOC_MINALIGN <= 32)
 		;			/* Original value is okay */
-	else if (ARCH_DMA_MINALIGN <= 64)
+	else if (ARCH_KMALLOC_MINALIGN <= 64)
 		pool_max[0] = 64;
-	else if (ARCH_DMA_MINALIGN <= 128)
+	else if (ARCH_KMALLOC_MINALIGN <= 128)
 		pool_max[0] = 0;	/* Don't use this pool */
 	else
 		BUILD_BUG();		/* We don't allow this */
@@ -51,8 +51,7 @@ void __init usb_init_pool_max(void)
 /**
  * hcd_buffer_create - initialize buffer pools
  * @hcd: the bus whose buffer pools are to be initialized
- *
- * Context: task context, might sleep
+ * Context: !in_interrupt()
  *
  * Call this as part of initializing a host controller that uses the dma
  * memory allocators.  It initializes some pools of dma-coherent memory that
@@ -89,8 +88,7 @@ int hcd_buffer_create(struct usb_hcd *hcd)
 /**
  * hcd_buffer_destroy - deallocate buffer pools
  * @hcd: the bus whose buffer pools are to be destroyed
- *
- * Context: task context, might sleep
+ * Context: !in_interrupt()
  *
  * This frees the buffer pools created by hcd_buffer_create().
  */

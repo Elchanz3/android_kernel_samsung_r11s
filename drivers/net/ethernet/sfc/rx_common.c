@@ -11,7 +11,6 @@
 #include "net_driver.h"
 #include <linux/module.h>
 #include <linux/iommu.h>
-#include <net/rps.h>
 #include "efx.h"
 #include "nic.h"
 #include "rx_common.h"
@@ -23,6 +22,13 @@ static unsigned int rx_refill_threshold;
 module_param(rx_refill_threshold, uint, 0444);
 MODULE_PARM_DESC(rx_refill_threshold,
 		 "RX descriptor ring refill threshold (%)");
+
+/* Number of RX buffers to recycle pages for.  When creating the RX page recycle
+ * ring, this number is divided by the number of buffers per page to calculate
+ * the number of pages to store in the RX page recycle ring.
+ */
+#define EFX_RECYCLE_RING_SIZE_IOMMU 4096
+#define EFX_RECYCLE_RING_SIZE_NOIOMMU (2 * EFX_RX_PREFERRED_BATCH)
 
 /* RX maximum head room required.
  *
@@ -135,7 +141,16 @@ static void efx_init_rx_recycle_ring(struct efx_rx_queue *rx_queue)
 	unsigned int bufs_in_recycle_ring, page_ring_size;
 	struct efx_nic *efx = rx_queue->efx;
 
-	bufs_in_recycle_ring = efx_rx_recycle_ring_size(efx);
+	/* Set the RX recycle ring size */
+#ifdef CONFIG_PPC64
+	bufs_in_recycle_ring = EFX_RECYCLE_RING_SIZE_IOMMU;
+#else
+	if (iommu_present(&pci_bus_type))
+		bufs_in_recycle_ring = EFX_RECYCLE_RING_SIZE_IOMMU;
+	else
+		bufs_in_recycle_ring = EFX_RECYCLE_RING_SIZE_NOIOMMU;
+#endif /* CONFIG_PPC64 */
+
 	page_ring_size = roundup_pow_of_two(bufs_in_recycle_ring /
 					    efx->rx_bufs_per_page);
 	rx_queue->page_ring = kcalloc(page_ring_size,
@@ -230,7 +245,6 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	/* Initialise ptr fields */
 	rx_queue->added_count = 0;
 	rx_queue->notified_count = 0;
-	rx_queue->granted_count = 0;
 	rx_queue->removed_count = 0;
 	rx_queue->min_fill = -1U;
 	efx_init_rx_recycle_ring(rx_queue);
@@ -240,9 +254,6 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	rx_queue->page_recycle_count = 0;
 	rx_queue->page_recycle_failed = 0;
 	rx_queue->page_recycle_full = 0;
-
-	rx_queue->old_rx_packets = rx_queue->rx_packets;
-	rx_queue->old_rx_bytes = rx_queue->rx_bytes;
 
 	/* Initialise limit fields */
 	max_fill = efx->rxq_entries - EFX_RXD_HEAD_ROOM;
@@ -262,13 +273,15 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 
 	/* Initialise XDP queue information */
 	rc = xdp_rxq_info_reg(&rx_queue->xdp_rxq_info, efx->net_dev,
-			      rx_queue->core_index, 0);
+			      rx_queue->core_index);
 
 	if (rc) {
 		netif_err(efx, rx_err, efx->net_dev,
 			  "Failure to initialise XDP queue information rc=%d\n",
 			  rc);
 		efx->xdp_rxq_info_failed = true;
+	} else {
+		rx_queue->xdp_rxq_info_valid = true;
 	}
 
 	/* Set up RX descriptor ring */
@@ -283,9 +296,7 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 	netif_dbg(rx_queue->efx, drv, rx_queue->efx->net_dev,
 		  "shutting down RX queue %d\n", efx_rx_queue_index(rx_queue));
 
-	timer_delete_sync(&rx_queue->slow_fill);
-	if (rx_queue->grant_credits)
-		flush_work(&rx_queue->grant_work);
+	del_timer_sync(&rx_queue->slow_fill);
 
 	/* Release RX buffers from the current read ptr to the write ptr */
 	if (rx_queue->buffer) {
@@ -300,8 +311,10 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 
 	efx_fini_rx_recycle_ring(rx_queue);
 
-	if (xdp_rxq_info_is_reg(&rx_queue->xdp_rxq_info))
+	if (rx_queue->xdp_rxq_info_valid)
 		xdp_rxq_info_unreg(&rx_queue->xdp_rxq_info);
+
+	rx_queue->xdp_rxq_info_valid = false;
 }
 
 void efx_remove_rx_queue(struct efx_rx_queue *rx_queue)
@@ -348,8 +361,7 @@ void efx_free_rx_buffers(struct efx_rx_queue *rx_queue,
 
 void efx_rx_slow_fill(struct timer_list *t)
 {
-	struct efx_rx_queue *rx_queue = timer_container_of(rx_queue, t,
-							   slow_fill);
+	struct efx_rx_queue *rx_queue = from_timer(rx_queue, t, slow_fill);
 
 	/* Post an event to cause NAPI to run and refill the queue */
 	efx_nic_generate_fill_event(rx_queue);
@@ -557,25 +569,69 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 	napi_gro_frags(napi);
 }
 
-struct efx_rss_context_priv *efx_find_rss_context_entry(struct efx_nic *efx,
-							u32 id)
+/* RSS contexts.  We're using linked lists and crappy O(n) algorithms, because
+ * (a) this is an infrequent control-plane operation and (b) n is small (max 64)
+ */
+struct efx_rss_context *efx_alloc_rss_context_entry(struct efx_nic *efx)
 {
-	struct ethtool_rxfh_context *ctx;
+	struct list_head *head = &efx->rss_context.list;
+	struct efx_rss_context *ctx, *new;
+	u32 id = 1; /* Don't use zero, that refers to the master RSS context */
 
-	WARN_ON(!mutex_is_locked(&efx->net_dev->ethtool->rss_lock));
+	WARN_ON(!mutex_is_locked(&efx->rss_lock));
 
-	ctx = xa_load(&efx->net_dev->ethtool->rss_ctx, id);
-	if (!ctx)
+	/* Search for first gap in the numbering */
+	list_for_each_entry(ctx, head, list) {
+		if (ctx->user_id != id)
+			break;
+		id++;
+		/* Check for wrap.  If this happens, we have nearly 2^32
+		 * allocated RSS contexts, which seems unlikely.
+		 */
+		if (WARN_ON_ONCE(!id))
+			return NULL;
+	}
+
+	/* Create the new entry */
+	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
 		return NULL;
-	return ethtool_rxfh_context_priv(ctx);
+	new->context_id = EFX_MCDI_RSS_CONTEXT_INVALID;
+	new->rx_hash_udp_4tuple = false;
+
+	/* Insert the new entry into the gap */
+	new->user_id = id;
+	list_add_tail(&new->list, &ctx->list);
+	return new;
 }
 
-void efx_set_default_rx_indir_table(struct efx_nic *efx, u32 *indir)
+struct efx_rss_context *efx_find_rss_context_entry(struct efx_nic *efx, u32 id)
+{
+	struct list_head *head = &efx->rss_context.list;
+	struct efx_rss_context *ctx;
+
+	WARN_ON(!mutex_is_locked(&efx->rss_lock));
+
+	list_for_each_entry(ctx, head, list)
+		if (ctx->user_id == id)
+			return ctx;
+	return NULL;
+}
+
+void efx_free_rss_context_entry(struct efx_rss_context *ctx)
+{
+	list_del(&ctx->list);
+	kfree(ctx);
+}
+
+void efx_set_default_rx_indir_table(struct efx_nic *efx,
+				    struct efx_rss_context *ctx)
 {
 	size_t i;
 
-	for (i = 0; i < ARRAY_SIZE(efx->rss_context.rx_indir_table); i++)
-		indir[i] = ethtool_rxfh_indir_default(i, efx->rss_spread);
+	for (i = 0; i < ARRAY_SIZE(ctx->rx_indir_table); i++)
+		ctx->rx_indir_table[i] =
+			ethtool_rxfh_indir_default(i, efx->rss_spread);
 }
 
 /**
@@ -753,6 +809,7 @@ int efx_probe_filters(struct efx_nic *efx)
 	int rc;
 
 	mutex_lock(&efx->mac_lock);
+	down_write(&efx->filter_sem);
 	rc = efx->type->filter_table_probe(efx);
 	if (rc)
 		goto out_unlock;
@@ -791,6 +848,7 @@ int efx_probe_filters(struct efx_nic *efx)
 	}
 #endif
 out_unlock:
+	up_write(&efx->filter_sem);
 	mutex_unlock(&efx->mac_lock);
 	return rc;
 }
@@ -806,7 +864,9 @@ void efx_remove_filters(struct efx_nic *efx)
 		channel->rps_flow_id = NULL;
 	}
 #endif
+	down_write(&efx->filter_sem);
 	efx->type->filter_table_remove(efx);
+	up_write(&efx->filter_sem);
 }
 
 #ifdef CONFIG_RFS_ACCEL
@@ -815,7 +875,7 @@ static void efx_filter_rfs_work(struct work_struct *data)
 {
 	struct efx_async_filter_insertion *req = container_of(data, struct efx_async_filter_insertion,
 							      work);
-	struct efx_nic *efx = efx_netdev_priv(req->net_dev);
+	struct efx_nic *efx = netdev_priv(req->net_dev);
 	struct efx_channel *channel = efx_get_channel(efx, req->rxq_index);
 	int slot_idx = req - efx->rps_slot;
 	struct efx_arfs_rule *rule;
@@ -894,13 +954,13 @@ static void efx_filter_rfs_work(struct work_struct *data)
 
 	/* Release references */
 	clear_bit(slot_idx, &efx->rps_slot_map);
-	netdev_put(req->net_dev, &req->net_dev_tracker);
+	dev_put(req->net_dev);
 }
 
 int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 		   u16 rxq_index, u32 flow_id)
 {
-	struct efx_nic *efx = efx_netdev_priv(net_dev);
+	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_async_filter_insertion *req;
 	struct efx_arfs_rule *rule;
 	struct flow_keys fk;
@@ -986,8 +1046,7 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	}
 
 	/* Queue the request */
-	req->net_dev = net_dev;
-	netdev_hold(req->net_dev, &req->net_dev_tracker, GFP_ATOMIC);
+	dev_hold(req->net_dev = net_dev);
 	INIT_WORK(&req->work, efx_filter_rfs_work);
 	req->rxq_index = rxq_index;
 	req->flow_id = flow_id;

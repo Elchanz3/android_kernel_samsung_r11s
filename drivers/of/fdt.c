@@ -8,7 +8,6 @@
 
 #define pr_fmt(fmt)	"OF: fdt: " fmt
 
-#include <linux/crash_dump.h>
 #include <linux/crc32.h>
 #include <linux/kernel.h>
 #include <linux/initrd.h>
@@ -16,6 +15,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
 #include <linux/errno.h>
@@ -25,19 +25,11 @@
 #include <linux/serial_core.h>
 #include <linux/sysfs.h>
 #include <linux/random.h>
-#include <linux/kexec_handover.h>
 
 #include <asm/setup.h>  /* for COMMAND_LINE_SIZE */
 #include <asm/page.h>
 
 #include "of_private.h"
-
-/*
- * __dtb_empty_root_begin[] and __dtb_empty_root_end[] magically created by
- * cmd_wrap_S_dtb in scripts/Makefile.dtbs
- */
-extern uint8_t __dtb_empty_root_begin[];
-extern uint8_t __dtb_empty_root_end[];
 
 /*
  * of_fdt_limit_memory - limit the number of regions in the /memory node
@@ -52,7 +44,28 @@ void __init of_fdt_limit_memory(int limit)
 	int memory;
 	int len;
 	const void *val;
-	int cell_size = sizeof(uint32_t)*(dt_root_addr_cells + dt_root_size_cells);
+	int nr_address_cells = OF_ROOT_NODE_ADDR_CELLS_DEFAULT;
+	int nr_size_cells = OF_ROOT_NODE_SIZE_CELLS_DEFAULT;
+	const __be32 *addr_prop;
+	const __be32 *size_prop;
+	int root_offset;
+	int cell_size;
+
+	root_offset = fdt_path_offset(initial_boot_params, "/");
+	if (root_offset < 0)
+		return;
+
+	addr_prop = fdt_getprop(initial_boot_params, root_offset,
+				"#address-cells", NULL);
+	if (addr_prop)
+		nr_address_cells = fdt32_to_cpu(*addr_prop);
+
+	size_prop = fdt_getprop(initial_boot_params, root_offset,
+				"#size-cells", NULL);
+	if (size_prop)
+		nr_size_cells = fdt32_to_cpu(*size_prop);
+
+	cell_size = sizeof(uint32_t)*(nr_address_cells + nr_size_cells);
 
 	memory = fdt_path_offset(initial_boot_params, "/memory");
 	if (memory > 0) {
@@ -66,7 +79,7 @@ void __init of_fdt_limit_memory(int limit)
 	}
 }
 
-bool of_fdt_device_is_available(const void *blob, unsigned long node)
+static bool of_fdt_device_is_available(const void *blob, unsigned long node)
 {
 	const char *status = fdt_getprop(blob, node, "status", NULL);
 
@@ -180,15 +193,19 @@ static void populate_properties(const void *blob,
 			pp->length = len;
 			pp->value  = pp + 1;
 			*pprev     = pp;
+			pprev      = &pp->next;
 			memcpy(pp->value, ps, len - 1);
 			((char *)pp->value)[len - 1] = 0;
 			pr_debug("fixed up name for %s -> %s\n",
 				 nodename, (char *)pp->value);
 		}
 	}
+
+	if (!dryrun)
+		*pprev = NULL;
 }
 
-static int populate_node(const void *blob,
+static bool populate_node(const void *blob,
 			  int offset,
 			  void **mem,
 			  struct device_node *dad,
@@ -197,24 +214,24 @@ static int populate_node(const void *blob,
 {
 	struct device_node *np;
 	const char *pathp;
-	int len;
+	unsigned int l, allocl;
 
-	pathp = fdt_get_name(blob, offset, &len);
+	pathp = fdt_get_name(blob, offset, &l);
 	if (!pathp) {
 		*pnp = NULL;
-		return len;
+		return false;
 	}
 
-	len++;
+	allocl = ++l;
 
-	np = unflatten_dt_alloc(mem, sizeof(struct device_node) + len,
+	np = unflatten_dt_alloc(mem, sizeof(struct device_node) + allocl,
 				__alignof__(struct device_node));
 	if (!dryrun) {
 		char *fn;
 		of_node_init(np);
 		np->full_name = fn = ((char *)np) + sizeof(*np);
 
-		memcpy(fn, pathp, len);
+		memcpy(fn, pathp, l);
 
 		if (dad != NULL) {
 			np->parent = dad;
@@ -231,7 +248,7 @@ static int populate_node(const void *blob,
 	}
 
 	*pnp = np;
-	return 0;
+	return true;
 }
 
 static void reverse_nodes(struct device_node *parent)
@@ -278,7 +295,6 @@ static int unflatten_dt_nodes(const void *blob,
 	struct device_node *nps[FDT_MAX_DEPTH];
 	void *base = mem;
 	bool dryrun = !base;
-	int ret;
 
 	if (nodepp)
 		*nodepp = NULL;
@@ -306,10 +322,9 @@ static int unflatten_dt_nodes(const void *blob,
 		    !of_fdt_device_is_available(blob, offset))
 			continue;
 
-		ret = populate_node(blob, offset, &mem, nps[depth],
-				   &nps[depth+1], dryrun);
-		if (ret < 0)
-			return ret;
+		if (!populate_node(blob, offset, &mem, nps[depth],
+				   &nps[depth+1], dryrun))
+			return mem - base;
 
 		if (!dryrun && nodepp && !*nodepp)
 			*nodepp = nps[depth+1];
@@ -356,10 +371,6 @@ void *__unflatten_device_tree(const void *blob,
 {
 	int size;
 	void *mem;
-	int ret;
-
-	if (mynodes)
-		*mynodes = NULL;
 
 	pr_debug(" -> unflatten_device_tree()\n");
 
@@ -380,7 +391,7 @@ void *__unflatten_device_tree(const void *blob,
 
 	/* First pass, scan for size */
 	size = unflatten_dt_nodes(blob, NULL, dad, NULL);
-	if (size <= 0)
+	if (size < 0)
 		return NULL;
 
 	size = ALIGN(size, 4);
@@ -398,16 +409,12 @@ void *__unflatten_device_tree(const void *blob,
 	pr_debug("  unflattening %p...\n", mem);
 
 	/* Second pass, do actual unflattening */
-	ret = unflatten_dt_nodes(blob, mem, dad, mynodes);
-
+	unflatten_dt_nodes(blob, mem, dad, mynodes);
 	if (be32_to_cpup(mem + size) != 0xdeadbeef)
 		pr_warn("End of tree marker overwritten: %08x\n",
 			be32_to_cpup(mem + size));
 
-	if (ret <= 0)
-		return NULL;
-
-	if (detached && mynodes && *mynodes) {
+	if (detached && mynodes) {
 		of_node_set_flag(*mynodes, OF_DETACHED);
 		pr_debug("unflattened tree is detached\n");
 	}
@@ -457,34 +464,115 @@ int __initdata dt_root_addr_cells;
 int __initdata dt_root_size_cells;
 
 void *initial_boot_params __ro_after_init;
-phys_addr_t initial_boot_params_pa __ro_after_init;
 
 #ifdef CONFIG_OF_EARLY_FLATTREE
 
 static u32 of_fdt_crc32;
 
-/*
- * fdt_reserve_elfcorehdr() - reserves memory for elf core header
- *
- * This function reserves the memory occupied by an elf core header
- * described in the device tree. This region contains all the
- * information about primary kernel's core image and is used by a dump
- * capture kernel to access the system memory on primary kernel.
+/**
+ * __reserved_mem_reserve_reg() - reserve all memory described in 'reg' property
  */
-static void __init fdt_reserve_elfcorehdr(void)
+static int __init __reserved_mem_reserve_reg(unsigned long node,
+					     const char *uname)
 {
-	if (!IS_ENABLED(CONFIG_CRASH_DUMP) || !elfcorehdr_size)
-		return;
+	int t_len = (dt_root_addr_cells + dt_root_size_cells) * sizeof(__be32);
+	phys_addr_t base, size;
+	int len;
+	const __be32 *prop;
+	int first = 1;
+	bool nomap;
 
-	if (memblock_is_region_reserved(elfcorehdr_addr, elfcorehdr_size)) {
-		pr_warn("elfcorehdr is overlapped\n");
-		return;
+	prop = of_get_flat_dt_prop(node, "reg", &len);
+	if (!prop)
+		return -ENOENT;
+
+	if (len && len % t_len != 0) {
+		pr_err("Reserved memory: invalid reg property in '%s', skipping node.\n",
+		       uname);
+		return -EINVAL;
 	}
 
-	memblock_reserve(elfcorehdr_addr, elfcorehdr_size);
+	nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
 
-	pr_info("Reserving %llu KiB of memory at 0x%llx for elfcorehdr\n",
-		elfcorehdr_size >> 10, elfcorehdr_addr);
+	while (len >= t_len) {
+		base = dt_mem_next_cell(dt_root_addr_cells, &prop);
+		size = dt_mem_next_cell(dt_root_size_cells, &prop);
+
+		if (size &&
+		    early_init_dt_reserve_memory_arch(base, size, nomap) == 0)
+			pr_debug("Reserved memory: reserved region for node '%s': base %pa, size %lu MiB\n",
+				uname, &base, (unsigned long)(size / SZ_1M));
+		else
+			pr_info("Reserved memory: failed to reserve memory for node '%s': base %pa, size %lu MiB\n",
+				uname, &base, (unsigned long)(size / SZ_1M));
+
+		len -= t_len;
+		if (first) {
+			fdt_reserved_mem_save_node(node, uname, base, size);
+			first = 0;
+		}
+	}
+	return 0;
+}
+
+/**
+ * __reserved_mem_check_root() - check if #size-cells, #address-cells provided
+ * in /reserved-memory matches the values supported by the current implementation,
+ * also check if ranges property has been provided
+ */
+static int __init __reserved_mem_check_root(unsigned long node)
+{
+	const __be32 *prop;
+
+	prop = of_get_flat_dt_prop(node, "#size-cells", NULL);
+	if (!prop || be32_to_cpup(prop) != dt_root_size_cells)
+		return -EINVAL;
+
+	prop = of_get_flat_dt_prop(node, "#address-cells", NULL);
+	if (!prop || be32_to_cpup(prop) != dt_root_addr_cells)
+		return -EINVAL;
+
+	prop = of_get_flat_dt_prop(node, "ranges", NULL);
+	if (!prop)
+		return -EINVAL;
+	return 0;
+}
+
+/**
+ * fdt_scan_reserved_mem() - scan a single FDT node for reserved memory
+ */
+static int __init __fdt_scan_reserved_mem(unsigned long node, const char *uname,
+					  int depth, void *data)
+{
+	static int found;
+	int err;
+
+	if (!found && depth == 1 && strcmp(uname, "reserved-memory") == 0) {
+		if (__reserved_mem_check_root(node) != 0) {
+			pr_err("Reserved memory: unsupported node format, ignoring\n");
+			/* break scan */
+			return 1;
+		}
+		found = 1;
+		/* scan next node */
+		return 0;
+	} else if (!found) {
+		/* scan next node */
+		return 0;
+	} else if (found && depth < 2) {
+		/* scanning of /reserved-memory has been finished */
+		return 1;
+	}
+
+	if (!of_fdt_device_is_available(initial_boot_params, node))
+		return 0;
+
+	err = __reserved_mem_reserve_reg(node, uname);
+	if (err == -ENOENT && of_get_flat_dt_prop(node, "size", NULL))
+		fdt_reserved_mem_save_node(node, uname, 0, 0);
+
+	/* scan next node */
+	return 0;
 }
 
 /**
@@ -497,26 +585,24 @@ static void __init fdt_reserve_elfcorehdr(void)
 void __init early_init_fdt_scan_reserved_mem(void)
 {
 	int n;
-	int res;
 	u64 base, size;
 
 	if (!initial_boot_params)
 		return;
 
-	fdt_scan_reserved_mem();
-	fdt_reserve_elfcorehdr();
-
+	memblock_memsize_disable_tracking();
 	/* Process header /memreserve/ fields */
 	for (n = 0; ; n++) {
-		res = fdt_get_mem_rsv(initial_boot_params, n, &base, &size);
-		if (res) {
-			pr_err("Invalid memory reservation block index %d\n", n);
-			break;
-		}
+		fdt_get_mem_rsv(initial_boot_params, n, &base, &size);
 		if (!size)
 			break;
-		memblock_reserve(base, size);
+		early_init_dt_reserve_memory_arch(base, size, false);
+		memblock_memsize_record(NULL, base, size, 0, 0);
 	}
+
+	of_scan_flat_dt(__fdt_scan_reserved_mem, NULL);
+	fdt_init_reserved_mem();
+	memblock_memsize_enable_tracking();
 }
 
 /**
@@ -528,8 +614,9 @@ void __init early_init_fdt_reserve_self(void)
 		return;
 
 	/* Reserve the dtb region */
-	memblock_reserve(__pa(initial_boot_params),
-			 fdt_totalsize(initial_boot_params));
+	early_init_dt_reserve_memory_arch(__pa(initial_boot_params),
+					  fdt_totalsize(initial_boot_params),
+					  false);
 }
 
 /**
@@ -565,7 +652,6 @@ int __init of_scan_flat_dt(int (*it)(unsigned long node,
 
 /**
  * of_scan_flat_dt_subnodes - scan sub-nodes of a node call callback on each.
- * @parent: parent node
  * @it: callback function
  * @data: context data pointer
  *
@@ -605,7 +691,7 @@ int __init of_get_flat_dt_subnode_by_name(unsigned long node, const char *uname)
 	return fdt_subnode_offset(initial_boot_params, node, uname);
 }
 
-/*
+/**
  * of_get_flat_dt_root - find the root node in the flat blob
  */
 unsigned long __init of_get_flat_dt_root(void)
@@ -613,7 +699,7 @@ unsigned long __init of_get_flat_dt_root(void)
 	return 0;
 }
 
-/*
+/**
  * of_get_flat_dt_prop - Given a node in the flat blob, return the property ptr
  *
  * This function can be used within scan_flattened_dt callback to get
@@ -667,7 +753,7 @@ int __init of_flat_dt_is_compatible(unsigned long node, const char *compat)
 	return of_fdt_is_compatible(initial_boot_params, node, compat);
 }
 
-/*
+/**
  * of_flat_dt_match - Return true if node matches a list of compatible values
  */
 static int __init of_flat_dt_match(unsigned long node, const char *const *compat)
@@ -687,13 +773,22 @@ static int __init of_flat_dt_match(unsigned long node, const char *const *compat
 	return score;
 }
 
-/*
- * of_get_flat_dt_phandle - Given a node in the flat blob, return the phandle
+/**
+ * of_get_flat_dt_prop - Given a node in the flat blob, return the phandle
  */
 uint32_t __init of_get_flat_dt_phandle(unsigned long node)
 {
 	return fdt_get_phandle(initial_boot_params, node);
 }
+
+struct fdt_scan_status {
+	const char *name;
+	int namelen;
+	int depth;
+	int found;
+	int (*iterator)(unsigned long node, const char *uname, int depth, void *data);
+	void *data;
+};
 
 const char * __init of_flat_dt_get_machine_name(void)
 {
@@ -755,16 +850,16 @@ const void * __init of_flat_dt_match_machine(const void *default_match,
 	return best_data;
 }
 
+#ifdef CONFIG_BLK_DEV_INITRD
 static void __early_init_dt_declare_initrd(unsigned long start,
 					   unsigned long end)
 {
-	/*
-	 * __va() is not yet available this early on some platforms. In that
-	 * case, the platform uses phys_initrd_start/phys_initrd_size instead
-	 * and does the VA conversion itself.
+	/* ARM64 would cause a BUG to occur here when CONFIG_DEBUG_VM is
+	 * enabled since __va() is called too early. ARM64 does make use
+	 * of phys_initrd_start/phys_initrd_size so we can skip this
+	 * conversion.
 	 */
-	if (!IS_ENABLED(CONFIG_ARM64) &&
-	    !(IS_ENABLED(CONFIG_RISCV) && IS_ENABLED(CONFIG_64BIT))) {
+	if (!IS_ENABLED(CONFIG_ARM64)) {
 		initrd_start = (unsigned long)__va(start);
 		initrd_end = (unsigned long)__va(end);
 		initrd_below_start_ok = 1;
@@ -781,9 +876,6 @@ static void __init early_init_dt_check_for_initrd(unsigned long node)
 	int len;
 	const __be32 *prop;
 
-	if (!IS_ENABLED(CONFIG_BLK_DEV_INITRD))
-		return;
-
 	pr_debug("Looking for initrd properties... ");
 
 	prop = of_get_flat_dt_prop(node, "linux,initrd-start", &len);
@@ -795,116 +887,19 @@ static void __init early_init_dt_check_for_initrd(unsigned long node)
 	if (!prop)
 		return;
 	end = of_read_number(prop, len/4);
-	if (start > end)
-		return;
 
 	__early_init_dt_declare_initrd(start, end);
 	phys_initrd_start = start;
 	phys_initrd_size = end - start;
 
-	pr_debug("initrd_start=0x%llx  initrd_end=0x%llx\n", start, end);
+	pr_debug("initrd_start=0x%llx  initrd_end=0x%llx\n",
+		 (unsigned long long)start, (unsigned long long)end);
 }
-
-/**
- * early_init_dt_check_for_elfcorehdr - Decode elfcorehdr location from flat
- * tree
- * @node: reference to node containing elfcorehdr location ('chosen')
- */
-static void __init early_init_dt_check_for_elfcorehdr(unsigned long node)
+#else
+static inline void early_init_dt_check_for_initrd(unsigned long node)
 {
-	const __be32 *prop;
-	int len;
-
-	if (!IS_ENABLED(CONFIG_CRASH_DUMP))
-		return;
-
-	pr_debug("Looking for elfcorehdr property... ");
-
-	prop = of_get_flat_dt_prop(node, "linux,elfcorehdr", &len);
-	if (!prop || (len < (dt_root_addr_cells + dt_root_size_cells)))
-		return;
-
-	elfcorehdr_addr = dt_mem_next_cell(dt_root_addr_cells, &prop);
-	elfcorehdr_size = dt_mem_next_cell(dt_root_size_cells, &prop);
-
-	pr_debug("elfcorehdr_start=0x%llx elfcorehdr_size=0x%llx\n",
-		 elfcorehdr_addr, elfcorehdr_size);
 }
-
-static unsigned long chosen_node_offset = -FDT_ERR_NOTFOUND;
-
-/*
- * The main usage of linux,usable-memory-range is for crash dump kernel.
- * Originally, the number of usable-memory regions is one. Now there may
- * be two regions, low region and high region.
- * To make compatibility with existing user-space and older kdump, the low
- * region is always the last range of linux,usable-memory-range if exist.
- */
-#define MAX_USABLE_RANGES		2
-
-/**
- * early_init_dt_check_for_usable_mem_range - Decode usable memory range
- * location from flat tree
- */
-void __init early_init_dt_check_for_usable_mem_range(void)
-{
-	struct memblock_region rgn[MAX_USABLE_RANGES] = {0};
-	const __be32 *prop, *endp;
-	int len, i;
-	unsigned long node = chosen_node_offset;
-
-	if ((long)node < 0)
-		return;
-
-	pr_debug("Looking for usable-memory-range property... ");
-
-	prop = of_get_flat_dt_prop(node, "linux,usable-memory-range", &len);
-	if (!prop || (len % (dt_root_addr_cells + dt_root_size_cells)))
-		return;
-
-	endp = prop + (len / sizeof(__be32));
-	for (i = 0; i < MAX_USABLE_RANGES && prop < endp; i++) {
-		rgn[i].base = dt_mem_next_cell(dt_root_addr_cells, &prop);
-		rgn[i].size = dt_mem_next_cell(dt_root_size_cells, &prop);
-
-		pr_debug("cap_mem_regions[%d]: base=%pa, size=%pa\n",
-			 i, &rgn[i].base, &rgn[i].size);
-	}
-
-	memblock_cap_memory_range(rgn[0].base, rgn[0].size);
-	for (i = 1; i < MAX_USABLE_RANGES && rgn[i].size; i++)
-		memblock_add(rgn[i].base, rgn[i].size);
-}
-
-/**
- * early_init_dt_check_kho - Decode info required for kexec handover from DT
- */
-static void __init early_init_dt_check_kho(void)
-{
-	unsigned long node = chosen_node_offset;
-	u64 fdt_start, fdt_size, scratch_start, scratch_size;
-	const __be32 *p;
-	int l;
-
-	if (!IS_ENABLED(CONFIG_KEXEC_HANDOVER) || (long)node < 0)
-		return;
-
-	p = of_get_flat_dt_prop(node, "linux,kho-fdt", &l);
-	if (l != (dt_root_addr_cells + dt_root_size_cells) * sizeof(__be32))
-		return;
-
-	fdt_start = dt_mem_next_cell(dt_root_addr_cells, &p);
-	fdt_size = dt_mem_next_cell(dt_root_addr_cells, &p);
-
-	p = of_get_flat_dt_prop(node, "linux,kho-scratch", &l);
-	if (l != (dt_root_addr_cells + dt_root_size_cells) * sizeof(__be32))
-		return;
-
-	scratch_start = dt_mem_next_cell(dt_root_addr_cells, &p);
-	scratch_size = dt_mem_next_cell(dt_root_addr_cells, &p);
-
-	kho_populate(fdt_start, fdt_size, scratch_start, scratch_size);
-}
+#endif /* CONFIG_BLK_DEV_INITRD */
 
 #ifdef CONFIG_SERIAL_EARLYCON
 
@@ -913,9 +908,8 @@ int __init early_init_dt_scan_chosen_stdout(void)
 	int offset;
 	const char *p, *q, *options = NULL;
 	int l;
-	const struct earlycon_id *match;
+	const struct earlycon_id **p_match;
 	const void *fdt = initial_boot_params;
-	int ret;
 
 	offset = fdt_path_offset(fdt, "/chosen");
 	if (offset < 0)
@@ -941,47 +935,49 @@ int __init early_init_dt_scan_chosen_stdout(void)
 		return 0;
 	}
 
-	for (match = __earlycon_table; match < __earlycon_table_end; match++) {
+	for (p_match = __earlycon_table; p_match < __earlycon_table_end;
+	     p_match++) {
+		const struct earlycon_id *match = *p_match;
+
 		if (!match->compatible[0])
 			continue;
 
 		if (fdt_node_check_compatible(fdt, offset, match->compatible))
 			continue;
 
-		ret = of_setup_earlycon(match, offset, options);
-		if (!ret || ret == -EALREADY)
+		if (of_setup_earlycon(match, offset, options) == 0)
 			return 0;
 	}
 	return -ENODEV;
 }
 #endif
 
-/*
+/**
  * early_init_dt_scan_root - fetch the top level address and size cells
  */
-int __init early_init_dt_scan_root(void)
+int __init early_init_dt_scan_root(unsigned long node, const char *uname,
+				   int depth, void *data)
 {
 	const __be32 *prop;
-	const void *fdt = initial_boot_params;
-	int node = fdt_path_offset(fdt, "/");
 
-	if (node < 0)
-		return -ENODEV;
+	if (depth != 0)
+		return 0;
 
 	dt_root_size_cells = OF_ROOT_NODE_SIZE_CELLS_DEFAULT;
 	dt_root_addr_cells = OF_ROOT_NODE_ADDR_CELLS_DEFAULT;
 
 	prop = of_get_flat_dt_prop(node, "#size-cells", NULL);
-	if (!WARN(!prop, "No '#size-cells' in root node\n"))
+	if (prop)
 		dt_root_size_cells = be32_to_cpup(prop);
 	pr_debug("dt_root_size_cells = %x\n", dt_root_size_cells);
 
 	prop = of_get_flat_dt_prop(node, "#address-cells", NULL);
-	if (!WARN(!prop, "No '#address-cells' in root node\n"))
+	if (prop)
 		dt_root_addr_cells = be32_to_cpup(prop);
 	pr_debug("dt_root_addr_cells = %x\n", dt_root_addr_cells);
 
-	return 0;
+	/* break now */
+	return 1;
 }
 
 u64 __init dt_mem_next_cell(int s, const __be32 **cellp)
@@ -992,82 +988,119 @@ u64 __init dt_mem_next_cell(int s, const __be32 **cellp)
 	return of_read_number(p, s);
 }
 
-/*
+/**
  * early_init_dt_scan_memory - Look for and parse memory nodes
  */
-int __init early_init_dt_scan_memory(void)
+int __init early_init_dt_scan_memory(unsigned long node, const char *uname,
+				     int depth, void *data)
 {
-	int node, found_memory = 0;
-	const void *fdt = initial_boot_params;
+	const char *type = of_get_flat_dt_prop(node, "device_type", NULL);
+	const __be32 *reg, *endp;
+	int l;
+	bool hotpluggable;
 
-	fdt_for_each_subnode(node, fdt, 0) {
-		const char *type = of_get_flat_dt_prop(node, "device_type", NULL);
-		const __be32 *reg, *endp;
-		int l;
-		bool hotpluggable;
+	/* We are scanning "memory" nodes only */
+	if (type == NULL || strcmp(type, "memory") != 0)
+		return 0;
 
-		/* We are scanning "memory" nodes only */
-		if (type == NULL || strcmp(type, "memory") != 0)
+	reg = of_get_flat_dt_prop(node, "linux,usable-memory", &l);
+	if (reg == NULL)
+		reg = of_get_flat_dt_prop(node, "reg", &l);
+	if (reg == NULL)
+		return 0;
+
+	endp = reg + (l / sizeof(__be32));
+	hotpluggable = of_get_flat_dt_prop(node, "hotpluggable", NULL);
+
+	pr_debug("memory scan node %s, reg size %d,\n", uname, l);
+
+	while ((endp - reg) >= (dt_root_addr_cells + dt_root_size_cells)) {
+		u64 base, size;
+
+		base = dt_mem_next_cell(dt_root_addr_cells, &reg);
+		size = dt_mem_next_cell(dt_root_size_cells, &reg);
+
+		if (size == 0)
+			continue;
+		pr_debug(" - %llx ,  %llx\n", (unsigned long long)base,
+		    (unsigned long long)size);
+
+		early_init_dt_add_memory_arch(base, size);
+
+		if (!hotpluggable)
 			continue;
 
-		if (!of_fdt_device_is_available(fdt, node))
-			continue;
-
-		reg = of_get_flat_dt_prop(node, "linux,usable-memory", &l);
-		if (reg == NULL)
-			reg = of_get_flat_dt_prop(node, "reg", &l);
-		if (reg == NULL)
-			continue;
-
-		endp = reg + (l / sizeof(__be32));
-		hotpluggable = of_get_flat_dt_prop(node, "hotpluggable", NULL);
-
-		pr_debug("memory scan node %s, reg size %d,\n",
-			 fdt_get_name(fdt, node, NULL), l);
-
-		while ((endp - reg) >= (dt_root_addr_cells + dt_root_size_cells)) {
-			u64 base, size;
-
-			base = dt_mem_next_cell(dt_root_addr_cells, &reg);
-			size = dt_mem_next_cell(dt_root_size_cells, &reg);
-
-			if (size == 0)
-				continue;
-			pr_debug(" - %llx, %llx\n", base, size);
-
-			early_init_dt_add_memory_arch(base, size);
-
-			found_memory = 1;
-
-			if (!hotpluggable)
-				continue;
-
-			if (memblock_mark_hotplug(base, size))
-				pr_warn("failed to mark hotplug range 0x%llx - 0x%llx\n",
-					base, base + size);
-		}
+		if (early_init_dt_mark_hotplug_memory_arch(base, size))
+			pr_warn("failed to mark hotplug range 0x%llx - 0x%llx\n",
+				base, base + size);
 	}
-	return found_memory;
+
+	return 0;
 }
 
-int __init early_init_dt_scan_chosen(char *cmdline)
+/*
+ * Convert configs to something easy to use in C code
+ */
+#if defined(CONFIG_CMDLINE_FORCE)
+static const int overwrite_incoming_cmdline = 1;
+static const int read_dt_cmdline;
+static const int concat_cmdline;
+#elif defined(CONFIG_CMDLINE_EXTEND)
+static const int overwrite_incoming_cmdline;
+static const int read_dt_cmdline = 1;
+static const int concat_cmdline = 1;
+#else /* CMDLINE_FROM_BOOTLOADER */
+static const int overwrite_incoming_cmdline;
+static const int read_dt_cmdline = 1;
+static const int concat_cmdline;
+#endif
+
+#ifdef CONFIG_CMDLINE
+static const char *config_cmdline = CONFIG_CMDLINE;
+#else
+static const char *config_cmdline = "";
+#endif
+
+int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
+				     int depth, void *data)
 {
-	int l, node;
-	const char *p;
+	int l = 0;
+	const char *p = NULL;
 	const void *rng_seed;
-	const void *fdt = initial_boot_params;
+	char *cmdline = data;
 
-	node = fdt_path_offset(fdt, "/chosen");
-	if (node < 0)
-		node = fdt_path_offset(fdt, "/chosen@0");
-	if (node < 0)
-		/* Handle the cmdline config options even if no /chosen node */
-		goto handle_cmdline;
+	pr_debug("search \"chosen\", depth: %d, uname: %s\n", depth, uname);
 
-	chosen_node_offset = node;
+	if (depth != 1 || !cmdline ||
+	    (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
+		return 0;
 
 	early_init_dt_check_for_initrd(node);
-	early_init_dt_check_for_elfcorehdr(node);
+
+	/* Put CONFIG_CMDLINE in if forced or if data had nothing in it to start */
+	if (overwrite_incoming_cmdline || !cmdline[0])
+		strlcpy(cmdline, config_cmdline, COMMAND_LINE_SIZE);
+
+	/* Retrieve command line unless forcing */
+	if (read_dt_cmdline)
+		p = of_get_flat_dt_prop(node, "bootargs", &l);
+
+	if (p != NULL && l > 0) {
+		if (concat_cmdline) {
+			int cmdline_len;
+			int copy_len;
+			strlcat(cmdline, " ", COMMAND_LINE_SIZE);
+			cmdline_len = strlen(cmdline);
+			copy_len = COMMAND_LINE_SIZE - cmdline_len - 1;
+			copy_len = min((int)l, copy_len);
+			strncpy(cmdline + cmdline_len, p, copy_len);
+			cmdline[cmdline_len + copy_len] = '\0';
+		} else {
+			strlcpy(cmdline, p, min(l, COMMAND_LINE_SIZE));
+		}
+	}
+
+	pr_debug("Command line is: %s\n", (char *)data);
 
 	rng_seed = of_get_flat_dt_prop(node, "rng-seed", &l);
 	if (rng_seed && l > 0) {
@@ -1081,33 +1114,8 @@ int __init early_init_dt_scan_chosen(char *cmdline)
 				fdt_totalsize(initial_boot_params));
 	}
 
-	/* Retrieve command line */
-	p = of_get_flat_dt_prop(node, "bootargs", &l);
-	if (p != NULL && l > 0)
-		strscpy(cmdline, p, min(l, COMMAND_LINE_SIZE));
-
-handle_cmdline:
-	/*
-	 * CONFIG_CMDLINE is meant to be a default in case nothing else
-	 * managed to set the command line, unless CONFIG_CMDLINE_FORCE
-	 * is set in which case we override whatever was found earlier.
-	 */
-#ifdef CONFIG_CMDLINE
-#if defined(CONFIG_CMDLINE_EXTEND)
-	strlcat(cmdline, " ", COMMAND_LINE_SIZE);
-	strlcat(cmdline, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
-#elif defined(CONFIG_CMDLINE_FORCE)
-	strscpy(cmdline, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
-#else
-	/* No arguments from boot loader, use kernel's  cmdl*/
-	if (!((char *)cmdline)[0])
-		strscpy(cmdline, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
-#endif
-#endif /* CONFIG_CMDLINE */
-
-	pr_debug("Command line is: %s\n", (char *)cmdline);
-
-	return 0;
+	/* break now */
+	return 1;
 }
 
 #ifndef MIN_MEMBLOCK_ADDR
@@ -1159,77 +1167,87 @@ void __init __weak early_init_dt_add_memory_arch(u64 base, u64 size)
 	memblock_add(base, size);
 }
 
-static void * __init early_init_dt_alloc_memory_arch(u64 size, u64 align)
+int __init __weak early_init_dt_mark_hotplug_memory_arch(u64 base, u64 size)
 {
-	return memblock_alloc_or_panic(size, align);
+	return memblock_mark_hotplug(base, size);
 }
 
-bool __init early_init_dt_verify(void *dt_virt, phys_addr_t dt_phys)
+int __init __weak early_init_dt_reserve_memory_arch(phys_addr_t base,
+					phys_addr_t size, bool nomap)
 {
-	if (!dt_virt)
+	if (nomap) {
+		/*
+		 * If the memory is already reserved (by another region), we
+		 * should not allow it to be marked nomap.
+		 */
+		if (memblock_is_region_reserved(base, size))
+			return -EBUSY;
+
+		if (memblock_is_nomap_remove())
+			return memblock_remove(base, size);
+
+		return memblock_mark_nomap(base, size);
+	}
+	return memblock_reserve(base, size);
+}
+
+static void * __init early_init_dt_alloc_memory_arch(u64 size, u64 align)
+{
+	void *ptr = memblock_alloc(size, align);
+
+	if (!ptr)
+		panic("%s: Failed to allocate %llu bytes align=0x%llx\n",
+		      __func__, size, align);
+
+	return ptr;
+}
+
+bool __init early_init_dt_verify(void *params)
+{
+	if (!params)
 		return false;
 
 	/* check device tree validity */
-	if (fdt_check_header(dt_virt))
+	if (fdt_check_header(params))
 		return false;
 
 	/* Setup flat device-tree pointer */
-	initial_boot_params = dt_virt;
-	initial_boot_params_pa = dt_phys;
+	initial_boot_params = params;
 	of_fdt_crc32 = crc32_be(~0, initial_boot_params,
 				fdt_totalsize(initial_boot_params));
-
-	/* Initialize {size,address}-cells info */
-	early_init_dt_scan_root();
-
 	return true;
 }
 
 
 void __init early_init_dt_scan_nodes(void)
 {
-	int rc;
+	int rc = 0;
 
 	/* Retrieve various information from the /chosen node */
-	rc = early_init_dt_scan_chosen(boot_command_line);
-	if (rc)
+	rc = of_scan_flat_dt(early_init_dt_scan_chosen, boot_command_line);
+	if (!rc)
 		pr_warn("No chosen node found, continuing without\n");
 
+	/* Initialize {size,address}-cells info */
+	of_scan_flat_dt(early_init_dt_scan_root, NULL);
+
 	/* Setup memory, calling early_init_dt_add_memory_arch */
-	early_init_dt_scan_memory();
-
-	/* Handle linux,usable-memory-range property */
-	early_init_dt_check_for_usable_mem_range();
-
-	/* Handle kexec handover */
-	early_init_dt_check_kho();
+	memblock_memsize_disable_tracking();
+	of_scan_flat_dt(early_init_dt_scan_memory, NULL);
+	memblock_memsize_enable_tracking();
+	memblock_memsize_detect_hole();
 }
 
-bool __init early_init_dt_scan(void *dt_virt, phys_addr_t dt_phys)
+bool __init early_init_dt_scan(void *params)
 {
 	bool status;
 
-	status = early_init_dt_verify(dt_virt, dt_phys);
+	status = early_init_dt_verify(params);
 	if (!status)
 		return false;
 
 	early_init_dt_scan_nodes();
 	return true;
-}
-
-static void *__init copy_device_tree(void *fdt)
-{
-	int size;
-	void *dt;
-
-	size = fdt_totalsize(fdt);
-	dt = early_init_dt_alloc_memory_arch(size,
-					     roundup_pow_of_two(FDT_V17_SIZE));
-
-	if (dt)
-		memcpy(dt, fdt, size);
-
-	return dt;
 }
 
 /**
@@ -1242,25 +1260,7 @@ static void *__init copy_device_tree(void *fdt)
  */
 void __init unflatten_device_tree(void)
 {
-	void *fdt = initial_boot_params;
-
-	/* Save the statically-placed regions in the reserved_mem array */
-	fdt_scan_reserved_mem_reg_nodes();
-
-	/* Populate an empty root node when bootloader doesn't provide one */
-	if (!fdt) {
-		fdt = (void *) __dtb_empty_root_begin;
-		/* fdt_totalsize() will be used for copy size */
-		if (fdt_totalsize(fdt) >
-		    __dtb_empty_root_end - __dtb_empty_root_begin) {
-			pr_err("invalid size in dtb_empty_root\n");
-			return;
-		}
-		of_fdt_crc32 = crc32_be(~0, fdt, fdt_totalsize(fdt));
-		fdt = copy_device_tree(fdt);
-	}
-
-	__unflatten_device_tree(fdt, NULL, &of_root,
+	__unflatten_device_tree(initial_boot_params, NULL, &of_root,
 				early_init_dt_alloc_memory_arch, false);
 
 	/* Get pointer to "/chosen" and "/aliases" nodes for use everywhere */
@@ -1282,16 +1282,38 @@ void __init unflatten_device_tree(void)
  */
 void __init unflatten_and_copy_device_tree(void)
 {
-	if (initial_boot_params)
-		initial_boot_params = copy_device_tree(initial_boot_params);
+	int size;
+	void *dt;
 
+	if (!initial_boot_params) {
+		pr_warn("No valid device tree found, continuing without\n");
+		return;
+	}
+
+	size = fdt_totalsize(initial_boot_params);
+	dt = early_init_dt_alloc_memory_arch(size,
+					     roundup_pow_of_two(FDT_V17_SIZE));
+
+	if (dt) {
+		memcpy(dt, initial_boot_params, size);
+		initial_boot_params = dt;
+	}
 	unflatten_device_tree();
 }
 
 #ifdef CONFIG_SYSFS
+static ssize_t of_fdt_raw_read(struct file *filp, struct kobject *kobj,
+			       struct bin_attribute *bin_attr,
+			       char *buf, loff_t off, size_t count)
+{
+	memcpy(buf, initial_boot_params + off, count);
+	return count;
+}
+
 static int __init of_fdt_raw_init(void)
 {
-	static __ro_after_init BIN_ATTR_SIMPLE_ADMIN_RO(fdt);
+	static struct bin_attribute of_fdt_raw_attr =
+		__BIN_ATTR(fdt, S_IRUSR, of_fdt_raw_read, NULL, 0);
 
 	if (!initial_boot_params)
 		return 0;
@@ -1301,9 +1323,8 @@ static int __init of_fdt_raw_init(void)
 		pr_warn("not creating '/sys/firmware/fdt': CRC check failed\n");
 		return 0;
 	}
-	bin_attr_fdt.private = initial_boot_params;
-	bin_attr_fdt.size = fdt_totalsize(initial_boot_params);
-	return sysfs_create_bin_file(firmware_kobj, &bin_attr_fdt);
+	of_fdt_raw_attr.size = fdt_totalsize(initial_boot_params);
+	return sysfs_create_bin_file(firmware_kobj, &of_fdt_raw_attr);
 }
 late_initcall(of_fdt_raw_init);
 #endif

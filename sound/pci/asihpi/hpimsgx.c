@@ -93,6 +93,11 @@ static void HPIMSGX__cleanup(u16 adapter_index, void *h_owner);
 #pragma pack(push, 1)
 #endif
 
+struct hpi_subsys_response {
+	struct hpi_response_header h;
+	struct hpi_subsys_res s;
+};
+
 struct hpi_adapter_response {
 	struct hpi_response_header h;
 	struct hpi_adapter_res a;
@@ -708,7 +713,7 @@ static u16 HPIMSGX__init(struct hpi_message *phm,
 		phr->error = HPI_ERROR_PROCESSING_MESSAGE;
 		return phr->error;
 	}
-	if (hr.error == 0 && hr.u.s.adapter_index < HPI_MAX_ADAPTERS) {
+	if (hr.error == 0) {
 		/* the adapter was created successfully
 		   save the mapping for future use */
 		hpi_entry_points[hr.u.s.adapter_index] = entry_point_func;

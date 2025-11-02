@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 Red Hat, Inc.
  *
@@ -13,7 +12,6 @@
 #include <linux/export.h>
 #include <linux/mutex.h>
 #include <linux/hash.h>
-#include <linux/rbtree.h>
 #include <linux/slab.h>
 #include <linux/device-mapper.h>
 
@@ -30,15 +28,14 @@ struct prefetch_set {
 	dm_block_t blocks[PREFETCH_SIZE];
 };
 
-static unsigned int prefetch_hash(dm_block_t b)
+static unsigned prefetch_hash(dm_block_t b)
 {
 	return hash_64(b, PREFETCH_BITS);
 }
 
 static void prefetch_wipe(struct prefetch_set *p)
 {
-	unsigned int i;
-
+	unsigned i;
 	for (i = 0; i < PREFETCH_SIZE; i++)
 		p->blocks[i] = PREFETCH_SENTINEL;
 }
@@ -51,7 +48,7 @@ static void prefetch_init(struct prefetch_set *p)
 
 static void prefetch_add(struct prefetch_set *p, dm_block_t b)
 {
-	unsigned int h = prefetch_hash(b);
+	unsigned h = prefetch_hash(b);
 
 	mutex_lock(&p->lock);
 	if (p->blocks[h] == PREFETCH_SENTINEL)
@@ -62,7 +59,7 @@ static void prefetch_add(struct prefetch_set *p, dm_block_t b)
 
 static void prefetch_issue(struct prefetch_set *p, struct dm_block_manager *bm)
 {
-	unsigned int i;
+	unsigned i;
 
 	mutex_lock(&p->lock);
 
@@ -78,7 +75,7 @@ static void prefetch_issue(struct prefetch_set *p, struct dm_block_manager *bm)
 /*----------------------------------------------------------------*/
 
 struct shadow_info {
-	struct rb_node node;
+	struct hlist_node hlist;
 	dm_block_t where;
 };
 
@@ -96,7 +93,7 @@ struct dm_transaction_manager {
 	struct dm_space_map *sm;
 
 	spinlock_t lock;
-	struct rb_root buckets[DM_HASH_SIZE];
+	struct hlist_head buckets[DM_HASH_SIZE];
 
 	struct prefetch_set prefetches;
 };
@@ -106,23 +103,15 @@ struct dm_transaction_manager {
 static int is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	int r = 0;
-	unsigned int bucket = dm_hash_block(b, DM_HASH_MASK);
-	struct rb_node **node;
+	unsigned bucket = dm_hash_block(b, DM_HASH_MASK);
+	struct shadow_info *si;
 
 	spin_lock(&tm->lock);
-	node = &tm->buckets[bucket].rb_node;
-	while (*node) {
-		struct shadow_info *si =
-			rb_entry(*node, struct shadow_info, node);
-		if (b == si->where) {
+	hlist_for_each_entry(si, tm->buckets + bucket, hlist)
+		if (si->where == b) {
 			r = 1;
 			break;
 		}
-		if (b < si->where)
-			node = &si->node.rb_left;
-		else
-			node = &si->node.rb_right;
-	}
 	spin_unlock(&tm->lock);
 
 	return r;
@@ -134,46 +123,35 @@ static int is_shadow(struct dm_transaction_manager *tm, dm_block_t b)
  */
 static void insert_shadow(struct dm_transaction_manager *tm, dm_block_t b)
 {
-	unsigned int bucket;
+	unsigned bucket;
 	struct shadow_info *si;
 
 	si = kmalloc(sizeof(*si), GFP_NOIO);
 	if (si) {
-		struct rb_node **node, *parent;
 		si->where = b;
 		bucket = dm_hash_block(b, DM_HASH_MASK);
-
 		spin_lock(&tm->lock);
-		node = &tm->buckets[bucket].rb_node;
-		parent = NULL;
-		while (*node) {
-			struct shadow_info *si =
-				rb_entry(*node, struct shadow_info, node);
-			parent = *node;
-			if (b < si->where)
-				node = &si->node.rb_left;
-			else
-				node = &si->node.rb_right;
-		}
-		rb_link_node(&si->node, parent, node);
-		rb_insert_color(&si->node, &tm->buckets[bucket]);
+		hlist_add_head(&si->hlist, tm->buckets + bucket);
 		spin_unlock(&tm->lock);
 	}
 }
 
 static void wipe_shadow_table(struct dm_transaction_manager *tm)
 {
-	unsigned int i;
+	struct shadow_info *si;
+	struct hlist_node *tmp;
+	struct hlist_head *bucket;
+	int i;
 
 	spin_lock(&tm->lock);
 	for (i = 0; i < DM_HASH_SIZE; i++) {
-		while (!RB_EMPTY_ROOT(&tm->buckets[i])) {
-			struct shadow_info *si =
-				rb_entry(tm->buckets[i].rb_node, struct shadow_info, node);
-			rb_erase(&si->node, &tm->buckets[i]);
+		bucket = tm->buckets + i;
+		hlist_for_each_entry_safe(si, tmp, bucket, hlist)
 			kfree(si);
-		}
+
+		INIT_HLIST_HEAD(bucket);
 	}
+
 	spin_unlock(&tm->lock);
 }
 
@@ -182,7 +160,7 @@ static void wipe_shadow_table(struct dm_transaction_manager *tm)
 static struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
 						   struct dm_space_map *sm)
 {
-	unsigned int i;
+	int i;
 	struct dm_transaction_manager *tm;
 
 	tm = kmalloc(sizeof(*tm), GFP_KERNEL);
@@ -196,7 +174,7 @@ static struct dm_transaction_manager *dm_tm_create(struct dm_block_manager *bm,
 
 	spin_lock_init(&tm->lock);
 	for (i = 0; i < DM_HASH_SIZE; i++)
-		tm->buckets[i] = RB_ROOT;
+		INIT_HLIST_HEAD(tm->buckets + i);
 
 	prefetch_init(&tm->prefetches);
 
@@ -219,9 +197,6 @@ EXPORT_SYMBOL_GPL(dm_tm_create_non_blocking_clone);
 
 void dm_tm_destroy(struct dm_transaction_manager *tm)
 {
-	if (!tm)
-		return;
-
 	if (!tm->is_clone)
 		wipe_shadow_table(tm);
 
@@ -257,7 +232,7 @@ int dm_tm_commit(struct dm_transaction_manager *tm, struct dm_block *root)
 EXPORT_SYMBOL_GPL(dm_tm_commit);
 
 int dm_tm_new_block(struct dm_transaction_manager *tm,
-		    const struct dm_block_validator *v,
+		    struct dm_block_validator *v,
 		    struct dm_block **result)
 {
 	int r;
@@ -286,7 +261,7 @@ int dm_tm_new_block(struct dm_transaction_manager *tm,
 }
 
 static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
-			  const struct dm_block_validator *v,
+			  struct dm_block_validator *v,
 			  struct dm_block **result)
 {
 	int r;
@@ -326,7 +301,7 @@ static int __shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 }
 
 int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
-		       const struct dm_block_validator *v, struct dm_block **result,
+		       struct dm_block_validator *v, struct dm_block **result,
 		       int *inc_children)
 {
 	int r;
@@ -351,7 +326,7 @@ int dm_tm_shadow_block(struct dm_transaction_manager *tm, dm_block_t orig,
 EXPORT_SYMBOL_GPL(dm_tm_shadow_block);
 
 int dm_tm_read_lock(struct dm_transaction_manager *tm, dm_block_t b,
-		    const struct dm_block_validator *v,
+		    struct dm_block_validator *v,
 		    struct dm_block **blk)
 {
 	if (tm->is_clone) {
@@ -384,17 +359,6 @@ void dm_tm_inc(struct dm_transaction_manager *tm, dm_block_t b)
 }
 EXPORT_SYMBOL_GPL(dm_tm_inc);
 
-void dm_tm_inc_range(struct dm_transaction_manager *tm, dm_block_t b, dm_block_t e)
-{
-	/*
-	 * The non-blocking clone doesn't support this.
-	 */
-	BUG_ON(tm->is_clone);
-
-	dm_sm_inc_blocks(tm->sm, b, e);
-}
-EXPORT_SYMBOL_GPL(dm_tm_inc_range);
-
 void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 {
 	/*
@@ -406,47 +370,6 @@ void dm_tm_dec(struct dm_transaction_manager *tm, dm_block_t b)
 }
 EXPORT_SYMBOL_GPL(dm_tm_dec);
 
-void dm_tm_dec_range(struct dm_transaction_manager *tm, dm_block_t b, dm_block_t e)
-{
-	/*
-	 * The non-blocking clone doesn't support this.
-	 */
-	BUG_ON(tm->is_clone);
-
-	dm_sm_dec_blocks(tm->sm, b, e);
-}
-EXPORT_SYMBOL_GPL(dm_tm_dec_range);
-
-void dm_tm_with_runs(struct dm_transaction_manager *tm,
-		     const __le64 *value_le, unsigned int count, dm_tm_run_fn fn)
-{
-	uint64_t b, begin, end;
-	bool in_run = false;
-	unsigned int i;
-
-	for (i = 0; i < count; i++, value_le++) {
-		b = le64_to_cpu(*value_le);
-
-		if (in_run) {
-			if (b == end)
-				end++;
-			else {
-				fn(tm, begin, end);
-				begin = b;
-				end = b + 1;
-			}
-		} else {
-			in_run = true;
-			begin = b;
-			end = b + 1;
-		}
-	}
-
-	if (in_run)
-		fn(tm, begin, end);
-}
-EXPORT_SYMBOL_GPL(dm_tm_with_runs);
-
 int dm_tm_ref(struct dm_transaction_manager *tm, dm_block_t b,
 	      uint32_t *result)
 {
@@ -454,15 +377,6 @@ int dm_tm_ref(struct dm_transaction_manager *tm, dm_block_t b,
 		return -EWOULDBLOCK;
 
 	return dm_sm_get_count(tm->sm, b, result);
-}
-
-int dm_tm_block_is_shared(struct dm_transaction_manager *tm, dm_block_t b,
-			  int *result)
-{
-	if (tm->is_clone)
-		return -EWOULDBLOCK;
-
-	return dm_sm_count_is_more_than_one(tm->sm, b, result);
 }
 
 struct dm_block_manager *dm_tm_get_bm(struct dm_transaction_manager *tm)

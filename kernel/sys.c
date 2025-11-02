@@ -7,7 +7,6 @@
 
 #include <linux/export.h>
 #include <linux/mm.h>
-#include <linux/mm_inline.h>
 #include <linux/utsname.h>
 #include <linux/mman.h>
 #include <linux/reboot.h>
@@ -15,7 +14,6 @@
 #include <linux/highuid.h>
 #include <linux/fs.h>
 #include <linux/kmod.h>
-#include <linux/ksm.h>
 #include <linux/perf_event.h>
 #include <linux/resource.h>
 #include <linux/kernel.h>
@@ -26,7 +24,7 @@
 #include <linux/times.h>
 #include <linux/posix-timers.h>
 #include <linux/security.h>
-#include <linux/random.h>
+#include <linux/dcookies.h>
 #include <linux/suspend.h>
 #include <linux/tty.h>
 #include <linux/signal.h>
@@ -44,7 +42,8 @@
 #include <linux/syscore_ops.h>
 #include <linux/version.h>
 #include <linux/ctype.h>
-#include <linux/syscall_user_dispatch.h>
+#include <linux/mm.h>
+#include <linux/mempolicy.h>
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
@@ -52,7 +51,6 @@
 #include <linux/user_namespace.h>
 #include <linux/time_namespace.h>
 #include <linux/binfmts.h>
-#include <linux/futex.h>
 
 #include <linux/sched.h>
 #include <linux/sched/autogroup.h>
@@ -76,9 +74,13 @@
 #include <asm/io.h>
 #include <asm/unistd.h>
 
-#include <trace/events/task.h>
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
 
 #include "uid16.h"
+
+#include <trace/hooks/sys.h>
 
 #ifndef SET_UNALIGN_CTL
 # define SET_UNALIGN_CTL(a, b)	(-EINVAL)
@@ -122,12 +124,6 @@
 #ifndef SVE_GET_VL
 # define SVE_GET_VL()		(-EINVAL)
 #endif
-#ifndef SME_SET_VL
-# define SME_SET_VL(a)		(-EINVAL)
-#endif
-#ifndef SME_GET_VL
-# define SME_GET_VL()		(-EINVAL)
-#endif
 #ifndef PAC_RESET_KEYS
 # define PAC_RESET_KEYS(a, b)	(-EINVAL)
 #endif
@@ -142,21 +138,6 @@
 #endif
 #ifndef GET_TAGGED_ADDR_CTRL
 # define GET_TAGGED_ADDR_CTRL()		(-EINVAL)
-#endif
-#ifndef RISCV_V_SET_CONTROL
-# define RISCV_V_SET_CONTROL(a)		(-EINVAL)
-#endif
-#ifndef RISCV_V_GET_CONTROL
-# define RISCV_V_GET_CONTROL()		(-EINVAL)
-#endif
-#ifndef RISCV_SET_ICACHE_FLUSH_CTX
-# define RISCV_SET_ICACHE_FLUSH_CTX(a, b)	(-EINVAL)
-#endif
-#ifndef PPC_GET_DEXCR_ASPECT
-# define PPC_GET_DEXCR_ASPECT(a, b)	(-EINVAL)
-#endif
-#ifndef PPC_SET_DEXCR_ASPECT
-# define PPC_SET_DEXCR_ASPECT(a, b, c)	(-EINVAL)
 #endif
 
 /*
@@ -180,35 +161,6 @@ int fs_overflowgid = DEFAULT_FS_OVERFLOWGID;
 
 EXPORT_SYMBOL(fs_overflowuid);
 EXPORT_SYMBOL(fs_overflowgid);
-
-static const struct ctl_table overflow_sysctl_table[] = {
-	{
-		.procname	= "overflowuid",
-		.data		= &overflowuid,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_MAXOLDUID,
-	},
-	{
-		.procname	= "overflowgid",
-		.data		= &overflowgid,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_MAXOLDUID,
-	},
-};
-
-static int __init init_overflow_sysctl(void)
-{
-	register_sysctl_init("kernel", overflow_sysctl_table);
-	return 0;
-}
-
-postcore_initcall(init_overflow_sysctl);
 
 /*
  * Returns true if current's euid is same as p's uid or euid,
@@ -276,6 +228,7 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 		niceval = MAX_NICE;
 
 	rcu_read_lock();
+	read_lock(&tasklist_lock);
 	switch (which) {
 	case PRIO_PROCESS:
 		if (who)
@@ -290,11 +243,9 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 			pgrp = find_vpid(who);
 		else
 			pgrp = task_pgrp(current);
-		read_lock(&tasklist_lock);
 		do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
 			error = set_one_prio(p, niceval, error);
 		} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
-		read_unlock(&tasklist_lock);
 		break;
 	case PRIO_USER:
 		uid = make_kuid(cred->user_ns, who);
@@ -306,15 +257,16 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 			if (!user)
 				goto out_unlock;	/* No processes for this user */
 		}
-		for_each_process_thread(g, p) {
+		do_each_thread(g, p) {
 			if (uid_eq(task_uid(p), uid) && task_pid_vnr(p))
 				error = set_one_prio(p, niceval, error);
-		}
+		} while_each_thread(g, p);
 		if (!uid_eq(uid, cred->uid))
 			free_uid(user);		/* For find_user() */
 		break;
 	}
 out_unlock:
+	read_unlock(&tasklist_lock);
 	rcu_read_unlock();
 out:
 	return error;
@@ -339,6 +291,7 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 		return -EINVAL;
 
 	rcu_read_lock();
+	read_lock(&tasklist_lock);
 	switch (which) {
 	case PRIO_PROCESS:
 		if (who)
@@ -356,13 +309,11 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 			pgrp = find_vpid(who);
 		else
 			pgrp = task_pgrp(current);
-		read_lock(&tasklist_lock);
 		do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
 			niceval = nice_to_rlimit(task_nice(p));
 			if (niceval > retval)
 				retval = niceval;
 		} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
-		read_unlock(&tasklist_lock);
 		break;
 	case PRIO_USER:
 		uid = make_kuid(cred->user_ns, who);
@@ -374,18 +325,19 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 			if (!user)
 				goto out_unlock;	/* No processes for this user */
 		}
-		for_each_process_thread(g, p) {
+		do_each_thread(g, p) {
 			if (uid_eq(task_uid(p), uid) && task_pid_vnr(p)) {
 				niceval = nice_to_rlimit(task_nice(p));
 				if (niceval > retval)
 					retval = niceval;
 			}
-		}
+		} while_each_thread(g, p);
 		if (!uid_eq(uid, cred->uid))
 			free_uid(user);		/* for find_user() */
 		break;
 	}
 out_unlock:
+	read_unlock(&tasklist_lock);
 	rcu_read_unlock();
 
 	return retval;
@@ -528,16 +480,6 @@ static int set_user(struct cred *new)
 	if (!new_user)
 		return -EAGAIN;
 
-	free_uid(new->user);
-	new->user = new_user;
-	return 0;
-}
-
-static void flag_nproc_exceeded(struct cred *new)
-{
-	if (new->ucounts == current_ucounts())
-		return;
-
 	/*
 	 * We don't fail in case of NPROC limit excess here because too many
 	 * poorly written programs don't check set*uid() return code, assuming
@@ -545,11 +487,15 @@ static void flag_nproc_exceeded(struct cred *new)
 	 * for programs doing set*uid()+execve() by harmlessly deferring the
 	 * failure to the execve() stage.
 	 */
-	if (is_rlimit_overlimit(new->ucounts, UCOUNT_RLIMIT_NPROC, rlimit(RLIMIT_NPROC)) &&
-			new->user != INIT_USER)
+	if (atomic_read(&new_user->processes) >= rlimit(RLIMIT_NPROC) &&
+			new_user != INIT_USER)
 		current->flags |= PF_NPROC_EXCEEDED;
 	else
 		current->flags &= ~PF_NPROC_EXCEEDED;
+
+	free_uid(new->user);
+	new->user = new_user;
+	return 0;
 }
 
 /*
@@ -620,11 +566,6 @@ long __sys_setreuid(uid_t ruid, uid_t euid)
 	if (retval < 0)
 		goto error;
 
-	retval = set_cred_ucounts(new);
-	if (retval < 0)
-		goto error;
-
-	flag_nproc_exceeded(new);
 	return commit_creds(new);
 
 error:
@@ -683,11 +624,6 @@ long __sys_setuid(uid_t uid)
 	if (retval < 0)
 		goto error;
 
-	retval = set_cred_ucounts(new);
-	if (retval < 0)
-		goto error;
-
-	flag_nproc_exceeded(new);
 	return commit_creds(new);
 
 error:
@@ -768,11 +704,6 @@ long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	if (retval < 0)
 		goto error;
 
-	retval = set_cred_ucounts(new);
-	if (retval < 0)
-		goto error;
-
-	flag_nproc_exceeded(new);
 	return commit_creds(new);
 
 error:
@@ -915,6 +846,11 @@ long __sys_setfsuid(uid_t uid)
 	if (!uid_valid(kuid))
 		return old_fsuid;
 
+#ifdef CONFIG_SECURITY_DEFEX
+	if (task_defex_enforce(current, NULL, -__NR_setfsuid))
+		return old_fsuid;
+#endif
+
 	new = prepare_creds();
 	if (!new)
 		return old_fsuid;
@@ -958,6 +894,11 @@ long __sys_setfsgid(gid_t gid)
 	kgid = make_kgid(old->user_ns, gid);
 	if (!gid_valid(kgid))
 		return old_fsgid;
+
+#ifdef CONFIG_SECURITY_DEFEX
+	if (task_defex_enforce(current, NULL, -__NR_setfsgid))
+		return old_fsgid;
+#endif
 
 	new = prepare_creds();
 	if (!new)
@@ -1115,7 +1056,6 @@ SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)
 {
 	struct task_struct *p;
 	struct task_struct *group_leader = current->group_leader;
-	struct pid *pids[PIDTYPE_MAX] = { 0 };
 	struct pid *pgrp;
 	int err;
 
@@ -1173,14 +1113,13 @@ SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)
 		goto out;
 
 	if (task_pgrp(p) != pgrp)
-		change_pid(pids, p, PIDTYPE_PGID, pgrp);
+		change_pid(p, PIDTYPE_PGID, pgrp);
 
 	err = 0;
 out:
 	/* All paths lead to here, thus we are safe. -DaveM */
 	write_unlock_irq(&tasklist_lock);
 	rcu_read_unlock();
-	free_pids(pids);
 	return err;
 }
 
@@ -1254,22 +1193,21 @@ out:
 	return retval;
 }
 
-static void set_special_pids(struct pid **pids, struct pid *pid)
+static void set_special_pids(struct pid *pid)
 {
 	struct task_struct *curr = current->group_leader;
 
 	if (task_session(curr) != pid)
-		change_pid(pids, curr, PIDTYPE_SID, pid);
+		change_pid(curr, PIDTYPE_SID, pid);
 
 	if (task_pgrp(curr) != pid)
-		change_pid(pids, curr, PIDTYPE_PGID, pid);
+		change_pid(curr, PIDTYPE_PGID, pid);
 }
 
 int ksys_setsid(void)
 {
 	struct task_struct *group_leader = current->group_leader;
 	struct pid *sid = task_pid(group_leader);
-	struct pid *pids[PIDTYPE_MAX] = { 0 };
 	pid_t session = pid_vnr(sid);
 	int err = -EPERM;
 
@@ -1285,14 +1223,13 @@ int ksys_setsid(void)
 		goto out;
 
 	group_leader->signal->leader = 1;
-	set_special_pids(pids, sid);
+	set_special_pids(sid);
 
 	proc_clear_tty(group_leader);
 
 	err = session;
 out:
 	write_unlock_irq(&tasklist_lock);
-	free_pids(pids);
 	if (err > 0) {
 		proc_sid_connector(group_leader);
 		sched_autogroup_create_attach(group_leader);
@@ -1340,7 +1277,7 @@ static int override_release(char __user *release, size_t len)
 				break;
 			rest++;
 		}
-		v = LINUX_VERSION_PATCHLEVEL + 60;
+		v = ((LINUX_VERSION_CODE >> 8) & 0xff) + 60;
 		copy = clamp_t(size_t, len, 1, sizeof(buf));
 		copy = scnprintf(buf, copy, "2.6.%u%s", v, rest);
 		ret = copy_to_user(release, buf, copy + 1);
@@ -1430,7 +1367,6 @@ SYSCALL_DEFINE2(sethostname, char __user *, name, int, len)
 	if (!copy_from_user(tmp, name, len)) {
 		struct new_utsname *u;
 
-		add_device_randomness(tmp, len);
 		down_write(&uts_sem);
 		u = utsname();
 		memcpy(u->nodename, tmp, len);
@@ -1484,7 +1420,6 @@ SYSCALL_DEFINE2(setdomainname, char __user *, name, int, len)
 	if (!copy_from_user(tmp, name, len)) {
 		struct new_utsname *u;
 
-		add_device_randomness(tmp, len);
 		down_write(&uts_sem);
 		u = utsname();
 		memcpy(u->domainname, tmp, len);
@@ -1494,70 +1429,6 @@ SYSCALL_DEFINE2(setdomainname, char __user *, name, int, len)
 		up_write(&uts_sem);
 	}
 	return errno;
-}
-
-/* make sure you are allowed to change @tsk limits before calling this */
-static int do_prlimit(struct task_struct *tsk, unsigned int resource,
-		      struct rlimit *new_rlim, struct rlimit *old_rlim)
-{
-	struct rlimit *rlim;
-	int retval = 0;
-
-	if (resource >= RLIM_NLIMITS)
-		return -EINVAL;
-	resource = array_index_nospec(resource, RLIM_NLIMITS);
-
-	if (new_rlim) {
-		if (new_rlim->rlim_cur > new_rlim->rlim_max)
-			return -EINVAL;
-		if (resource == RLIMIT_NOFILE &&
-				new_rlim->rlim_max > sysctl_nr_open)
-			return -EPERM;
-	}
-
-	/* Holding a refcount on tsk protects tsk->signal from disappearing. */
-	rlim = tsk->signal->rlim + resource;
-	task_lock(tsk->group_leader);
-	if (new_rlim) {
-		/*
-		 * Keep the capable check against init_user_ns until cgroups can
-		 * contain all limits.
-		 */
-		if (new_rlim->rlim_max > rlim->rlim_max &&
-				!capable(CAP_SYS_RESOURCE))
-			retval = -EPERM;
-		if (!retval)
-			retval = security_task_setrlimit(tsk, resource, new_rlim);
-	}
-	if (!retval) {
-		if (old_rlim)
-			*old_rlim = *rlim;
-		if (new_rlim)
-			*rlim = *new_rlim;
-	}
-	task_unlock(tsk->group_leader);
-
-	/*
-	 * RLIMIT_CPU handling. Arm the posix CPU timer if the limit is not
-	 * infinite. In case of RLIM_INFINITY the posix CPU timer code
-	 * ignores the rlimit.
-	 */
-	if (!retval && new_rlim && resource == RLIMIT_CPU &&
-	    new_rlim->rlim_cur != RLIM_INFINITY &&
-	    IS_ENABLED(CONFIG_POSIX_TIMERS)) {
-		/*
-		 * update_rlimit_cpu can fail if the task is exiting, but there
-		 * may be other tasks in the thread group that are not exiting,
-		 * and they need their cpu timers adjusted.
-		 *
-		 * The group_leader is the last task to be released, so if we
-		 * cannot update_rlimit_cpu on it, then the entire process is
-		 * exiting and we do not need to update at all.
-		 */
-		update_rlimit_cpu(tsk->group_leader, new_rlim->rlim_cur);
-	}
-
-	return retval;
 }
 
 SYSCALL_DEFINE2(getrlimit, unsigned int, resource, struct rlimit __user *, rlim)
@@ -1703,6 +1574,65 @@ static void rlim64_to_rlim(const struct rlimit64 *rlim64, struct rlimit *rlim)
 		rlim->rlim_max = (unsigned long)rlim64->rlim_max;
 }
 
+/* make sure you are allowed to change @tsk limits before calling this */
+int do_prlimit(struct task_struct *tsk, unsigned int resource,
+		struct rlimit *new_rlim, struct rlimit *old_rlim)
+{
+	struct rlimit *rlim;
+	int retval = 0;
+
+	if (resource >= RLIM_NLIMITS)
+		return -EINVAL;
+	resource = array_index_nospec(resource, RLIM_NLIMITS);
+
+	if (new_rlim) {
+		if (new_rlim->rlim_cur > new_rlim->rlim_max)
+			return -EINVAL;
+		if (resource == RLIMIT_NOFILE &&
+				new_rlim->rlim_max > sysctl_nr_open)
+			return -EPERM;
+	}
+
+	/* protect tsk->signal and tsk->sighand from disappearing */
+	read_lock(&tasklist_lock);
+	if (!tsk->sighand) {
+		retval = -ESRCH;
+		goto out;
+	}
+
+	rlim = tsk->signal->rlim + resource;
+	task_lock(tsk->group_leader);
+	if (new_rlim) {
+		/* Keep the capable check against init_user_ns until
+		   cgroups can contain all limits */
+		if (new_rlim->rlim_max > rlim->rlim_max &&
+				!capable(CAP_SYS_RESOURCE))
+			retval = -EPERM;
+		if (!retval)
+			retval = security_task_setrlimit(tsk, resource, new_rlim);
+	}
+	if (!retval) {
+		if (old_rlim)
+			*old_rlim = *rlim;
+		if (new_rlim)
+			*rlim = *new_rlim;
+	}
+	task_unlock(tsk->group_leader);
+
+	/*
+	 * RLIMIT_CPU handling. Arm the posix CPU timer if the limit is not
+	 * infite. In case of RLIM_INFINITY the posix CPU timer code
+	 * ignores the rlimit.
+	 */
+	 if (!retval && new_rlim && resource == RLIMIT_CPU &&
+	     new_rlim->rlim_cur != RLIM_INFINITY &&
+	     IS_ENABLED(CONFIG_POSIX_TIMERS))
+		update_rlimit_cpu(tsk, new_rlim->rlim_cur);
+out:
+	read_unlock(&tasklist_lock);
+	return retval;
+}
+
 /* rcu lock must be held */
 static int check_prlimit_permission(struct task_struct *task,
 				    unsigned int flags)
@@ -1734,7 +1664,6 @@ SYSCALL_DEFINE4(prlimit64, pid_t, pid, unsigned int, resource,
 	struct rlimit old, new;
 	struct task_struct *tsk;
 	unsigned int checkflags = 0;
-	bool need_tasklist;
 	int ret;
 
 	if (old_rlim)
@@ -1761,25 +1690,8 @@ SYSCALL_DEFINE4(prlimit64, pid_t, pid, unsigned int, resource,
 	get_task_struct(tsk);
 	rcu_read_unlock();
 
-	need_tasklist = !same_thread_group(tsk, current);
-	if (need_tasklist) {
-		/*
-		 * Ensure we can't race with group exit or de_thread(),
-		 * so tsk->group_leader can't be freed or changed until
-		 * read_unlock(tasklist_lock) below.
-		 */
-		read_lock(&tasklist_lock);
-		if (!pid_alive(tsk))
-			ret = -ESRCH;
-	}
-
-	if (!ret) {
-		ret = do_prlimit(tsk, resource, new_rlim ? &new : NULL,
-				old_rlim ? &old : NULL);
-	}
-
-	if (need_tasklist)
-		read_unlock(&tasklist_lock);
+	ret = do_prlimit(tsk, resource, new_rlim ? &new : NULL,
+			old_rlim ? &old : NULL);
 
 	if (!ret && old_rlim) {
 		rlim_to_rlim64(&old, &old64);
@@ -1965,28 +1877,64 @@ SYSCALL_DEFINE1(umask, int, mask)
 
 static int prctl_set_mm_exe_file(struct mm_struct *mm, unsigned int fd)
 {
-	CLASS(fd, exe)(fd);
+	struct fd exe;
+	struct file *old_exe, *exe_file;
 	struct inode *inode;
 	int err;
 
-	if (fd_empty(exe))
+	exe = fdget(fd);
+	if (!exe.file)
 		return -EBADF;
 
-	inode = file_inode(fd_file(exe));
+	inode = file_inode(exe.file);
 
 	/*
 	 * Because the original mm->exe_file points to executable file, make
 	 * sure that this one is executable as well, to avoid breaking an
 	 * overall picture.
 	 */
-	if (!S_ISREG(inode->i_mode) || path_noexec(&fd_file(exe)->f_path))
-		return -EACCES;
+	err = -EACCES;
+	if (!S_ISREG(inode->i_mode) || path_noexec(&exe.file->f_path))
+		goto exit;
 
-	err = file_permission(fd_file(exe), MAY_EXEC);
+	err = inode_permission(inode, MAY_EXEC);
 	if (err)
-		return err;
+		goto exit;
 
-	return replace_mm_exe_file(mm, fd_file(exe));
+	/*
+	 * Forbid mm->exe_file change if old file still mapped.
+	 */
+	exe_file = get_mm_exe_file(mm);
+	err = -EBUSY;
+	if (exe_file) {
+		struct vm_area_struct *vma;
+
+		mmap_read_lock(mm);
+		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+			if (!vma->vm_file)
+				continue;
+			if (path_equal(&vma->vm_file->f_path,
+				       &exe_file->f_path))
+				goto exit_err;
+		}
+
+		mmap_read_unlock(mm);
+		fput(exe_file);
+	}
+
+	err = 0;
+	/* set the new file, lockless */
+	get_file(exe.file);
+	old_exe = xchg(&mm->exe_file, exe.file);
+	if (old_exe)
+		fput(old_exe);
+exit:
+	fdput(exe);
+	return err;
+exit_err:
+	mmap_read_unlock(mm);
+	fput(exe_file);
+	goto exit;
 }
 
 /*
@@ -2118,7 +2066,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 	}
 
 	/*
-	 * arg_lock protects concurrent updates but we still need mmap_lock for
+	 * arg_lock protects concurent updates but we still need mmap_lock for
 	 * read to exclude races with sys_brk.
 	 */
 	mmap_read_lock(mm);
@@ -2130,7 +2078,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 	 * output in procfs mostly, except
 	 *
 	 *  - @start_brk/@brk which are used in do_brk_flags but kernel lookups
-	 *    for VMAs when updating these members so anything wrong written
+	 *    for VMAs when updating these memvers so anything wrong written
 	 *    here cause kernel to swear at userspace program but won't lead
 	 *    to any problem in kernel itself
 	 */
@@ -2174,7 +2122,7 @@ static int prctl_set_auxv(struct mm_struct *mm, unsigned long addr,
 	 * up to the caller to provide sane values here, otherwise userspace
 	 * tools which use this vector might be unhappy.
 	 */
-	unsigned long user_auxv[AT_VECTOR_SIZE] = {};
+	unsigned long user_auxv[AT_VECTOR_SIZE];
 
 	if (len > sizeof(user_auxv))
 		return -EINVAL;
@@ -2232,7 +2180,7 @@ static int prctl_set_mm(int opt, unsigned long addr,
 	error = -EINVAL;
 
 	/*
-	 * arg_lock protects concurrent updates of arg boundaries, we need
+	 * arg_lock protects concurent updates of arg boundaries, we need
 	 * mmap_lock for a) concurrent sys_brk, b) finding VMA for addr
 	 * validation.
 	 */
@@ -2299,7 +2247,7 @@ static int prctl_set_mm(int opt, unsigned long addr,
 	 * If command line arguments and environment
 	 * are placed somewhere else on stack, we can
 	 * set them up here, ARG_START/END to setup
-	 * command line arguments and ENV_START/END
+	 * command line argumets and ENV_START/END
 	 * for environment.
 	 */
 	case PR_SET_MM_START_STACK:
@@ -2347,8 +2295,8 @@ static int prctl_get_tid_address(struct task_struct *me, int __user * __user *ti
 static int propagate_has_child_subreaper(struct task_struct *p, void *data)
 {
 	/*
-	 * If task has has_child_subreaper - all its descendants
-	 * already have these flag too and new descendants will
+	 * If task has has_child_subreaper - all its decendants
+	 * already have these flag too and new decendants will
 	 * inherit it on fork, skip them.
 	 *
 	 * If we've found child_reaper - skip descendants in
@@ -2373,147 +2321,154 @@ int __weak arch_prctl_spec_ctrl_set(struct task_struct *t, unsigned long which,
 	return -EINVAL;
 }
 
-int __weak arch_get_shadow_stack_status(struct task_struct *t, unsigned long __user *status)
+#ifdef CONFIG_MMU
+static int prctl_update_vma_anon_name(struct vm_area_struct *vma,
+		struct vm_area_struct **prev,
+		unsigned long start, unsigned long end,
+		const char __user *name_addr)
 {
-	return -EINVAL;
+	struct mm_struct *mm = vma->vm_mm;
+	int error = 0;
+	pgoff_t pgoff;
+
+	if (name_addr == vma_get_anon_name(vma)) {
+		*prev = vma;
+		goto out;
+	}
+
+	pgoff = vma->vm_pgoff + ((start - vma->vm_start) >> PAGE_SHIFT);
+	*prev = vma_merge(mm, *prev, start, end, vma->vm_flags, vma->anon_vma,
+				vma->vm_file, pgoff, vma_policy(vma),
+				vma->vm_userfaultfd_ctx, name_addr);
+	if (*prev) {
+		vma = *prev;
+		goto success;
+	}
+
+	*prev = vma;
+
+	if (start != vma->vm_start) {
+		error = split_vma(mm, vma, start, 1);
+		if (error)
+			goto out;
+	}
+
+	if (end != vma->vm_end) {
+		error = split_vma(mm, vma, end, 0);
+		if (error)
+			goto out;
+	}
+
+success:
+	if (!vma->vm_file)
+		vma->anon_name = name_addr;
+
+out:
+	if (error == -ENOMEM)
+		error = -EAGAIN;
+	return error;
 }
 
-int __weak arch_set_shadow_stack_status(struct task_struct *t, unsigned long status)
+static int prctl_set_vma_anon_name(unsigned long start, unsigned long end,
+			unsigned long arg)
 {
-	return -EINVAL;
+	unsigned long tmp;
+	struct vm_area_struct *vma, *prev;
+	int unmapped_error = 0;
+	int error = -EINVAL;
+
+	/*
+	 * If the interval [start,end) covers some unmapped address
+	 * ranges, just ignore them, but return -ENOMEM at the end.
+	 * - this matches the handling in madvise.
+	 */
+	vma = find_vma_prev(current->mm, start, &prev);
+	if (vma && start > vma->vm_start)
+		prev = vma;
+
+	for (;;) {
+		/* Still start < end. */
+		error = -ENOMEM;
+		if (!vma)
+			return error;
+
+		/* Here start < (end|vma->vm_end). */
+		if (start < vma->vm_start) {
+			unmapped_error = -ENOMEM;
+			start = vma->vm_start;
+			if (start >= end)
+				return error;
+		}
+
+		/* Here vma->vm_start <= start < (end|vma->vm_end) */
+		tmp = vma->vm_end;
+		if (end < tmp)
+			tmp = end;
+
+		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
+		error = prctl_update_vma_anon_name(vma, &prev, start, tmp,
+				(const char __user *)arg);
+		if (error)
+			return error;
+		start = tmp;
+		if (prev && start < prev->vm_end)
+			start = prev->vm_end;
+		error = unmapped_error;
+		if (start >= end)
+			return error;
+		if (prev)
+			vma = prev->vm_next;
+		else	/* madvise_remove dropped mmap_lock */
+			vma = find_vma(current->mm, start);
+	}
 }
 
-int __weak arch_lock_shadow_stack_status(struct task_struct *t, unsigned long status)
+static int prctl_set_vma(unsigned long opt, unsigned long start,
+		unsigned long len_in, unsigned long arg)
 {
-	return -EINVAL;
-}
-
-#define PR_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LOCAL_THROTTLE)
-
-static int prctl_set_vma(unsigned long opt, unsigned long addr,
-			 unsigned long size, unsigned long arg)
-{
+	struct mm_struct *mm = current->mm;
 	int error;
+	unsigned long len;
+	unsigned long end;
+
+	if (start & ~PAGE_MASK)
+		return -EINVAL;
+	len = (len_in + ~PAGE_MASK) & PAGE_MASK;
+
+	/* Check to see whether len was rounded up from small -ve to zero */
+	if (len_in && !len)
+		return -EINVAL;
+
+	end = start + len;
+	if (end < start)
+		return -EINVAL;
+
+	if (end == start)
+		return 0;
+
+	mmap_write_lock(mm);
 
 	switch (opt) {
 	case PR_SET_VMA_ANON_NAME:
-		error = set_anon_vma_name(addr, size, (const char __user *)arg);
+		error = prctl_set_vma_anon_name(start, end, arg);
 		break;
 	default:
 		error = -EINVAL;
 	}
 
+	mmap_write_unlock(mm);
+
 	return error;
 }
-
-static inline unsigned long get_current_mdwe(void)
+#else /* CONFIG_MMU */
+static int prctl_set_vma(unsigned long opt, unsigned long start,
+		unsigned long len_in, unsigned long arg)
 {
-	unsigned long ret = 0;
-
-	if (mm_flags_test(MMF_HAS_MDWE, current->mm))
-		ret |= PR_MDWE_REFUSE_EXEC_GAIN;
-	if (mm_flags_test(MMF_HAS_MDWE_NO_INHERIT, current->mm))
-		ret |= PR_MDWE_NO_INHERIT;
-
-	return ret;
+	return -EINVAL;
 }
+#endif
 
-static inline int prctl_set_mdwe(unsigned long bits, unsigned long arg3,
-				 unsigned long arg4, unsigned long arg5)
-{
-	unsigned long current_bits;
-
-	if (arg3 || arg4 || arg5)
-		return -EINVAL;
-
-	if (bits & ~(PR_MDWE_REFUSE_EXEC_GAIN | PR_MDWE_NO_INHERIT))
-		return -EINVAL;
-
-	/* NO_INHERIT only makes sense with REFUSE_EXEC_GAIN */
-	if (bits & PR_MDWE_NO_INHERIT && !(bits & PR_MDWE_REFUSE_EXEC_GAIN))
-		return -EINVAL;
-
-	/*
-	 * EOPNOTSUPP might be more appropriate here in principle, but
-	 * existing userspace depends on EINVAL specifically.
-	 */
-	if (!arch_memory_deny_write_exec_supported())
-		return -EINVAL;
-
-	current_bits = get_current_mdwe();
-	if (current_bits && current_bits != bits)
-		return -EPERM; /* Cannot unset the flags */
-
-	if (bits & PR_MDWE_NO_INHERIT)
-		mm_flags_set(MMF_HAS_MDWE_NO_INHERIT, current->mm);
-	if (bits & PR_MDWE_REFUSE_EXEC_GAIN)
-		mm_flags_set(MMF_HAS_MDWE, current->mm);
-
-	return 0;
-}
-
-static inline int prctl_get_mdwe(unsigned long arg2, unsigned long arg3,
-				 unsigned long arg4, unsigned long arg5)
-{
-	if (arg2 || arg3 || arg4 || arg5)
-		return -EINVAL;
-	return get_current_mdwe();
-}
-
-static int prctl_get_auxv(void __user *addr, unsigned long len)
-{
-	struct mm_struct *mm = current->mm;
-	unsigned long size = min_t(unsigned long, sizeof(mm->saved_auxv), len);
-
-	if (size && copy_to_user(addr, mm->saved_auxv, size))
-		return -EFAULT;
-	return sizeof(mm->saved_auxv);
-}
-
-static int prctl_get_thp_disable(unsigned long arg2, unsigned long arg3,
-				 unsigned long arg4, unsigned long arg5)
-{
-	struct mm_struct *mm = current->mm;
-
-	if (arg2 || arg3 || arg4 || arg5)
-		return -EINVAL;
-
-	/* If disabled, we return "1 | flags", otherwise 0. */
-	if (mm_flags_test(MMF_DISABLE_THP_COMPLETELY, mm))
-		return 1;
-	else if (mm_flags_test(MMF_DISABLE_THP_EXCEPT_ADVISED, mm))
-		return 1 | PR_THP_DISABLE_EXCEPT_ADVISED;
-	return 0;
-}
-
-static int prctl_set_thp_disable(bool thp_disable, unsigned long flags,
-				 unsigned long arg4, unsigned long arg5)
-{
-	struct mm_struct *mm = current->mm;
-
-	if (arg4 || arg5)
-		return -EINVAL;
-
-	/* Flags are only allowed when disabling. */
-	if ((!thp_disable && flags) || (flags & ~PR_THP_DISABLE_EXCEPT_ADVISED))
-		return -EINVAL;
-	if (mmap_write_lock_killable(current->mm))
-		return -EINTR;
-	if (thp_disable) {
-		if (flags & PR_THP_DISABLE_EXCEPT_ADVISED) {
-			mm_flags_clear(MMF_DISABLE_THP_COMPLETELY, mm);
-			mm_flags_set(MMF_DISABLE_THP_EXCEPT_ADVISED, mm);
-		} else {
-			mm_flags_set(MMF_DISABLE_THP_COMPLETELY, mm);
-			mm_flags_clear(MMF_DISABLE_THP_EXCEPT_ADVISED, mm);
-		}
-	} else {
-		mm_flags_clear(MMF_DISABLE_THP_COMPLETELY, mm);
-		mm_flags_clear(MMF_DISABLE_THP_EXCEPT_ADVISED, mm);
-	}
-	mmap_write_unlock(current->mm);
-	return 0;
-}
+#define PR_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LOCAL_THROTTLE)
 
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)
@@ -2533,17 +2488,7 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			error = -EINVAL;
 			break;
 		}
-		/*
-		 * Ensure that either:
-		 *
-		 * 1. Subsequent getppid() calls reflect the parent process having died.
-		 * 2. forget_original_parent() will send the new me->pdeath_signal.
-		 *
-		 * Also prevent the read of me->pdeath_signal from being a data race.
-		 */
-		read_lock(&tasklist_lock);
 		me->pdeath_signal = arg2;
-		read_unlock(&tasklist_lock);
 		break;
 	case PR_GET_PDEATHSIG:
 		error = put_user(me->pdeath_signal, (int __user *)arg2);
@@ -2628,8 +2573,6 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			error = current->timer_slack_ns;
 		break;
 	case PR_SET_TIMERSLACK:
-		if (rt_or_dl_task_policy(current))
-			break;
 		if (arg2 <= 0)
 			current->timer_slack_ns =
 					current->default_timer_slack_ns;
@@ -2698,10 +2641,20 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			return -EINVAL;
 		return task_no_new_privs(current) ? 1 : 0;
 	case PR_GET_THP_DISABLE:
-		error = prctl_get_thp_disable(arg2, arg3, arg4, arg5);
+		if (arg2 || arg3 || arg4 || arg5)
+			return -EINVAL;
+		error = !!test_bit(MMF_DISABLE_THP, &me->mm->flags);
 		break;
 	case PR_SET_THP_DISABLE:
-		error = prctl_set_thp_disable(arg2, arg3, arg4, arg5);
+		if (arg3 || arg4 || arg5)
+			return -EINVAL;
+		if (mmap_write_lock_killable(me->mm))
+			return -EINTR;
+		if (arg2)
+			set_bit(MMF_DISABLE_THP, &me->mm->flags);
+		else
+			clear_bit(MMF_DISABLE_THP, &me->mm->flags);
+		mmap_write_unlock(me->mm);
 		break;
 	case PR_MPX_ENABLE_MANAGEMENT:
 	case PR_MPX_DISABLE_MANAGEMENT:
@@ -2719,12 +2672,6 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_SVE_GET_VL:
 		error = SVE_GET_VL();
 		break;
-	case PR_SME_SET_VL:
-		error = SME_SET_VL(arg2);
-		break;
-	case PR_SME_GET_VL:
-		error = SME_GET_VL();
-		break;
 	case PR_GET_SPECULATION_CTRL:
 		if (arg3 || arg4 || arg5)
 			return -EINVAL;
@@ -2734,6 +2681,9 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		if (arg4 || arg5)
 			return -EINVAL;
 		error = arch_prctl_spec_ctrl_set(me, arg2, arg3);
+		break;
+	case PR_SET_VMA:
+		error = prctl_set_vma(arg2, arg3, arg4, arg5);
 		break;
 	case PR_PAC_RESET_KEYS:
 		if (arg3 || arg4 || arg5)
@@ -2783,96 +2733,11 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 
 		error = (current->flags & PR_IO_FLUSHER) == PR_IO_FLUSHER;
 		break;
-	case PR_SET_SYSCALL_USER_DISPATCH:
-		error = set_syscall_user_dispatch(arg2, arg3, arg4,
-						  (char __user *) arg5);
-		break;
-#ifdef CONFIG_SCHED_CORE
-	case PR_SCHED_CORE:
-		error = sched_core_share_pid(arg2, arg3, arg4, arg5);
-		break;
-#endif
-	case PR_SET_MDWE:
-		error = prctl_set_mdwe(arg2, arg3, arg4, arg5);
-		break;
-	case PR_GET_MDWE:
-		error = prctl_get_mdwe(arg2, arg3, arg4, arg5);
-		break;
-	case PR_PPC_GET_DEXCR:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		error = PPC_GET_DEXCR_ASPECT(me, arg2);
-		break;
-	case PR_PPC_SET_DEXCR:
-		if (arg4 || arg5)
-			return -EINVAL;
-		error = PPC_SET_DEXCR_ASPECT(me, arg2, arg3);
-		break;
-	case PR_SET_VMA:
-		error = prctl_set_vma(arg2, arg3, arg4, arg5);
-		break;
-	case PR_GET_AUXV:
-		if (arg4 || arg5)
-			return -EINVAL;
-		error = prctl_get_auxv((void __user *)arg2, arg3);
-		break;
-#ifdef CONFIG_KSM
-	case PR_SET_MEMORY_MERGE:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		if (mmap_write_lock_killable(me->mm))
-			return -EINTR;
-
-		if (arg2)
-			error = ksm_enable_merge_any(me->mm);
-		else
-			error = ksm_disable_merge_any(me->mm);
-		mmap_write_unlock(me->mm);
-		break;
-	case PR_GET_MEMORY_MERGE:
-		if (arg2 || arg3 || arg4 || arg5)
-			return -EINVAL;
-
-		error = !!mm_flags_test(MMF_VM_MERGE_ANY, me->mm);
-		break;
-#endif
-	case PR_RISCV_V_SET_CONTROL:
-		error = RISCV_V_SET_CONTROL(arg2);
-		break;
-	case PR_RISCV_V_GET_CONTROL:
-		error = RISCV_V_GET_CONTROL();
-		break;
-	case PR_RISCV_SET_ICACHE_FLUSH_CTX:
-		error = RISCV_SET_ICACHE_FLUSH_CTX(arg2, arg3);
-		break;
-	case PR_GET_SHADOW_STACK_STATUS:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		error = arch_get_shadow_stack_status(me, (unsigned long __user *) arg2);
-		break;
-	case PR_SET_SHADOW_STACK_STATUS:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		error = arch_set_shadow_stack_status(me, arg2);
-		break;
-	case PR_LOCK_SHADOW_STACK_STATUS:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		error = arch_lock_shadow_stack_status(me, arg2);
-		break;
-	case PR_TIMER_CREATE_RESTORE_IDS:
-		if (arg3 || arg4 || arg5)
-			return -EINVAL;
-		error = posixtimer_create_prctl(arg2);
-		break;
-	case PR_FUTEX_HASH:
-		error = futex_hash_prctl(arg2, arg3, arg4);
-		break;
 	default:
-		trace_task_prctl_unknown(option, arg2, arg3, arg4, arg5);
 		error = -EINVAL;
 		break;
 	}
+	trace_android_vh_syscall_prctl_finished(option, me);
 	return error;
 }
 

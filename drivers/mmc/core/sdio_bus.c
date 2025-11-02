@@ -14,7 +14,6 @@
 #include <linux/pm_runtime.h>
 #include <linux/pm_domain.h>
 #include <linux/acpi.h>
-#include <linux/sysfs.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
@@ -26,7 +25,7 @@
 #include "sdio_cis.h"
 #include "sdio_bus.h"
 
-#define to_sdio_driver(d)	container_of_const(d, struct sdio_driver, drv)
+#define to_sdio_driver(d)	container_of(d, struct sdio_driver, drv)
 
 /* show configuration fields */
 #define sdio_config_attr(field, format_string, args...)			\
@@ -36,7 +35,7 @@ field##_show(struct device *dev, struct device_attribute *attr, char *buf)				\
 	struct sdio_func *func;						\
 									\
 	func = dev_to_sdio_func (dev);					\
-	return sysfs_emit(buf, format_string, args);			\
+	return sprintf(buf, format_string, args);			\
 }									\
 static DEVICE_ATTR_RO(field)
 
@@ -53,9 +52,9 @@ static ssize_t info##num##_show(struct device *dev, struct device_attribute *att
 												\
 	if (num > func->num_info)								\
 		return -ENODATA;								\
-	if (!func->info[num - 1][0])								\
+	if (!func->info[num-1][0])								\
 		return 0;									\
-	return sysfs_emit(buf, "%s\n", func->info[num - 1]);					\
+	return sprintf(buf, "%s\n", func->info[num-1]);						\
 }												\
 static DEVICE_ATTR_RO(info##num)
 
@@ -91,7 +90,7 @@ static const struct sdio_device_id *sdio_match_one(struct sdio_func *func,
 }
 
 static const struct sdio_device_id *sdio_match_device(struct sdio_func *func,
-	const struct sdio_driver *sdrv)
+	struct sdio_driver *sdrv)
 {
 	const struct sdio_device_id *ids;
 
@@ -108,10 +107,10 @@ static const struct sdio_device_id *sdio_match_device(struct sdio_func *func,
 	return NULL;
 }
 
-static int sdio_bus_match(struct device *dev, const struct device_driver *drv)
+static int sdio_bus_match(struct device *dev, struct device_driver *drv)
 {
 	struct sdio_func *func = dev_to_sdio_func(dev);
-	const struct sdio_driver *sdrv = to_sdio_driver(drv);
+	struct sdio_driver *sdrv = to_sdio_driver(drv);
 
 	if (sdio_match_device(func, sdrv))
 		return 1;
@@ -120,16 +119,16 @@ static int sdio_bus_match(struct device *dev, const struct device_driver *drv)
 }
 
 static int
-sdio_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
+sdio_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct sdio_func *func = dev_to_sdio_func(dev);
+	struct sdio_func *func = dev_to_sdio_func(dev);
 	unsigned int i;
 
 	if (add_uevent_var(env,
 			"SDIO_CLASS=%02X", func->class))
 		return -ENOMEM;
 
-	if (add_uevent_var(env,
+	if (add_uevent_var(env, 
 			"SDIO_ID=%04X:%04X", func->vendor, func->device))
 		return -ENOMEM;
 
@@ -161,7 +160,7 @@ static int sdio_bus_probe(struct device *dev)
 	if (!id)
 		return -ENODEV;
 
-	ret = dev_pm_domain_attach(dev, 0);
+	ret = dev_pm_domain_attach(dev, false);
 	if (ret)
 		return ret;
 
@@ -200,10 +199,11 @@ disable_runtimepm:
 	atomic_dec(&func->card->sdio_funcs_probed);
 	if (func->card->host->caps & MMC_CAP_POWER_OFF_CARD)
 		pm_runtime_put_noidle(dev);
+	dev_pm_domain_detach(dev, false);
 	return ret;
 }
 
-static void sdio_bus_remove(struct device *dev)
+static int sdio_bus_remove(struct device *dev)
 {
 	struct sdio_driver *drv = to_sdio_driver(dev->driver);
 	struct sdio_func *func = dev_to_sdio_func(dev);
@@ -230,6 +230,10 @@ static void sdio_bus_remove(struct device *dev)
 	/* Then undo the runtime PM settings in sdio_bus_probe() */
 	if (func->card->host->caps & MMC_CAP_POWER_OFF_CARD)
 		pm_runtime_put_sync(dev);
+
+	dev_pm_domain_detach(dev, false);
+
+	return 0;
 }
 
 static const struct dev_pm_ops sdio_bus_pm_ops = {
@@ -241,7 +245,7 @@ static const struct dev_pm_ops sdio_bus_pm_ops = {
 	)
 };
 
-static const struct bus_type sdio_bus_type = {
+static struct bus_type sdio_bus_type = {
 	.name		= "sdio",
 	.dev_groups	= sdio_dev_groups,
 	.match		= sdio_bus_match,
@@ -262,19 +266,16 @@ void sdio_unregister_bus(void)
 }
 
 /**
- *	__sdio_register_driver - register a function driver
+ *	sdio_register_driver - register a function driver
  *	@drv: SDIO function driver
- *	@owner: owning module/driver
  */
-int __sdio_register_driver(struct sdio_driver *drv, struct module *owner)
+int sdio_register_driver(struct sdio_driver *drv)
 {
 	drv->drv.name = drv->name;
 	drv->drv.bus = &sdio_bus_type;
-	drv->drv.owner = owner;
-
 	return driver_register(&drv->drv);
 }
-EXPORT_SYMBOL_GPL(__sdio_register_driver);
+EXPORT_SYMBOL_GPL(sdio_register_driver);
 
 /**
  *	sdio_unregister_driver - unregister a function driver

@@ -9,7 +9,9 @@
 
 #define NR_syscalls	__NR_syscalls
 
-#ifndef __ASSEMBLER__
+#define __NR__exit __NR_exit
+
+#ifndef __ASSEMBLY__
 
 #include <linux/types.h>
 #include <linux/compiler.h>
@@ -38,19 +40,17 @@
 #define __ARCH_WANT_SYS_SIGPROCMASK
 #ifdef CONFIG_PPC32
 #define __ARCH_WANT_OLD_STAT
-#define __ARCH_WANT_SYS_OLD_SELECT
 #endif
 #ifdef CONFIG_PPC64
 #define __ARCH_WANT_SYS_TIME
 #define __ARCH_WANT_SYS_UTIME
 #define __ARCH_WANT_SYS_NEWFSTATAT
-#define __ARCH_WANT_COMPAT_STAT
-#define __ARCH_WANT_COMPAT_FALLOCATE
 #define __ARCH_WANT_COMPAT_SYS_SENDFILE
 #endif
 #define __ARCH_WANT_SYS_FORK
 #define __ARCH_WANT_SYS_VFORK
 #define __ARCH_WANT_SYS_CLONE
+#define __ARCH_WANT_SYS_CLONE3
 
-#endif		/* __ASSEMBLER__ */
+#endif		/* __ASSEMBLY__ */
 #endif /* _ASM_POWERPC_UNISTD_H_ */

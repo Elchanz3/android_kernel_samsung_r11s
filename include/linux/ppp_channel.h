@@ -20,8 +20,6 @@
 #include <linux/poll.h>
 #include <net/net_namespace.h>
 
-struct net_device_path;
-struct net_device_path_ctx;
 struct ppp_channel;
 
 struct ppp_channel_ops {
@@ -30,9 +28,6 @@ struct ppp_channel_ops {
 	int	(*start_xmit)(struct ppp_channel *, struct sk_buff *);
 	/* Handle an ioctl call that has come in via /dev/ppp. */
 	int	(*ioctl)(struct ppp_channel *, unsigned int, unsigned long);
-	int	(*fill_forward_path)(struct net_device_path_ctx *,
-				     struct net_device_path *,
-				     const struct ppp_channel *);
 };
 
 struct ppp_channel {
@@ -42,7 +37,8 @@ struct ppp_channel {
 	int		hdrlen;		/* amount of headroom channel needs */
 	void		*ppp;		/* opaque to channel */
 	int		speed;		/* transfer rate (bytes/second) */
-	bool		direct_xmit;	/* no qdisc, xmit directly */
+	/* the following is not used at present */
+	int		latency;	/* overhead time in milliseconds */
 };
 
 #ifdef __KERNEL__

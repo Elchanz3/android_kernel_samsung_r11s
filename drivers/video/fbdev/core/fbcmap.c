@@ -11,7 +11,6 @@
  *  more details.
  */
 
-#include <linux/export.h>
 #include <linux/string.h>
 #include <linux/module.h>
 #include <linux/fb.h>
@@ -77,7 +76,7 @@ static const struct fb_cmap default_16_colors = {
 
 
 /**
- *	fb_alloc_cmap_gfp - allocate a colormap
+ *	fb_alloc_cmap - allocate a colormap
  *	@cmap: frame buffer colormap structure
  *	@len: length of @cmap
  *	@transp: boolean, 1 if there is transparency, 0 otherwise

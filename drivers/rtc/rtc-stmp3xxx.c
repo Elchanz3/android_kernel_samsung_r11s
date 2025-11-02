@@ -18,6 +18,7 @@
 #include <linux/delay.h>
 #include <linux/rtc.h>
 #include <linux/slab.h>
+#include <linux/of_device.h>
 #include <linux/of.h>
 #include <linux/stmp_device.h>
 #include <linux/stmp3xxx_rtc_wdt.h>
@@ -106,8 +107,6 @@ static void stmp3xxx_wdt_register(struct platform_device *rtc_pdev)
 		wdt_pdev->dev.parent = &rtc_pdev->dev;
 		wdt_pdev->dev.platform_data = &wdt_pdata;
 		rc = platform_device_add(wdt_pdev);
-		if (rc)
-			platform_device_put(wdt_pdev);
 	}
 
 	if (rc)
@@ -231,15 +230,17 @@ static const struct rtc_class_ops stmp3xxx_rtc_ops = {
 	.set_alarm	= stmp3xxx_rtc_set_alarm,
 };
 
-static void stmp3xxx_rtc_remove(struct platform_device *pdev)
+static int stmp3xxx_rtc_remove(struct platform_device *pdev)
 {
 	struct stmp3xxx_rtc_data *rtc_data = platform_get_drvdata(pdev);
 
 	if (!rtc_data)
-		return;
+		return 0;
 
 	writel(STMP3XXX_RTC_CTRL_ALARM_IRQ_EN,
 		rtc_data->io + STMP3XXX_RTC_CTRL + STMP_OFFSET_REG_CLR);
+
+	return 0;
 }
 
 static int stmp3xxx_rtc_probe(struct platform_device *pdev)
@@ -365,7 +366,7 @@ static int stmp3xxx_rtc_probe(struct platform_device *pdev)
 	rtc_data->rtc->ops = &stmp3xxx_rtc_ops;
 	rtc_data->rtc->range_max = U32_MAX;
 
-	err = devm_rtc_register_device(rtc_data->rtc);
+	err = rtc_register_device(rtc_data->rtc);
 	if (err)
 		return err;
 

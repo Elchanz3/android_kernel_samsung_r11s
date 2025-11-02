@@ -639,7 +639,7 @@ static void ir_do_keyup(struct rc_dev *dev, bool sync)
 		return;
 
 	dev_dbg(&dev->dev, "keyup key 0x%04x\n", dev->last_keycode);
-	timer_delete(&dev->timer_repeat);
+	del_timer(&dev->timer_repeat);
 	input_report_key(dev->input_dev, dev->last_keycode, 0);
 	led_trigger_event(led_feedback, LED_OFF);
 	if (sync)
@@ -674,7 +674,7 @@ EXPORT_SYMBOL_GPL(rc_keyup);
  */
 static void ir_timer_keyup(struct timer_list *t)
 {
-	struct rc_dev *dev = timer_container_of(dev, t, timer_keyup);
+	struct rc_dev *dev = from_timer(dev, t, timer_keyup);
 	unsigned long flags;
 
 	/*
@@ -703,7 +703,7 @@ static void ir_timer_keyup(struct timer_list *t)
  */
 static void ir_timer_repeat(struct timer_list *t)
 {
-	struct rc_dev *dev = timer_container_of(dev, t, timer_repeat);
+	struct rc_dev *dev = from_timer(dev, t, timer_repeat);
 	struct input_dev *input = dev->input_dev;
 	unsigned long flags;
 
@@ -786,8 +786,7 @@ static void ir_do_keydown(struct rc_dev *dev, enum rc_proto protocol,
 			  dev->last_toggle   != toggle);
 	struct lirc_scancode sc = {
 		.scancode = scancode, .rc_proto = protocol,
-		.flags = (toggle ? LIRC_SCANCODE_FLAG_TOGGLE : 0) |
-			 (!new_event ? LIRC_SCANCODE_FLAG_REPEAT : 0),
+		.flags = toggle ? LIRC_SCANCODE_FLAG_TOGGLE : 0,
 		.keycode = keycode
 	};
 
@@ -1017,7 +1016,7 @@ static void ir_close(struct input_dev *idev)
 }
 
 /* class for /sys/class/rc */
-static char *rc_devnode(const struct device *dev, umode_t *mode)
+static char *rc_devnode(struct device *dev, umode_t *mode)
 {
 	return kasprintf(GFP_KERNEL, "rc/%s", dev_name(dev));
 }
@@ -1614,7 +1613,7 @@ static void rc_dev_release(struct device *device)
 	kfree(dev);
 }
 
-static int rc_dev_uevent(const struct device *device, struct kobj_uevent_env *env)
+static int rc_dev_uevent(struct device *device, struct kobj_uevent_env *env)
 {
 	struct rc_dev *dev = to_rc_dev(device);
 	int ret = 0;
@@ -1898,7 +1897,7 @@ int rc_register_device(struct rc_dev *dev)
 	if (!dev)
 		return -EINVAL;
 
-	minor = ida_alloc_max(&rc_ida, RC_DEV_MAX - 1, GFP_KERNEL);
+	minor = ida_simple_get(&rc_ida, 0, RC_DEV_MAX, GFP_KERNEL);
 	if (minor < 0)
 		return minor;
 
@@ -1941,7 +1940,7 @@ int rc_register_device(struct rc_dev *dev)
 	kfree(path);
 
 	/*
-	 * once the input device is registered in rc_setup_rx_device,
+	 * once the the input device is registered in rc_setup_rx_device,
 	 * userspace can open the input device and rc_open() will be called
 	 * as a result. This results in driver code being allowed to submit
 	 * keycodes with rc_keydown, so lirc must be registered first.
@@ -1981,7 +1980,7 @@ out_rx_free:
 out_raw:
 	ir_raw_event_free(dev);
 out_minor:
-	ida_free(&rc_ida, minor);
+	ida_simple_remove(&rc_ida, minor);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(rc_register_device);
@@ -2021,8 +2020,8 @@ void rc_unregister_device(struct rc_dev *dev)
 	if (dev->driver_type == RC_DRIVER_IR_RAW)
 		ir_raw_event_unregister(dev);
 
-	timer_delete_sync(&dev->timer_keyup);
-	timer_delete_sync(&dev->timer_repeat);
+	del_timer_sync(&dev->timer_keyup);
+	del_timer_sync(&dev->timer_repeat);
 
 	mutex_lock(&dev->lock);
 	if (dev->users && dev->close)
@@ -2041,7 +2040,7 @@ void rc_unregister_device(struct rc_dev *dev)
 
 	device_del(&dev->dev);
 
-	ida_free(&rc_ida, dev->minor);
+	ida_simple_remove(&rc_ida, dev->minor);
 
 	if (!dev->managed_alloc)
 		rc_free_device(dev);
@@ -2092,5 +2091,4 @@ subsys_initcall(rc_core_init);
 module_exit(rc_core_exit);
 
 MODULE_AUTHOR("Mauro Carvalho Chehab");
-MODULE_DESCRIPTION("Remote Controller core module");
 MODULE_LICENSE("GPL v2");

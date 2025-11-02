@@ -8,8 +8,7 @@
 #ifndef __LINUX_REGULATOR_COUPLER_H_
 #define __LINUX_REGULATOR_COUPLER_H_
 
-#include <linux/errno.h>
-#include <linux/types.h>
+#include <linux/kernel.h>
 #include <linux/suspend.h>
 
 struct regulator_coupler;
@@ -53,6 +52,7 @@ struct regulator_coupler {
 
 #ifdef CONFIG_REGULATOR
 int regulator_coupler_register(struct regulator_coupler *coupler);
+const char *rdev_get_name(struct regulator_dev *rdev);
 int regulator_check_consumers(struct regulator_dev *rdev,
 			      int *min_uV, int *max_uV,
 			      suspend_state_t state);
@@ -68,6 +68,10 @@ int regulator_do_balance_voltage(struct regulator_dev *rdev,
 static inline int regulator_coupler_register(struct regulator_coupler *coupler)
 {
 	return 0;
+}
+static inline const char *rdev_get_name(struct regulator_dev *rdev)
+{
+	return NULL;
 }
 static inline int regulator_check_consumers(struct regulator_dev *rdev,
 					    int *min_uV, int *max_uV,

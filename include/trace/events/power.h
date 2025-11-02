@@ -40,66 +40,27 @@ DEFINE_EVENT(cpu, cpu_idle,
 	TP_ARGS(state, cpu_id)
 );
 
-TRACE_EVENT(cpu_idle_miss,
+TRACE_EVENT(powernv_throttle,
 
-	TP_PROTO(unsigned int cpu_id, unsigned int state, bool below),
+	TP_PROTO(int chip_id, const char *reason, int pmax),
 
-	TP_ARGS(cpu_id, state, below),
+	TP_ARGS(chip_id, reason, pmax),
 
 	TP_STRUCT__entry(
-		__field(u32,		cpu_id)
-		__field(u32,		state)
-		__field(bool,		below)
+		__field(int, chip_id)
+		__string(reason, reason)
+		__field(int, pmax)
 	),
 
 	TP_fast_assign(
-		__entry->cpu_id = cpu_id;
-		__entry->state = state;
-		__entry->below = below;
+		__entry->chip_id = chip_id;
+		__assign_str(reason, reason);
+		__entry->pmax = pmax;
 	),
 
-	TP_printk("cpu_id=%lu state=%lu type=%s", (unsigned long)__entry->cpu_id,
-		(unsigned long)__entry->state, (__entry->below)?"below":"above")
+	TP_printk("Chip %d Pmax %d %s", __entry->chip_id,
+		  __entry->pmax, __get_str(reason))
 );
-
-#ifdef CONFIG_ARM_PSCI_CPUIDLE
-DECLARE_EVENT_CLASS(psci_domain_idle,
-
-	TP_PROTO(unsigned int cpu_id, unsigned int state, bool s2idle),
-
-	TP_ARGS(cpu_id, state, s2idle),
-
-	TP_STRUCT__entry(
-		__field(u32,		cpu_id)
-		__field(u32,		state)
-		__field(bool,		s2idle)
-	),
-
-	TP_fast_assign(
-		__entry->cpu_id = cpu_id;
-		__entry->state = state;
-		__entry->s2idle = s2idle;
-	),
-
-	TP_printk("cpu_id=%lu state=0x%lx is_s2idle=%s",
-		  (unsigned long)__entry->cpu_id, (unsigned long)__entry->state,
-		  (__entry->s2idle)?"yes":"no")
-);
-
-DEFINE_EVENT(psci_domain_idle, psci_domain_idle_enter,
-
-	TP_PROTO(unsigned int cpu_id, unsigned int state, bool s2idle),
-
-	TP_ARGS(cpu_id, state, s2idle)
-);
-
-DEFINE_EVENT(psci_domain_idle, psci_domain_idle_exit,
-
-	TP_PROTO(unsigned int cpu_id, unsigned int state, bool s2idle),
-
-	TP_ARGS(cpu_id, state, s2idle)
-);
-#endif
 
 TRACE_EVENT(pstate_sample,
 
@@ -212,7 +173,6 @@ TRACE_EVENT(cpu_frequency_limits,
 		  (unsigned long)__entry->cpu_id)
 );
 
-#ifdef CONFIG_PM_SLEEP
 TRACE_EVENT(device_pm_callback_start,
 
 	TP_PROTO(struct device *dev, const char *pm_ops, int event),
@@ -228,10 +188,11 @@ TRACE_EVENT(device_pm_callback_start,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
-		__assign_str(parent);
-		__assign_str(pm_ops);
+		__assign_str(device, dev_name(dev));
+		__assign_str(driver, dev_driver_string(dev));
+		__assign_str(parent,
+			dev->parent ? dev_name(dev->parent) : "none");
+		__assign_str(pm_ops, pm_ops ? pm_ops : "none ");
 		__entry->event = event;
 	),
 
@@ -253,15 +214,14 @@ TRACE_EVENT(device_pm_callback_end,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(dev));
+		__assign_str(driver, dev_driver_string(dev));
 		__entry->error = error;
 	),
 
 	TP_printk("%s %s, err=%d",
 		__get_str(driver), __get_str(device), __entry->error)
 );
-#endif
 
 TRACE_EVENT(suspend_resume,
 
@@ -297,7 +257,7 @@ DECLARE_EVENT_CLASS(wakeup_source,
 	),
 
 	TP_fast_assign(
-		__assign_str(name);
+		__assign_str(name, name);
 		__entry->state = state;
 	),
 
@@ -319,7 +279,53 @@ DEFINE_EVENT(wakeup_source, wakeup_source_deactivate,
 	TP_ARGS(name, state)
 );
 
-#ifdef CONFIG_ARCH_OMAP2PLUS
+/*
+ * The clock events are used for clock enable/disable and for
+ *  clock rate change
+ */
+DECLARE_EVENT_CLASS(clock,
+
+	TP_PROTO(const char *name, unsigned int state, unsigned int cpu_id),
+
+	TP_ARGS(name, state, cpu_id),
+
+	TP_STRUCT__entry(
+		__string(       name,           name            )
+		__field(        u64,            state           )
+		__field(        u64,            cpu_id          )
+	),
+
+	TP_fast_assign(
+		__assign_str(name, name);
+		__entry->state = state;
+		__entry->cpu_id = cpu_id;
+	),
+
+	TP_printk("%s state=%lu cpu_id=%lu", __get_str(name),
+		(unsigned long)__entry->state, (unsigned long)__entry->cpu_id)
+);
+
+DEFINE_EVENT(clock, clock_enable,
+
+	TP_PROTO(const char *name, unsigned int state, unsigned int cpu_id),
+
+	TP_ARGS(name, state, cpu_id)
+);
+
+DEFINE_EVENT(clock, clock_disable,
+
+	TP_PROTO(const char *name, unsigned int state, unsigned int cpu_id),
+
+	TP_ARGS(name, state, cpu_id)
+);
+
+DEFINE_EVENT(clock, clock_set_rate,
+
+	TP_PROTO(const char *name, unsigned int state, unsigned int cpu_id),
+
+	TP_ARGS(name, state, cpu_id)
+);
+
 /*
  * The power domain events are used for power domains transitions
  */
@@ -336,7 +342,7 @@ DECLARE_EVENT_CLASS(power_domain,
 	),
 
 	TP_fast_assign(
-		__assign_str(name);
+		__assign_str(name, name);
 		__entry->state = state;
 		__entry->cpu_id = cpu_id;
 ),
@@ -351,7 +357,6 @@ DEFINE_EVENT(power_domain, power_domain_target,
 
 	TP_ARGS(name, state, cpu_id)
 );
-#endif
 
 /*
  * CPU latency QoS events used for global CPU latency QoS list updates
@@ -459,7 +464,7 @@ DECLARE_EVENT_CLASS(dev_pm_qos_request,
 	),
 
 	TP_fast_assign(
-		__assign_str(name);
+		__assign_str(name, name);
 		__entry->type = type;
 		__entry->new_value = new_value;
 	),
@@ -495,35 +500,6 @@ DEFINE_EVENT(dev_pm_qos_request, dev_pm_qos_remove_request,
 
 	TP_ARGS(name, type, new_value)
 );
-
-TRACE_EVENT(guest_halt_poll_ns,
-
-	TP_PROTO(bool grow, unsigned int new, unsigned int old),
-
-	TP_ARGS(grow, new, old),
-
-	TP_STRUCT__entry(
-		__field(bool, grow)
-		__field(unsigned int, new)
-		__field(unsigned int, old)
-	),
-
-	TP_fast_assign(
-		__entry->grow   = grow;
-		__entry->new    = new;
-		__entry->old    = old;
-	),
-
-	TP_printk("halt_poll_ns %u (%s %u)",
-		__entry->new,
-		__entry->grow ? "grow" : "shrink",
-		__entry->old)
-);
-
-#define trace_guest_halt_poll_ns_grow(new, old) \
-	trace_guest_halt_poll_ns(true, new, old)
-#define trace_guest_halt_poll_ns_shrink(new, old) \
-	trace_guest_halt_poll_ns(false, new, old)
 #endif /* _TRACE_POWER_H */
 
 /* This part must be outside protection */

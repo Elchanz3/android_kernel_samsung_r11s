@@ -33,10 +33,7 @@ static unsigned long read_sysfs(char *str)
 		ksft_print_msg("ERR: missing %s\n", str);
 		return 0;
 	}
-	if (fscanf(f, "%lu", &val) != 1) {
-		ksft_print_msg("ERR: parsing %s\n", str);
-		val = 0;
-	}
+	fscanf(f, "%lu", &val);
 	fclose(f);
 	return val;
 }
@@ -106,7 +103,7 @@ static int check_madvise_options(int mem_type, int mode, int mapping)
 		return err;
 	}
 
-	mte_switch_mode(mode, MTE_ALLOW_NON_ZERO_TAG, false);
+	mte_switch_mode(mode, MTE_ALLOW_NON_ZERO_TAG);
 	ptr = mte_allocate_memory(TEST_UNIT * page_sz, mem_type, mapping, true);
 	if (check_allocated_memory(ptr, TEST_UNIT * page_sz, mem_type, false) != KSFT_PASS)
 		return KSFT_FAIL;
@@ -141,8 +138,8 @@ int main(int argc, char *argv[])
 		return KSFT_FAIL;
 	}
 	/* Register signal handlers */
-	mte_register_signal(SIGBUS, mte_default_handler, false);
-	mte_register_signal(SIGSEGV, mte_default_handler, false);
+	mte_register_signal(SIGBUS, mte_default_handler);
+	mte_register_signal(SIGSEGV, mte_default_handler);
 
 	/* Set test plan */
 	ksft_set_plan(4);

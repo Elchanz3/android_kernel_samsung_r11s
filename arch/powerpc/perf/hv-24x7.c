@@ -18,7 +18,6 @@
 #include <asm/firmware.h>
 #include <asm/hvcall.h>
 #include <asm/io.h>
-#include <asm/papr-sysparm.h>
 #include <linux/byteorder/generic.h>
 
 #include <asm/rtas.h>
@@ -34,7 +33,7 @@ static bool aggregate_result_elements;
 
 static cpumask_t hv_24x7_cpumask;
 
-static bool domain_is_valid(unsigned int domain)
+static bool domain_is_valid(unsigned domain)
 {
 	switch (domain) {
 #define DOMAIN(n, v, x, c)		\
@@ -48,7 +47,7 @@ static bool domain_is_valid(unsigned int domain)
 	}
 }
 
-static bool is_physical_domain(unsigned int domain)
+static bool is_physical_domain(unsigned domain)
 {
 	switch (domain) {
 #define DOMAIN(n, v, x, c)		\
@@ -67,6 +66,8 @@ static bool is_physical_domain(unsigned int domain)
  * Refer PAPR+ document to get parameter token value as '43'.
  */
 
+#define PROCESSOR_MODULE_INFO   43
+
 static u32 phys_sockets;	/* Physical sockets */
 static u32 phys_chipspersocket;	/* Physical chips per socket*/
 static u32 phys_coresperchip; /* Physical cores per chip */
@@ -78,7 +79,8 @@ static u32 phys_coresperchip; /* Physical cores per chip */
  */
 void read_24x7_sys_info(void)
 {
-	struct papr_sysparm_buf *buf;
+	const s32 token = rtas_token("ibm,get-system-parameter");
+	int call_status;
 
 	/*
 	 * Making system parameter: chips and sockets and cores per chip
@@ -88,22 +90,27 @@ void read_24x7_sys_info(void)
 	phys_chipspersocket = 1;
 	phys_coresperchip = 1;
 
-	buf = papr_sysparm_buf_alloc();
-	if (!buf)
-		return;
+	do {
+		spin_lock(&rtas_data_buf_lock);
+		call_status = rtas_call(token, 3, 1, NULL, PROCESSOR_MODULE_INFO,
+					__pa(rtas_data_buf), RTAS_DATA_BUF_SIZE);
+		if (call_status == 0) {
+			int ntypes = be16_to_cpup((__be16 *)&rtas_data_buf[2]);
+			int len = be16_to_cpup((__be16 *)&rtas_data_buf[0]);
 
-	if (!papr_sysparm_get(PAPR_SYSPARM_PROC_MODULE_INFO, buf)) {
-		int ntypes = be16_to_cpup((__be16 *)&buf->val[0]);
-		int len = be16_to_cpu(buf->len);
-
-		if (len >= 8 && ntypes != 0) {
-			phys_sockets = be16_to_cpup((__be16 *)&buf->val[2]);
-			phys_chipspersocket = be16_to_cpup((__be16 *)&buf->val[4]);
-			phys_coresperchip = be16_to_cpup((__be16 *)&buf->val[6]);
+			if (len >= 8 && ntypes != 0) {
+				phys_sockets = be16_to_cpup((__be16 *)&rtas_data_buf[4]);
+				phys_chipspersocket = be16_to_cpup((__be16 *)&rtas_data_buf[6]);
+				phys_coresperchip = be16_to_cpup((__be16 *)&rtas_data_buf[8]);
+			}
 		}
-	}
+		spin_unlock(&rtas_data_buf_lock);
+	} while (rtas_busy_delay(call_status));
 
-	papr_sysparm_buf_free(buf);
+	if (call_status != 0) {
+		pr_err("Error calling get-system-parameter %d\n",
+		       call_status);
+	}
 }
 
 /* Domains for which more than one result element are returned for each event. */
@@ -115,7 +122,7 @@ static bool domain_needs_aggregation(unsigned int domain)
 			  domain <= HV_PERF_DOMAIN_VCPU_REMOTE_NODE));
 }
 
-static const char *domain_name(unsigned int domain)
+static const char *domain_name(unsigned domain)
 {
 	if (!domain_is_valid(domain))
 		return NULL;
@@ -133,7 +140,7 @@ static const char *domain_name(unsigned int domain)
 	return NULL;
 }
 
-static bool catalog_entry_domain_is_valid(unsigned int domain)
+static bool catalog_entry_domain_is_valid(unsigned domain)
 {
 	/* POWER8 doesn't support virtual domains. */
 	if (interface_version == 1)
@@ -191,7 +198,7 @@ static struct attribute *format_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group format_group = {
+static struct attribute_group format_group = {
 	.name = "format",
 	.attrs = format_attrs,
 };
@@ -213,14 +220,14 @@ static struct attribute_group event_long_desc_group = {
 
 static struct kmem_cache *hv_page_cache;
 
-static DEFINE_PER_CPU(int, hv_24x7_txn_flags);
-static DEFINE_PER_CPU(int, hv_24x7_txn_err);
+DEFINE_PER_CPU(int, hv_24x7_txn_flags);
+DEFINE_PER_CPU(int, hv_24x7_txn_err);
 
 struct hv_24x7_hw {
 	struct perf_event *events[255];
 };
 
-static DEFINE_PER_CPU(struct hv_24x7_hw, hv_24x7_hw);
+DEFINE_PER_CPU(struct hv_24x7_hw, hv_24x7_hw);
 
 /*
  * request_buffer and result_buffer are not required to be 4k aligned,
@@ -228,8 +235,8 @@ static DEFINE_PER_CPU(struct hv_24x7_hw, hv_24x7_hw);
  * the simplest way to ensure that.
  */
 #define H24x7_DATA_BUFFER_SIZE	4096
-static DEFINE_PER_CPU(char, hv_24x7_reqb[H24x7_DATA_BUFFER_SIZE]) __aligned(4096);
-static DEFINE_PER_CPU(char, hv_24x7_resb[H24x7_DATA_BUFFER_SIZE]) __aligned(4096);
+DEFINE_PER_CPU(char, hv_24x7_reqb[H24x7_DATA_BUFFER_SIZE]) __aligned(4096);
+DEFINE_PER_CPU(char, hv_24x7_resb[H24x7_DATA_BUFFER_SIZE]) __aligned(4096);
 
 static unsigned int max_num_requests(int interface_version)
 {
@@ -245,7 +252,7 @@ static char *event_name(struct hv_24x7_event_data *ev, int *len)
 
 static char *event_desc(struct hv_24x7_event_data *ev, int *len)
 {
-	unsigned int nl = be16_to_cpu(ev->event_name_len);
+	unsigned nl = be16_to_cpu(ev->event_name_len);
 	__be16 *desc_len = (__be16 *)(ev->remainder + nl - 2);
 
 	*len = be16_to_cpu(*desc_len) - 2;
@@ -254,9 +261,9 @@ static char *event_desc(struct hv_24x7_event_data *ev, int *len)
 
 static char *event_long_desc(struct hv_24x7_event_data *ev, int *len)
 {
-	unsigned int nl = be16_to_cpu(ev->event_name_len);
+	unsigned nl = be16_to_cpu(ev->event_name_len);
 	__be16 *desc_len_ = (__be16 *)(ev->remainder + nl - 2);
-	unsigned int desc_len = be16_to_cpu(*desc_len_);
+	unsigned desc_len = be16_to_cpu(*desc_len_);
 	__be16 *long_desc_len = (__be16 *)(ev->remainder + nl + desc_len - 2);
 
 	*len = be16_to_cpu(*long_desc_len) - 2;
@@ -283,8 +290,8 @@ static void *event_end(struct hv_24x7_event_data *ev, void *end)
 {
 	void *start = ev;
 	__be16 *dl_, *ldl_;
-	unsigned int dl, ldl;
-	unsigned int nl = be16_to_cpu(ev->event_name_len);
+	unsigned dl, ldl;
+	unsigned nl = be16_to_cpu(ev->event_name_len);
 
 	if (nl < 2) {
 		pr_debug("%s: name length too short: %d", __func__, nl);
@@ -385,7 +392,7 @@ static long h_get_24x7_catalog_page(char page[], u64 version, u32 index)
  *		- Specifying (i.e overriding) values for other parameters
  *		  is undefined.
  */
-static char *event_fmt(struct hv_24x7_event_data *event, unsigned int domain)
+static char *event_fmt(struct hv_24x7_event_data *event, unsigned domain)
 {
 	const char *sindex;
 	const char *lpar;
@@ -423,6 +430,16 @@ static char *event_fmt(struct hv_24x7_event_data *event, unsigned int domain)
 static char *memdup_to_str(char *maybe_str, int max_len, gfp_t gfp)
 {
 	return kasprintf(gfp, "%.*s", max_len, maybe_str);
+}
+
+static ssize_t device_show_string(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct dev_ext_attribute *d;
+
+	d = container_of(attr, struct dev_ext_attribute, attr);
+
+	return sprintf(buf, "%s\n", (char *)d->var);
 }
 
 static ssize_t cpumask_show(struct device *dev,
@@ -506,9 +523,9 @@ out_s:
 	return NULL;
 }
 
-static struct attribute *event_to_attr(unsigned int ix,
+static struct attribute *event_to_attr(unsigned ix,
 				       struct hv_24x7_event_data *event,
-				       unsigned int domain,
+				       unsigned domain,
 				       int nonce)
 {
 	int event_name_len;
@@ -576,8 +593,8 @@ event_to_long_desc_attr(struct hv_24x7_event_data *event, int nonce)
 	return device_str_attr_create(name, nl, nonce, desc, dl);
 }
 
-static int event_data_to_attrs(unsigned int ix, struct attribute **attrs,
-			       struct hv_24x7_event_data *event, int nonce)
+static int event_data_to_attrs(unsigned ix, struct attribute **attrs,
+				   struct hv_24x7_event_data *event, int nonce)
 {
 	*attrs = event_to_attr(ix, event, event->domain, nonce);
 	if (!*attrs)
@@ -591,8 +608,8 @@ struct event_uniq {
 	struct rb_node node;
 	const char *name;
 	int nl;
-	unsigned int ct;
-	unsigned int domain;
+	unsigned ct;
+	unsigned domain;
 };
 
 static int memord(const void *d1, size_t s1, const void *d2, size_t s2)
@@ -605,8 +622,8 @@ static int memord(const void *d1, size_t s1, const void *d2, size_t s2)
 	return memcmp(d1, d2, s1);
 }
 
-static int ev_uniq_ord(const void *v1, size_t s1, unsigned int d1,
-		       const void *v2, size_t s2, unsigned int d2)
+static int ev_uniq_ord(const void *v1, size_t s1, unsigned d1, const void *v2,
+		       size_t s2, unsigned d2)
 {
 	int r = memord(v1, s1, v2, s2);
 
@@ -620,7 +637,7 @@ static int ev_uniq_ord(const void *v1, size_t s1, unsigned int d1,
 }
 
 static int event_uniq_add(struct rb_root *root, const char *name, int nl,
-			  unsigned int domain)
+			  unsigned domain)
 {
 	struct rb_node **new = &(root->rb_node), *parent = NULL;
 	struct event_uniq *data;
@@ -713,12 +730,12 @@ static ssize_t catalog_event_len_validate(struct hv_24x7_event_data *event,
 	ev_len = be16_to_cpu(event->length);
 
 	if (ev_len % 16)
-		pr_info("event %zu has length %zu not divisible by 16: event=%p\n",
+		pr_info("event %zu has length %zu not divisible by 16: event=%pK\n",
 				event_idx, ev_len, event);
 
 	ev_end = (__u8 *)event + ev_len;
 	if (ev_end > end) {
-		pr_warn("event %zu has .length=%zu, ends after buffer end: ev_end=%p > end=%p, offset=%zu\n",
+		pr_warn("event %zu has .length=%zu, ends after buffer end: ev_end=%pK > end=%pK, offset=%zu\n",
 				event_idx, ev_len, ev_end, end,
 				offset);
 		return -1;
@@ -726,27 +743,19 @@ static ssize_t catalog_event_len_validate(struct hv_24x7_event_data *event,
 
 	calc_ev_end = event_end(event, end);
 	if (!calc_ev_end) {
-		pr_warn("event %zu has a calculated length which exceeds buffer length %zu: event=%p end=%p, offset=%zu\n",
+		pr_warn("event %zu has a calculated length which exceeds buffer length %zu: event=%pK end=%pK, offset=%zu\n",
 			event_idx, event_data_bytes, event, end,
 			offset);
 		return -1;
 	}
 
 	if (calc_ev_end > ev_end) {
-		pr_warn("event %zu exceeds its own length: event=%p, end=%p, offset=%zu, calc_ev_end=%p\n",
+		pr_warn("event %zu exceeds it's own length: event=%pK, end=%pK, offset=%zu, calc_ev_end=%pK\n",
 			event_idx, event, ev_end, offset, calc_ev_end);
 		return -1;
 	}
 
 	return ev_len;
-}
-
-/*
- * Return true incase of invalid or dummy events with names like RESERVED*
- */
-static bool ignore_event(const char *name)
-{
-	return strncmp(name, "RESERVED", 8) == 0;
 }
 
 #define MAX_4K (SIZE_MAX / 4096)
@@ -879,10 +888,6 @@ static int create_events_from_catalog(struct attribute ***events_,
 
 		name = event_name(event, &nl);
 
-		if (ignore_event(name)) {
-			junk_events++;
-			continue;
-		}
 		if (event->event_group_record_len == 0) {
 			pr_devel("invalid event %zu (%.*s): group_record_len == 0, skipping\n",
 					event_idx, nl, name);
@@ -944,9 +949,6 @@ static int create_events_from_catalog(struct attribute ***events_,
 			continue;
 
 		name  = event_name(event, &nl);
-		if (ignore_event(name))
-			continue;
-
 		nonce = event_uniq_add(&ev_uniq, name, nl, event->domain);
 		ct    = event_data_to_attrs(event_idx, events + event_attr_ct,
 					    event, nonce);
@@ -998,7 +1000,7 @@ e_out:
 }
 
 static ssize_t catalog_read(struct file *filp, struct kobject *kobj,
-			    const struct bin_attribute *bin_attr, char *buf,
+			    struct bin_attribute *bin_attr, char *buf,
 			    loff_t offset, size_t count)
 {
 	long hret;
@@ -1108,14 +1110,14 @@ PAGE_0_ATTR(catalog_version, "%lld\n",
 		(unsigned long long)be64_to_cpu(page_0->version));
 PAGE_0_ATTR(catalog_len, "%lld\n",
 		(unsigned long long)be32_to_cpu(page_0->length) * 4096);
-static const BIN_ATTR_RO(catalog, 0/* real length varies */);
+static BIN_ATTR_RO(catalog, 0/* real length varies */);
 static DEVICE_ATTR_RO(domains);
 static DEVICE_ATTR_RO(sockets);
 static DEVICE_ATTR_RO(chipspersocket);
 static DEVICE_ATTR_RO(coresperchip);
 static DEVICE_ATTR_RO(cpumask);
 
-static const struct bin_attribute *const if_bin_attrs[] = {
+static struct bin_attribute *if_bin_attrs[] = {
 	&bin_attr_catalog,
 	NULL,
 };
@@ -1125,7 +1127,7 @@ static struct attribute *cpumask_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group cpumask_attr_group = {
+static struct attribute_group cpumask_attr_group = {
 	.attrs = cpumask_attrs,
 };
 
@@ -1139,7 +1141,7 @@ static struct attribute *if_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group if_group = {
+static struct attribute_group if_group = {
 	.name = "interface",
 	.bin_attrs = if_bin_attrs,
 	.attrs = if_attrs,
@@ -1328,7 +1330,7 @@ static int get_count_from_result(struct perf_event *event,
 	for (i = count = 0, element_data = res->elements + data_offset;
 	     i < num_elements;
 	     i++, element_data += data_size + data_offset)
-		count += be64_to_cpu(*((__be64 *)element_data));
+		count += be64_to_cpu(*((u64 *) element_data));
 
 	*countp = count;
 
@@ -1375,7 +1377,7 @@ out:
 static int h_24x7_event_init(struct perf_event *event)
 {
 	struct hv_perf_caps caps;
-	unsigned int domain;
+	unsigned domain;
 	unsigned long hret;
 	u64 ct;
 
@@ -1695,17 +1697,16 @@ static int hv_24x7_init(void)
 {
 	int r;
 	unsigned long hret;
-	unsigned int pvr = mfspr(SPRN_PVR);
 	struct hv_perf_caps caps;
 
 	if (!firmware_has_feature(FW_FEATURE_LPAR)) {
 		pr_debug("not a virtualized system, not enabling\n");
 		return -ENODEV;
-	}
+	} else if (!cur_cpu_spec->oprofile_cpu_type)
+		return -ENODEV;
 
 	/* POWER8 only supports v1, while POWER9 only supports v2. */
-	if (PVR_VER(pvr) == PVR_POWER8 || PVR_VER(pvr) == PVR_POWER8E ||
-	    PVR_VER(pvr) == PVR_POWER8NVL)
+	if (!strcmp(cur_cpu_spec->oprofile_cpu_type, "ppc64/power8"))
 		interface_version = 1;
 	else {
 		interface_version = 2;

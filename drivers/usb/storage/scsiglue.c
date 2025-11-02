@@ -40,6 +40,7 @@
 #include <scsi/scsi_eh.h>
 
 #include "usb.h"
+#include <linux/usb/hcd.h>
 #include "scsiglue.h"
 #include "debug.h"
 #include "transport.h"
@@ -64,7 +65,7 @@ static const char* host_info(struct Scsi_Host *host)
 	return us->scsi_name;
 }
 
-static int sdev_init (struct scsi_device *sdev)
+static int slave_alloc (struct scsi_device *sdev)
 {
 	struct us_data *us = host_to_us(sdev->host);
 
@@ -75,20 +76,20 @@ static int sdev_init (struct scsi_device *sdev)
 	 */
 	sdev->inquiry_len = 36;
 
+	/*
+	 * Some host controllers may have alignment requirements.
+	 * We'll play it safe by requiring 512-byte alignment always.
+	 */
+	blk_queue_update_dma_alignment(sdev->request_queue, (512 - 1));
+
 	/* Tell the SCSI layer if we know there is more than one LUN */
 	if (us->protocol == USB_PR_BULK && us->max_lun > 0)
 		sdev->sdev_bflags |= BLIST_FORCELUN;
 
-	/*
-	 * Some USB storage devices reset if the IO advice hints grouping mode
-	 * page is queried. Hence skip that mode page.
-	 */
-	sdev->sdev_bflags |= BLIST_SKIP_IO_HINTS;
-
 	return 0;
 }
 
-static int sdev_configure(struct scsi_device *sdev, struct queue_limits *lim)
+static int slave_configure(struct scsi_device *sdev)
 {
 	struct us_data *us = host_to_us(sdev->host);
 	struct device *dev = us->pusb_dev->bus->sysdev;
@@ -103,31 +104,43 @@ static int sdev_configure(struct scsi_device *sdev, struct queue_limits *lim)
 
 		if (us->fflags & US_FL_MAX_SECTORS_MIN)
 			max_sectors = PAGE_SIZE >> 9;
-		lim->max_hw_sectors = min(lim->max_hw_sectors, max_sectors);
+		if (queue_max_hw_sectors(sdev->request_queue) > max_sectors)
+			blk_queue_max_hw_sectors(sdev->request_queue,
+					      max_sectors);
 	} else if (sdev->type == TYPE_TAPE) {
 		/*
 		 * Tapes need much higher max_sector limits, so just
 		 * raise it to the maximum possible (4 GB / 512) and
 		 * let the queue segment size sort out the real limit.
 		 */
-		lim->max_hw_sectors = 0x7FFFFF;
+		blk_queue_max_hw_sectors(sdev->request_queue, 0x7FFFFF);
 	} else if (us->pusb_dev->speed >= USB_SPEED_SUPER) {
 		/*
 		 * USB3 devices will be limited to 2048 sectors. This gives us
 		 * better throughput on most devices.
 		 */
-		lim->max_hw_sectors = 2048;
+		blk_queue_max_hw_sectors(sdev->request_queue, 2048);
 	}
 
 	/*
 	 * The max_hw_sectors should be up to maximum size of a mapping for
 	 * the device. Otherwise, a DMA API might fail on swiotlb environment.
 	 */
-	lim->max_hw_sectors = min_t(size_t,
-		lim->max_hw_sectors, dma_max_mapping_size(dev) >> SECTOR_SHIFT);
+	blk_queue_max_hw_sectors(sdev->request_queue,
+		min_t(size_t, queue_max_hw_sectors(sdev->request_queue),
+		      dma_max_mapping_size(dev) >> SECTOR_SHIFT));
 
 	/*
-	 * We can't put these settings in sdev_init() because that gets
+	 * Some USB host controllers can't do DMA; they have to use PIO.
+	 * For such controllers we need to make sure the block layer sets
+	 * up bounce buffers in addressable memory.
+	 */
+	if (!hcd_uses_dma(bus_to_hcd(us->pusb_dev->bus)) ||
+			(bus_to_hcd(us->pusb_dev->bus)->localmem_pool != NULL))
+		blk_queue_bounce_limit(sdev->request_queue, BLK_BOUNCE_HIGH);
+
+	/*
+	 * We can't put these settings in slave_alloc() because that gets
 	 * called before the device type is known.  Consequently these
 	 * settings can't be overridden via the scsi devinfo mechanism.
 	 */
@@ -165,13 +178,6 @@ static int sdev_configure(struct scsi_device *sdev, struct queue_limits *lim)
 		 * 192 bytes (that's what Windows uses).
 		 */
 		sdev->use_192_bytes_for_3f = 1;
-
-		/*
-		 * Some devices report generic values until the media has been
-		 * accessed. Force a READ(10) prior to querying device
-		 * characteristics.
-		 */
-		sdev->read_before_ms = 1;
 
 		/*
 		 * Some devices don't like MODE SENSE with page=0x3f,
@@ -357,25 +363,51 @@ static int target_alloc(struct scsi_target *starget)
 
 /* queue a command */
 /* This is always called with scsi_lock(host) held */
-static int queuecommand_lck(struct scsi_cmnd *srb)
+static int queuecommand_lck(struct scsi_cmnd *srb,
+			void (*done)(struct scsi_cmnd *))
 {
-	void (*done)(struct scsi_cmnd *) = scsi_done;
 	struct us_data *us = host_to_us(srb->device->host);
+
+#ifdef CONFIG_SEC_FACTORY
+	if (srb && srb->device &&
+		srb->device->removable && srb->cmnd &&
+			srb->cmnd[0] == TEST_UNIT_READY) {
+		pr_info("usb-storage: %s TEST_UNIT_READY +\n",
+			__func__);
+	}
+#endif
 
 	/* check for state-transition errors */
 	if (us->srb != NULL) {
-		dev_err(&us->pusb_intf->dev,
-			"Error in %s: us->srb = %p\n", __func__, us->srb);
+		printk(KERN_ERR "usb-storage: Error in %s: us->srb = %p\n",
+			__func__, us->srb);
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
 	/* fail the command if we are disconnecting */
 	if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
 		usb_stor_dbg(us, "Fail command during disconnect\n");
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+		pr_err("usb-storage: %s, Fail command during disconnect\n",
+				__func__);
+#endif
 		srb->result = DID_NO_CONNECT << 16;
 		done(srb);
 		return 0;
 	}
+
+#ifdef CONFIG_SEC_FACTORY
+	if (test_bit(US_FLIDX_ABORTING, &us->dflags)) {
+		usb_stor_dbg(us, "Fail command during abort\n");
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+		pr_err("usb-storage: %s, Fail command during abort\n",
+				__func__);
+#endif
+		srb->result = DID_NO_CONNECT << 16;
+		done(srb);
+		return 0;
+	}
+#endif
 
 	if ((us->fflags & US_FL_NO_ATA_1X) &&
 			(srb->cmnd[0] == ATA_12 || srb->cmnd[0] == ATA_16)) {
@@ -383,12 +415,25 @@ static int queuecommand_lck(struct scsi_cmnd *srb)
 		       sizeof(usb_stor_sense_invalidCDB));
 		srb->result = SAM_STAT_CHECK_CONDITION;
 		done(srb);
+#ifdef CONFIG_SEC_FACTORY
+		pr_info("usb-storage: %s, SAM_STAT_CHECK_CONDITION\n",
+				__func__);
+#endif
 		return 0;
 	}
 
 	/* enqueue the command and wake up the control thread */
+	srb->scsi_done = done;
 	us->srb = srb;
 	complete(&us->cmnd_ready);
+#ifdef CONFIG_SEC_FACTORY
+	if (srb && srb->device &&
+		srb->device->removable && srb->cmnd &&
+			srb->cmnd[0] == TEST_UNIT_READY) {
+		pr_info("usb-storage: %s TEST_UNIT_READY -\n",
+			__func__);
+	}
+#endif
 
 	return 0;
 }
@@ -402,6 +447,9 @@ static DEF_SCSI_QCMD(queuecommand)
 /* Command timeout and abort */
 static int command_abort_matching(struct us_data *us, struct scsi_cmnd *srb_match)
 {
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	printk(KERN_ERR "usb-storage: %s scsi_lock +\n", __func__);
+#endif
 	/*
 	 * us->srb together with the TIMED_OUT, RESETTING, and ABORTING
 	 * bits are protected by the host lock.
@@ -412,6 +460,10 @@ static int command_abort_matching(struct us_data *us, struct scsi_cmnd *srb_matc
 	if (!us->srb) {
 		scsi_unlock(us_to_host(us));
 		usb_stor_dbg(us, "-- nothing to abort\n");
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+		printk(KERN_ERR "usb-storage: %s -- nothing to abort -\n",
+				__func__);
+#endif	
 		return SUCCESS;
 	}
 
@@ -419,6 +471,10 @@ static int command_abort_matching(struct us_data *us, struct scsi_cmnd *srb_matc
 	if (srb_match && us->srb != srb_match) {
 		scsi_unlock(us_to_host(us));
 		usb_stor_dbg(us, "-- pending command mismatch\n");
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+		printk(KERN_ERR "usb-storage: %s -- pending command mismatch -\n",
+				__func__);
+#endif	
 		return FAILED;
 	}
 
@@ -435,9 +491,15 @@ static int command_abort_matching(struct us_data *us, struct scsi_cmnd *srb_matc
 		usb_stor_stop_transport(us);
 	}
 	scsi_unlock(us_to_host(us));
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	printk(KERN_ERR "usb-storage: %s scsi_unlock\n", __func__);
+#endif
 
 	/* Wait for the aborted command to finish */
 	wait_for_completion(&us->notify);
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	printk(KERN_ERR "usb-storage: %s -\n", __func__);
+#endif
 	return SUCCESS;
 }
 
@@ -509,9 +571,15 @@ void usb_stor_report_bus_reset(struct us_data *us)
 {
 	struct Scsi_Host *host = us_to_host(us);
 
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	printk(KERN_ERR "usb-storage: %s scsi_lock\n", __func__);
+#endif
 	scsi_lock(host);
 	scsi_report_bus_reset(host, 0);
 	scsi_unlock(host);
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	printk(KERN_ERR "usb-storage: %s scsi_unlock\n", __func__);
+#endif
 }
 
 /***********************************************************************
@@ -585,28 +653,20 @@ static ssize_t max_sectors_store(struct device *dev, struct device_attribute *at
 		size_t count)
 {
 	struct scsi_device *sdev = to_scsi_device(dev);
-	struct queue_limits lim;
 	unsigned short ms;
-	int ret;
 
-	if (sscanf(buf, "%hu", &ms) <= 0)
-		return -EINVAL;
-
-	lim = queue_limits_start_update(sdev->request_queue);
-	lim.max_hw_sectors = ms;
-	ret = queue_limits_commit_update_frozen(sdev->request_queue, &lim);
-	if (ret)
-		return ret;
-	return count;
+	if (sscanf(buf, "%hu", &ms) > 0) {
+		blk_queue_max_hw_sectors(sdev->request_queue, ms);
+		return count;
+	}
+	return -EINVAL;
 }
 static DEVICE_ATTR_RW(max_sectors);
 
-static struct attribute *usb_sdev_attrs[] = {
-	&dev_attr_max_sectors.attr,
+static struct device_attribute *sysfs_device_attr_list[] = {
+	&dev_attr_max_sectors,
 	NULL,
 };
-
-ATTRIBUTE_GROUPS(usb_sdev);
 
 /*
  * this defines our host template, with which we'll allocate hosts
@@ -634,18 +694,13 @@ static const struct scsi_host_template usb_stor_host_template = {
 	/* unknown initiator id */
 	.this_id =			-1,
 
-	.sdev_init =			sdev_init,
-	.sdev_configure =		sdev_configure,
+	.slave_alloc =			slave_alloc,
+	.slave_configure =		slave_configure,
 	.target_alloc =			target_alloc,
 
 	/* lots of sg segments can be handled */
 	.sg_tablesize =			SG_MAX_SEGMENTS,
 
-	/*
-	 * Some host controllers may have alignment requirements.
-	 * We'll play it safe by requiring 512-byte alignment always.
-	 */
-	.dma_alignment =		511,
 
 	/*
 	 * Limit the total size of a transfer to 120 KB.
@@ -673,7 +728,7 @@ static const struct scsi_host_template usb_stor_host_template = {
 	.skip_settle_delay =		1,
 
 	/* sysfs device attributes */
-	.sdev_groups =			usb_sdev_groups,
+	.sdev_attrs =			sysfs_device_attr_list,
 
 	/* module management */
 	.module =			THIS_MODULE

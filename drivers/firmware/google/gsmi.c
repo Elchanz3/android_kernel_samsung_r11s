@@ -17,9 +17,9 @@
 #include <linux/string.h>
 #include <linux/spinlock.h>
 #include <linux/dma-mapping.h>
+#include <linux/dmapool.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/panic_notifier.h>
 #include <linux/ioctl.h>
 #include <linux/acpi.h>
 #include <linux/io.h>
@@ -85,6 +85,7 @@
 struct gsmi_buf {
 	u8 *start;			/* start of buffer */
 	size_t length;			/* length of buffer */
+	dma_addr_t handle;		/* dma allocation handle */
 	u32 address;			/* physical address of buffer */
 };
 
@@ -96,7 +97,7 @@ static struct gsmi_device {
 	spinlock_t lock;		/* serialize access to SMIs */
 	u16 smi_cmd;			/* SMI command port */
 	int handshake_type;		/* firmware handler interlock type */
-	struct kmem_cache *mem_pool;	/* kmem cache for gsmi_buf allocations */
+	struct dma_pool *dma_pool;	/* DMA buffer pool */
 } gsmi_dev;
 
 /* Packed structures for communicating with the firmware */
@@ -137,16 +138,12 @@ MODULE_PARM_DESC(spincount,
 	"The number of loop iterations to use when using the spin handshake.");
 
 /*
- * Some older platforms with Apollo Lake chipsets do not support S0ix logging
- * in their GSMI handlers, and behaved poorly when resuming via power button
- * press if the logging was attempted. Updated firmware with proper behavior
- * has long since shipped, removing the need for this opt-in parameter. It
- * now exists as an opt-out parameter for folks defiantly running old
- * firmware, or unforeseen circumstances. After the change from opt-in to
- * opt-out has baked sufficiently, this parameter should probably be removed
- * entirely.
+ * Platforms might not support S0ix logging in their GSMI handlers. In order to
+ * avoid any side-effects of generating an SMI for S0ix logging, use the S0ix
+ * related GSMI commands only for those platforms that explicitly enable this
+ * option.
  */
-static bool s0ix_logging_enable = true;
+static bool s0ix_logging_enable;
 module_param(s0ix_logging_enable, bool, 0600);
 
 static struct gsmi_buf *gsmi_buf_alloc(void)
@@ -160,7 +157,8 @@ static struct gsmi_buf *gsmi_buf_alloc(void)
 	}
 
 	/* allocate buffer in 32bit address space */
-	smibuf->start = kmem_cache_alloc(gsmi_dev.mem_pool, GFP_KERNEL);
+	smibuf->start = dma_pool_alloc(gsmi_dev.dma_pool, GFP_KERNEL,
+				       &smibuf->handle);
 	if (!smibuf->start) {
 		printk(KERN_ERR "gsmi: failed to allocate name buffer\n");
 		kfree(smibuf);
@@ -178,7 +176,8 @@ static void gsmi_buf_free(struct gsmi_buf *smibuf)
 {
 	if (smibuf) {
 		if (smibuf->start)
-			kmem_cache_free(gsmi_dev.mem_pool, smibuf->start);
+			dma_pool_free(gsmi_dev.dma_pool, smibuf->start,
+				      smibuf->handle);
 		kfree(smibuf);
 	}
 }
@@ -488,7 +487,7 @@ static const struct efivar_operations efivar_ops = {
 #endif /* CONFIG_EFI */
 
 static ssize_t eventlog_write(struct file *filp, struct kobject *kobj,
-			       const struct bin_attribute *bin_attr,
+			       struct bin_attribute *bin_attr,
 			       char *buf, loff_t pos, size_t count)
 {
 	struct gsmi_set_eventlog_param param = {
@@ -528,7 +527,7 @@ static ssize_t eventlog_write(struct file *filp, struct kobject *kobj,
 
 }
 
-static const struct bin_attribute eventlog_bin_attr = {
+static struct bin_attribute eventlog_bin_attr = {
 	.attr = {.name = "append_to_eventlog", .mode = 0200},
 	.write = eventlog_write,
 };
@@ -918,28 +917,16 @@ static __init int gsmi_init(void)
 	gsmi_dev.pdev = platform_device_register_full(&gsmi_dev_info);
 	if (IS_ERR(gsmi_dev.pdev)) {
 		printk(KERN_ERR "gsmi: unable to register platform device\n");
-		ret = PTR_ERR(gsmi_dev.pdev);
-		goto out_unregister;
+		return PTR_ERR(gsmi_dev.pdev);
 	}
 
 	/* SMI access needs to be serialized */
 	spin_lock_init(&gsmi_dev.lock);
 
 	ret = -ENOMEM;
-
-	/*
-	 * SLAB cache is created using SLAB_CACHE_DMA32 to ensure that the
-	 * allocations for gsmi_buf come from the DMA32 memory zone. These
-	 * buffers have nothing to do with DMA. They are required for
-	 * communication with firmware executing in SMI mode which can only
-	 * access the bottom 4GiB of physical memory. Since DMA32 memory zone
-	 * guarantees allocation under the 4GiB boundary, this driver creates
-	 * a SLAB cache with SLAB_CACHE_DMA32 flag.
-	 */
-	gsmi_dev.mem_pool = kmem_cache_create("gsmi", GSMI_BUF_SIZE,
-					      GSMI_BUF_ALIGN,
-					      SLAB_CACHE_DMA32, NULL);
-	if (!gsmi_dev.mem_pool)
+	gsmi_dev.dma_pool = dma_pool_create("gsmi", &gsmi_dev.pdev->dev,
+					     GSMI_BUF_SIZE, GSMI_BUF_ALIGN, 0);
+	if (!gsmi_dev.dma_pool)
 		goto out_err;
 
 	/*
@@ -1031,7 +1018,7 @@ static __init int gsmi_init(void)
 	}
 
 #ifdef CONFIG_EFI
-	ret = efivars_register(&efivars, &efivar_ops);
+	ret = efivars_register(&efivars, &efivar_ops, gsmi_kobj);
 	if (ret) {
 		printk(KERN_INFO "gsmi: Failed to register efivars\n");
 		sysfs_remove_files(gsmi_kobj, gsmi_attrs);
@@ -1055,13 +1042,12 @@ out_err:
 	gsmi_buf_free(gsmi_dev.param_buf);
 	gsmi_buf_free(gsmi_dev.data_buf);
 	gsmi_buf_free(gsmi_dev.name_buf);
-	kmem_cache_destroy(gsmi_dev.mem_pool);
+	dma_pool_destroy(gsmi_dev.dma_pool);
 	platform_device_unregister(gsmi_dev.pdev);
-out_unregister:
+	pr_info("gsmi: failed to load: %d\n", ret);
 #ifdef CONFIG_PM
 	platform_driver_unregister(&gsmi_driver_info);
 #endif
-	pr_info("gsmi: failed to load: %d\n", ret);
 	return ret;
 }
 
@@ -1081,7 +1067,7 @@ static void __exit gsmi_exit(void)
 	gsmi_buf_free(gsmi_dev.param_buf);
 	gsmi_buf_free(gsmi_dev.data_buf);
 	gsmi_buf_free(gsmi_dev.name_buf);
-	kmem_cache_destroy(gsmi_dev.mem_pool);
+	dma_pool_destroy(gsmi_dev.dma_pool);
 	platform_device_unregister(gsmi_dev.pdev);
 #ifdef CONFIG_PM
 	platform_driver_unregister(&gsmi_driver_info);
@@ -1092,5 +1078,4 @@ module_init(gsmi_init);
 module_exit(gsmi_exit);
 
 MODULE_AUTHOR("Google, Inc.");
-MODULE_DESCRIPTION("EFI SMI interface for Google platforms");
 MODULE_LICENSE("GPL");

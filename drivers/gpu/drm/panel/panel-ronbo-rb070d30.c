@@ -11,10 +11,10 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/fb.h>
 #include <linux/kernel.h>
 #include <linux/media-bus-format.h>
 #include <linux/module.h>
-#include <linux/of.h>
 
 #include <linux/gpio/consumer.h>
 #include <linux/regulator/consumer.h>
@@ -75,8 +75,13 @@ static int rb070d30_panel_unprepare(struct drm_panel *panel)
 static int rb070d30_panel_enable(struct drm_panel *panel)
 {
 	struct rb070d30_panel *ctx = panel_to_rb070d30_panel(panel);
+	int ret;
 
-	return mipi_dsi_dcs_exit_sleep_mode(ctx->dsi);
+	ret = mipi_dsi_dcs_exit_sleep_mode(ctx->dsi);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 static int rb070d30_panel_disable(struct drm_panel *panel)
@@ -143,11 +148,9 @@ static int rb070d30_panel_dsi_probe(struct mipi_dsi_device *dsi)
 	struct rb070d30_panel *ctx;
 	int ret;
 
-	ctx = devm_drm_panel_alloc(&dsi->dev, struct rb070d30_panel, panel,
-				   &rb070d30_panel_funcs,
-				   DRM_MODE_CONNECTOR_DSI);
-	if (IS_ERR(ctx))
-		return PTR_ERR(ctx);
+	ctx = devm_kzalloc(&dsi->dev, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
 	ctx->supply = devm_regulator_get(&dsi->dev, "vcc-lcd");
 	if (IS_ERR(ctx->supply))
@@ -155,6 +158,9 @@ static int rb070d30_panel_dsi_probe(struct mipi_dsi_device *dsi)
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 	ctx->dsi = dsi;
+
+	drm_panel_init(&ctx->panel, &dsi->dev, &rb070d30_panel_funcs,
+		       DRM_MODE_CONNECTOR_DSI);
 
 	ctx->gpios.reset = devm_gpiod_get(&dsi->dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->gpios.reset)) {
@@ -198,21 +204,17 @@ static int rb070d30_panel_dsi_probe(struct mipi_dsi_device *dsi)
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->lanes = 4;
 
-	ret = mipi_dsi_attach(dsi);
-	if (ret < 0) {
-		drm_panel_remove(&ctx->panel);
-		return ret;
-	}
-
-	return 0;
+	return mipi_dsi_attach(dsi);
 }
 
-static void rb070d30_panel_dsi_remove(struct mipi_dsi_device *dsi)
+static int rb070d30_panel_dsi_remove(struct mipi_dsi_device *dsi)
 {
 	struct rb070d30_panel *ctx = mipi_dsi_get_drvdata(dsi);
 
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);
+
+	return 0;
 }
 
 static const struct of_device_id rb070d30_panel_of_match[] = {

@@ -7,6 +7,9 @@
  * Logitech ADI joystick family driver for Linux
  */
 
+/*
+ */
+
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -120,7 +123,7 @@ static void adi_read_packet(struct adi_port *port)
 {
 	struct adi *adi = port->adi;
 	struct gameport *gameport = port->gameport;
-	unsigned char u, v, w, x;
+	unsigned char u, v, w, x, z;
 	int t[2], s[2], i;
 	unsigned long flags;
 
@@ -133,7 +136,7 @@ static void adi_read_packet(struct adi_port *port)
 	local_irq_save(flags);
 
 	gameport_trigger(gameport);
-	v = gameport_read(gameport);
+	v = z = gameport_read(gameport);
 
 	do {
 		u = v;
@@ -456,7 +459,7 @@ static int adi_connect(struct gameport *gameport, struct gameport_driver *drv)
 	int i;
 	int err;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc(sizeof(struct adi_port), GFP_KERNEL);
 	if (!port)
 		return -ENOMEM;
 

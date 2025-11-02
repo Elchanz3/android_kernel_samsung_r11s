@@ -419,11 +419,13 @@ static int arche_apb_ctrl_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void arche_apb_ctrl_remove(struct platform_device *pdev)
+static int arche_apb_ctrl_remove(struct platform_device *pdev)
 {
 	device_remove_file(&pdev->dev, &dev_attr_state);
 	poweroff_seq(pdev);
 	platform_set_drvdata(pdev, NULL);
+
+	return 0;
 }
 
 static int __maybe_unused arche_apb_ctrl_suspend(struct device *dev)
@@ -443,7 +445,7 @@ static int __maybe_unused arche_apb_ctrl_suspend(struct device *dev)
 static int __maybe_unused arche_apb_ctrl_resume(struct device *dev)
 {
 	/*
-	 * At least for ES2 we have to meet the delay requirement between
+	 * Atleast for ES2 we have to meet the delay requirement between
 	 * unipro switch and AP bridge init, depending on whether bridge is in
 	 * OFF state or standby state.
 	 *

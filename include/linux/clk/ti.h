@@ -1,8 +1,16 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * TI clock drivers support
  *
  * Copyright (C) 2013 Texas Instruments, Inc.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 #ifndef __LINUX_CLK_TI_H__
 #define __LINUX_CLK_TI_H__
@@ -13,14 +21,11 @@
 /**
  * struct clk_omap_reg - OMAP register declaration
  * @offset: offset from the master IP module base address
- * @bit: register bit offset
  * @index: index of the master IP module
- * @flags: flags
  */
 struct clk_omap_reg {
 	void __iomem *ptr;
 	u16 offset;
-	u8 bit;
 	u8 index;
 	u8 flags;
 };
@@ -34,14 +39,14 @@ struct clk_omap_reg {
  * @clk_ref: struct clk_hw pointer to the clock's reference clock input
  * @control_reg: register containing the DPLL mode bitfield
  * @enable_mask: mask of the DPLL mode bitfield in @control_reg
- * @last_rounded_rate: cache of the last rate result of omap2_dpll_determine_rate()
- * @last_rounded_m: cache of the last M result of omap2_dpll_determine_rate()
+ * @last_rounded_rate: cache of the last rate result of omap2_dpll_round_rate()
+ * @last_rounded_m: cache of the last M result of omap2_dpll_round_rate()
  * @last_rounded_m4xen: cache of the last M4X result of
- *			omap4_dpll_regm4xen_determine_rate()
+ *			omap4_dpll_regm4xen_round_rate()
  * @last_rounded_lpmode: cache of the last lpmode result of
  *			 omap4_dpll_lpmode_recalc()
  * @max_multiplier: maximum valid non-bypass multiplier value (actual)
- * @last_rounded_n: cache of the last N result of omap2_dpll_determine_rate()
+ * @last_rounded_n: cache of the last N result of omap2_dpll_round_rate()
  * @min_divider: minimum valid non-bypass divider value (actual)
  * @max_divider: maximum valid non-bypass divider value (actual)
  * @max_rate: maximum clock rate for the DPLL
@@ -58,17 +63,6 @@ struct clk_omap_reg {
  * @auto_recal_bit: bitshift of the driftguard enable bit in @control_reg
  * @recal_en_bit: bitshift of the PRM_IRQENABLE_* bit for recalibration IRQs
  * @recal_st_bit: bitshift of the PRM_IRQSTATUS_* bit for recalibration IRQs
- * @ssc_deltam_reg: register containing the DPLL SSC frequency spreading
- * @ssc_modfreq_reg: register containing the DPLL SSC modulation frequency
- * @ssc_modfreq_mant_mask: mask of the mantissa component in @ssc_modfreq_reg
- * @ssc_modfreq_exp_mask: mask of the exponent component in @ssc_modfreq_reg
- * @ssc_enable_mask: mask of the DPLL SSC enable bit in @control_reg
- * @ssc_downspread_mask: mask of the DPLL SSC low frequency only bit in
- *                       @control_reg
- * @ssc_modfreq: the DPLL SSC frequency modulation in kHz
- * @ssc_deltam: the DPLL SSC frequency spreading in permille (10th of percent)
- * @ssc_downspread: require the only low frequency spread of the DPLL in SSC
- *                   mode
  * @flags: DPLL type/features (see below)
  *
  * Possible values for @flags:
@@ -116,17 +110,6 @@ struct dpll_data {
 	u8			auto_recal_bit;
 	u8			recal_en_bit;
 	u8			recal_st_bit;
-	struct clk_omap_reg	ssc_deltam_reg;
-	struct clk_omap_reg	ssc_modfreq_reg;
-	u32			ssc_deltam_int_mask;
-	u32			ssc_deltam_frac_mask;
-	u32			ssc_modfreq_mant_mask;
-	u32			ssc_modfreq_exp_mask;
-	u32                     ssc_enable_mask;
-	u32                     ssc_downspread_mask;
-	u32                     ssc_modfreq;
-	u32                     ssc_deltam;
-	bool                    ssc_downspread;
 	u8			flags;
 };
 

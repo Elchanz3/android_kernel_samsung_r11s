@@ -19,12 +19,14 @@
 #include <linux/sched/rt.h>
 #include <linux/livepatch.h>
 #include <linux/mm_types.h>
+#include <linux/task_integrity.h>
 
 #include <asm/thread_info.h>
 
 extern struct files_struct init_files;
 extern struct fs_struct init_fs;
 extern struct nsproxy init_nsproxy;
+extern struct group_info init_groups;
 extern struct cred init_cred;
 
 #ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
@@ -35,7 +37,31 @@ extern struct cred init_cred;
 #define INIT_PREV_CPUTIME(x)
 #endif
 
+#ifdef CONFIG_FIVE
+# define INIT_TASK_INTEGRITY(integrity) {				\
+	.user_value = INTEGRITY_NONE,					\
+	.value = INTEGRITY_NONE,					\
+	.usage_count = ATOMIC_INIT(1),					\
+	.value_lock = __SPIN_LOCK_UNLOCKED(integrity.value_lock),	\
+	.list_lock = __SPIN_LOCK_UNLOCKED(integrity.list_lock),		\
+	.events = { .list = LIST_HEAD_INIT(integrity.events.list),},   \
+}
+
+# define INIT_INTEGRITY(tsk)						\
+	.android_oem_data1[2] = (u64)&init_integrity,
+#else
+# define INIT_INTEGRITY(tsk)
+# define INIT_TASK_INTEGRITY(integrity)
+#endif
+
 #define INIT_TASK_COMM "swapper"
+
+/* Attach to the init_task data structure for proper alignment */
+#ifdef CONFIG_ARCH_TASK_STRUCT_ON_STACK
+#define __init_task_data __section(".data..init_task")
+#else
+#define __init_task_data /**/
+#endif
 
 /* Attach to the thread_info data structure for proper alignment */
 #define __init_thread_info __section(".data..init_thread_info")

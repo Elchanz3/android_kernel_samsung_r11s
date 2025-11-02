@@ -4,7 +4,6 @@
 #include <regex.h>
 #include <linux/zalloc.h>
 
-#include "perf_regs.h"
 #include "../../../util/perf_regs.h"
 #include "../../../util/debug.h"
 #include "../../../util/event.h"
@@ -16,9 +15,8 @@
 
 #define PVR_POWER9		0x004E
 #define PVR_POWER10		0x0080
-#define PVR_POWER11		0x0082
 
-static const struct sample_reg sample_reg_masks[] = {
+const struct sample_reg sample_reg_masks[] = {
 	SMPL_REG(r0, PERF_REG_POWERPC_R0),
 	SMPL_REG(r1, PERF_REG_POWERPC_R1),
 	SMPL_REG(r2, PERF_REG_POWERPC_R2),
@@ -70,14 +68,6 @@ static const struct sample_reg sample_reg_masks[] = {
 	SMPL_REG(mmcr3, PERF_REG_POWERPC_MMCR3),
 	SMPL_REG(sier2, PERF_REG_POWERPC_SIER2),
 	SMPL_REG(sier3, PERF_REG_POWERPC_SIER3),
-	SMPL_REG(pmc1, PERF_REG_POWERPC_PMC1),
-	SMPL_REG(pmc2, PERF_REG_POWERPC_PMC2),
-	SMPL_REG(pmc3, PERF_REG_POWERPC_PMC3),
-	SMPL_REG(pmc4, PERF_REG_POWERPC_PMC4),
-	SMPL_REG(pmc5, PERF_REG_POWERPC_PMC5),
-	SMPL_REG(pmc6, PERF_REG_POWERPC_PMC6),
-	SMPL_REG(sdar, PERF_REG_POWERPC_SDAR),
-	SMPL_REG(siar, PERF_REG_POWERPC_SIAR),
 	SMPL_REG_END
 };
 
@@ -208,7 +198,7 @@ uint64_t arch__intr_reg_mask(void)
 	version = (((mfspr(SPRN_PVR)) >>  16) & 0xFFFF);
 	if (version == PVR_POWER9)
 		extended_mask = PERF_REG_PMU_MASK_300;
-	else if ((version == PVR_POWER10) || (version == PVR_POWER11))
+	else if (version == PVR_POWER10)
 		extended_mask = PERF_REG_PMU_MASK_31;
 	else
 		return mask;
@@ -227,14 +217,4 @@ uint64_t arch__intr_reg_mask(void)
 		mask |= extended_mask;
 	}
 	return mask;
-}
-
-uint64_t arch__user_reg_mask(void)
-{
-	return PERF_REGS_MASK;
-}
-
-const struct sample_reg *arch__sample_reg_masks(void)
-{
-	return sample_reg_masks;
 }

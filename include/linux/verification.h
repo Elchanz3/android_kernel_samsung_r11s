@@ -8,23 +8,12 @@
 #ifndef _LINUX_VERIFICATION_H
 #define _LINUX_VERIFICATION_H
 
-#include <linux/errno.h>
-#include <linux/types.h>
-
 /*
  * Indicate that both builtin trusted keys and secondary trusted keys
  * should be used.
  */
 #define VERIFY_USE_SECONDARY_KEYRING ((struct key *)1UL)
 #define VERIFY_USE_PLATFORM_KEYRING  ((struct key *)2UL)
-
-static inline int system_keyring_id_check(u64 id)
-{
-	if (id > (unsigned long)VERIFY_USE_PLATFORM_KEYRING)
-		return -EINVAL;
-
-	return 0;
-}
 
 /*
  * The use to which an asymmetric key is being put.
@@ -36,9 +25,10 @@ enum key_being_used_for {
 	VERIFYING_KEY_SIGNATURE,
 	VERIFYING_KEY_SELF_SIGNATURE,
 	VERIFYING_UNSPECIFIED_SIGNATURE,
-	VERIFYING_BPF_SIGNATURE,
 	NR__KEY_BEING_USED_FOR
 };
+extern const char *const key_being_used_for[NR__KEY_BEING_USED_FOR];
+
 #ifdef CONFIG_SYSTEM_DATA_VERIFICATION
 
 struct key;

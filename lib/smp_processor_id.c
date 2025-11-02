@@ -19,10 +19,11 @@ unsigned int check_preemption_disabled(const char *what1, const char *what2)
 	if (irqs_disabled())
 		goto out;
 
-	if (is_percpu_thread())
-		goto out;
-
-	if (current->migration_disabled)
+	/*
+	 * Kernel threads bound to a single CPU can safely use
+	 * smp_processor_id():
+	 */
+	if (current->nr_cpus_allowed == 1)
 		goto out;
 
 	/*

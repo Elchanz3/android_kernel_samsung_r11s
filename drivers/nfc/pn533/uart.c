@@ -123,7 +123,7 @@ static int pn532_dev_down(struct pn533 *dev)
 	return 0;
 }
 
-static const struct pn533_phy_ops uart_phy_ops = {
+static struct pn533_phy_ops uart_phy_ops = {
 	.send_frame = pn532_uart_send_frame,
 	.send_ack = pn532_uart_send_ack,
 	.abort_cmd = pn532_uart_abort_cmd,
@@ -133,7 +133,7 @@ static const struct pn533_phy_ops uart_phy_ops = {
 
 static void pn532_cmd_timeout(struct timer_list *t)
 {
-	struct pn532_uart_phy *dev = timer_container_of(dev, t, cmd_timeout);
+	struct pn532_uart_phy *dev = from_timer(dev, t, cmd_timeout);
 
 	pn532_uart_send_frame(dev->priv, dev->cur_out_buf);
 }
@@ -203,13 +203,13 @@ static int pn532_uart_rx_is_frame(struct sk_buff *skb)
 	return 0;
 }
 
-static size_t pn532_receive_buf(struct serdev_device *serdev,
-				const u8 *data, size_t count)
+static int pn532_receive_buf(struct serdev_device *serdev,
+		const unsigned char *data, size_t count)
 {
 	struct pn532_uart_phy *dev = serdev_device_get_drvdata(serdev);
 	size_t i;
 
-	timer_delete(&dev->cmd_timeout);
+	del_timer(&dev->cmd_timeout);
 	for (i = 0; i < count; i++) {
 		skb_put_u8(dev->recv_skb, *data++);
 		if (!pn532_uart_rx_is_frame(dev->recv_skb))
@@ -224,7 +224,7 @@ static size_t pn532_receive_buf(struct serdev_device *serdev,
 	return i;
 }
 
-static const struct serdev_device_ops pn532_serdev_ops = {
+static struct serdev_device_ops pn532_serdev_ops = {
 	.receive_buf = pn532_receive_buf,
 	.write_wakeup = serdev_device_write_wakeup,
 };
@@ -310,7 +310,7 @@ static void pn532_uart_remove(struct serdev_device *serdev)
 	pn53x_unregister_nfc(pn532->priv);
 	serdev_device_close(serdev);
 	pn53x_common_clean(pn532->priv);
-	timer_shutdown_sync(&pn532->cmd_timeout);
+	del_timer_sync(&pn532->cmd_timeout);
 	kfree_skb(pn532->recv_skb);
 	kfree(pn532);
 }
@@ -320,7 +320,7 @@ static struct serdev_device_driver pn532_uart_driver = {
 	.remove = pn532_uart_remove,
 	.driver = {
 		.name = "pn532_uart",
-		.of_match_table = pn532_uart_of_match,
+		.of_match_table = of_match_ptr(pn532_uart_of_match),
 	},
 };
 

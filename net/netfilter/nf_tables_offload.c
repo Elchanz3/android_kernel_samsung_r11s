@@ -7,6 +7,8 @@
 #include <net/netfilter/nf_tables_offload.h>
 #include <net/pkt_cls.h>
 
+extern unsigned int nf_tables_net_id;
+
 static struct nft_flow_rule *nft_flow_rule_alloc(int num_actions)
 {
 	struct nft_flow_rule *flow;
@@ -35,12 +37,12 @@ void nft_flow_rule_set_addr_type(struct nft_flow_rule *flow,
 	struct nft_flow_key *mask = &match->mask;
 	struct nft_flow_key *key = &match->key;
 
-	if (match->dissector.used_keys & BIT_ULL(FLOW_DISSECTOR_KEY_CONTROL))
+	if (match->dissector.used_keys & BIT(FLOW_DISSECTOR_KEY_CONTROL))
 		return;
 
 	key->control.addr_type = addr_type;
 	mask->control.addr_type = 0xffff;
-	match->dissector.used_keys |= BIT_ULL(FLOW_DISSECTOR_KEY_CONTROL);
+	match->dissector.used_keys |= BIT(FLOW_DISSECTOR_KEY_CONTROL);
 	match->dissector.offset[FLOW_DISSECTOR_KEY_CONTROL] =
 		offsetof(struct nft_flow_key, control);
 }
@@ -59,7 +61,7 @@ static void nft_flow_rule_transfer_vlan(struct nft_offload_ctx *ctx,
 		.mask	= match->mask.basic.n_proto,
 	};
 
-	if (match->dissector.used_keys & BIT_ULL(FLOW_DISSECTOR_KEY_VLAN) &&
+	if (match->dissector.used_keys & BIT(FLOW_DISSECTOR_KEY_VLAN) &&
 	    (match->key.vlan.vlan_tpid == htons(ETH_P_8021Q) ||
 	     match->key.vlan.vlan_tpid == htons(ETH_P_8021AD))) {
 		match->key.basic.n_proto = match->key.cvlan.vlan_tpid;
@@ -70,9 +72,8 @@ static void nft_flow_rule_transfer_vlan(struct nft_offload_ctx *ctx,
 		match->mask.vlan.vlan_tpid = ethertype.mask;
 		match->dissector.offset[FLOW_DISSECTOR_KEY_CVLAN] =
 			offsetof(struct nft_flow_key, cvlan);
-		match->dissector.used_keys |= BIT_ULL(FLOW_DISSECTOR_KEY_CVLAN);
-	} else if (match->dissector.used_keys &
-		   BIT_ULL(FLOW_DISSECTOR_KEY_BASIC) &&
+		match->dissector.used_keys |= BIT(FLOW_DISSECTOR_KEY_CVLAN);
+	} else if (match->dissector.used_keys & BIT(FLOW_DISSECTOR_KEY_BASIC) &&
 		   (match->key.basic.n_proto == htons(ETH_P_8021Q) ||
 		    match->key.basic.n_proto == htons(ETH_P_8021AD))) {
 		match->key.basic.n_proto = match->key.vlan.vlan_tpid;
@@ -81,7 +82,7 @@ static void nft_flow_rule_transfer_vlan(struct nft_offload_ctx *ctx,
 		match->mask.vlan.vlan_tpid = ethertype.mask;
 		match->dissector.offset[FLOW_DISSECTOR_KEY_VLAN] =
 			offsetof(struct nft_flow_key, vlan);
-		match->dissector.used_keys |= BIT_ULL(FLOW_DISSECTOR_KEY_VLAN);
+		match->dissector.used_keys |= BIT(FLOW_DISSECTOR_KEY_VLAN);
 	}
 }
 
@@ -220,7 +221,6 @@ static int nft_chain_offload_priority(const struct nft_base_chain *basechain)
 
 bool nft_chain_offload_support(const struct nft_base_chain *basechain)
 {
-	struct nf_hook_ops *ops;
 	struct net_device *dev;
 	struct nft_hook *hook;
 
@@ -228,16 +228,13 @@ bool nft_chain_offload_support(const struct nft_base_chain *basechain)
 		return false;
 
 	list_for_each_entry(hook, &basechain->hook_list, list) {
-		list_for_each_entry(ops, &hook->ops_list, list) {
-			if (ops->pf != NFPROTO_NETDEV ||
-			    ops->hooknum != NF_NETDEV_INGRESS)
-				return false;
+		if (hook->ops.pf != NFPROTO_NETDEV ||
+		    hook->ops.hooknum != NF_NETDEV_INGRESS)
+			return false;
 
-			dev = ops->dev;
-			if (!dev->netdev_ops->ndo_setup_tc &&
-			    !flow_indr_dev_exists())
-				return false;
-		}
+		dev = hook->ops.dev;
+		if (!dev->netdev_ops->ndo_setup_tc && !flow_indr_dev_exists())
+			return false;
 	}
 
 	return true;
@@ -265,54 +262,24 @@ static void nft_flow_cls_offload_setup(struct flow_cls_offload *cls_flow,
 		cls_flow->rule = flow->rule;
 }
 
-static int nft_flow_offload_cmd(const struct nft_chain *chain,
-				const struct nft_rule *rule,
-				struct nft_flow_rule *flow,
-				enum flow_cls_command command,
-				struct flow_cls_offload *cls_flow)
+static int nft_flow_offload_rule(struct nft_chain *chain,
+				 struct nft_rule *rule,
+				 struct nft_flow_rule *flow,
+				 enum flow_cls_command command)
 {
 	struct netlink_ext_ack extack = {};
+	struct flow_cls_offload cls_flow;
 	struct nft_base_chain *basechain;
 
 	if (!nft_is_base_chain(chain))
 		return -EOPNOTSUPP;
 
 	basechain = nft_base_chain(chain);
-	nft_flow_cls_offload_setup(cls_flow, basechain, rule, flow, &extack,
+	nft_flow_cls_offload_setup(&cls_flow, basechain, rule, flow, &extack,
 				   command);
 
-	return nft_setup_cb_call(TC_SETUP_CLSFLOWER, cls_flow,
+	return nft_setup_cb_call(TC_SETUP_CLSFLOWER, &cls_flow,
 				 &basechain->flow_block.cb_list);
-}
-
-static int nft_flow_offload_rule(const struct nft_chain *chain,
-				 struct nft_rule *rule,
-				 struct nft_flow_rule *flow,
-				 enum flow_cls_command command)
-{
-	struct flow_cls_offload cls_flow;
-
-	return nft_flow_offload_cmd(chain, rule, flow, command, &cls_flow);
-}
-
-int nft_flow_rule_stats(const struct nft_chain *chain,
-			const struct nft_rule *rule)
-{
-	struct flow_cls_offload cls_flow = {};
-	struct nft_expr *expr, *next;
-	int err;
-
-	err = nft_flow_offload_cmd(chain, rule, NULL, FLOW_CLS_STATS,
-				   &cls_flow);
-	if (err < 0)
-		return err;
-
-	nft_rule_for_each_expr(expr, next, rule) {
-		if (expr->ops->offload_stats)
-			expr->ops->offload_stats(expr, &cls_flow.stats);
-	}
-
-	return 0;
 }
 
 static int nft_flow_offload_bind(struct flow_block_offload *bo,
@@ -412,7 +379,7 @@ static void nft_indr_block_cleanup(struct flow_block_cb *block_cb)
 
 	nft_flow_block_offload_init(&bo, dev_net(dev), FLOW_BLOCK_UNBIND,
 				    basechain, &extack);
-	nft_net = nft_pernet(net);
+	nft_net = net_generic(net, nf_tables_net_id);
 	mutex_lock(&nft_net->commit_mutex);
 	list_del(&block_cb->driver_list);
 	list_move(&block_cb->list, &bo.cb_list);
@@ -459,37 +426,34 @@ static int nft_flow_block_chain(struct nft_base_chain *basechain,
 				const struct net_device *this_dev,
 				enum flow_block_command cmd)
 {
-	struct nf_hook_ops *ops;
+	struct net_device *dev;
 	struct nft_hook *hook;
 	int err, i = 0;
 
 	list_for_each_entry(hook, &basechain->hook_list, list) {
-		list_for_each_entry(ops, &hook->ops_list, list) {
-			if (this_dev && this_dev != ops->dev)
-				continue;
+		dev = hook->ops.dev;
+		if (this_dev && this_dev != dev)
+			continue;
 
-			err = nft_chain_offload_cmd(basechain, ops->dev, cmd);
-			if (err < 0 && cmd == FLOW_BLOCK_BIND) {
-				if (!this_dev)
-					goto err_flow_block;
+		err = nft_chain_offload_cmd(basechain, dev, cmd);
+		if (err < 0 && cmd == FLOW_BLOCK_BIND) {
+			if (!this_dev)
+				goto err_flow_block;
 
-				return err;
-			}
-			i++;
+			return err;
 		}
+		i++;
 	}
 
 	return 0;
 
 err_flow_block:
 	list_for_each_entry(hook, &basechain->hook_list, list) {
-		list_for_each_entry(ops, &hook->ops_list, list) {
-			if (i-- <= 0)
-				break;
+		if (i-- <= 0)
+			break;
 
-			nft_chain_offload_cmd(basechain, ops->dev,
-					      FLOW_BLOCK_UNBIND);
-		}
+		dev = hook->ops.dev;
+		nft_chain_offload_cmd(basechain, dev, FLOW_BLOCK_UNBIND);
 	}
 	return err;
 }
@@ -516,42 +480,42 @@ static int nft_flow_offload_chain(struct nft_chain *chain, u8 *ppolicy,
 static void nft_flow_rule_offload_abort(struct net *net,
 					struct nft_trans *trans)
 {
-	struct nftables_pernet *nft_net = nft_pernet(net);
+	struct nftables_pernet *nft_net = net_generic(net, nf_tables_net_id);
 	int err = 0;
 
 	list_for_each_entry_continue_reverse(trans, &nft_net->commit_list, list) {
-		if (trans->table->family != NFPROTO_NETDEV)
+		if (trans->ctx.family != NFPROTO_NETDEV)
 			continue;
 
 		switch (trans->msg_type) {
 		case NFT_MSG_NEWCHAIN:
-			if (!(nft_trans_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD) ||
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD) ||
 			    nft_trans_chain_update(trans))
 				continue;
 
-			err = nft_flow_offload_chain(nft_trans_chain(trans), NULL,
+			err = nft_flow_offload_chain(trans->ctx.chain, NULL,
 						     FLOW_BLOCK_UNBIND);
 			break;
 		case NFT_MSG_DELCHAIN:
-			if (!(nft_trans_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD))
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
 				continue;
 
-			err = nft_flow_offload_chain(nft_trans_chain(trans), NULL,
+			err = nft_flow_offload_chain(trans->ctx.chain, NULL,
 						     FLOW_BLOCK_BIND);
 			break;
 		case NFT_MSG_NEWRULE:
-			if (!(nft_trans_rule_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD))
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
 				continue;
 
-			err = nft_flow_offload_rule(nft_trans_rule_chain(trans),
+			err = nft_flow_offload_rule(trans->ctx.chain,
 						    nft_trans_rule(trans),
 						    NULL, FLOW_CLS_DESTROY);
 			break;
 		case NFT_MSG_DELRULE:
-			if (!(nft_trans_rule_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD))
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
 				continue;
 
-			err = nft_flow_offload_rule(nft_trans_rule_chain(trans),
+			err = nft_flow_offload_rule(trans->ctx.chain,
 						    nft_trans_rule(trans),
 						    nft_trans_flow_rule(trans),
 						    FLOW_CLS_REPLACE);
@@ -565,52 +529,52 @@ static void nft_flow_rule_offload_abort(struct net *net,
 
 int nft_flow_rule_offload_commit(struct net *net)
 {
-	struct nftables_pernet *nft_net = nft_pernet(net);
+	struct nftables_pernet *nft_net = net_generic(net, nf_tables_net_id);
 	struct nft_trans *trans;
 	int err = 0;
 	u8 policy;
 
 	list_for_each_entry(trans, &nft_net->commit_list, list) {
-		if (trans->table->family != NFPROTO_NETDEV)
+		if (trans->ctx.family != NFPROTO_NETDEV)
 			continue;
 
 		switch (trans->msg_type) {
 		case NFT_MSG_NEWCHAIN:
-			if (!(nft_trans_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD) ||
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD) ||
 			    nft_trans_chain_update(trans))
 				continue;
 
 			policy = nft_trans_chain_policy(trans);
-			err = nft_flow_offload_chain(nft_trans_chain(trans), &policy,
+			err = nft_flow_offload_chain(trans->ctx.chain, &policy,
 						     FLOW_BLOCK_BIND);
 			break;
 		case NFT_MSG_DELCHAIN:
-			if (!(nft_trans_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD))
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
 				continue;
 
 			policy = nft_trans_chain_policy(trans);
-			err = nft_flow_offload_chain(nft_trans_chain(trans), &policy,
+			err = nft_flow_offload_chain(trans->ctx.chain, &policy,
 						     FLOW_BLOCK_UNBIND);
 			break;
 		case NFT_MSG_NEWRULE:
-			if (!(nft_trans_rule_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD))
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
 				continue;
 
-			if (trans->flags & NLM_F_REPLACE ||
-			    !(trans->flags & NLM_F_APPEND)) {
+			if (trans->ctx.flags & NLM_F_REPLACE ||
+			    !(trans->ctx.flags & NLM_F_APPEND)) {
 				err = -EOPNOTSUPP;
 				break;
 			}
-			err = nft_flow_offload_rule(nft_trans_rule_chain(trans),
+			err = nft_flow_offload_rule(trans->ctx.chain,
 						    nft_trans_rule(trans),
 						    nft_trans_flow_rule(trans),
 						    FLOW_CLS_REPLACE);
 			break;
 		case NFT_MSG_DELRULE:
-			if (!(nft_trans_rule_chain(trans)->flags & NFT_CHAIN_HW_OFFLOAD))
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
 				continue;
 
-			err = nft_flow_offload_rule(nft_trans_rule_chain(trans),
+			err = nft_flow_offload_rule(trans->ctx.chain,
 						    nft_trans_rule(trans),
 						    NULL, FLOW_CLS_DESTROY);
 			break;
@@ -618,6 +582,23 @@ int nft_flow_rule_offload_commit(struct net *net)
 
 		if (err) {
 			nft_flow_rule_offload_abort(net, trans);
+			break;
+		}
+	}
+
+	list_for_each_entry(trans, &nft_net->commit_list, list) {
+		if (trans->ctx.family != NFPROTO_NETDEV)
+			continue;
+
+		switch (trans->msg_type) {
+		case NFT_MSG_NEWRULE:
+		case NFT_MSG_DELRULE:
+			if (!(trans->ctx.chain->flags & NFT_CHAIN_HW_OFFLOAD))
+				continue;
+
+			nft_flow_rule_destroy(nft_trans_flow_rule(trans));
+			break;
+		default:
 			break;
 		}
 	}
@@ -645,7 +626,7 @@ static struct nft_chain *__nft_offload_get_chain(const struct nftables_pernet *n
 			found = NULL;
 			basechain = nft_base_chain(chain);
 			list_for_each_entry(hook, &basechain->hook_list, list) {
-				if (!nft_hook_find_ops(hook, dev))
+				if (hook->ops.dev != dev)
 					continue;
 
 				found = hook;
@@ -672,7 +653,7 @@ static int nft_offload_netdev_event(struct notifier_block *this,
 	if (event != NETDEV_UNREGISTER)
 		return NOTIFY_DONE;
 
-	nft_net = nft_pernet(net);
+	nft_net = net_generic(net, nf_tables_net_id);
 	mutex_lock(&nft_net->commit_mutex);
 	chain = __nft_offload_get_chain(nft_net, dev);
 	if (chain)

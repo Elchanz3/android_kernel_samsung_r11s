@@ -256,8 +256,8 @@ static struct phy_driver bcm_cygnus_phy_driver[] = {
 	.name          = "Broadcom Cygnus PHY",
 	/* PHY_GBIT_FEATURES */
 	.config_init   = bcm_cygnus_config_init,
+	.ack_interrupt = bcm_phy_ack_intr,
 	.config_intr   = bcm_phy_config_intr,
-	.handle_interrupt = bcm_phy_handle_interrupt,
 	.suspend       = genphy_suspend,
 	.resume        = bcm_cygnus_resume,
 }, {
@@ -278,7 +278,7 @@ static struct phy_driver bcm_cygnus_phy_driver[] = {
 }
 };
 
-static const struct mdio_device_id __maybe_unused bcm_cygnus_phy_tbl[] = {
+static struct mdio_device_id __maybe_unused bcm_cygnus_phy_tbl[] = {
 	{ PHY_ID_BCM_CYGNUS, 0xfffffff0, },
 	{ PHY_ID_BCM_OMEGA, 0xfffffff0, },
 	{ }

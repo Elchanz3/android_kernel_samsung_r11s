@@ -1,17 +1,15 @@
 .. SPDX-License-Identifier: GPL-2.0
 
 ====
-GPIO
+gpio
 ====
 
 .. toctree::
     :maxdepth: 1
 
-    Character Device Userspace API <../../userspace-api/gpio/chardev>
     gpio-aggregator
-    gpio-sim
-    gpio-virtuser
-    Obsolete APIs <obsolete>
+    sysfs
+    gpio-mockup
 
 .. only::  subproject and html
 

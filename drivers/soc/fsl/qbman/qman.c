@@ -1159,7 +1159,7 @@ static u32 fq_to_tag(struct qman_fq *fq)
 
 static u32 __poll_portal_slow(struct qman_portal *p, u32 is);
 static inline unsigned int __poll_portal_fast(struct qman_portal *p,
-					unsigned int poll_limit, bool sched_napi);
+					unsigned int poll_limit);
 static void qm_congestion_task(struct work_struct *work);
 static void qm_mr_process_task(struct work_struct *work);
 
@@ -1174,7 +1174,7 @@ static irqreturn_t portal_isr(int irq, void *ptr)
 
 	/* DQRR-handling if it's interrupt-driven */
 	if (is & QM_PIRQ_DQRI) {
-		__poll_portal_fast(p, QMAN_POLL_LIMIT, true);
+		__poll_portal_fast(p, QMAN_POLL_LIMIT);
 		clear = QM_DQAVAIL_MASK | QM_PIRQ_DQRI;
 	}
 	/* Handling of anything else that's interrupt-driven */
@@ -1270,7 +1270,7 @@ static int qman_create_portal(struct qman_portal *portal,
 	qm_dqrr_set_ithresh(p, QMAN_PIRQ_DQRR_ITHRESH);
 	qm_mr_set_ithresh(p, QMAN_PIRQ_MR_ITHRESH);
 	qm_out(p, QM_REG_ITPR, QMAN_PIRQ_IPERIOD);
-	portal->cgrs = kmalloc_array(2, sizeof(*portal->cgrs), GFP_KERNEL);
+	portal->cgrs = kmalloc_array(2, sizeof(*cgrs), GFP_KERNEL);
 	if (!portal->cgrs)
 		goto fail_cgrs;
 	/* initial snapshot is no-depletion */
@@ -1605,7 +1605,7 @@ static noinline void clear_vdqcr(struct qman_portal *p, struct qman_fq *fq)
  * user callbacks to call into any QMan API.
  */
 static inline unsigned int __poll_portal_fast(struct qman_portal *p,
-					unsigned int poll_limit, bool sched_napi)
+					unsigned int poll_limit)
 {
 	const struct qm_dqrr_entry *dq;
 	struct qman_fq *fq;
@@ -1639,7 +1639,7 @@ static inline unsigned int __poll_portal_fast(struct qman_portal *p,
 			 * and we don't want multiple if()s in the critical
 			 * path (SDQCR).
 			 */
-			res = fq->cb.dqrr(p, fq, dq, sched_napi);
+			res = fq->cb.dqrr(p, fq, dq);
 			if (res == qman_cb_dqrr_stop)
 				break;
 			/* Check for VDQCR completion */
@@ -1649,7 +1649,7 @@ static inline unsigned int __poll_portal_fast(struct qman_portal *p,
 			/* SDQCR: context_b points to the FQ */
 			fq = tag_to_fq(be32_to_cpu(dq->context_b));
 			/* Now let the callback do its stuff */
-			res = fq->cb.dqrr(p, fq, dq, sched_napi);
+			res = fq->cb.dqrr(p, fq, dq);
 			/*
 			 * The callback can request that we exit without
 			 * consuming this entry nor advancing;
@@ -1756,7 +1756,7 @@ EXPORT_SYMBOL(qman_start_using_portal);
 
 int qman_p_poll_dqrr(struct qman_portal *p, unsigned int limit)
 {
-	return __poll_portal_fast(p, limit, false);
+	return __poll_portal_fast(p, limit);
 }
 EXPORT_SYMBOL(qman_p_poll_dqrr);
 
@@ -2546,6 +2546,11 @@ release_lock:
 }
 EXPORT_SYMBOL(qman_delete_cgr);
 
+struct cgr_comp {
+	struct qman_cgr *cgr;
+	struct completion completion;
+};
+
 static void qman_delete_cgr_smp_call(void *p)
 {
 	qman_delete_cgr((struct qman_cgr *)p);
@@ -2677,7 +2682,7 @@ int qman_shutdown_fq(u32 fqid)
 	union qm_mc_command *mcc;
 	union qm_mc_result *mcr;
 	int orl_empty, drain = 0, ret = 0;
-	u32 channel, res;
+	u32 channel, wq, res;
 	u8 state;
 
 	p = get_affine_portal();
@@ -2710,7 +2715,7 @@ int qman_shutdown_fq(u32 fqid)
 	DPAA_ASSERT((mcr->verb & QM_MCR_VERB_MASK) == QM_MCR_VERB_QUERYFQ);
 	/* Need to store these since the MCR gets reused */
 	channel = qm_fqd_get_chan(&mcr->queryfq.fqd);
-	qm_fqd_get_wq(&mcr->queryfq.fqd);
+	wq = qm_fqd_get_wq(&mcr->queryfq.fqd);
 
 	if (channel < qm_channel_pool1) {
 		channel_portal = get_portal_for_channel(channel);
@@ -2752,6 +2757,7 @@ int qman_shutdown_fq(u32 fqid)
 			 * to dequeue from the channel the FQ is scheduled on
 			 */
 			int found_fqrn = 0;
+			u16 dequeue_wq = 0;
 
 			/* Flag that we need to drain FQ */
 			drain = 1;
@@ -2759,8 +2765,11 @@ int qman_shutdown_fq(u32 fqid)
 			if (channel >= qm_channel_pool1 &&
 			    channel < qm_channel_pool1 + 15) {
 				/* Pool channel, enable the bit in the portal */
+				dequeue_wq = (channel -
+					      qm_channel_pool1 + 1)<<4 | wq;
 			} else if (channel < qm_channel_pool1) {
 				/* Dedicated channel */
+				dequeue_wq = wq;
 			} else {
 				dev_err(dev, "Can't recover FQ 0x%x, ch: 0x%x",
 					fqid, channel);

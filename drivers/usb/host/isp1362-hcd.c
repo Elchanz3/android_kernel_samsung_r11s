@@ -83,7 +83,7 @@
 
 #include <asm/irq.h>
 #include <asm/byteorder.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 static int dbg_level;
 #ifdef ISP1362_DEBUG
@@ -1279,7 +1279,7 @@ static int isp1362_urb_enqueue(struct usb_hcd *hcd,
 		ep->udev = usb_get_dev(udev);
 		ep->hep = hep;
 		ep->epnum = epnum;
-		ep->maxpacket = usb_maxpacket(udev, urb->pipe);
+		ep->maxpacket = usb_maxpacket(udev, urb->pipe, is_out);
 		ep->ptd_offset = -EINVAL;
 		ep->ptd_index = -EINVAL;
 		usb_settoggle(udev, epnum, is_out, 0);
@@ -1299,8 +1299,8 @@ static int isp1362_urb_enqueue(struct usb_hcd *hcd,
 			ep->interval = urb->interval;
 			ep->branch = PERIODIC_SIZE;
 			ep->load = usb_calc_bus_time(udev->speed, !is_out,
-						     type == PIPE_ISOCHRONOUS,
-						     usb_maxpacket(udev, pipe)) / 1000;
+						     (type == PIPE_ISOCHRONOUS),
+						     usb_maxpacket(udev, pipe, is_out)) / 1000;
 			break;
 		}
 		hep->hcpriv = ep;
@@ -2164,13 +2164,15 @@ DEFINE_SHOW_ATTRIBUTE(isp1362);
 /* expect just one isp1362_hcd per system */
 static void create_debug_file(struct isp1362_hcd *isp1362_hcd)
 {
-	debugfs_create_file("isp1362", S_IRUGO, usb_debug_root, isp1362_hcd,
-			    &isp1362_fops);
+	isp1362_hcd->debug_file = debugfs_create_file("isp1362", S_IRUGO,
+						      usb_debug_root,
+						      isp1362_hcd,
+						      &isp1362_fops);
 }
 
 static void remove_debug_file(struct isp1362_hcd *isp1362_hcd)
 {
-	debugfs_lookup_and_remove("isp1362", usb_debug_root);
+	debugfs_remove(isp1362_hcd->debug_file);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -2357,7 +2359,7 @@ static void isp1362_hc_stop(struct usb_hcd *hcd)
 
 	pr_debug("%s:\n", __func__);
 
-	timer_delete_sync(&hcd->rh_timer);
+	del_timer_sync(&hcd->rh_timer);
 
 	spin_lock_irqsave(&isp1362_hcd->lock, flags);
 
@@ -2606,7 +2608,7 @@ static const struct hc_driver isp1362_hc_driver = {
 
 /*-------------------------------------------------------------------------*/
 
-static void isp1362_remove(struct platform_device *pdev)
+static int isp1362_remove(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
 	struct isp1362_hcd *isp1362_hcd = hcd_to_isp1362_hcd(hcd);
@@ -2617,6 +2619,8 @@ static void isp1362_remove(struct platform_device *pdev)
 	DBG(0, "%s: put_hcd\n", __func__);
 	usb_put_hcd(hcd);
 	DBG(0, "%s: Done\n", __func__);
+
+	return 0;
 }
 
 static int isp1362_probe(struct platform_device *pdev)
@@ -2651,7 +2655,8 @@ static int isp1362_probe(struct platform_device *pdev)
 	if (IS_ERR(addr_reg))
 		return PTR_ERR(addr_reg);
 
-	data_reg = devm_platform_get_and_ioremap_resource(pdev, 0, &data);
+	data = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	data_reg = devm_ioremap_resource(&pdev->dev, data);
 	if (IS_ERR(data_reg))
 		return PTR_ERR(data_reg);
 

@@ -202,7 +202,7 @@ mtu_value_is_too_small_test()
 
 	mtu_restore $rp2
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	tc filter del dev $h1 ingress protocol ip pref 1 handle 101 flower
 }
 
@@ -235,7 +235,7 @@ __ttl_value_is_too_small_test()
 
 	log_test "TTL value is too small: TTL=$ttl_val"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	tc filter del dev $h1 ingress protocol ip pref 1 handle 101 flower
 }
 
@@ -299,7 +299,7 @@ __mc_reverse_path_forwarding_test()
 
 	log_test "Multicast reverse path forwarding: $desc"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	tc filter del dev $rp2 egress protocol $proto pref 1 handle 101 flower
 }
 
@@ -347,7 +347,7 @@ __reject_route_test()
 
 	log_test "Reject route: $desc"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	ip route del unreachable $unreachable
 	tc filter del dev $h1 ingress protocol $proto pref 1 handle 101 flower
 }
@@ -449,35 +449,6 @@ __invalid_nexthop_test()
 	log_test "Unresolved neigh: nexthop does not exist: $desc"
 }
 
-__invalid_nexthop_bucket_test()
-{
-	local desc=$1; shift
-	local dip=$1; shift
-	local via_add=$1; shift
-	local trap_name="unresolved_neigh"
-
-	RET=0
-
-	# Check that route to nexthop that does not exist triggers
-	# unresolved_neigh
-	ip nexthop add id 1 via $via_add dev $rp2
-	ip nexthop add id 10 group 1 type resilient buckets 32
-	ip route add $dip nhid 10
-
-	t0_packets=$(devlink_trap_rx_packets_get $trap_name)
-	ping_do $h1 $dip
-	t1_packets=$(devlink_trap_rx_packets_get $trap_name)
-
-	if [[ $t0_packets -eq $t1_packets ]]; then
-		check_err 1 "Trap counter did not increase"
-	fi
-
-	ip route del $dip nhid 10
-	ip nexthop del id 10
-	ip nexthop del id 1
-	log_test "Unresolved neigh: nexthop bucket does not exist: $desc"
-}
-
 unresolved_neigh_test()
 {
 	__host_miss_test "IPv4" 198.51.100.1
@@ -485,8 +456,6 @@ unresolved_neigh_test()
 	__invalid_nexthop_test "IPv4" 198.51.100.1 198.51.100.3 24 198.51.100.4
 	__invalid_nexthop_test "IPv6" 2001:db8:2::1 2001:db8:2::3 64 \
 		2001:db8:2::4
-	__invalid_nexthop_bucket_test "IPv4" 198.51.100.1 198.51.100.4
-	__invalid_nexthop_bucket_test "IPv6" 2001:db8:2::1 2001:db8:2::4
 }
 
 vrf_without_routes_create()
@@ -542,7 +511,7 @@ ipv4_lpm_miss_test()
 
 	log_test "LPM miss: IPv4"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	vrf_without_routes_destroy
 }
 
@@ -569,7 +538,7 @@ ipv6_lpm_miss_test()
 
 	log_test "LPM miss: IPv6"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	vrf_without_routes_destroy
 }
 

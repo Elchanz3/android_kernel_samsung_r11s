@@ -127,7 +127,8 @@ static int __init sa1100irq_init_devicefs(void)
 
 device_initcall(sa1100irq_init_devicefs);
 
-static void __exception_irq_entry sa1100_handle_irq(struct pt_regs *regs)
+static asmlinkage void __exception_irq_entry
+sa1100_handle_irq(struct pt_regs *regs)
 {
 	uint32_t icip, icmr, mask;
 
@@ -139,8 +140,8 @@ static void __exception_irq_entry sa1100_handle_irq(struct pt_regs *regs)
 		if (mask == 0)
 			break;
 
-		generic_handle_domain_irq(sa1100_normal_irqdomain,
-					  ffs(mask) - 1);
+		handle_domain_irq(sa1100_normal_irqdomain,
+				ffs(mask) - 1, regs);
 	} while (1);
 }
 
@@ -162,7 +163,7 @@ void __init sa11x0_init_irq_nodt(int irq_start, resource_size_t io_start)
 	 */
 	writel_relaxed(1, iobase + ICCR);
 
-	sa1100_normal_irqdomain = irq_domain_create_simple(NULL,
+	sa1100_normal_irqdomain = irq_domain_add_simple(NULL,
 			32, irq_start,
 			&sa1100_normal_irqdomain_ops, NULL);
 

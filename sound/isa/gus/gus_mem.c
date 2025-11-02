@@ -15,9 +15,17 @@ static void snd_gf1_mem_info_read(struct snd_info_entry *entry,
 				  struct snd_info_buffer *buffer);
 #endif
 
-static struct snd_gf1_mem_block *
-snd_gf1_mem_xalloc(struct snd_gf1_mem *alloc, struct snd_gf1_mem_block *block,
-		   const char *name)
+void snd_gf1_mem_lock(struct snd_gf1_mem * alloc, int xup)
+{
+	if (!xup) {
+		mutex_lock(&alloc->memory_mutex);
+	} else {
+		mutex_unlock(&alloc->memory_mutex);
+	}
+}
+
+static struct snd_gf1_mem_block *snd_gf1_mem_xalloc(struct snd_gf1_mem * alloc,
+					       struct snd_gf1_mem_block * block)
 {
 	struct snd_gf1_mem_block *pblock, *nblock;
 
@@ -25,12 +33,6 @@ snd_gf1_mem_xalloc(struct snd_gf1_mem *alloc, struct snd_gf1_mem_block *block,
 	if (nblock == NULL)
 		return NULL;
 	*nblock = *block;
-	nblock->name = kstrdup(name, GFP_KERNEL);
-	if (!nblock->name) {
-		kfree(nblock);
-		return NULL;
-	}
-
 	pblock = alloc->first;
 	while (pblock) {
 		if (pblock->ptr > nblock->ptr) {
@@ -41,7 +43,8 @@ snd_gf1_mem_xalloc(struct snd_gf1_mem *alloc, struct snd_gf1_mem_block *block,
 				alloc->first = nblock;
 			else
 				nblock->prev->next = nblock;
-			return nblock;
+			mutex_unlock(&alloc->memory_mutex);
+			return NULL;
 		}
 		pblock = pblock->next;
 	}
@@ -61,6 +64,7 @@ int snd_gf1_mem_xfree(struct snd_gf1_mem * alloc, struct snd_gf1_mem_block * blo
 {
 	if (block->share) {	/* ok.. shared block */
 		block->share--;
+		mutex_unlock(&alloc->memory_mutex);
 		return 0;
 	}
 	if (alloc->first == block) {
@@ -172,37 +176,46 @@ struct snd_gf1_mem_block *snd_gf1_mem_alloc(struct snd_gf1_mem * alloc, int owne
 {
 	struct snd_gf1_mem_block block, *nblock;
 
-	guard(mutex)(&alloc->memory_mutex);
+	snd_gf1_mem_lock(alloc, 0);
 	if (share_id != NULL) {
 		nblock = snd_gf1_mem_share(alloc, share_id);
 		if (nblock != NULL) {
 			if (size != (int)nblock->size) {
 				/* TODO: remove in the future */
-				pr_err("%s - share: sizes differ\n", __func__);
+				snd_printk(KERN_ERR "snd_gf1_mem_alloc - share: sizes differ\n");
 				goto __std;
 			}
 			nblock->share++;
+			snd_gf1_mem_lock(alloc, 1);
 			return NULL;
 		}
 	}
       __std:
-	if (snd_gf1_mem_find(alloc, &block, size, w_16, align) < 0)
+	if (snd_gf1_mem_find(alloc, &block, size, w_16, align) < 0) {
+		snd_gf1_mem_lock(alloc, 1);
 		return NULL;
+	}
 	if (share_id != NULL)
 		memcpy(&block.share_id, share_id, sizeof(block.share_id));
 	block.owner = owner;
-	nblock = snd_gf1_mem_xalloc(alloc, &block, name);
+	block.name = kstrdup(name, GFP_KERNEL);
+	nblock = snd_gf1_mem_xalloc(alloc, &block);
+	snd_gf1_mem_lock(alloc, 1);
 	return nblock;
 }
 
 int snd_gf1_mem_free(struct snd_gf1_mem * alloc, unsigned int address)
 {
+	int result;
 	struct snd_gf1_mem_block *block;
 
-	guard(mutex)(&alloc->memory_mutex);
-	block = snd_gf1_mem_look(alloc, address);
-	if (block)
-		return snd_gf1_mem_xfree(alloc, block);
+	snd_gf1_mem_lock(alloc, 0);
+	if ((block = snd_gf1_mem_look(alloc, address)) != NULL) {
+		result = snd_gf1_mem_xfree(alloc, block);
+		snd_gf1_mem_lock(alloc, 1);
+		return result;
+	}
+	snd_gf1_mem_lock(alloc, 1);
 	return -EINVAL;
 }
 
@@ -222,12 +235,14 @@ int snd_gf1_mem_init(struct snd_gus_card * gus)
 	if (gus->gf1.enh_mode) {
 		block.ptr = 0;
 		block.size = 1024;
-		if (!snd_gf1_mem_xalloc(alloc, &block, "InterWave LFOs"))
+		block.name = kstrdup("InterWave LFOs", GFP_KERNEL);
+		if (snd_gf1_mem_xalloc(alloc, &block) == NULL)
 			return -ENOMEM;
 	}
 	block.ptr = gus->gf1.default_voice_address;
 	block.size = 4;
-	if (!snd_gf1_mem_xalloc(alloc, &block, "Voice default (NULL's)"))
+	block.name = kstrdup("Voice default (NULL's)", GFP_KERNEL);
+	if (snd_gf1_mem_xalloc(alloc, &block) == NULL)
 		return -ENOMEM;
 #ifdef CONFIG_SND_DEBUG
 	snd_card_ro_proc_new(gus->card, "gusmem", gus, snd_gf1_mem_info_read);
@@ -262,7 +277,7 @@ static void snd_gf1_mem_info_read(struct snd_info_entry *entry,
 
 	gus = entry->private_data;
 	alloc = &gus->gf1.mem_alloc;
-	guard(mutex)(&alloc->memory_mutex);
+	mutex_lock(&alloc->memory_mutex);
 	snd_iprintf(buffer, "8-bit banks       : \n    ");
 	for (i = 0; i < 4; i++)
 		snd_iprintf(buffer, "0x%06x (%04ik)%s", alloc->banks_8[i].address, alloc->banks_8[i].size >> 10, i + 1 < 4 ? "," : "");
@@ -306,6 +321,7 @@ static void snd_gf1_mem_info_read(struct snd_info_entry *entry,
 	}
 	snd_iprintf(buffer, "  Total: memory = %i, used = %i, free = %i\n",
 		    total, used, total - used);
+	mutex_unlock(&alloc->memory_mutex);
 #if 0
 	ultra_iprintf(buffer, "  Verify: free = %i, max 8-bit block = %i, max 16-bit block = %i\n",
 		      ultra_memory_free_size(card, &card->gf1.mem_alloc),

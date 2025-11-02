@@ -12,7 +12,6 @@
 
 #include <media/cec-notifier.h>
 
-#include <drm/drm_bridge.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_property.h>
 
@@ -32,6 +31,12 @@ struct hdmi_audio_params {
 	unsigned int sample_width;
 	unsigned int sample_rate;
 	struct hdmi_audio_infoframe cea;
+};
+
+static const struct drm_prop_enum_list colorspace_mode_names[] = {
+	{ HDMI_COLORSPACE_RGB, "rgb" },
+	{ HDMI_COLORSPACE_YUV422, "yuv422" },
+	{ HDMI_COLORSPACE_YUV444, "yuv444" },
 };
 
 #define DEFAULT_COLORSPACE_MODE HDMI_COLORSPACE_RGB
@@ -58,6 +63,7 @@ struct hdmi_audio_params {
  * @reset: reset control of the hdmi phy
  * @ddc_adapt: i2c ddc adapter
  * @colorspace: current colorspace selected
+ * @hdmi_monitor: true if HDMI monitor detected else DVI monitor assumed
  * @audio_pdev: ASoC hdmi-codec platform device
  * @audio: hdmi audio parameters.
  * @drm_connector: hdmi connector
@@ -83,11 +89,11 @@ struct sti_hdmi {
 	struct reset_control *reset;
 	struct i2c_adapter *ddc_adapt;
 	enum hdmi_colorspace colorspace;
+	bool hdmi_monitor;
 	struct platform_device *audio_pdev;
 	struct hdmi_audio_params audio;
 	struct drm_connector *drm_connector;
 	struct cec_notifier *notifier;
-	struct drm_bridge bridge;
 };
 
 u32 hdmi_read(struct sti_hdmi *hdmi, int offset);

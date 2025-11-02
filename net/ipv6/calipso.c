@@ -29,10 +29,10 @@
 #include <net/calipso.h>
 #include <linux/atomic.h>
 #include <linux/bug.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include <linux/crc-ccitt.h>
 
-/* Maximum size of the calipso option including
+/* Maximium size of the calipso option including
  * the two-byte TLV header.
  */
 #define CALIPSO_OPT_LEN_MAX (2 + 252)
@@ -42,13 +42,13 @@
  */
 #define CALIPSO_HDR_LEN (2 + 8)
 
-/* Maximum size of the calipso option including
+/* Maximium size of the calipso option including
  * the two-byte TLV header and upto 3 bytes of
  * leading pad and 7 bytes of trailing pad.
  */
 #define CALIPSO_OPT_LEN_MAX_WITH_PAD (3 + CALIPSO_OPT_LEN_MAX + 7)
 
- /* Maximum size of u32 aligned buffer required to hold calipso
+ /* Maximium size of u32 aligned buffer required to hold calipso
   * option.  Max of 3 initial pad bytes starting from buffer + 3.
   * i.e. the worst case is when the previous tlv finishes on 4n + 3.
   */
@@ -426,7 +426,7 @@ static void calipso_doi_free_rcu(struct rcu_head *entry)
 /**
  * calipso_doi_remove - Remove an existing DOI from the CALIPSO protocol engine
  * @doi: the DOI value
- * @audit_info: NetLabel audit information
+ * @audit_secid: the LSM secid to use in the audit message
  *
  * Description:
  * Removes a DOI definition from the CALIPSO engine.  The NetLabel routines will
@@ -657,8 +657,11 @@ static int calipso_map_cat_ntoh(const struct calipso_doi *doi_def,
 					  net_clen_bits,
 					  spot + 1,
 					  1);
-		if (spot < 0)
+		if (spot < 0) {
+			if (spot == -2)
+				return -EFAULT;
 			return 0;
+		}
 
 		ret_val = netlbl_catmap_setbit(&secattr->attr.mls.cat,
 					       spot,
@@ -1072,13 +1075,8 @@ static int calipso_sock_getattr(struct sock *sk,
 	struct ipv6_opt_hdr *hop;
 	int opt_len, len, ret_val = -ENOMSG, offset;
 	unsigned char *opt;
-	struct ipv6_pinfo *pinfo = inet6_sk(sk);
-	struct ipv6_txoptions *txopts;
+	struct ipv6_txoptions *txopts = txopt_get(inet6_sk(sk));
 
-	if (!pinfo)
-		return -EAFNOSUPPORT;
-
-	txopts = txopt_get(pinfo);
 	if (!txopts || !txopts->hopopt)
 		goto done;
 
@@ -1130,13 +1128,8 @@ static int calipso_sock_setattr(struct sock *sk,
 {
 	int ret_val;
 	struct ipv6_opt_hdr *old, *new;
-	struct ipv6_pinfo *pinfo = inet6_sk(sk);
-	struct ipv6_txoptions *txopts;
+	struct ipv6_txoptions *txopts = txopt_get(inet6_sk(sk));
 
-	if (!pinfo)
-		return -EAFNOSUPPORT;
-
-	txopts = txopt_get(pinfo);
 	old = NULL;
 	if (txopts)
 		old = txopts->hopopt;
@@ -1163,13 +1156,8 @@ static int calipso_sock_setattr(struct sock *sk,
 static void calipso_sock_delattr(struct sock *sk)
 {
 	struct ipv6_opt_hdr *new_hop;
-	struct ipv6_pinfo *pinfo = inet6_sk(sk);
-	struct ipv6_txoptions *txopts;
+	struct ipv6_txoptions *txopts = txopt_get(inet6_sk(sk));
 
-	if (!pinfo)
-		return;
-
-	txopts = txopt_get(pinfo);
 	if (!txopts || !txopts->hopopt)
 		goto done;
 
@@ -1207,10 +1195,6 @@ static int calipso_req_setattr(struct request_sock *req,
 	struct ipv6_opt_hdr *old, *new;
 	struct sock *sk = sk_to_full_sk(req_to_sk(req));
 
-	/* sk is NULL for SYN+ACK w/ SYN Cookie */
-	if (!sk)
-		return -ENOMEM;
-
 	if (req_inet->ipv6_opt && req_inet->ipv6_opt->hopopt)
 		old = req_inet->ipv6_opt->hopopt;
 	else
@@ -1238,7 +1222,7 @@ static int calipso_req_setattr(struct request_sock *req,
 
 /**
  * calipso_req_delattr - Delete the CALIPSO option from a request socket
- * @req: the request socket
+ * @reg: the request socket
  *
  * Description:
  * Removes the CALIPSO option from a request socket, if present.
@@ -1250,10 +1234,6 @@ static void calipso_req_delattr(struct request_sock *req)
 	struct ipv6_opt_hdr *new;
 	struct ipv6_txoptions *txopts;
 	struct sock *sk = sk_to_full_sk(req_to_sk(req));
-
-	/* sk is NULL for SYN+ACK w/ SYN Cookie */
-	if (!sk)
-		return;
 
 	if (!req_inet->ipv6_opt || !req_inet->ipv6_opt->hopopt)
 		return;

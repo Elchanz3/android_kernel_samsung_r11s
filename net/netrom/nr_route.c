@@ -189,7 +189,7 @@ static int __must_check nr_add_node(ax25_address *nr, const char *mnemonic,
 		}
 
 		nr_node->callsign = *nr;
-		strscpy(nr_node->mnemonic, mnemonic);
+		strcpy(nr_node->mnemonic, mnemonic);
 
 		nr_node->which = 0;
 		nr_node->count = 1;
@@ -214,7 +214,7 @@ static int __must_check nr_add_node(ax25_address *nr, const char *mnemonic,
 	nr_node_lock(nr_node);
 
 	if (quality != 0)
-		strscpy(nr_node->mnemonic, mnemonic);
+		strcpy(nr_node->mnemonic, mnemonic);
 
 	for (found = 0, i = 0; i < nr_node->count; i++) {
 		if (nr_node->routes[i].neighbour == nr_neigh) {
@@ -266,7 +266,6 @@ static int __must_check nr_add_node(ax25_address *nr, const char *mnemonic,
 		fallthrough;
 	case 2:
 		re_sort_routes(nr_node, 0, 1);
-		break;
 	case 1:
 		break;
 	}
@@ -353,7 +352,6 @@ static int nr_del_node(ax25_address *callsign, ax25_address *neighbour, struct n
 					fallthrough;
 				case 1:
 					nr_node->routes[1] = nr_node->routes[2];
-					fallthrough;
 				case 2:
 					break;
 				}
@@ -479,7 +477,6 @@ static int nr_dec_obs(void)
 					fallthrough;
 				case 1:
 					s->routes[1] = s->routes[2];
-					break;
 				case 2:
 					break;
 				}
@@ -527,7 +524,6 @@ void nr_rt_device_down(struct net_device *dev)
 							fallthrough;
 						case 1:
 							t->routes[1] = t->routes[2];
-							break;
 						case 2:
 							break;
 						}
@@ -577,7 +573,8 @@ struct net_device *nr_dev_first(void)
 			if (first == NULL || strncmp(dev->name, first->name, 3) < 0)
 				first = dev;
 	}
-	dev_hold(first);
+	if (first)
+		dev_hold(first);
 	rcu_read_unlock();
 
 	return first;
@@ -593,7 +590,7 @@ struct net_device *nr_dev_get(ax25_address *addr)
 	rcu_read_lock();
 	for_each_netdev_rcu(&init_net, dev) {
 		if ((dev->flags & IFF_UP) && dev->type == ARPHRD_NETROM &&
-		    ax25cmp(addr, (const ax25_address *)dev->dev_addr) == 0) {
+		    ax25cmp(addr, (ax25_address *)dev->dev_addr) == 0) {
 			dev_hold(dev);
 			goto out;
 		}
@@ -754,12 +751,6 @@ int nr_route_frame(struct sk_buff *skb, ax25_cb *ax25)
 	int ret;
 	struct sk_buff *skbn;
 
-	/*
-	 * Reject malformed packets early. Check that it contains at least 2
-	 * addresses and 1 byte more for Time-To-Live
-	 */
-	if (skb->len < 2 * sizeof(ax25_address) + 1)
-		return 0;
 
 	nr_src  = (ax25_address *)(skb->data + 0);
 	nr_dest = (ax25_address *)(skb->data + 7);
@@ -826,7 +817,7 @@ int nr_route_frame(struct sk_buff *skb, ax25_cb *ax25)
 
 	ax25s = nr_neigh->ax25;
 	nr_neigh->ax25 = ax25_send_frame(skb, 256,
-					 (const ax25_address *)dev->dev_addr,
+					 (ax25_address *)dev->dev_addr,
 					 &nr_neigh->callsign,
 					 nr_neigh->digipeat, nr_neigh->dev);
 	if (ax25s)

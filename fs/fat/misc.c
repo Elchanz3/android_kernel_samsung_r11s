@@ -9,6 +9,47 @@
 
 #include "fat.h"
 #include <linux/iversion.h>
+#include <linux/blkdev.h>
+
+#ifdef CONFIG_FAT_UEVENT
+static struct kobject fat_uevent_kobj;
+
+int fat_uevent_init(struct kset *fat_kset)
+{
+	int err;
+	struct kobj_type *ktype = get_ktype(&fat_kset->kobj);
+
+	fat_uevent_kobj.kset = fat_kset;
+	err = kobject_init_and_add(&fat_uevent_kobj, ktype, NULL, "uevent");
+	if (err)
+		pr_err("FAT-fs Unable to create fat uevent kobj\n");
+
+	return err;
+}
+
+void fat_uevent_uninit(void)
+{
+	kobject_del(&fat_uevent_kobj);
+	memset(&fat_uevent_kobj, 0, sizeof(struct kobject));
+}
+
+void fat_uevent_ro_remount(struct super_block *sb)
+{
+	struct block_device *bdev = sb->s_bdev;
+	dev_t bd_dev = bdev ? bdev->bd_dev : 0;
+	
+	char major[16], minor[16];
+	char *envp[] = { major, minor, NULL };
+
+	snprintf(major, sizeof(major), "MAJOR=%d", MAJOR(bd_dev));
+	snprintf(minor, sizeof(minor), "MINOR=%d", MINOR(bd_dev));
+
+	kobject_uevent_env(&fat_uevent_kobj, KOBJ_CHANGE, envp);
+
+	ST_LOG("FAT-fs (%s[%d:%d]): Uevent triggered\n",
+			sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
+}
+#endif
 
 /*
  * fat_fs_error reports a file system problem that might indicate fa data
@@ -23,43 +64,58 @@ void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...)
 	struct fat_mount_options *opts = &MSDOS_SB(sb)->options;
 	va_list args;
 	struct va_format vaf;
+	struct block_device *bdev = sb->s_bdev;
+	dev_t bd_dev = bdev ? bdev->bd_dev : 0;
 
 	if (report) {
 		va_start(args, fmt);
 		vaf.fmt = fmt;
 		vaf.va = &args;
-		fat_msg(sb, KERN_ERR, "error, %pV", &vaf);
+		printk(KERN_ERR "FAT-fs (%s[%d:%d]): error, %pV\n",
+				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev), &vaf);
+
+		if (opts->errors == FAT_ERRORS_RO && !sb_rdonly(sb))
+				ST_LOG("FAT-fs (%s[%d:%d]): error, %pV\n",
+				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev), &vaf);
 		va_end(args);
 	}
 
 	if (opts->errors == FAT_ERRORS_PANIC)
-		panic("FAT-fs (%s): fs panic from previous error\n", sb->s_id);
+		panic("FAT-fs (%s[%d:%d]): fs panic from previous error\n",
+				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
 	else if (opts->errors == FAT_ERRORS_RO && !sb_rdonly(sb)) {
 		sb->s_flags |= SB_RDONLY;
-		fat_msg(sb, KERN_ERR, "Filesystem has been set read-only");
+		printk(KERN_ERR "FAT-fs (%s[%d:%d]): Filesystem has been "
+				"set read-only\n",
+				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
+
+		ST_LOG("FAT-fs (%s[%d:%d]): Filesystem has been set read-only\n",
+				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
+		fat_uevent_ro_remount(sb);
 	}
 }
 EXPORT_SYMBOL_GPL(__fat_fs_error);
 
 /**
- * _fat_msg() - Print a preformatted FAT message based on a superblock.
- * @sb: A pointer to a &struct super_block
- * @level: A Kernel printk level constant
- * @fmt: The printf-style format string to print.
- *
- * Everything that is not fat_fs_error() should be fat_msg().
- *
- * fat_msg() wraps _fat_msg() for printk indexing.
+ * fat_msg() - print preformated FAT specific messages. Every thing what is
+ * not fat_fs_error() should be fat_msg().
  */
-void _fat_msg(struct super_block *sb, const char *level, const char *fmt, ...)
+void fat_msg(struct super_block *sb, const char *level, const char *fmt, ...)
 {
 	struct va_format vaf;
 	va_list args;
+	struct block_device *bdev = sb->s_bdev;
+	dev_t bd_dev = bdev ? bdev->bd_dev : 0;
 
 	va_start(args, fmt);
 	vaf.fmt = fmt;
 	vaf.va = &args;
-	_printk(FAT_PRINTK_PREFIX "%pV\n", level, sb->s_id, &vaf);
+	if (!strncmp(level, KERN_ERR, sizeof(KERN_ERR)))
+		printk_ratelimited("%sFAT-fs (%s[%d:%d]): %pV\n", level,
+			sb->s_id, MAJOR(bd_dev), MINOR(bd_dev), &vaf);
+	else
+		printk("%sFAT-fs (%s[%d:%d]): %pV\n", level,
+			sb->s_id, MAJOR(bd_dev), MINOR(bd_dev), &vaf);
 	va_end(args);
 }
 
@@ -158,9 +214,9 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 			mark_inode_dirty(inode);
 	}
 	if (new_fclus != (inode->i_blocks >> (sbi->cluster_bits - 9))) {
-		fat_fs_error_ratelimit(
-			sb, "clusters badly computed (%d != %llu)", new_fclus,
-			(llu)(inode->i_blocks >> (sbi->cluster_bits - 9)));
+		fat_fs_error(sb, "clusters badly computed (%d != %llu)",
+			     new_fclus,
+			     (llu)(inode->i_blocks >> (sbi->cluster_bits - 9)));
 		fat_cache_inval_inode(inode);
 	}
 	inode->i_blocks += nr_cluster << (sbi->cluster_bits - 9);
@@ -193,7 +249,7 @@ static long days_in_year[] = {
 	0,   0,  31,  59,  90, 120, 151, 181, 212, 243, 273, 304, 334, 0, 0, 0,
 };
 
-static inline int fat_tz_offset(const struct msdos_sb_info *sbi)
+static inline int fat_tz_offset(struct msdos_sb_info *sbi)
 {
 	return (sbi->options.tz_set ?
 	       -sbi->options.time_offset :
@@ -235,9 +291,6 @@ void fat_time_fat2unix(struct msdos_sb_info *sbi, struct timespec64 *ts,
 		ts->tv_nsec = 0;
 	}
 }
-
-/* Export fat_time_fat2unix() for the fat_test KUnit tests. */
-EXPORT_SYMBOL_GPL(fat_time_fat2unix);
 
 /* Convert linear UNIX date to a FAT time/date pair. */
 void fat_time_unix2fat(struct msdos_sb_info *sbi, struct timespec64 *ts,
@@ -281,35 +334,23 @@ static inline struct timespec64 fat_timespec64_trunc_2secs(struct timespec64 ts)
 	return (struct timespec64){ ts.tv_sec & ~1ULL, 0 };
 }
 
-/*
- * truncate atime to 24 hour granularity (00:00:00 in local timezone)
- */
-struct timespec64 fat_truncate_atime(const struct msdos_sb_info *sbi,
-				     const struct timespec64 *ts)
+static inline struct timespec64 fat_timespec64_trunc_10ms(struct timespec64 ts)
 {
-	/* to localtime */
-	time64_t seconds = ts->tv_sec - fat_tz_offset(sbi);
-	s32 remainder;
-
-	div_s64_rem(seconds, SECS_PER_DAY, &remainder);
-	/* to day boundary, and back to unix time */
-	seconds = seconds + fat_tz_offset(sbi) - remainder;
-
-	return (struct timespec64){ seconds, 0 };
-}
-
-/*
- * truncate mtime to 2 second granularity
- */
-struct timespec64 fat_truncate_mtime(const struct msdos_sb_info *sbi,
-				     const struct timespec64 *ts)
-{
-	return fat_timespec64_trunc_2secs(*ts);
+	if (ts.tv_nsec)
+		ts.tv_nsec -= ts.tv_nsec % 10000000UL;
+	return ts;
 }
 
 /*
  * truncate the various times with appropriate granularity:
- *   all times in root node are always 0
+ *   root inode:
+ *     all times always 0
+ *   all other inodes:
+ *     mtime - 2 seconds
+ *     ctime
+ *       msdos - 2 seconds
+ *       vfat  - 10 milliseconds
+ *     atime - 24 hours (00:00:00 in local timezone)
  */
 int fat_truncate_time(struct inode *inode, struct timespec64 *now, int flags)
 {
@@ -324,37 +365,48 @@ int fat_truncate_time(struct inode *inode, struct timespec64 *now, int flags)
 		ts = current_time(inode);
 	}
 
-	if (flags & S_ATIME)
-		inode_set_atime_to_ts(inode, fat_truncate_atime(sbi, now));
-	/*
-	 * ctime and mtime share the same on-disk field, and should be
-	 * identical in memory. all mtime updates will be applied to ctime,
-	 * but ctime updates are ignored.
-	 */
+	if (flags & S_ATIME) {
+		/* to localtime */
+		time64_t seconds = now->tv_sec - fat_tz_offset(sbi);
+		s32 remainder;
+
+		div_s64_rem(seconds, SECS_PER_DAY, &remainder);
+		/* to day boundary, and back to unix time */
+		seconds = seconds + fat_tz_offset(sbi) - remainder;
+
+		inode->i_atime = (struct timespec64){ seconds, 0 };
+	}
+	if (flags & S_CTIME) {
+		if (sbi->options.isvfat)
+			inode->i_ctime = fat_timespec64_trunc_10ms(*now);
+		else
+			inode->i_ctime = fat_timespec64_trunc_2secs(*now);
+	}
 	if (flags & S_MTIME)
-		inode_set_mtime_to_ts(inode,
-				      inode_set_ctime_to_ts(inode, fat_truncate_mtime(sbi, now)));
+		inode->i_mtime = fat_timespec64_trunc_2secs(*now);
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(fat_truncate_time);
 
-int fat_update_time(struct inode *inode, int flags)
+int fat_update_time(struct inode *inode, struct timespec64 *now, int flags)
 {
-	int dirty_flags = 0;
+	int iflags = I_DIRTY_TIME;
+	bool dirty = false;
 
 	if (inode->i_ino == MSDOS_ROOT_INO)
 		return 0;
 
-	if (flags & (S_ATIME | S_CTIME | S_MTIME)) {
-		fat_truncate_time(inode, NULL, flags);
-		if (inode->i_sb->s_flags & SB_LAZYTIME)
-			dirty_flags |= I_DIRTY_TIME;
-		else
-			dirty_flags |= I_DIRTY_SYNC;
-	}
+	fat_truncate_time(inode, now, flags);
+	if (flags & S_VERSION)
+		dirty = inode_maybe_inc_iversion(inode, false);
+	if ((flags & (S_ATIME | S_CTIME | S_MTIME)) &&
+	    !(inode->i_sb->s_flags & SB_LAZYTIME))
+		dirty = true;
 
-	__mark_inode_dirty(inode, dirty_flags);
+	if (dirty)
+		iflags |= I_DIRTY_SYNC;
+	__mark_inode_dirty(inode, iflags);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(fat_update_time);

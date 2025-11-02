@@ -100,8 +100,6 @@
  *
  */
 
-#include <linux/aperture.h>
-#include <linux/export.h>
 #include <linux/version.h>
 
 #include "matroxfb_base.h"
@@ -1205,7 +1203,6 @@ static const struct fb_ops matroxfb_ops = {
 	.owner =	THIS_MODULE,
 	.fb_open =	matroxfb_open,
 	.fb_release =	matroxfb_release,
-	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var =	matroxfb_check_var,
 	.fb_set_par =	matroxfb_set_par,
 	.fb_setcolreg =	matroxfb_setcolreg,
@@ -1216,7 +1213,6 @@ static const struct fb_ops matroxfb_ops = {
 /*	.fb_copyarea =	<set by matrox_cfbX_init>, */
 /*	.fb_imageblit =	<set by matrox_cfbX_init>, */
 /*	.fb_cursor =	<set by matrox_cfbX_init>, */
-	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 #define RSDepth(X)	(((X) >> 8) & 0x0F)
@@ -1974,7 +1970,9 @@ int matroxfb_register_driver(struct matroxfb_driver* drv) {
 	struct matrox_fb_info* minfo;
 
 	list_add(&drv->node, &matroxfb_driver_list);
-	list_for_each_entry(minfo, &matroxfb_list, next_fb) {
+	for (minfo = matroxfb_l(matroxfb_list.next);
+	     minfo != matroxfb_l(&matroxfb_list);
+	     minfo = matroxfb_l(minfo->next_fb.next)) {
 		void* p;
 
 		if (minfo->drivers_count == MATROXFB_MAX_FB_DRIVERS)
@@ -1992,7 +1990,9 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv) {
 	struct matrox_fb_info* minfo;
 
 	list_del(&drv->node);
-	list_for_each_entry(minfo, &matroxfb_list, next_fb) {
+	for (minfo = matroxfb_l(matroxfb_list.next);
+	     minfo != matroxfb_l(&matroxfb_list);
+	     minfo = matroxfb_l(minfo->next_fb.next)) {
 		int i;
 
 		for (i = 0; i < minfo->drivers_count; ) {
@@ -2047,10 +2047,6 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 	int err;
 	u_int32_t cmd;
 	DBG(__func__)
-
-	err = aperture_remove_conflicting_pci_devices(pdev, "matroxfb");
-	if (err)
-		return err;
 
 	svid = pdev->subsystem_vendor;
 	sid = pdev->subsystem_device;
@@ -2317,9 +2313,6 @@ static void __init matroxfb_init_params(void) {
 static int __init matrox_init(void) {
 	int err;
 
-	if (fb_modesetting_disabled("matroxfb"))
-		return -ENODEV;
-
 	matroxfb_init_params();
 	err = pci_register_driver(&matroxfb_driver);
 	dev = -1;	/* accept all new devices... */
@@ -2394,9 +2387,9 @@ static int __init matroxfb_setup(char *options) {
 		else if (!strncmp(this_opt, "mem:", 4))
 			mem = simple_strtoul(this_opt+4, NULL, 0);
 		else if (!strncmp(this_opt, "mode:", 5))
-			strscpy(videomode, this_opt + 5, sizeof(videomode));
+			strlcpy(videomode, this_opt+5, sizeof(videomode));
 		else if (!strncmp(this_opt, "outputs:", 8))
-			strscpy(outputs, this_opt + 8, sizeof(outputs));
+			strlcpy(outputs, this_opt+8, sizeof(outputs));
 		else if (!strncmp(this_opt, "dfp:", 4)) {
 			dfp_type = simple_strtoul(this_opt+4, NULL, 0);
 			dfp = 1;
@@ -2466,7 +2459,7 @@ static int __init matroxfb_setup(char *options) {
 			else if (!strcmp(this_opt, "dfp"))
 				dfp = value;
 			else {
-				strscpy(videomode, this_opt, sizeof(videomode));
+				strlcpy(videomode, this_opt, sizeof(videomode));
 			}
 		}
 	}
@@ -2496,6 +2489,8 @@ static int __init matroxfb_init(void)
 	/* never return failure, user can hotplug matrox later... */
 	return err;
 }
+
+module_init(matroxfb_init);
 
 #else
 
@@ -2581,7 +2576,7 @@ module_param_named(cmode, default_cmode, int, 0);
 MODULE_PARM_DESC(cmode, "Specify the video depth that should be used (8bit default)");
 #endif
 
-static int __init matroxfb_init(void){
+int __init init_module(void){
 
 	DBG(__func__)
 
@@ -2612,9 +2607,17 @@ static int __init matroxfb_init(void){
 }
 #endif	/* MODULE */
 
-module_init(matroxfb_init);
 module_exit(matrox_done);
 EXPORT_SYMBOL(matroxfb_register_driver);
 EXPORT_SYMBOL(matroxfb_unregister_driver);
 EXPORT_SYMBOL(matroxfb_wait_for_sync);
 EXPORT_SYMBOL(matroxfb_enable_irq);
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-basic-offset: 8
+ * End:
+ */
+

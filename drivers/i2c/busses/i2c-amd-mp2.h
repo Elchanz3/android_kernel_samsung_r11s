@@ -183,8 +183,13 @@ struct amd_mp2_dev {
 	struct mutex c2p_lock;
 	u8 c2p_lock_busid;
 	unsigned int probed;
-	int dev_irq;
 };
+
+#define ndev_pdev(ndev) ((ndev)->pci_dev)
+#define ndev_name(ndev) pci_name(ndev_pdev(ndev))
+#define ndev_dev(ndev) (&ndev_pdev(ndev)->dev)
+#define work_amd_i2c_common(__work) \
+	container_of(__work, struct amd_i2c_common, work.work)
 
 /* PCIe communication driver */
 
@@ -207,6 +212,7 @@ static inline void amd_mp2_pm_runtime_get(struct amd_mp2_dev *mp2_dev)
 
 static inline void amd_mp2_pm_runtime_put(struct amd_mp2_dev *mp2_dev)
 {
+	pm_runtime_mark_last_busy(&mp2_dev->pci_dev->dev);
 	pm_runtime_put_autosuspend(&mp2_dev->pci_dev->dev);
 }
 

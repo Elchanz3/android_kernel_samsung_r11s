@@ -1,5 +1,6 @@
 #define pr_fmt(fmt)  "Hyper-V: " fmt
 
+#include <linux/hyperv.h>
 #include <linux/log2.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -51,28 +52,35 @@ static inline int fill_gva_list(u64 gva_list[], int offset,
 	return gva_n - offset;
 }
 
-static bool cpu_is_lazy(int cpu)
-{
-	return per_cpu(cpu_tlbstate_shared.is_lazy, cpu);
-}
-
-static void hyperv_flush_tlb_multi(const struct cpumask *cpus,
-				   const struct flush_tlb_info *info)
+static void hyperv_flush_tlb_others(const struct cpumask *cpus,
+				    const struct flush_tlb_info *info)
 {
 	int cpu, vcpu, gva_n, max_gvas;
+	struct hv_tlb_flush **flush_pcpu;
 	struct hv_tlb_flush *flush;
-	u64 status;
+	u64 status = U64_MAX;
 	unsigned long flags;
-	bool do_lazy = !info->freed_tables;
 
-	trace_hyperv_mmu_flush_tlb_multi(cpus, info);
+	trace_hyperv_mmu_flush_tlb_others(cpus, info);
 
 	if (!hv_hypercall_pg)
 		goto do_native;
 
 	local_irq_save(flags);
 
-	flush = *this_cpu_ptr(hyperv_pcpu_input_arg);
+	/*
+	 * Only check the mask _after_ interrupt has been disabled to avoid the
+	 * mask changing under our feet.
+	 */
+	if (cpumask_empty(cpus)) {
+		local_irq_restore(flags);
+		return;
+	}
+
+	flush_pcpu = (struct hv_tlb_flush **)
+		     this_cpu_ptr(hyperv_pcpu_input_arg);
+
+	flush = *flush_pcpu;
 
 	if (unlikely(!flush)) {
 		local_irq_restore(flags);
@@ -107,14 +115,10 @@ static void hyperv_flush_tlb_multi(const struct cpumask *cpus,
 		 * must. We will also check all VP numbers when walking the
 		 * supplied CPU set to remain correct in all cases.
 		 */
-		cpu = cpumask_last(cpus);
-
-		if (cpu < nr_cpumask_bits && hv_cpu_number_to_vp_number(cpu) >= 64)
+		if (hv_cpu_number_to_vp_number(cpumask_last(cpus)) >= 64)
 			goto do_ex_hypercall;
 
 		for_each_cpu(cpu, cpus) {
-			if (do_lazy && cpu_is_lazy(cpu))
-				continue;
 			vcpu = hv_cpu_number_to_vp_number(cpu);
 			if (vcpu == VP_INVAL) {
 				local_irq_restore(flags);
@@ -126,12 +130,6 @@ static void hyperv_flush_tlb_multi(const struct cpumask *cpus,
 
 			__set_bit(vcpu, (unsigned long *)
 				  &flush->processor_mask);
-		}
-
-		/* nothing to flush if 'processor_mask' ends up being empty */
-		if (!flush->processor_mask) {
-			local_irq_restore(flags);
-			return;
 		}
 	}
 
@@ -163,23 +161,27 @@ do_ex_hypercall:
 check_status:
 	local_irq_restore(flags);
 
-	if (hv_result_success(status))
+	if (!(status & HV_HYPERCALL_RESULT_MASK))
 		return;
 do_native:
-	native_flush_tlb_multi(cpus, info);
+	native_flush_tlb_others(cpus, info);
 }
 
 static u64 hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 				      const struct flush_tlb_info *info)
 {
 	int nr_bank = 0, max_gvas, gva_n;
+	struct hv_tlb_flush_ex **flush_pcpu;
 	struct hv_tlb_flush_ex *flush;
 	u64 status;
 
 	if (!(ms_hyperv.hints & HV_X64_EX_PROCESSOR_MASKS_RECOMMENDED))
-		return HV_STATUS_INVALID_PARAMETER;
+		return U64_MAX;
 
-	flush = *this_cpu_ptr(hyperv_pcpu_input_arg);
+	flush_pcpu = (struct hv_tlb_flush_ex **)
+		     this_cpu_ptr(hyperv_pcpu_input_arg);
+
+	flush = *flush_pcpu;
 
 	if (info->mm) {
 		/*
@@ -197,18 +199,13 @@ static u64 hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 	flush->hv_vp_set.valid_bank_mask = 0;
 
 	flush->hv_vp_set.format = HV_GENERIC_SET_SPARSE_4K;
-	nr_bank = cpumask_to_vpset_skip(&flush->hv_vp_set, cpus,
-			info->freed_tables ? NULL : cpu_is_lazy);
+	nr_bank = cpumask_to_vpset(&(flush->hv_vp_set), cpus);
 	if (nr_bank < 0)
-		return HV_STATUS_INVALID_PARAMETER;
+		return U64_MAX;
 
 	/*
 	 * We can flush not more than max_gvas with one hypercall. Flush the
 	 * whole address space if we were asked to do more.
-	 *
-	 * For these hypercalls, Hyper-V treats the valid_bank_mask field
-	 * of flush->hv_vp_set as part of the fixed size input header.
-	 * So the variable input header size is equal to nr_bank.
 	 */
 	max_gvas =
 		(PAGE_SIZE - sizeof(*flush) - nr_bank *
@@ -242,5 +239,6 @@ void hyperv_setup_mmu_ops(void)
 		return;
 
 	pr_info("Using hypercall for remote TLB flush\n");
-	pv_ops.mmu.flush_tlb_multi = hyperv_flush_tlb_multi;
+	pv_ops.mmu.flush_tlb_others = hyperv_flush_tlb_others;
+	pv_ops.mmu.tlb_remove_table = tlb_remove_table;
 }

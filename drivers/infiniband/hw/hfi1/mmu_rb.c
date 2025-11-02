@@ -1,9 +1,50 @@
-// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2020 Cornelis Networks, Inc.
  * Copyright(c) 2016 - 2017 Intel Corporation.
+ *
+ * This file is provided under a dual BSD/GPLv2 license.  When using or
+ * redistributing this file, you may do so under either license.
+ *
+ * GPL LICENSE SUMMARY
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * BSD LICENSE
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ *  - Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  - Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *  - Neither the name of Intel Corporation nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
  */
-
 #include <linux/list.h>
 #include <linux/rculist.h>
 #include <linux/mmu_notifier.h>
@@ -40,19 +81,17 @@ static unsigned long mmu_node_last(struct mmu_rb_node *node)
 }
 
 int hfi1_mmu_rb_register(void *ops_arg,
-			 const struct mmu_rb_ops *ops,
+			 struct mmu_rb_ops *ops,
 			 struct workqueue_struct *wq,
 			 struct mmu_rb_handler **handler)
 {
 	struct mmu_rb_handler *h;
-	void *free_ptr;
 	int ret;
 
-	free_ptr = kzalloc(sizeof(*h) + cache_line_size() - 1, GFP_KERNEL);
-	if (!free_ptr)
+	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	if (!h)
 		return -ENOMEM;
 
-	h = PTR_ALIGN(free_ptr, cache_line_size());
 	h->root = RB_ROOT_CACHED;
 	h->ops = ops;
 	h->ops_arg = ops_arg;
@@ -63,11 +102,10 @@ int hfi1_mmu_rb_register(void *ops_arg,
 	INIT_LIST_HEAD(&h->del_list);
 	INIT_LIST_HEAD(&h->lru_list);
 	h->wq = wq;
-	h->free_ptr = free_ptr;
 
 	ret = mmu_notifier_register(&h->mn, current->mm);
 	if (ret) {
-		kfree(free_ptr);
+		kfree(h);
 		return ret;
 	}
 
@@ -114,7 +152,7 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	/* Now the mm may be freed. */
 	mmdrop(handler->mn.mm);
 
-	kfree(handler->free_ptr);
+	kfree(handler);
 }
 
 int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
@@ -124,7 +162,7 @@ int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
 	unsigned long flags;
 	int ret = 0;
 
-	trace_hfi1_mmu_rb_insert(mnode);
+	trace_hfi1_mmu_rb_insert(mnode->addr, mnode->len);
 
 	if (current->mm != handler->mn.mm)
 		return -EPERM;
@@ -189,7 +227,6 @@ static void release_immediate(struct kref *refcount)
 {
 	struct mmu_rb_node *mnode =
 		container_of(refcount, struct mmu_rb_node, refcount);
-	trace_hfi1_mmu_release_node(mnode);
 	mnode->handler->ops->remove(mnode->handler->ops_arg, mnode);
 }
 
@@ -253,7 +290,6 @@ void hfi1_mmu_rb_evict(struct mmu_rb_handler *handler, void *evict_arg)
 	spin_unlock_irqrestore(&handler->lock, flags);
 
 	list_for_each_entry_safe(rbnode, ptr, &del_list, list) {
-		trace_hfi1_mmu_rb_evict(rbnode);
 		kref_put(&rbnode->refcount, release_immediate);
 	}
 }
@@ -273,7 +309,7 @@ static int mmu_notifier_range_start(struct mmu_notifier *mn,
 		/* Guard against node removal. */
 		ptr = __mmu_int_rb_iter_next(node, range->start,
 					     range->end - 1);
-		trace_hfi1_mmu_mem_invalidate(node);
+		trace_hfi1_mmu_mem_invalidate(node->addr, node->len);
 		/* Remove from rb tree and lru_list. */
 		__mmu_int_rb_remove(node, root);
 		list_del_init(&node->list);
@@ -306,7 +342,6 @@ static void handle_remove(struct work_struct *work)
 	while (!list_empty(&del_list)) {
 		node = list_first_entry(&del_list, struct mmu_rb_node, list);
 		list_del(&node->list);
-		trace_hfi1_mmu_release_node(node);
 		handler->ops->remove(handler->ops_arg, node);
 	}
 }

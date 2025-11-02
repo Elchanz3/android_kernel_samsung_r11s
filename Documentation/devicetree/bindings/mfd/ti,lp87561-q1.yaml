@@ -17,16 +17,12 @@ properties:
     description: I2C slave address
     const: 0x60
 
-  reset-gpios:
-    description: GPIO connected to NRST pin (active low reset, pin 20)
-    maxItems: 1
-
   gpio-controller: true
 
   '#gpio-cells':
     description:
       The first cell is the pin number.
-      The second cell is used to specify flags.
+      The second cell is is used to specify flags.
       See ../gpio/gpio.txt for more information.
     const: 2
 
@@ -41,7 +37,6 @@ properties:
       buck3210:
         type: object
         $ref: /schemas/regulator/regulator.yaml#
-        unevaluatedProperties: false
 
     required:
       - buck3210

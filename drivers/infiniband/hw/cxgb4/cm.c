@@ -145,7 +145,7 @@ static void connect_reply_upcall(struct c4iw_ep *ep, int status);
 static int sched(struct c4iw_dev *dev, struct sk_buff *skb);
 
 static LIST_HEAD(timeout_list);
-static DEFINE_SPINLOCK(timeout_lock);
+static spinlock_t timeout_lock;
 
 static void deref_cm_id(struct c4iw_ep_common *epc)
 {
@@ -191,7 +191,7 @@ static void start_ep_timer(struct c4iw_ep *ep)
 static int stop_ep_timer(struct c4iw_ep *ep)
 {
 	pr_debug("ep %p stopping\n", ep);
-	timer_delete_sync(&ep->timer);
+	del_timer_sync(&ep->timer);
 	if (!test_and_set_bit(TIMEOUT, &ep->com.flags)) {
 		c4iw_put_ep(&ep->com);
 		return 0;
@@ -734,7 +734,7 @@ static int send_connect(struct c4iw_ep *ep)
 				   &ep->com.remote_addr;
 	int ret;
 	enum chip_type adapter_type = ep->com.dev->rdev.lldi.adapter_type;
-	u32 isn = (get_random_u32() & ~7UL) - 1;
+	u32 isn = (prandom_u32() & ~7UL) - 1;
 	struct net_device *netdev;
 	u64 params;
 
@@ -1222,8 +1222,6 @@ static int act_establish(struct c4iw_dev *dev, struct sk_buff *skb)
 	int ret;
 
 	ep = lookup_atid(t, atid);
-	if (!ep)
-		return -EINVAL;
 
 	pr_debug("ep %p tid %u snd_isn %u rcv_isn %u\n", ep, tid,
 		 be32_to_cpu(req->snd_isn), be32_to_cpu(req->rcv_isn));
@@ -2086,7 +2084,7 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 	err = -ENOMEM;
 	if (n->dev->flags & IFF_LOOPBACK) {
 		if (iptype == 4)
-			pdev = __ip_dev_find(&init_net, *(__be32 *)peer_ip, false);
+			pdev = ip_dev_find(&init_net, *(__be32 *)peer_ip);
 		else if (IS_ENABLED(CONFIG_IPV6))
 			for_each_netdev(&init_net, pdev) {
 				if (ipv6_chk_addr(&init_net,
@@ -2101,12 +2099,12 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 			err = -ENODEV;
 			goto out;
 		}
-		if (is_vlan_dev(pdev))
-			pdev = vlan_dev_real_dev(pdev);
 		ep->l2t = cxgb4_l2t_get(cdev->rdev.lldi.l2t,
 					n, pdev, rt_tos2priority(tos));
-		if (!ep->l2t)
+		if (!ep->l2t) {
+			dev_put(pdev);
 			goto out;
+		}
 		ep->mtu = pdev->mtu;
 		ep->tx_chan = cxgb4_port_chan(pdev);
 		ep->smac_idx = ((struct port_info *)netdev_priv(pdev))->smt_idx;
@@ -2119,6 +2117,7 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 		ep->rss_qid = cdev->rdev.lldi.rxq_ids[
 			cxgb4_port_idx(pdev) * step];
 		set_tcp_window(ep, (struct port_info *)netdev_priv(pdev));
+		dev_put(pdev);
 	} else {
 		pdev = get_real_dev(n->dev);
 		ep->l2t = cxgb4_l2t_get(cdev->rdev.lldi.l2t,
@@ -2280,9 +2279,6 @@ static int act_open_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 	int ret = 0;
 
 	ep = lookup_atid(t, atid);
-	if (!ep)
-		return -EINVAL;
-
 	la = (struct sockaddr_in *)&ep->com.local_addr;
 	ra = (struct sockaddr_in *)&ep->com.remote_addr;
 	la6 = (struct sockaddr_in6 *)&ep->com.local_addr;
@@ -2475,24 +2471,30 @@ static int accept_cr(struct c4iw_ep *ep, struct sk_buff *skb,
 			opt2 |= CCTRL_ECN_V(1);
 	}
 
+	skb_get(skb);
+	rpl = cplhdr(skb);
 	if (!is_t4(adapter_type)) {
-		u32 isn = (get_random_u32() & ~7UL) - 1;
+		skb_trim(skb, roundup(sizeof(*rpl5), 16));
+		rpl5 = (void *)rpl;
+		INIT_TP_WR(rpl5, ep->hwtid);
+	} else {
+		skb_trim(skb, sizeof(*rpl));
+		INIT_TP_WR(rpl, ep->hwtid);
+	}
+	OPCODE_TID(rpl) = cpu_to_be32(MK_OPCODE_TID(CPL_PASS_ACCEPT_RPL,
+						    ep->hwtid));
 
-		skb = get_skb(skb, roundup(sizeof(*rpl5), 16), GFP_KERNEL);
-		rpl5 = __skb_put_zero(skb, roundup(sizeof(*rpl5), 16));
-		rpl = (void *)rpl5;
-		INIT_TP_WR_CPL(rpl5, CPL_PASS_ACCEPT_RPL, ep->hwtid);
+	if (CHELSIO_CHIP_VERSION(adapter_type) > CHELSIO_T4) {
+		u32 isn = (prandom_u32() & ~7UL) - 1;
 		opt2 |= T5_OPT_2_VALID_F;
 		opt2 |= CONG_CNTRL_V(CONG_ALG_TAHOE);
 		opt2 |= T5_ISS_F;
+		rpl5 = (void *)rpl;
+		memset(&rpl5->iss, 0, roundup(sizeof(*rpl5)-sizeof(*rpl), 16));
 		if (peer2peer)
 			isn += 4;
 		rpl5->iss = cpu_to_be32(isn);
 		pr_debug("iss %u\n", be32_to_cpu(rpl5->iss));
-	} else {
-		skb = get_skb(skb, sizeof(*rpl), GFP_KERNEL);
-		rpl = __skb_put_zero(skb, sizeof(*rpl));
-		INIT_TP_WR_CPL(rpl, CPL_PASS_ACCEPT_RPL, ep->hwtid);
 	}
 
 	rpl->opt0 = cpu_to_be64(opt0);
@@ -2683,9 +2685,6 @@ static int pass_establish(struct c4iw_dev *dev, struct sk_buff *skb)
 	u16 tcp_opt = ntohs(req->tcp_opt);
 
 	ep = get_ep_from_tid(dev, tid);
-	if (!ep)
-		return 0;
-
 	pr_debug("ep %p tid %u\n", ep, ep->hwtid);
 	ep->snd_seq = be32_to_cpu(req->snd_isn);
 	ep->rcv_seq = be32_to_cpu(req->rcv_isn);
@@ -4154,10 +4153,6 @@ static int rx_pkt(struct c4iw_dev *dev, struct sk_buff *skb)
 
 	if (neigh->dev->flags & IFF_LOOPBACK) {
 		pdev = ip_dev_find(&init_net, iph->daddr);
-		if (!pdev) {
-			pr_err("%s - failed to find device!\n", __func__);
-			goto free_dst;
-		}
 		e = cxgb4_l2t_get(dev->rdev.lldi.l2t, neigh,
 				    pdev, 0);
 		pi = (struct port_info *)netdev_priv(pdev);
@@ -4327,7 +4322,7 @@ static DECLARE_WORK(skb_work, process_work);
 
 static void ep_timeout(struct timer_list *t)
 {
-	struct c4iw_ep *ep = timer_container_of(ep, t, timer);
+	struct c4iw_ep *ep = from_timer(ep, t, timer);
 	int kickit = 0;
 
 	spin_lock(&timeout_lock);
@@ -4460,6 +4455,7 @@ c4iw_handler_func c4iw_handlers[NUM_CPL_CMDS] = {
 
 int __init c4iw_cm_init(void)
 {
+	spin_lock_init(&timeout_lock);
 	skb_queue_head_init(&rxq);
 
 	workq = alloc_ordered_workqueue("iw_cxgb4", WQ_MEM_RECLAIM);
@@ -4472,5 +4468,6 @@ int __init c4iw_cm_init(void)
 void c4iw_cm_term(void)
 {
 	WARN_ON(!list_empty(&timeout_list));
+	flush_workqueue(workq);
 	destroy_workqueue(workq);
 }

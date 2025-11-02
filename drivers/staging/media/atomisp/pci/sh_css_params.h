@@ -2,6 +2,15 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
  */
 
 #ifndef _SH_CSS_PARAMS_H_
@@ -112,6 +121,8 @@ struct ia_css_isp_parameters {
 	bool dvs2_coef_table_changed;
 	bool morph_table_changed;
 	bool sc_table_changed;
+	bool sc_table_dirty;
+	unsigned int sc_table_last_pipe_num;
 	bool anr_thres_changed;
 	/* ---- deprecated: replaced with pipe_dvs_6axis_config_changed ---- */
 	bool dvs_6axis_config_changed;
@@ -156,6 +167,12 @@ ia_css_params_alloc_convert_sctbl(
 
 struct ia_css_isp_config *
 sh_css_pipe_isp_config_get(struct ia_css_pipe *pipe);
+
+/* ipu address allocation/free for gdc lut */
+ia_css_ptr
+sh_css_params_alloc_gdc_lut(void);
+void
+sh_css_params_free_gdc_lut(ia_css_ptr addr);
 
 int
 sh_css_params_map_and_store_default_gdc_lut(void);

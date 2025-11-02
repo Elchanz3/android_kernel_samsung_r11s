@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
+ * linux/fs/9p/error.c
+ *
  * Error string handling
  *
  * Plan 9 uses error strings, Unix uses error numbers.  These functions
@@ -16,7 +18,6 @@
 #include <linux/list.h>
 #include <linux/jhash.h>
 #include <linux/errno.h>
-#include <linux/hashtable.h>
 #include <net/9p/9p.h>
 
 /**
@@ -34,8 +35,8 @@ struct errormap {
 	struct hlist_node list;
 };
 
-#define ERRHASH_BITS 5
-static DEFINE_HASHTABLE(hash_errmap, ERRHASH_BITS);
+#define ERRHASHSZ		32
+static struct hlist_head hash_errmap[ERRHASHSZ];
 
 /* FixMe - reduce to a reasonable size */
 static struct errormap errmap[] = {
@@ -177,14 +178,18 @@ static struct errormap errmap[] = {
 int p9_error_init(void)
 {
 	struct errormap *c;
-	u32 hash;
+	int bucket;
+
+	/* initialize hash table */
+	for (bucket = 0; bucket < ERRHASHSZ; bucket++)
+		INIT_HLIST_HEAD(&hash_errmap[bucket]);
 
 	/* load initial error map into hash table */
-	for (c = errmap; c->name; c++) {
+	for (c = errmap; c->name != NULL; c++) {
 		c->namelen = strlen(c->name);
-		hash = jhash(c->name, c->namelen, 0);
+		bucket = jhash(c->name, c->namelen, 0) % ERRHASHSZ;
 		INIT_HLIST_NODE(&c->list);
-		hash_add(hash_errmap, &c->list, hash);
+		hlist_add_head(&c->list, &hash_errmap[bucket]);
 	}
 
 	return 1;
@@ -192,7 +197,7 @@ int p9_error_init(void)
 EXPORT_SYMBOL(p9_error_init);
 
 /**
- * p9_errstr2errno - convert error string to error number
+ * errstr2errno - convert error string to error number
  * @errstr: error string
  * @len: length of error string
  *
@@ -202,12 +207,12 @@ int p9_errstr2errno(char *errstr, int len)
 {
 	int errno;
 	struct errormap *c;
-	u32 hash;
+	int bucket;
 
 	errno = 0;
 	c = NULL;
-	hash = jhash(errstr, len, 0);
-	hash_for_each_possible(hash_errmap, c, list, hash) {
+	bucket = jhash(errstr, len, 0) % ERRHASHSZ;
+	hlist_for_each_entry(c, &hash_errmap[bucket], list) {
 		if (c->namelen == len && !memcmp(c->name, errstr, len)) {
 			errno = c->val;
 			break;

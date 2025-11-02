@@ -2,11 +2,7 @@
 /*
  * Copyright (c) 2005-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
-
-#include <linux/export.h>
 
 #include "core.h"
 #include "hif.h"
@@ -37,7 +33,7 @@ static struct sk_buff *ath10k_htc_build_tx_ctrl_skb(void *ar)
 	skb_cb = ATH10K_SKB_CB(skb);
 	memset(skb_cb, 0, sizeof(*skb_cb));
 
-	ath10k_dbg(ar, ATH10K_DBG_HTC, "%s: skb %p\n", __func__, skb);
+	ath10k_dbg(ar, ATH10K_DBG_HTC, "%s: skb %pK\n", __func__, skb);
 	return skb;
 }
 
@@ -57,17 +53,8 @@ void ath10k_htc_notify_tx_completion(struct ath10k_htc_ep *ep,
 	struct ath10k *ar = ep->htc->ar;
 	struct ath10k_htc_hdr *hdr;
 
-	ath10k_dbg(ar, ATH10K_DBG_HTC, "%s: ep %d skb %p\n", __func__,
+	ath10k_dbg(ar, ATH10K_DBG_HTC, "%s: ep %d skb %pK\n", __func__,
 		   ep->eid, skb);
-
-	/* A corner case where the copy completion is reaching to host but still
-	 * copy engine is processing it due to which host unmaps corresponding
-	 * memory and causes SMMU fault, hence as workaround adding delay
-	 * the unmapping memory to avoid SMMU faults.
-	 */
-	if (ar->hw_params.delay_unmap_buffer &&
-	    ep->ul_pipe_id == 3)
-		mdelay(2);
 
 	hdr = (struct ath10k_htc_hdr *)skb->data;
 	ath10k_htc_restore_tx_skb(ep->htc, skb);
@@ -462,10 +449,6 @@ void ath10k_htc_rx_completion_handler(struct ath10k *ar, struct sk_buff *skb)
 	}
 
 	ep = &htc->endpoint[eid];
-	if (ep->service_id == ATH10K_HTC_SVC_ID_UNUSED) {
-		ath10k_warn(ar, "htc rx endpoint %d is not connected\n", eid);
-		goto out;
-	}
 
 	payload_len = __le16_to_cpu(hdr->len);
 
@@ -518,7 +501,7 @@ void ath10k_htc_rx_completion_handler(struct ath10k *ar, struct sk_buff *skb)
 		/* zero length packet with trailer data, just drop these */
 		goto out;
 
-	ath10k_dbg(ar, ATH10K_DBG_HTC, "htc rx completion ep %d skb %p\n",
+	ath10k_dbg(ar, ATH10K_DBG_HTC, "htc rx completion ep %d skb %pK\n",
 		   eid, skb);
 	ep->ep_ops.ep_rx_complete(ar, skb);
 
@@ -960,18 +943,13 @@ int ath10k_htc_wait_target(struct ath10k_htc *htc)
 		return -ECOMM;
 	}
 
-	if (ar->hw_params.use_fw_tx_credits)
-		htc->total_transmit_credits = __le16_to_cpu(msg->ready.credit_count);
-	else
-		htc->total_transmit_credits = 1;
-
+	htc->total_transmit_credits = __le16_to_cpu(msg->ready.credit_count);
 	htc->target_credit_size = __le16_to_cpu(msg->ready.credit_size);
 
 	ath10k_dbg(ar, ATH10K_DBG_HTC,
-		   "Target ready! transmit resources: %d size:%d actual credits:%d\n",
+		   "Target ready! transmit resources: %d size:%d\n",
 		   htc->total_transmit_credits,
-		   htc->target_credit_size,
-		   msg->ready.credit_count);
+		   htc->target_credit_size);
 
 	if ((htc->total_transmit_credits == 0) ||
 	    (htc->target_credit_size == 0)) {

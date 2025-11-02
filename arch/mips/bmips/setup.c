@@ -16,6 +16,7 @@
 #include <linux/of.h>
 #include <linux/of_clk.h>
 #include <linux/of_fdt.h>
+#include <linux/of_platform.h>
 #include <linux/libfdt.h>
 #include <linux/smp.h>
 #include <asm/addrspace.h>
@@ -27,19 +28,11 @@
 #include <asm/smp-ops.h>
 #include <asm/time.h>
 #include <asm/traps.h>
-#include <asm/fw/cfe/cfe_api.h>
 
 #define RELO_NORMAL_VEC		BIT(18)
 
 #define REG_BCM6328_OTP		((void __iomem *)CKSEG1ADDR(0x1000062c))
 #define BCM6328_TP1_DISABLED	BIT(9)
-
-/*
- * CBR addr doesn't change and we can cache it.
- * For broken SoC/Bootloader CBR addr might also be provided via DT
- * with "brcm,bmips-cbr-reg" in the "cpus" node.
- */
-void __iomem *bmips_cbr_addr __read_mostly;
 
 extern bool bmips_rac_flush_disable;
 
@@ -118,7 +111,7 @@ static void bcm6358_quirks(void)
 	 * because the bootloader is not initializing it properly.
 	 */
 	bmips_rac_flush_disable = !!(read_c0_brcm_cmt_local() & (1 << 31)) ||
-				  !!bmips_cbr_addr;
+				  !!BMIPS_GET_CBR();
 }
 
 static void bcm6368_quirks(void)
@@ -139,23 +132,14 @@ static const struct bmips_quirk bmips_quirk_list[] = {
 	{ },
 };
 
-static void __init bmips_init_cfe(void)
-{
-	cfe_seal = fw_arg3;
-
-	if (cfe_seal != CFE_EPTSEAL)
-		return;
-
-	cfe_init(fw_arg0, fw_arg2);
-}
-
 void __init prom_init(void)
 {
-	/* Cache CBR addr before CPU/DMA setup */
-	bmips_cbr_addr = BMIPS_GET_CBR();
-	bmips_init_cfe();
 	bmips_cpu_setup();
 	register_bmips_smp_ops();
+}
+
+void __init prom_free_prom_memory(void)
+{
 }
 
 const char *get_system_type(void)
@@ -187,17 +171,15 @@ void __init plat_mem_setup(void)
 	ioport_resource.start = 0;
 	ioport_resource.end = ~0;
 
-	/*
-	 * intended to somewhat resemble ARM; see
-	 * Documentation/arch/arm/booting.rst
-	 */
+	/* intended to somewhat resemble ARM; see Documentation/arm/booting.rst */
 	if (fw_arg0 == 0 && fw_arg1 == 0xffffffff)
 		dtb = phys_to_virt(fw_arg2);
+	else if (fw_passed_dtb) /* UHI interface or appended dtb */
+		dtb = (void *)fw_passed_dtb;
+	else if (&__dtb_start != &__dtb_end)
+		dtb = (void *)__dtb_start;
 	else
-		dtb = get_fdt();
-
-	if (!dtb)
-		cfe_die("no dtb found");
+		panic("no dtb found");
 
 	__dt_setup_arch(dtb);
 
@@ -212,35 +194,13 @@ void __init plat_mem_setup(void)
 void __init device_tree_init(void)
 {
 	struct device_node *np;
-	u32 addr;
 
 	unflatten_and_copy_device_tree();
 
 	/* Disable SMP boot unless both CPUs are listed in DT and !disabled */
 	np = of_find_node_by_name(NULL, "cpus");
-	if (!np)
-		return;
-
-	if (of_get_available_child_count(np) <= 1)
+	if (np && of_get_available_child_count(np) <= 1)
 		bmips_smp_enabled = 0;
-
-	/* Check if DT provide a CBR address */
-	if (of_property_read_u32(np, "brcm,bmips-cbr-reg", &addr))
-		goto exit;
-
-	/* Make sure CBR address is outside DRAM window */
-	if (addr >= (u32)memblock_start_of_DRAM() &&
-	    addr < (u32)memblock_end_of_DRAM()) {
-		WARN(1, "DT CBR %x inside DRAM window. Ignoring DT CBR.\n",
-		     addr);
-		goto exit;
-	}
-
-	bmips_cbr_addr = (void __iomem *)addr;
-	/* Since CBR is provided by DT, enable RAC flush */
-	bmips_rac_flush_disable = false;
-
-exit:
 	of_node_put(np);
 }
 
@@ -250,4 +210,4 @@ static int __init plat_dev_init(void)
 	return 0;
 }
 
-arch_initcall(plat_dev_init);
+device_initcall(plat_dev_init);

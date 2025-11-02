@@ -12,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
-#include <linux/dsa/brcm.h>
 #include <linux/etherdevice.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
@@ -26,6 +25,30 @@
 #include <net/ipv6.h>
 
 #include "bcmsysport.h"
+
+/* I/O accessors register helpers */
+#define BCM_SYSPORT_IO_MACRO(name, offset) \
+static inline u32 name##_readl(struct bcm_sysport_priv *priv, u32 off)	\
+{									\
+	u32 reg = readl_relaxed(priv->base + offset + off);		\
+	return reg;							\
+}									\
+static inline void name##_writel(struct bcm_sysport_priv *priv,		\
+				  u32 val, u32 off)			\
+{									\
+	writel_relaxed(val, priv->base + offset + off);			\
+}									\
+
+BCM_SYSPORT_IO_MACRO(intrl2_0, SYS_PORT_INTRL2_0_OFFSET);
+BCM_SYSPORT_IO_MACRO(intrl2_1, SYS_PORT_INTRL2_1_OFFSET);
+BCM_SYSPORT_IO_MACRO(umac, SYS_PORT_UMAC_OFFSET);
+BCM_SYSPORT_IO_MACRO(gib, SYS_PORT_GIB_OFFSET);
+BCM_SYSPORT_IO_MACRO(tdma, SYS_PORT_TDMA_OFFSET);
+BCM_SYSPORT_IO_MACRO(rxchk, SYS_PORT_RXCHK_OFFSET);
+BCM_SYSPORT_IO_MACRO(txchk, SYS_PORT_TXCHK_OFFSET);
+BCM_SYSPORT_IO_MACRO(rbuf, SYS_PORT_RBUF_OFFSET);
+BCM_SYSPORT_IO_MACRO(tbuf, SYS_PORT_TBUF_OFFSET);
+BCM_SYSPORT_IO_MACRO(topctrl, SYS_PORT_TOPCTRL_OFFSET);
 
 /* On SYSTEMPORT Lite, any register after RDMA_STATUS has the exact
  * same layout, except it has been moved by 4 bytes up, *sigh*
@@ -271,8 +294,6 @@ static const struct bcm_sysport_stats bcm_sysport_gstrings_stats[] = {
 	/* RBUF misc statistics */
 	STAT_RBUF("rbuf_ovflow_cnt", mib.rbuf_ovflow_cnt, RBUF_OVFL_DISC_CNTR),
 	STAT_RBUF("rbuf_err_cnt", mib.rbuf_err_cnt, RBUF_ERR_PKT_CNTR),
-	/* RDMA misc statistics */
-	STAT_RDMA("rdma_ovflow_cnt", mib.rdma_ovflow_cnt, RDMA_OVFL_DISC_CNTR),
 	STAT_MIB_SOFT("alloc_rx_buff_failed", mib.alloc_rx_buff_failed),
 	STAT_MIB_SOFT("rx_dma_failed", mib.rx_dma_failed),
 	STAT_MIB_SOFT("tx_dma_failed", mib.tx_dma_failed),
@@ -286,8 +307,8 @@ static const struct bcm_sysport_stats bcm_sysport_gstrings_stats[] = {
 static void bcm_sysport_get_drvinfo(struct net_device *dev,
 				    struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
-	strscpy(info->bus_info, "platform", sizeof(info->bus_info));
+	strlcpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
+	strlcpy(info->bus_info, "platform", sizeof(info->bus_info));
 }
 
 static u32 bcm_sysport_get_msglvl(struct net_device *dev)
@@ -311,7 +332,6 @@ static inline bool bcm_sysport_lite_stat_valid(enum bcm_sysport_stat_type type)
 	case BCM_SYSPORT_STAT_NETDEV64:
 	case BCM_SYSPORT_STAT_RXCHK:
 	case BCM_SYSPORT_STAT_RBUF:
-	case BCM_SYSPORT_STAT_RDMA:
 	case BCM_SYSPORT_STAT_SOFT:
 		return true;
 	default:
@@ -346,22 +366,32 @@ static void bcm_sysport_get_strings(struct net_device *dev,
 {
 	struct bcm_sysport_priv *priv = netdev_priv(dev);
 	const struct bcm_sysport_stats *s;
-	int i;
+	char buf[128];
+	int i, j;
 
 	switch (stringset) {
 	case ETH_SS_STATS:
-		for (i = 0; i < BCM_SYSPORT_STATS_LEN; i++) {
+		for (i = 0, j = 0; i < BCM_SYSPORT_STATS_LEN; i++) {
 			s = &bcm_sysport_gstrings_stats[i];
 			if (priv->is_lite &&
 			    !bcm_sysport_lite_stat_valid(s->type))
 				continue;
 
-			ethtool_puts(&data, s->stat_string);
+			memcpy(data + j * ETH_GSTRING_LEN, s->stat_string,
+			       ETH_GSTRING_LEN);
+			j++;
 		}
 
 		for (i = 0; i < dev->num_tx_queues; i++) {
-			ethtool_sprintf(&data, "txq%d_packets", i);
-			ethtool_sprintf(&data, "txq%d_bytes", i);
+			snprintf(buf, sizeof(buf), "txq%d_packets", i);
+			memcpy(data + j * ETH_GSTRING_LEN, buf,
+			       ETH_GSTRING_LEN);
+			j++;
+
+			snprintf(buf, sizeof(buf), "txq%d_bytes", i);
+			memcpy(data + j * ETH_GSTRING_LEN, buf,
+			       ETH_GSTRING_LEN);
+			j++;
 		}
 		break;
 	default:
@@ -405,14 +435,6 @@ static void bcm_sysport_update_mib_counters(struct bcm_sysport_priv *priv)
 			if (val == ~0)
 				rbuf_writel(priv, 0, s->reg_offset);
 			break;
-		case BCM_SYSPORT_STAT_RDMA:
-			if (!priv->is_lite)
-				continue;
-
-			val = rdma_readl(priv, s->reg_offset);
-			if (val == ~0)
-				rdma_writel(priv, 0, s->reg_offset);
-			break;
 		}
 
 		j += s->stat_sizeof;
@@ -434,10 +456,10 @@ static void bcm_sysport_update_tx_stats(struct bcm_sysport_priv *priv,
 	for (q = 0; q < priv->netdev->num_tx_queues; q++) {
 		ring = &priv->tx_rings[q];
 		do {
-			start = u64_stats_fetch_begin(&priv->syncp);
+			start = u64_stats_fetch_begin_irq(&priv->syncp);
 			bytes = ring->bytes;
 			packets = ring->packets;
-		} while (u64_stats_fetch_retry(&priv->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&priv->syncp, start));
 
 		*tx_bytes += bytes;
 		*tx_packets += packets;
@@ -481,9 +503,9 @@ static void bcm_sysport_get_stats(struct net_device *dev,
 		if (s->stat_sizeof == sizeof(u64) &&
 		    s->type == BCM_SYSPORT_STAT_NETDEV64) {
 			do {
-				start = u64_stats_fetch_begin(syncp);
+				start = u64_stats_fetch_begin_irq(syncp);
 				data[i] = *(u64 *)p;
-			} while (u64_stats_fetch_retry(syncp, start));
+			} while (u64_stats_fetch_retry_irq(syncp, start));
 		} else
 			data[i] = *(u32 *)p;
 		j++;
@@ -584,9 +606,7 @@ static void bcm_sysport_set_tx_coalesce(struct bcm_sysport_tx_ring *ring,
 }
 
 static int bcm_sysport_get_coalesce(struct net_device *dev,
-				    struct ethtool_coalesce *ec,
-				    struct kernel_ethtool_coalesce *kernel_coal,
-				    struct netlink_ext_ack *extack)
+				    struct ethtool_coalesce *ec)
 {
 	struct bcm_sysport_priv *priv = netdev_priv(dev);
 	u32 reg;
@@ -606,9 +626,7 @@ static int bcm_sysport_get_coalesce(struct net_device *dev,
 }
 
 static int bcm_sysport_set_coalesce(struct net_device *dev,
-				    struct ethtool_coalesce *ec,
-				    struct kernel_ethtool_coalesce *kernel_coal,
-				    struct netlink_ext_ack *extack)
+				    struct ethtool_coalesce *ec)
 {
 	struct bcm_sysport_priv *priv = netdev_priv(dev);
 	struct dim_cq_moder moder;
@@ -1019,7 +1037,7 @@ static int bcm_sysport_poll(struct napi_struct *napi, int budget)
 	if (priv->dim.use_dim) {
 		dim_update_sample(priv->dim.event_ctr, priv->dim.packets,
 				  priv->dim.bytes, &dim_sample);
-		net_dim(&priv->dim.dim, &dim_sample);
+		net_dim(&priv->dim.dim, dim_sample);
 	}
 
 	return work_done;
@@ -1325,7 +1343,6 @@ static netdev_tx_t bcm_sysport_xmit(struct sk_buff *skb,
 		netif_err(priv, tx_err, dev, "DMA map failed at %p (len=%d)\n",
 			  skb->data, skb_len);
 		ret = NETDEV_TX_OK;
-		dev_kfree_skb_any(skb);
 		goto out;
 	}
 
@@ -1495,7 +1512,7 @@ static int bcm_sysport_init_tx_ring(struct bcm_sysport_priv *priv,
 	/* Initialize SW view of the ring */
 	spin_lock_init(&ring->lock);
 	ring->priv = priv;
-	netif_napi_add_tx(priv->netdev, &ring->napi, bcm_sysport_tx_poll);
+	netif_tx_napi_add(priv->netdev, &ring->napi, bcm_sysport_tx_poll, 64);
 	ring->index = index;
 	ring->size = size;
 	ring->clean_index = 0;
@@ -1798,7 +1815,7 @@ static inline void umac_reset(struct bcm_sysport_priv *priv)
 }
 
 static void umac_set_hw_addr(struct bcm_sysport_priv *priv,
-			     const unsigned char *addr)
+			     unsigned char *addr)
 {
 	u32 mac0 = (addr[0] << 24) | (addr[1] << 16) | (addr[2] << 8) |
 		    addr[3];
@@ -1830,7 +1847,7 @@ static int bcm_sysport_change_mac(struct net_device *dev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EINVAL;
 
-	eth_hw_addr_set(dev, addr->sa_data);
+	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
 
 	/* interface is disabled, changes to MAC will be reflected on next
 	 * open call
@@ -1856,10 +1873,10 @@ static void bcm_sysport_get_stats64(struct net_device *dev,
 				    &stats->tx_packets);
 
 	do {
-		start = u64_stats_fetch_begin(&priv->syncp);
+		start = u64_stats_fetch_begin_irq(&priv->syncp);
 		stats->rx_packets = stats64->rx_packets;
 		stats->rx_bytes = stats64->rx_bytes;
-	} while (u64_stats_fetch_retry(&priv->syncp, start));
+	} while (u64_stats_fetch_retry_irq(&priv->syncp, start));
 }
 
 static void bcm_sysport_netif_start(struct net_device *dev)
@@ -1933,11 +1950,7 @@ static int bcm_sysport_open(struct net_device *dev)
 	unsigned int i;
 	int ret;
 
-	ret = clk_prepare_enable(priv->clk);
-	if (ret) {
-		netdev_err(dev, "could not enable priv clock\n");
-		return ret;
-	}
+	clk_prepare_enable(priv->clk);
 
 	/* Reset UniMAC */
 	umac_reset(priv);
@@ -1972,9 +1985,6 @@ static int bcm_sysport_open(struct net_device *dev)
 		ret = -ENODEV;
 		goto out_clk_disable;
 	}
-
-	/* Indicate that the MAC is responsible for PHY PM */
-	phydev->mac_managed_pm = true;
 
 	/* Reset house keeping link status */
 	priv->old_duplex = -1;
@@ -2165,9 +2175,13 @@ static int bcm_sysport_rule_set(struct bcm_sysport_priv *priv,
 	if (nfc->fs.ring_cookie != RX_CLS_FLOW_WAKE)
 		return -EOPNOTSUPP;
 
+	/* All filters are already in use, we cannot match more rules */
+	if (bitmap_weight(priv->filters, RXCHK_BRCM_TAG_MAX) ==
+	    RXCHK_BRCM_TAG_MAX)
+		return -ENOSPC;
+
 	index = find_first_zero_bit(priv->filters, RXCHK_BRCM_TAG_MAX);
 	if (index >= RXCHK_BRCM_TAG_MAX)
-		/* All filters are already in use, we cannot match more rules */
 		return -ENOSPC;
 
 	/* Location is the classification ID, and index is the position
@@ -2299,22 +2313,33 @@ static const struct net_device_ops bcm_sysport_netdev_ops = {
 	.ndo_select_queue	= bcm_sysport_select_queue,
 };
 
-static int bcm_sysport_map_queues(struct net_device *dev,
-				  struct net_device *slave_dev)
+static int bcm_sysport_map_queues(struct notifier_block *nb,
+				  struct dsa_notifier_register_info *info)
 {
-	struct dsa_port *dp = dsa_port_from_netdev(slave_dev);
-	struct bcm_sysport_priv *priv = netdev_priv(dev);
 	struct bcm_sysport_tx_ring *ring;
+	struct bcm_sysport_priv *priv;
+	struct net_device *slave_dev;
 	unsigned int num_tx_queues;
 	unsigned int q, qp, port;
+	struct net_device *dev;
+
+	priv = container_of(nb, struct bcm_sysport_priv, dsa_notifier);
+	if (priv->netdev != info->master)
+		return 0;
+
+	dev = info->master;
 
 	/* We can't be setting up queue inspection for non directly attached
 	 * switches
 	 */
-	if (dp->ds->index)
+	if (info->switch_number)
 		return 0;
 
-	port = dp->index;
+	if (dev->netdev_ops != &bcm_sysport_netdev_ops)
+		return 0;
+
+	port = info->port_number;
+	slave_dev = info->info.dev;
 
 	/* On SYSTEMPORT Lite we have twice as less queues, so we cannot do a
 	 * 1:1 mapping, we can only do a 2:1 mapping. By reducing the number of
@@ -2354,16 +2379,27 @@ static int bcm_sysport_map_queues(struct net_device *dev,
 	return 0;
 }
 
-static int bcm_sysport_unmap_queues(struct net_device *dev,
-				    struct net_device *slave_dev)
+static int bcm_sysport_unmap_queues(struct notifier_block *nb,
+				    struct dsa_notifier_register_info *info)
 {
-	struct dsa_port *dp = dsa_port_from_netdev(slave_dev);
-	struct bcm_sysport_priv *priv = netdev_priv(dev);
 	struct bcm_sysport_tx_ring *ring;
+	struct bcm_sysport_priv *priv;
+	struct net_device *slave_dev;
 	unsigned int num_tx_queues;
+	struct net_device *dev;
 	unsigned int q, qp, port;
 
-	port = dp->index;
+	priv = container_of(nb, struct bcm_sysport_priv, dsa_notifier);
+	if (priv->netdev != info->master)
+		return 0;
+
+	dev = info->master;
+
+	if (dev->netdev_ops != &bcm_sysport_netdev_ops)
+		return 0;
+
+	port = info->port_number;
+	slave_dev = info->info.dev;
 
 	num_tx_queues = slave_dev->real_num_tx_queues;
 
@@ -2384,30 +2420,17 @@ static int bcm_sysport_unmap_queues(struct net_device *dev,
 	return 0;
 }
 
-static int bcm_sysport_netdevice_event(struct notifier_block *nb,
-				       unsigned long event, void *ptr)
+static int bcm_sysport_dsa_notifier(struct notifier_block *nb,
+				    unsigned long event, void *ptr)
 {
-	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-	struct netdev_notifier_changeupper_info *info = ptr;
-	struct bcm_sysport_priv *priv;
-	int ret = 0;
-
-	priv = container_of(nb, struct bcm_sysport_priv, netdev_notifier);
-	if (priv->netdev != dev)
-		return NOTIFY_DONE;
+	int ret = NOTIFY_DONE;
 
 	switch (event) {
-	case NETDEV_CHANGEUPPER:
-		if (dev->netdev_ops != &bcm_sysport_netdev_ops)
-			return NOTIFY_DONE;
-
-		if (!dsa_user_dev_check(info->upper_dev))
-			return NOTIFY_DONE;
-
-		if (info->linking)
-			ret = bcm_sysport_map_queues(dev, info->upper_dev);
-		else
-			ret = bcm_sysport_unmap_queues(dev, info->upper_dev);
+	case DSA_PORT_REGISTER:
+		ret = bcm_sysport_map_queues(nb, ptr);
+		break;
+	case DSA_PORT_UNREGISTER:
+		ret = bcm_sysport_unmap_queues(nb, ptr);
 		break;
 	}
 
@@ -2445,6 +2468,7 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 	struct bcm_sysport_priv *priv;
 	struct device_node *dn;
 	struct net_device *dev;
+	const void *macaddr;
 	u32 txq, rxq;
 	int ret;
 
@@ -2502,9 +2526,9 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 	priv->irq0 = platform_get_irq(pdev, 0);
 	if (!priv->is_lite) {
 		priv->irq1 = platform_get_irq(pdev, 1);
-		priv->wol_irq = platform_get_irq_optional(pdev, 2);
+		priv->wol_irq = platform_get_irq(pdev, 2);
 	} else {
-		priv->wol_irq = platform_get_irq_optional(pdev, 1);
+		priv->wol_irq = platform_get_irq(pdev, 1);
 	}
 	if (priv->irq0 <= 0 || (priv->irq1 <= 0 && !priv->is_lite)) {
 		ret = -EINVAL;
@@ -2539,17 +2563,19 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 	}
 
 	/* Initialize netdevice members */
-	ret = of_get_ethdev_address(dn, dev);
-	if (ret) {
+	macaddr = of_get_mac_address(dn);
+	if (IS_ERR(macaddr)) {
 		dev_warn(&pdev->dev, "using random Ethernet MAC\n");
 		eth_hw_addr_random(dev);
+	} else {
+		ether_addr_copy(dev->dev_addr, macaddr);
 	}
 
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	dev_set_drvdata(&pdev->dev, dev);
 	dev->ethtool_ops = &bcm_sysport_ethtool_ops;
 	dev->netdev_ops = &bcm_sysport_netdev_ops;
-	netif_napi_add(dev, &priv->napi, bcm_sysport_poll);
+	netif_napi_add(dev, &priv->napi, bcm_sysport_poll, 64);
 
 	dev->features |= NETIF_F_RXCSUM | NETIF_F_HIGHDMA |
 			 NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
@@ -2581,9 +2607,9 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 	priv->rx_max_coalesced_frames = 1;
 	u64_stats_init(&priv->syncp);
 
-	priv->netdev_notifier.notifier_call = bcm_sysport_netdevice_event;
+	priv->dsa_notifier.notifier_call = bcm_sysport_dsa_notifier;
 
-	ret = register_netdevice_notifier(&priv->netdev_notifier);
+	ret = register_dsa_notifier(&priv->dsa_notifier);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to register DSA notifier\n");
 		goto err_deregister_fixed_link;
@@ -2595,11 +2621,7 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 		goto err_deregister_notifier;
 	}
 
-	ret = clk_prepare_enable(priv->clk);
-	if (ret) {
-		dev_err(&pdev->dev, "could not enable priv clock\n");
-		goto err_deregister_netdev;
-	}
+	clk_prepare_enable(priv->clk);
 
 	priv->rev = topctrl_readl(priv, REV_CNTL) & REV_MASK;
 	dev_info(&pdev->dev,
@@ -2613,10 +2635,8 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 
 	return 0;
 
-err_deregister_netdev:
-	unregister_netdev(dev);
 err_deregister_notifier:
-	unregister_netdevice_notifier(&priv->netdev_notifier);
+	unregister_dsa_notifier(&priv->dsa_notifier);
 err_deregister_fixed_link:
 	if (of_phy_is_fixed_link(dn))
 		of_phy_deregister_fixed_link(dn);
@@ -2625,7 +2645,7 @@ err_free_netdev:
 	return ret;
 }
 
-static void bcm_sysport_remove(struct platform_device *pdev)
+static int bcm_sysport_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = dev_get_drvdata(&pdev->dev);
 	struct bcm_sysport_priv *priv = netdev_priv(dev);
@@ -2634,12 +2654,14 @@ static void bcm_sysport_remove(struct platform_device *pdev)
 	/* Not much to do, ndo_close has been called
 	 * and we use managed allocations
 	 */
-	unregister_netdevice_notifier(&priv->netdev_notifier);
+	unregister_dsa_notifier(&priv->dsa_notifier);
 	unregister_netdev(dev);
 	if (of_phy_is_fixed_link(dn))
 		of_phy_deregister_fixed_link(dn);
 	free_netdev(dev);
 	dev_set_drvdata(&pdev->dev, NULL);
+
+	return 0;
 }
 
 static int bcm_sysport_suspend_to_wol(struct bcm_sysport_priv *priv)
@@ -2784,12 +2806,7 @@ static int __maybe_unused bcm_sysport_resume(struct device *d)
 	if (!netif_running(dev))
 		return 0;
 
-	ret = clk_prepare_enable(priv->clk);
-	if (ret) {
-		netdev_err(dev, "could not enable priv clock\n");
-		return ret;
-	}
-
+	clk_prepare_enable(priv->clk);
 	if (priv->wolopts)
 		clk_disable_unprepare(priv->wol_clk);
 
@@ -2881,7 +2898,7 @@ static SIMPLE_DEV_PM_OPS(bcm_sysport_pm_ops,
 
 static struct platform_driver bcm_sysport_driver = {
 	.probe	= bcm_sysport_probe,
-	.remove = bcm_sysport_remove,
+	.remove	= bcm_sysport_remove,
 	.driver =  {
 		.name = "brcm-systemport",
 		.of_match_table = bcm_sysport_of_match,

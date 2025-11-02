@@ -65,7 +65,6 @@ static struct irq_chip mtk_sysirq_chip = {
 	.irq_set_type		= mtk_sysirq_set_type,
 	.irq_retrigger		= irq_chip_retrigger_hierarchy,
 	.irq_set_affinity	= irq_chip_set_affinity_parent,
-	.flags			= IRQCHIP_SKIP_SET_WAKE,
 };
 
 static int mtk_sysirq_domain_translate(struct irq_domain *d,
@@ -207,8 +206,8 @@ static int __init mtk_sysirq_of_init(struct device_node *node,
 		chip_data->which_word[i] = word;
 	}
 
-	domain = irq_domain_create_hierarchy(domain_parent, 0, intpol_num, of_fwnode_handle(node),
-					     &sysirq_domain_ops, chip_data);
+	domain = irq_domain_add_hierarchy(domain_parent, 0, intpol_num, node,
+					  &sysirq_domain_ops, chip_data);
 	if (!domain) {
 		ret = -ENOMEM;
 		goto out_free_which_word;

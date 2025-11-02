@@ -68,8 +68,6 @@ MODULE_LICENSE("Dual BSD/GPL");
 static u64 srpt_service_guid;
 static DEFINE_SPINLOCK(srpt_dev_lock);	/* Protects srpt_dev_list. */
 static LIST_HEAD(srpt_dev_list);	/* List of srpt_device structures. */
-static DEFINE_MUTEX(srpt_mc_mutex);	/* Protects srpt_memory_caches. */
-static DEFINE_XARRAY(srpt_memory_caches); /* See also srpt_memory_cache_entry */
 
 static unsigned srp_max_req_size = DEFAULT_MAX_REQ_SIZE;
 module_param(srp_max_req_size, int, 0444);
@@ -106,63 +104,6 @@ static int srpt_queue_status(struct se_cmd *cmd);
 static void srpt_recv_done(struct ib_cq *cq, struct ib_wc *wc);
 static void srpt_send_done(struct ib_cq *cq, struct ib_wc *wc);
 static void srpt_process_wait_list(struct srpt_rdma_ch *ch);
-
-/* Type of the entries in srpt_memory_caches. */
-struct srpt_memory_cache_entry {
-	refcount_t ref;
-	struct kmem_cache *c;
-};
-
-static struct kmem_cache *srpt_cache_get(unsigned int object_size)
-{
-	struct srpt_memory_cache_entry *e;
-	char name[32];
-	void *res;
-
-	guard(mutex)(&srpt_mc_mutex);
-	e = xa_load(&srpt_memory_caches, object_size);
-	if (e) {
-		refcount_inc(&e->ref);
-		return e->c;
-	}
-	snprintf(name, sizeof(name), "srpt-%u", object_size);
-	e = kmalloc(sizeof(*e), GFP_KERNEL);
-	if (!e)
-		return NULL;
-	refcount_set(&e->ref, 1);
-	e->c = kmem_cache_create(name, object_size, /*align=*/512, 0, NULL);
-	if (!e->c)
-		goto free_entry;
-	res = xa_store(&srpt_memory_caches, object_size, e, GFP_KERNEL);
-	if (xa_is_err(res))
-		goto destroy_cache;
-	return e->c;
-
-destroy_cache:
-	kmem_cache_destroy(e->c);
-
-free_entry:
-	kfree(e);
-	return NULL;
-}
-
-static void srpt_cache_put(struct kmem_cache *c)
-{
-	struct srpt_memory_cache_entry *e = NULL;
-	unsigned long object_size;
-
-	guard(mutex)(&srpt_mc_mutex);
-	xa_for_each(&srpt_memory_caches, object_size, e)
-		if (e->c == c)
-			break;
-	if (WARN_ON_ONCE(!e))
-		return;
-	if (!refcount_dec_and_test(&e->ref))
-		return;
-	WARN_ON_ONCE(xa_erase(&srpt_memory_caches, object_size) != e);
-	kmem_cache_destroy(e->c);
-	kfree(e);
-}
 
 /*
  * The only allowed channel state changes are those that change the channel
@@ -667,9 +608,9 @@ static int srpt_refresh_port(struct srpt_port *sport)
 						  srpt_mad_recv_handler,
 						  sport, 0);
 		if (IS_ERR(mad_agent)) {
-			pr_err("%s-%d: MAD agent registration failed (%pe). Note: this is expected if SR-IOV is enabled.\n",
+			pr_err("%s-%d: MAD agent registration failed (%ld). Note: this is expected if SR-IOV is enabled.\n",
 			       dev_name(&sport->sdev->device->dev), sport->port,
-			       mad_agent);
+			       PTR_ERR(mad_agent));
 			sport->mad_agent = NULL;
 			memset(&port_modify, 0, sizeof(port_modify));
 			port_modify.clr_port_cap_mask = IB_PORT_DEVICE_MGMT_SUP;
@@ -1489,7 +1430,7 @@ static int srpt_build_cmd_rsp(struct srpt_rdma_ch *ch,
 
 		srp_rsp->flags |= SRP_RSP_FLAG_SNSVALID;
 		srp_rsp->sense_data_len = cpu_to_be32(sense_data_len);
-		memcpy(srp_rsp->data, sense_data, sense_data_len);
+		memcpy(srp_rsp + 1, sense_data, sense_data_len);
 	}
 
 	return sizeof(*srp_rsp) + sense_data_len;
@@ -1593,20 +1534,16 @@ static void srpt_handle_cmd(struct srpt_rdma_ch *ch,
 		goto busy;
 	}
 
-	rc = target_init_cmd(cmd, ch->sess, &send_ioctx->sense_data[0],
-			     scsilun_to_int(&srp_cmd->lun), data_len,
-			     TCM_SIMPLE_TAG, dir, TARGET_SCF_ACK_KREF);
+	rc = target_submit_cmd_map_sgls(cmd, ch->sess, srp_cmd->cdb,
+			       &send_ioctx->sense_data[0],
+			       scsilun_to_int(&srp_cmd->lun), data_len,
+			       TCM_SIMPLE_TAG, dir, TARGET_SCF_ACK_KREF,
+			       sg, sg_cnt, NULL, 0, NULL, 0);
 	if (rc != 0) {
 		pr_debug("target_submit_cmd() returned %d for tag %#llx\n", rc,
 			 srp_cmd->tag);
 		goto busy;
 	}
-
-	if (target_submit_prep(cmd, srp_cmd->cdb, sg, sg_cnt, NULL, 0, NULL, 0,
-			       GFP_KERNEL))
-		return;
-
-	target_submit(cmd);
 	return;
 
 busy:
@@ -1865,8 +1802,8 @@ retry:
 				 IB_POLL_WORKQUEUE);
 	if (IS_ERR(ch->cq)) {
 		ret = PTR_ERR(ch->cq);
-		pr_err("failed to create CQ cqe= %d ret= %pe\n",
-		       ch->rq_size + sq_size, ch->cq);
+		pr_err("failed to create CQ cqe= %d ret= %d\n",
+		       ch->rq_size + sq_size, ret);
 		goto out;
 	}
 	ch->cq_size = ch->rq_size + sq_size;
@@ -2153,7 +2090,7 @@ static void srpt_release_channel_work(struct work_struct *w)
 	se_sess = ch->sess;
 	BUG_ON(!se_sess);
 
-	target_stop_session(se_sess);
+	target_sess_cmd_list_set_waiting(se_sess);
 	target_wait_for_sess_cmds(se_sess);
 
 	target_remove_session(se_sess);
@@ -2178,13 +2115,13 @@ static void srpt_release_channel_work(struct work_struct *w)
 			     ch->sport->sdev, ch->rq_size,
 			     ch->rsp_buf_cache, DMA_TO_DEVICE);
 
-	srpt_cache_put(ch->rsp_buf_cache);
+	kmem_cache_destroy(ch->rsp_buf_cache);
 
 	srpt_free_ioctx_ring((struct srpt_ioctx **)ch->ioctx_recv_ring,
 			     sdev, ch->rq_size,
 			     ch->req_buf_cache, DMA_FROM_DEVICE);
 
-	srpt_cache_put(ch->req_buf_cache);
+	kmem_cache_destroy(ch->req_buf_cache);
 
 	kref_put(&ch->kref, srpt_free_ch);
 }
@@ -2285,13 +2222,13 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 	ch->zw_cqe.done = srpt_zerolength_write_done;
 	INIT_WORK(&ch->release_work, srpt_release_channel_work);
 	ch->sport = sport;
-	if (rdma_cm_id) {
+	if (ib_cm_id) {
+		ch->ib_cm.cm_id = ib_cm_id;
+		ib_cm_id->context = ch;
+	} else {
 		ch->using_rdma_cm = true;
 		ch->rdma_cm.cm_id = rdma_cm_id;
 		rdma_cm_id->context = ch;
-	} else {
-		ch->ib_cm.cm_id = ib_cm_id;
-		ib_cm_id->context = ch;
 	}
 	/*
 	 * ch->rq_size should be at least as large as the initiator queue
@@ -2304,7 +2241,8 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 	INIT_LIST_HEAD(&ch->cmd_wait_list);
 	ch->max_rsp_size = ch->sport->port_attrib.srp_max_rsp_size;
 
-	ch->rsp_buf_cache = srpt_cache_get(ch->max_rsp_size);
+	ch->rsp_buf_cache = kmem_cache_create("srpt-rsp-buf", ch->max_rsp_size,
+					      512, 0, NULL);
 	if (!ch->rsp_buf_cache)
 		goto free_ch;
 
@@ -2338,7 +2276,8 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 		alignment_offset = round_up(imm_data_offset, 512) -
 			imm_data_offset;
 		req_sz = alignment_offset + imm_data_offset + srp_max_req_size;
-		ch->req_buf_cache = srpt_cache_get(req_sz);
+		ch->req_buf_cache = kmem_cache_create("srpt-req-buf", req_sz,
+						      512, 0, NULL);
 		if (!ch->req_buf_cache)
 			goto free_rsp_ring;
 
@@ -2365,7 +2304,7 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 		goto free_recv_ring;
 	}
 
-	strscpy(ch->sess_name, src_addr, sizeof(ch->sess_name));
+	strlcpy(ch->sess_name, src_addr, sizeof(ch->sess_name));
 	snprintf(i_port_id, sizeof(i_port_id), "0x%016llx%016llx",
 			be64_to_cpu(*(__be64 *)nexus->i_port_id),
 			be64_to_cpu(*(__be64 *)(nexus->i_port_id + 8)));
@@ -2535,7 +2474,7 @@ free_recv_ring:
 			     ch->req_buf_cache, DMA_FROM_DEVICE);
 
 free_recv_cache:
-	srpt_cache_put(ch->req_buf_cache);
+	kmem_cache_destroy(ch->req_buf_cache);
 
 free_rsp_ring:
 	srpt_free_ioctx_ring((struct srpt_ioctx **)ch->ioctx_ring,
@@ -2543,7 +2482,7 @@ free_rsp_ring:
 			     ch->rsp_buf_cache, DMA_TO_DEVICE);
 
 free_rsp_cache:
-	srpt_cache_put(ch->rsp_buf_cache);
+	kmem_cache_destroy(ch->rsp_buf_cache);
 
 free_ch:
 	if (rdma_cm_id)
@@ -2924,6 +2863,7 @@ static void srpt_queue_response(struct se_cmd *cmd)
 			&ch->sq_wr_avail) < 0)) {
 		pr_warn("%s: IB send queue full (needed %d)\n",
 				__func__, ioctx->n_rdma);
+		ret = -ENOMEM;
 		goto out;
 	}
 
@@ -3112,7 +3052,7 @@ static void srpt_free_srq(struct srpt_device *sdev)
 	srpt_free_ioctx_ring((struct srpt_ioctx **)sdev->ioctx_ring, sdev,
 			     sdev->srq_size, sdev->req_buf_cache,
 			     DMA_FROM_DEVICE);
-	srpt_cache_put(sdev->req_buf_cache);
+	kmem_cache_destroy(sdev->req_buf_cache);
 	sdev->srq = NULL;
 }
 
@@ -3132,14 +3072,15 @@ static int srpt_alloc_srq(struct srpt_device *sdev)
 	WARN_ON_ONCE(sdev->srq);
 	srq = ib_create_srq(sdev->pd, &srq_attr);
 	if (IS_ERR(srq)) {
-		pr_debug("ib_create_srq() failed: %pe\n", srq);
+		pr_debug("ib_create_srq() failed: %ld\n", PTR_ERR(srq));
 		return PTR_ERR(srq);
 	}
 
 	pr_debug("create SRQ #wr= %d max_allow=%d dev= %s\n", sdev->srq_size,
 		 sdev->device->attrs.max_srq_wr, dev_name(&device->dev));
 
-	sdev->req_buf_cache = srpt_cache_get(srp_max_req_size);
+	sdev->req_buf_cache = kmem_cache_create("srpt-srq-req-buf",
+						srp_max_req_size, 0, 0, NULL);
 	if (!sdev->req_buf_cache)
 		goto free_srq;
 
@@ -3161,7 +3102,7 @@ static int srpt_alloc_srq(struct srpt_device *sdev)
 	return 0;
 
 free_cache:
-	srpt_cache_put(sdev->req_buf_cache);
+	kmem_cache_destroy(sdev->req_buf_cache);
 
 free_srq:
 	ib_destroy_srq(srq);
@@ -3204,8 +3145,7 @@ static int srpt_add_one(struct ib_device *device)
 {
 	struct srpt_device *sdev;
 	struct srpt_port *sport;
-	int ret;
-	u32 i;
+	int i, ret;
 
 	pr_debug("device = %p\n", device);
 
@@ -3236,7 +3176,8 @@ static int srpt_add_one(struct ib_device *device)
 	if (rdma_port_get_link_layer(device, 1) == IB_LINK_LAYER_INFINIBAND)
 		sdev->cm_id = ib_create_cm_id(device, srpt_cm_handler, sdev);
 	if (IS_ERR(sdev->cm_id)) {
-		pr_info("ib_create_cm_id() failed: %pe\n", sdev->cm_id);
+		pr_info("ib_create_cm_id() failed: %ld\n",
+			PTR_ERR(sdev->cm_id));
 		ret = PTR_ERR(sdev->cm_id);
 		sdev->cm_id = NULL;
 		if (!rdma_cm_id)
@@ -3254,7 +3195,7 @@ static int srpt_add_one(struct ib_device *device)
 	 * if this HCA is gone bad and replaced by different HCA
 	 */
 	ret = sdev->cm_id ?
-		ib_cm_listen(sdev->cm_id, cpu_to_be64(srpt_service_guid)) :
+		ib_cm_listen(sdev->cm_id, cpu_to_be64(srpt_service_guid), 0) :
 		0;
 	if (ret < 0) {
 		pr_err("ib_cm_listen() failed: %d (cm_id state = %d)\n", ret,
@@ -3362,6 +3303,11 @@ static int srpt_check_true(struct se_portal_group *se_tpg)
 	return 1;
 }
 
+static int srpt_check_false(struct se_portal_group *se_tpg)
+{
+	return 0;
+}
+
 static struct srpt_port *srpt_tpg_to_sport(struct se_portal_group *tpg)
 {
 	return tpg->se_tpg_wwn->priv;
@@ -3387,6 +3333,11 @@ static char *srpt_get_fabric_wwn(struct se_portal_group *tpg)
 }
 
 static u16 srpt_get_tag(struct se_portal_group *tpg)
+{
+	return 1;
+}
+
+static u32 srpt_tpg_get_inst_index(struct se_portal_group *se_tpg)
 {
 	return 1;
 }
@@ -3428,6 +3379,24 @@ static void srpt_close_session(struct se_session *se_sess)
 	struct srpt_rdma_ch *ch = se_sess->fabric_sess_ptr;
 
 	srpt_disconnect_ch_sync(ch);
+}
+
+/**
+ * srpt_sess_get_index - return the value of scsiAttIntrPortIndex (SCSI-MIB)
+ * @se_sess: SCSI target session.
+ *
+ * A quote from RFC 4455 (SCSI-MIB) about this MIB object:
+ * This object represents an arbitrary integer used to uniquely identify a
+ * particular attached remote initiator port to a particular SCSI target port
+ * within a particular SCSI target device within a particular SCSI instance.
+ */
+static u32 srpt_sess_get_index(struct se_session *se_sess)
+{
+	return 0;
+}
+
+static void srpt_set_default_node_attrs(struct se_node_acl *nacl)
+{
 }
 
 /* Note: only used from inside debug printk's by the TCM core. */
@@ -3515,7 +3484,7 @@ static ssize_t srpt_tpg_attrib_srp_max_rdma_size_show(struct config_item *item,
 	struct se_portal_group *se_tpg = attrib_to_tpg(item);
 	struct srpt_port *sport = srpt_tpg_to_sport(se_tpg);
 
-	return sysfs_emit(page, "%u\n", sport->port_attrib.srp_max_rdma_size);
+	return sprintf(page, "%u\n", sport->port_attrib.srp_max_rdma_size);
 }
 
 static ssize_t srpt_tpg_attrib_srp_max_rdma_size_store(struct config_item *item,
@@ -3552,7 +3521,7 @@ static ssize_t srpt_tpg_attrib_srp_max_rsp_size_show(struct config_item *item,
 	struct se_portal_group *se_tpg = attrib_to_tpg(item);
 	struct srpt_port *sport = srpt_tpg_to_sport(se_tpg);
 
-	return sysfs_emit(page, "%u\n", sport->port_attrib.srp_max_rsp_size);
+	return sprintf(page, "%u\n", sport->port_attrib.srp_max_rsp_size);
 }
 
 static ssize_t srpt_tpg_attrib_srp_max_rsp_size_store(struct config_item *item,
@@ -3589,7 +3558,7 @@ static ssize_t srpt_tpg_attrib_srp_sq_size_show(struct config_item *item,
 	struct se_portal_group *se_tpg = attrib_to_tpg(item);
 	struct srpt_port *sport = srpt_tpg_to_sport(se_tpg);
 
-	return sysfs_emit(page, "%u\n", sport->port_attrib.srp_sq_size);
+	return sprintf(page, "%u\n", sport->port_attrib.srp_sq_size);
 }
 
 static ssize_t srpt_tpg_attrib_srp_sq_size_store(struct config_item *item,
@@ -3626,7 +3595,7 @@ static ssize_t srpt_tpg_attrib_use_srq_show(struct config_item *item,
 	struct se_portal_group *se_tpg = attrib_to_tpg(item);
 	struct srpt_port *sport = srpt_tpg_to_sport(se_tpg);
 
-	return sysfs_emit(page, "%d\n", sport->port_attrib.use_srq);
+	return sprintf(page, "%d\n", sport->port_attrib.use_srq);
 }
 
 static ssize_t srpt_tpg_attrib_use_srq_store(struct config_item *item,
@@ -3686,7 +3655,8 @@ static struct rdma_cm_id *srpt_create_rdma_id(struct sockaddr *listen_addr)
 	rdma_cm_id = rdma_create_id(&init_net, srpt_rdma_cm_handler,
 				    NULL, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(rdma_cm_id)) {
-		pr_err("RDMA/CM ID creation failed: %pe\n", rdma_cm_id);
+		pr_err("RDMA/CM ID creation failed: %ld\n",
+		       PTR_ERR(rdma_cm_id));
 		goto out;
 	}
 
@@ -3715,7 +3685,7 @@ out:
 
 static ssize_t srpt_rdma_cm_port_show(struct config_item *item, char *page)
 {
-	return sysfs_emit(page, "%d\n", rdma_cm_port);
+	return sprintf(page, "%d\n", rdma_cm_port);
 }
 
 static ssize_t srpt_rdma_cm_port_store(struct config_item *item,
@@ -3766,16 +3736,46 @@ static struct configfs_attribute *srpt_da_attrs[] = {
 	NULL,
 };
 
-static int srpt_enable_tpg(struct se_portal_group *se_tpg, bool enable)
+static ssize_t srpt_tpg_enable_show(struct config_item *item, char *page)
 {
+	struct se_portal_group *se_tpg = to_tpg(item);
 	struct srpt_port *sport = srpt_tpg_to_sport(se_tpg);
 
+	return snprintf(page, PAGE_SIZE, "%d\n", sport->enabled);
+}
+
+static ssize_t srpt_tpg_enable_store(struct config_item *item,
+		const char *page, size_t count)
+{
+	struct se_portal_group *se_tpg = to_tpg(item);
+	struct srpt_port *sport = srpt_tpg_to_sport(se_tpg);
+	unsigned long tmp;
+	int ret;
+
+	ret = kstrtoul(page, 0, &tmp);
+	if (ret < 0) {
+		pr_err("Unable to extract srpt_tpg_store_enable\n");
+		return -EINVAL;
+	}
+
+	if ((tmp != 0) && (tmp != 1)) {
+		pr_err("Illegal value for srpt_tpg_store_enable: %lu\n", tmp);
+		return -EINVAL;
+	}
+
 	mutex_lock(&sport->mutex);
-	srpt_set_enabled(sport, enable);
+	srpt_set_enabled(sport, tmp);
 	mutex_unlock(&sport->mutex);
 
-	return 0;
+	return count;
 }
+
+CONFIGFS_ATTR(srpt_tpg_, enable);
+
+static struct configfs_attribute *srpt_tpg_attrs[] = {
+	&srpt_tpg_attr_enable,
+	NULL,
+};
 
 /**
  * srpt_make_tpg - configfs callback invoked for mkdir /sys/kernel/config/target/$driver/$port/$tpg
@@ -3884,7 +3884,7 @@ static void srpt_drop_tport(struct se_wwn *wwn)
 
 static ssize_t srpt_wwn_version_show(struct config_item *item, char *buf)
 {
-	return sysfs_emit(buf, "\n");
+	return scnprintf(buf, PAGE_SIZE, "\n");
 }
 
 CONFIGFS_ATTR_RO(srpt_wwn_, version);
@@ -3899,13 +3899,18 @@ static const struct target_core_fabric_ops srpt_template = {
 	.fabric_name			= "srpt",
 	.tpg_get_wwn			= srpt_get_fabric_wwn,
 	.tpg_get_tag			= srpt_get_tag,
+	.tpg_check_demo_mode		= srpt_check_false,
 	.tpg_check_demo_mode_cache	= srpt_check_true,
 	.tpg_check_demo_mode_write_protect = srpt_check_true,
+	.tpg_check_prod_mode_write_protect = srpt_check_false,
+	.tpg_get_inst_index		= srpt_tpg_get_inst_index,
 	.release_cmd			= srpt_release_cmd,
 	.check_stop_free		= srpt_check_stop_free,
 	.close_session			= srpt_close_session,
+	.sess_get_index			= srpt_sess_get_index,
 	.sess_get_initiator_sid		= NULL,
 	.write_pending			= srpt_write_pending,
+	.set_default_node_attributes	= srpt_set_default_node_attrs,
 	.get_cmd_state			= srpt_get_tcm_cmd_state,
 	.queue_data_in			= srpt_queue_data_in,
 	.queue_status			= srpt_queue_status,
@@ -3918,16 +3923,13 @@ static const struct target_core_fabric_ops srpt_template = {
 	.fabric_make_wwn		= srpt_make_tport,
 	.fabric_drop_wwn		= srpt_drop_tport,
 	.fabric_make_tpg		= srpt_make_tpg,
-	.fabric_enable_tpg		= srpt_enable_tpg,
 	.fabric_drop_tpg		= srpt_drop_tpg,
 	.fabric_init_nodeacl		= srpt_init_nodeacl,
 
 	.tfc_discovery_attrs		= srpt_da_attrs,
 	.tfc_wwn_attrs			= srpt_wwn_attrs,
+	.tfc_tpg_base_attrs		= srpt_tpg_attrs,
 	.tfc_tpg_attrib_attrs		= srpt_tpg_attrib_attrs,
-
-	.default_submit_type		= TARGET_DIRECT_SUBMIT,
-	.direct_submit_supp		= 1,
 };
 
 /**

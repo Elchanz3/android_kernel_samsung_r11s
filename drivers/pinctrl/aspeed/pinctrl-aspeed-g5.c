@@ -60,7 +60,7 @@
 #define COND2		{ ASPEED_IP_SCU, SCU94, GENMASK(1, 0), 0, 0 }
 
 /* LHCR0 is offset from the end of the H8S/2168-compatible registers */
-#define LHCR0		0xa0
+#define LHCR0		0x20
 #define GFX064		0x64
 
 #define B14 0
@@ -2648,19 +2648,14 @@ static struct regmap *aspeed_g5_acquire_regmap(struct aspeed_pinmux_data *ctx,
 	}
 
 	if (ip == ASPEED_IP_LPC) {
-		struct device_node *np;
+		struct device_node *node;
 		struct regmap *map;
 
-		np = of_parse_phandle(ctx->dev->of_node,
+		node = of_parse_phandle(ctx->dev->of_node,
 					"aspeed,external-nodes", 1);
-		if (np) {
-			if (!of_device_is_compatible(np->parent, "aspeed,ast2400-lpc-v2") &&
-			    !of_device_is_compatible(np->parent, "aspeed,ast2500-lpc-v2") &&
-			    !of_device_is_compatible(np->parent, "aspeed,ast2600-lpc-v2"))
-				return ERR_PTR(-ENODEV);
-
-			map = syscon_node_to_regmap(np->parent);
-			of_node_put(np);
+		if (node) {
+			map = syscon_node_to_regmap(node->parent);
+			of_node_put(node);
 			if (IS_ERR(map))
 				return map;
 		} else
@@ -2702,8 +2697,8 @@ static int aspeed_g5_sig_expr_eval(struct aspeed_pinmux_data *ctx,
 }
 
 /**
- * aspeed_g5_sig_expr_set() - Configure a pin's signal by applying an
- * expression's descriptor state for all descriptors in the expression.
+ * Configure a pin's signal by applying an expression's descriptor state for
+ * all descriptors in the expression.
  *
  * @ctx: The pinmux context
  * @expr: The expression associated with the function whose signal is to be
@@ -2742,20 +2737,15 @@ static int aspeed_g5_sig_expr_set(struct aspeed_pinmux_data *ctx,
 		 * deconfigured and is the reason we re-evaluate after writing
 		 * all descriptor bits.
 		 *
-		 * We make two exceptions to the read-only rule:
-		 *
-		 * - The passthrough mode of GPIO ports D and E are commonly
-		 *   used with front-panel buttons to allow normal operation
-		 *   of the host if the BMC is powered off or fails to boot.
-		 *   Once the BMC has booted, the loopback mode must be
-		 *   disabled for the BMC to control host power-on and reset.
-		 *
-		 * - The operating mode of the SPI1 interface is simply
-		 *   strapped incorrectly on some systems and requires a
-		 *   software fixup, which we allow to be done via pinctrl.
+		 * Port D and port E GPIO loopback modes are the only exception
+		 * as those are commonly used with front-panel buttons to allow
+		 * normal operation of the host when the BMC is powered off or
+		 * fails to boot. Once the BMC has booted, the loopback mode
+		 * must be disabled for the BMC to control host power-on and
+		 * reset.
 		 */
 		if (desc->ip == ASPEED_IP_SCU && desc->reg == HW_STRAP1 &&
-		    !(desc->mask & (BIT(22) | BIT(21) | BIT(13) | BIT(12))))
+		    !(desc->mask & (BIT(21) | BIT(22))))
 			continue;
 
 		if (desc->ip == ASPEED_IP_SCU && desc->reg == HW_STRAP2)
@@ -2845,7 +2835,7 @@ static const struct pinconf_ops aspeed_g5_conf_ops = {
 	.pin_config_group_set = aspeed_pin_config_group_set,
 };
 
-static const struct pinctrl_desc aspeed_g5_pinctrl_desc = {
+static struct pinctrl_desc aspeed_g5_pinctrl_desc = {
 	.name = "aspeed-g5-pinctrl",
 	.pins = aspeed_g5_pins,
 	.npins = ARRAY_SIZE(aspeed_g5_pins),

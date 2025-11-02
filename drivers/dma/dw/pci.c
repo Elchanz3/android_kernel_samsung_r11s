@@ -32,7 +32,11 @@ static int dw_pci_probe(struct pci_dev *pdev, const struct pci_device_id *pid)
 	pci_set_master(pdev);
 	pci_try_set_mwi(pdev);
 
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+
+	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
 
@@ -56,9 +60,9 @@ static int dw_pci_probe(struct pci_dev *pdev, const struct pci_device_id *pid)
 	if (ret)
 		return ret;
 
-	pci_set_drvdata(pdev, data);
-
 	dw_dma_acpi_controller_register(chip->dw);
+
+	pci_set_drvdata(pdev, data);
 
 	return 0;
 }
@@ -76,6 +80,8 @@ static void dw_pci_remove(struct pci_dev *pdev)
 		dev_warn(&pdev->dev, "can't remove device properly: %d\n", ret);
 }
 
+#ifdef CONFIG_PM_SLEEP
+
 static int dw_pci_suspend_late(struct device *dev)
 {
 	struct dw_dma_chip_pdata *data = dev_get_drvdata(dev);
@@ -92,8 +98,10 @@ static int dw_pci_resume_early(struct device *dev)
 	return do_dw_dma_enable(chip);
 };
 
+#endif /* CONFIG_PM_SLEEP */
+
 static const struct dev_pm_ops dw_pci_dev_pm_ops = {
-	LATE_SYSTEM_SLEEP_PM_OPS(dw_pci_suspend_late, dw_pci_resume_early)
+	SET_LATE_SYSTEM_SLEEP_PM_OPS(dw_pci_suspend_late, dw_pci_resume_early)
 };
 
 static const struct pci_device_id dw_pci_id_table[] = {
@@ -112,9 +120,9 @@ static const struct pci_device_id dw_pci_id_table[] = {
 	{ PCI_VDEVICE(INTEL, 0x22c0), (kernel_ulong_t)&dw_dma_chip_pdata },
 
 	/* Elkhart Lake iDMA 32-bit (PSE DMA) */
-	{ PCI_VDEVICE(INTEL, 0x4bb4), (kernel_ulong_t)&xbar_chip_pdata },
-	{ PCI_VDEVICE(INTEL, 0x4bb5), (kernel_ulong_t)&xbar_chip_pdata },
-	{ PCI_VDEVICE(INTEL, 0x4bb6), (kernel_ulong_t)&xbar_chip_pdata },
+	{ PCI_VDEVICE(INTEL, 0x4bb4), (kernel_ulong_t)&idma32_chip_pdata },
+	{ PCI_VDEVICE(INTEL, 0x4bb5), (kernel_ulong_t)&idma32_chip_pdata },
+	{ PCI_VDEVICE(INTEL, 0x4bb6), (kernel_ulong_t)&idma32_chip_pdata },
 
 	/* Haswell */
 	{ PCI_VDEVICE(INTEL, 0x9c60), (kernel_ulong_t)&dw_dma_chip_pdata },
@@ -132,7 +140,7 @@ static struct pci_driver dw_pci_driver = {
 	.probe		= dw_pci_probe,
 	.remove		= dw_pci_remove,
 	.driver	= {
-		.pm	= pm_sleep_ptr(&dw_pci_dev_pm_ops),
+		.pm	= &dw_pci_dev_pm_ops,
 	},
 };
 

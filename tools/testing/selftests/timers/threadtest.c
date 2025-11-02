@@ -38,10 +38,10 @@ struct timespec global_list[LISTSIZE];
 int listcount = 0;
 
 
-void checklist(const struct timespec *list, int size)
+void checklist(struct timespec *list, int size)
 {
 	int i, j;
-	const struct timespec *a, *b;
+	struct timespec *a, *b;
 
 	/* scan the list */
 	for (i = 0; i < size-1; i++) {
@@ -76,7 +76,7 @@ void checklist(const struct timespec *list, int size)
 
 /* The shared thread shares a global list
  * that each thread fills while holding the lock.
- * This stresses clock synchronization across cpus.
+ * This stresses clock syncronization across cpus.
  */
 void *shared_thread(void *arg)
 {
@@ -189,5 +189,5 @@ out:
 	/* die */
 	if (ret)
 		ksft_exit_fail();
-	ksft_exit_pass();
+	return ksft_exit_pass();
 }

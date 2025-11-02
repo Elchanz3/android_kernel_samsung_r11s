@@ -22,24 +22,7 @@ extern const unsigned long sys_call_table[];
 static inline int syscall_get_nr(struct task_struct *task,
 				 struct pt_regs *regs)
 {
-	if (IS_ENABLED(CONFIG_AEABI) && !IS_ENABLED(CONFIG_OABI_COMPAT))
-		return task_thread_info(task)->abi_syscall;
-
-	if (task_thread_info(task)->abi_syscall == -1)
-		return -1;
-
-	return task_thread_info(task)->abi_syscall & __NR_SYSCALL_MASK;
-}
-
-static inline bool __in_oabi_syscall(struct task_struct *task)
-{
-	return IS_ENABLED(CONFIG_OABI_COMPAT) &&
-		(task_thread_info(task)->abi_syscall & __NR_OABI_SYSCALL_BASE);
-}
-
-static inline bool in_oabi_syscall(void)
-{
-	return __in_oabi_syscall(current);
+	return task_thread_info(task)->syscall;
 }
 
 static inline void syscall_rollback(struct task_struct *task,
@@ -68,30 +51,6 @@ static inline void syscall_set_return_value(struct task_struct *task,
 	regs->ARM_r0 = (long) error ? error : val;
 }
 
-static inline void syscall_set_nr(struct task_struct *task,
-				  struct pt_regs *regs,
-				  int nr)
-{
-	if (nr == -1) {
-		task_thread_info(task)->abi_syscall = -1;
-		/*
-		 * When the syscall number is set to -1, the syscall will be
-		 * skipped.  In this case the syscall return value has to be
-		 * set explicitly, otherwise the first syscall argument is
-		 * returned as the syscall return value.
-		 */
-		syscall_set_return_value(task, regs, -ENOSYS, 0);
-		return;
-	}
-	if ((IS_ENABLED(CONFIG_AEABI) && !IS_ENABLED(CONFIG_OABI_COMPAT))) {
-		task_thread_info(task)->abi_syscall = nr;
-		return;
-	}
-	task_thread_info(task)->abi_syscall =
-		(task_thread_info(task)->abi_syscall & ~__NR_SYSCALL_MASK) |
-		(nr & __NR_SYSCALL_MASK);
-}
-
 #define SYSCALL_MAX_ARGS 7
 
 static inline void syscall_get_arguments(struct task_struct *task,
@@ -108,13 +67,10 @@ static inline void syscall_set_arguments(struct task_struct *task,
 					 struct pt_regs *regs,
 					 const unsigned long *args)
 {
-	memcpy(&regs->ARM_r0, args, 6 * sizeof(args[0]));
-	/*
-	 * Also copy the first argument into ARM_ORIG_r0
-	 * so that syscall_get_arguments() would return it
-	 * instead of the previous value.
-	 */
-	regs->ARM_ORIG_r0 = regs->ARM_r0;
+	regs->ARM_ORIG_r0 = args[0];
+	args++;
+
+	memcpy(&regs->ARM_r0 + 1, args, 5 * sizeof(args[0]));
 }
 
 static inline int syscall_get_arch(struct task_struct *task)

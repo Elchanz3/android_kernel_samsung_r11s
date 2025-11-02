@@ -14,7 +14,8 @@
 
 #include "adau1977.h"
 
-static int adau1977_i2c_probe(struct i2c_client *client)
+static int adau1977_i2c_probe(struct i2c_client *client,
+	const struct i2c_device_id *id)
 {
 	struct regmap_config config;
 
@@ -24,7 +25,7 @@ static int adau1977_i2c_probe(struct i2c_client *client)
 
 	return adau1977_probe(&client->dev,
 		devm_regmap_init_i2c(client, &config),
-		(uintptr_t)i2c_get_match_data(client), NULL);
+		id->driver_data, NULL);
 }
 
 static const struct i2c_device_id adau1977_i2c_ids[] = {

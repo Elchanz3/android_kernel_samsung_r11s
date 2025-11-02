@@ -43,8 +43,7 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 	if (snd_BUG_ON((subdevice_id & 0xfff0) != LAYLA24))
 		return -ENODEV;
 
-	err = init_dsp_comm_page(chip);
-	if (err) {
+	if ((err = init_dsp_comm_page(chip))) {
 		dev_err(chip->card->dev,
 			"init_hw - could not initialize DSP comm page\n");
 		return err;
@@ -63,13 +62,11 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 		ECHOCAPS_HAS_DIGITAL_MODE_SPDIF_OPTICAL |
 		ECHOCAPS_HAS_DIGITAL_MODE_ADAT;
 
-	err = load_firmware(chip);
-	if (err < 0)
+	if ((err = load_firmware(chip)) < 0)
 		return err;
 	chip->bad_board = false;
 
-	err = init_line_levels(chip);
-	if (err < 0)
+	if ((err = init_line_levels(chip)) < 0)
 		return err;
 
 	return err;
@@ -358,15 +355,16 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 
 	if (incompatible_clock) {	/* Switch to 48KHz, internal */
 		chip->sample_rate = 48000;
-		guard(spinlock_irq)(&chip->lock);
+		spin_lock_irq(&chip->lock);
 		set_input_clock(chip, ECHO_CLOCK_INTERNAL);
+		spin_unlock_irq(&chip->lock);
 	}
 
 	/* switch_asic() can sleep */
 	if (switch_asic(chip, asic) < 0)
 		return -EIO;
 
-	guard(spinlock_irq)(&chip->lock);
+	spin_lock_irq(&chip->lock);
 
 	/* Tweak the control register */
 	control_reg = le32_to_cpu(chip->comm_page->control_register);
@@ -386,6 +384,7 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 	}
 
 	err = write_control_reg(chip, control_reg, true);
+	spin_unlock_irq(&chip->lock);
 	if (err < 0)
 		return err;
 	chip->digital_mode = mode;

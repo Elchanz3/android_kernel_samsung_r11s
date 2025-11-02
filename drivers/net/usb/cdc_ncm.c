@@ -43,7 +43,6 @@
 #include <linux/ctype.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
-#include <linux/kstrtox.h>
 #include <linux/workqueue.h>
 #include <linux/mii.h>
 #include <linux/crc32.h>
@@ -62,7 +61,7 @@ static bool prefer_mbim;
 module_param(prefer_mbim, bool, 0644);
 MODULE_PARM_DESC(prefer_mbim, "Prefer MBIM setting on dual NCM/MBIM functions");
 
-static void cdc_ncm_txpath_bh(struct tasklet_struct *t);
+static void cdc_ncm_txpath_bh(unsigned long param);
 static void cdc_ncm_tx_timeout_start(struct cdc_ncm_ctx *ctx);
 static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *hr_timer);
 static struct usb_driver cdc_ncm_driver;
@@ -134,17 +133,17 @@ static void cdc_ncm_get_strings(struct net_device __always_unused *netdev, u32 s
 static void cdc_ncm_update_rxtx_max(struct usbnet *dev, u32 new_rx, u32 new_tx);
 
 static const struct ethtool_ops cdc_ncm_ethtool_ops = {
-	.get_link		= usbnet_get_link,
-	.nway_reset		= usbnet_nway_reset,
-	.get_drvinfo		= usbnet_get_drvinfo,
-	.get_msglevel		= usbnet_get_msglevel,
-	.set_msglevel		= usbnet_set_msglevel,
-	.get_ts_info		= ethtool_op_get_ts_info,
-	.get_sset_count		= cdc_ncm_get_sset_count,
-	.get_strings		= cdc_ncm_get_strings,
-	.get_ethtool_stats	= cdc_ncm_get_ethtool_stats,
-	.get_link_ksettings	= usbnet_get_link_ksettings_internal,
-	.set_link_ksettings	= NULL,
+	.get_link          = usbnet_get_link,
+	.nway_reset        = usbnet_nway_reset,
+	.get_drvinfo       = usbnet_get_drvinfo,
+	.get_msglevel      = usbnet_get_msglevel,
+	.set_msglevel      = usbnet_set_msglevel,
+	.get_ts_info       = ethtool_op_get_ts_info,
+	.get_sset_count    = cdc_ncm_get_sset_count,
+	.get_strings       = cdc_ncm_get_strings,
+	.get_ethtool_stats = cdc_ncm_get_ethtool_stats,
+	.get_link_ksettings      = usbnet_get_link_ksettings,
+	.set_link_ksettings      = usbnet_set_link_ksettings,
 };
 
 static u32 cdc_ncm_check_rx_max(struct usbnet *dev, u32 new_rx)
@@ -198,8 +197,7 @@ static u32 cdc_ncm_check_tx_max(struct usbnet *dev, u32 new_tx)
 	return val;
 }
 
-static ssize_t min_tx_pkt_show(struct device *d,
-			       struct device_attribute *attr, char *buf)
+static ssize_t cdc_ncm_show_min_tx_pkt(struct device *d, struct device_attribute *attr, char *buf)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -207,8 +205,7 @@ static ssize_t min_tx_pkt_show(struct device *d,
 	return sprintf(buf, "%u\n", ctx->min_tx_pkt);
 }
 
-static ssize_t rx_max_show(struct device *d,
-			   struct device_attribute *attr, char *buf)
+static ssize_t cdc_ncm_show_rx_max(struct device *d, struct device_attribute *attr, char *buf)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -216,8 +213,7 @@ static ssize_t rx_max_show(struct device *d,
 	return sprintf(buf, "%u\n", ctx->rx_max);
 }
 
-static ssize_t tx_max_show(struct device *d,
-			   struct device_attribute *attr, char *buf)
+static ssize_t cdc_ncm_show_tx_max(struct device *d, struct device_attribute *attr, char *buf)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -225,8 +221,7 @@ static ssize_t tx_max_show(struct device *d,
 	return sprintf(buf, "%u\n", ctx->tx_max);
 }
 
-static ssize_t tx_timer_usecs_show(struct device *d,
-				   struct device_attribute *attr, char *buf)
+static ssize_t cdc_ncm_show_tx_timer_usecs(struct device *d, struct device_attribute *attr, char *buf)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -234,9 +229,7 @@ static ssize_t tx_timer_usecs_show(struct device *d,
 	return sprintf(buf, "%u\n", ctx->timer_interval / (u32)NSEC_PER_USEC);
 }
 
-static ssize_t min_tx_pkt_store(struct device *d,
-				struct device_attribute *attr,
-				const char *buf, size_t len)
+static ssize_t cdc_ncm_store_min_tx_pkt(struct device *d,  struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -250,9 +243,7 @@ static ssize_t min_tx_pkt_store(struct device *d,
 	return len;
 }
 
-static ssize_t rx_max_store(struct device *d,
-			    struct device_attribute *attr,
-			    const char *buf, size_t len)
+static ssize_t cdc_ncm_store_rx_max(struct device *d,  struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -265,9 +256,7 @@ static ssize_t rx_max_store(struct device *d,
 	return len;
 }
 
-static ssize_t tx_max_store(struct device *d,
-			    struct device_attribute *attr,
-			    const char *buf, size_t len)
+static ssize_t cdc_ncm_store_tx_max(struct device *d,  struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -280,9 +269,7 @@ static ssize_t tx_max_store(struct device *d,
 	return len;
 }
 
-static ssize_t tx_timer_usecs_store(struct device *d,
-				    struct device_attribute *attr,
-				    const char *buf, size_t len)
+static ssize_t cdc_ncm_store_tx_timer_usecs(struct device *d,  struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct usbnet *dev = netdev_priv(to_net_dev(d));
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
@@ -303,10 +290,10 @@ static ssize_t tx_timer_usecs_store(struct device *d,
 	return len;
 }
 
-static DEVICE_ATTR_RW(min_tx_pkt);
-static DEVICE_ATTR_RW(rx_max);
-static DEVICE_ATTR_RW(tx_max);
-static DEVICE_ATTR_RW(tx_timer_usecs);
+static DEVICE_ATTR(min_tx_pkt, 0644, cdc_ncm_show_min_tx_pkt, cdc_ncm_store_min_tx_pkt);
+static DEVICE_ATTR(rx_max, 0644, cdc_ncm_show_rx_max, cdc_ncm_store_rx_max);
+static DEVICE_ATTR(tx_max, 0644, cdc_ncm_show_tx_max, cdc_ncm_store_tx_max);
+static DEVICE_ATTR(tx_timer_usecs, 0644, cdc_ncm_show_tx_timer_usecs, cdc_ncm_store_tx_timer_usecs);
 
 static ssize_t ndp_to_end_show(struct device *d, struct device_attribute *attr, char *buf)
 {
@@ -322,7 +309,7 @@ static ssize_t ndp_to_end_store(struct device *d,  struct device_attribute *attr
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
 	bool enable;
 
-	if (kstrtobool(buf, &enable))
+	if (strtobool(buf, &enable))
 		return -EINVAL;
 
 	/* no change? */
@@ -445,7 +432,7 @@ static void cdc_ncm_update_rxtx_max(struct usbnet *dev, u32 new_rx, u32 new_tx)
 	 * .bind which is called before usbnet sets up dev->maxpacket
 	 */
 	if (val != le32_to_cpu(ctx->ncm_parm.dwNtbOutMaxSize) &&
-	    val % usb_maxpacket(dev->udev, dev->out) == 0)
+	    val % usb_maxpacket(dev->udev, dev->out, 1) == 0)
 		val++;
 
 	/* we might need to flush any pending tx buffers if running */
@@ -469,7 +456,7 @@ static void cdc_ncm_update_rxtx_max(struct usbnet *dev, u32 new_rx, u32 new_tx)
 	usbnet_update_max_qlen(dev);
 
 	/* never pad more than 3 full USB packets per transfer */
-	ctx->min_tx_pkt = clamp_t(u16, ctx->tx_max - 3 * usb_maxpacket(dev->udev, dev->out),
+	ctx->min_tx_pkt = clamp_t(u16, ctx->tx_max - 3 * usb_maxpacket(dev->udev, dev->out, 1),
 				  CDC_NCM_MIN_TX_PKT, ctx->tx_max);
 }
 
@@ -646,7 +633,7 @@ out:
 	/* set MTU to max supported by the device if necessary */
 	dev->net->mtu = min_t(int, dev->net->mtu, ctx->max_datagram_size - cdc_ncm_eth_hlen(dev));
 
-	/* do not exceed operator preferred MTU */
+	/* do not exceed operater preferred MTU */
 	if (ctx->mbim_extended_desc) {
 		mbim_mtu = le16_to_cpu(ctx->mbim_extended_desc->wMTU);
 		if (mbim_mtu != 0 && mbim_mtu < dev->net->mtu)
@@ -703,7 +690,7 @@ static int cdc_ncm_setup(struct usbnet *dev)
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
 	u32 def_rx, def_tx;
 
-	/* be conservative when selecting initial buffer size to
+	/* be conservative when selecting intial buffer size to
 	 * increase the number of hosts this will work for
 	 */
 	def_rx = min_t(u32, CDC_NCM_NTB_DEF_SIZE_RX,
@@ -798,7 +785,7 @@ int cdc_ncm_change_mtu(struct net_device *net, int new_mtu)
 {
 	struct usbnet *dev = netdev_priv(net);
 
-	WRITE_ONCE(net->mtu, new_mtu);
+	net->mtu = new_mtu;
 	cdc_ncm_set_dgram_size(dev, new_mtu + cdc_ncm_eth_hlen(dev));
 
 	return 0;
@@ -811,7 +798,7 @@ static const struct net_device_ops cdc_ncm_netdev_ops = {
 	.ndo_start_xmit	     = usbnet_start_xmit,
 	.ndo_tx_timeout	     = usbnet_tx_timeout,
 	.ndo_set_rx_mode     = usbnet_set_rx_mode,
-	.ndo_get_stats64     = dev_get_tstats64,
+	.ndo_get_stats64     = usbnet_get_stats64,
 	.ndo_change_mtu	     = cdc_ncm_change_mtu,
 	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_validate_addr   = eth_validate_addr,
@@ -831,10 +818,9 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->dev = dev;
-
-	hrtimer_setup(&ctx->tx_timer, &cdc_ncm_tx_timer_cb, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	tasklet_setup(&ctx->bh, cdc_ncm_txpath_bh);
+	hrtimer_init(&ctx->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	ctx->tx_timer.function = &cdc_ncm_tx_timer_cb;
+	tasklet_init(&ctx->bh, cdc_ncm_txpath_bh, (unsigned long)dev);
 	atomic_set(&ctx->stop, 0);
 	spin_lock_init(&ctx->mtx);
 
@@ -868,17 +854,17 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
 
 	/* check if we got everything */
 	if (!ctx->data) {
-		dev_err(&intf->dev, "CDC Union missing and no IAD found\n");
+		dev_dbg(&intf->dev, "CDC Union missing and no IAD found\n");
 		goto error;
 	}
 	if (cdc_ncm_comm_intf_is_mbim(intf->cur_altsetting)) {
 		if (!ctx->mbim_desc) {
-			dev_err(&intf->dev, "MBIM functional descriptor missing\n");
+			dev_dbg(&intf->dev, "MBIM functional descriptor missing\n");
 			goto error;
 		}
 	} else {
 		if (!ctx->ether_desc || !ctx->func_desc) {
-			dev_err(&intf->dev, "NCM or ECM functional descriptors missing\n");
+			dev_dbg(&intf->dev, "NCM or ECM functional descriptors missing\n");
 			goto error;
 		}
 	}
@@ -887,14 +873,10 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
 	if (ctx->data != ctx->control) {
 		temp = usb_driver_claim_interface(driver, ctx->data, dev);
 		if (temp) {
-			dev_err(&intf->dev, "failed to claim data intf\n");
+			dev_dbg(&intf->dev, "failed to claim data intf\n");
 			goto error;
 		}
 	}
-
-	if (ctx->func_desc)
-		ctx->filtering_supported = !!(ctx->func_desc->bmNetworkCapabilities
-			& USB_CDC_NCM_NCAP_ETH_FILTER);
 
 	iface_no = ctx->data->cur_altsetting->desc.bInterfaceNumber;
 
@@ -936,18 +918,18 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
 
 	cdc_ncm_find_endpoints(dev, ctx->data);
 	cdc_ncm_find_endpoints(dev, ctx->control);
-	if (!dev->in || !dev->out ||
-	    (!dev->status && dev->driver_info->flags & FLAG_LINK_INTR)) {
+	if (!dev->in || !dev->out || !dev->status) {
 		dev_dbg(&intf->dev, "failed to collect endpoints\n");
 		goto error2;
 	}
 
+	usb_set_intfdata(ctx->data, dev);
 	usb_set_intfdata(ctx->control, dev);
 
 	if (ctx->ether_desc) {
 		temp = usbnet_get_ethernet_addr(dev, ctx->ether_desc->iMACAddress);
 		if (temp) {
-			dev_err(&intf->dev, "failed to get mac address\n");
+			dev_dbg(&intf->dev, "failed to get mac address\n");
 			goto error2;
 		}
 		dev_info(&intf->dev, "MAC-Address: %pM\n", dev->net->dev_addr);
@@ -1341,7 +1323,7 @@ cdc_ncm_fill_tx_frame(struct usbnet *dev, struct sk_buff *skb, __le32 sign)
 			break;
 		}
 
-		/* calculate frame number within this NDP */
+		/* calculate frame number withing this NDP */
 		if (ctx->is_ndp16) {
 			ndplen = le16_to_cpu(ndp.ndp16->wLength);
 			index = (ndplen - sizeof(struct usb_cdc_ncm_ndp16)) / sizeof(struct usb_cdc_ncm_dpe16) - 1;
@@ -1498,24 +1480,24 @@ static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *timer)
 	return HRTIMER_NORESTART;
 }
 
-static void cdc_ncm_txpath_bh(struct tasklet_struct *t)
+static void cdc_ncm_txpath_bh(unsigned long param)
 {
-	struct cdc_ncm_ctx *ctx = from_tasklet(ctx, t, bh);
-	struct usbnet *dev = ctx->dev;
+	struct usbnet *dev = (struct usbnet *)param;
+	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
 
-	spin_lock(&ctx->mtx);
+	spin_lock_bh(&ctx->mtx);
 	if (ctx->tx_timer_pending != 0) {
 		ctx->tx_timer_pending--;
 		cdc_ncm_tx_timeout_start(ctx);
-		spin_unlock(&ctx->mtx);
+		spin_unlock_bh(&ctx->mtx);
 	} else if (dev->net != NULL) {
 		ctx->tx_reason_timeout++;	/* count reason for transmitting */
-		spin_unlock(&ctx->mtx);
+		spin_unlock_bh(&ctx->mtx);
 		netif_tx_lock_bh(dev->net);
 		usbnet_start_xmit(NULL, dev->net);
 		netif_tx_unlock_bh(dev->net);
 	} else {
-		spin_unlock(&ctx->mtx);
+		spin_unlock_bh(&ctx->mtx);
 	}
 }
 
@@ -1850,9 +1832,24 @@ static void
 cdc_ncm_speed_change(struct usbnet *dev,
 		     struct usb_cdc_speed_change *data)
 {
-	/* RTL8156 shipped before 2021 sends notification about every 32ms. */
-	dev->rx_speed = le32_to_cpu(data->DLBitRRate);
-	dev->tx_speed = le32_to_cpu(data->ULBitRate);
+	uint32_t rx_speed = le32_to_cpu(data->DLBitRRate);
+	uint32_t tx_speed = le32_to_cpu(data->ULBitRate);
+
+	/*
+	 * Currently the USB-NET API does not support reporting the actual
+	 * device speed. Do print it instead.
+	 */
+	if ((tx_speed > 1000000) && (rx_speed > 1000000)) {
+		netif_info(dev, link, dev->net,
+			   "%u mbit/s downlink %u mbit/s uplink\n",
+			   (unsigned int)(rx_speed / 1000000U),
+			   (unsigned int)(tx_speed / 1000000U));
+	} else {
+		netif_info(dev, link, dev->net,
+			   "%u kbit/s downlink %u kbit/s uplink\n",
+			   (unsigned int)(rx_speed / 1000U),
+			   (unsigned int)(tx_speed / 1000U));
+	}
 }
 
 static void cdc_ncm_status(struct usbnet *dev, struct urb *urb)
@@ -1878,11 +1875,7 @@ static void cdc_ncm_status(struct usbnet *dev, struct urb *urb)
 		 * USB_CDC_NOTIFY_NETWORK_CONNECTION notification shall be
 		 * sent by device after USB_CDC_NOTIFY_SPEED_CHANGE.
 		 */
-		/* RTL8156 shipped before 2021 sends notification about
-		 * every 32ms. Don't forward notification if state is same.
-		 */
-		if (netif_carrier_ok(dev->net) != !!event->wValue)
-			usbnet_link_change(dev, !!event->wValue, 0);
+		usbnet_link_change(dev, !!event->wValue, 0);
 		break;
 
 	case USB_CDC_NOTIFY_SPEED_CHANGE:
@@ -1902,60 +1895,10 @@ static void cdc_ncm_status(struct usbnet *dev, struct urb *urb)
 	}
 }
 
-static void cdc_ncm_update_filter(struct usbnet *dev)
-{
-	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
-
-	if (ctx->filtering_supported)
-		usbnet_cdc_update_filter(dev);
-}
-
 static const struct driver_info cdc_ncm_info = {
-	.description = "CDC NCM (NO ZLP)",
+	.description = "CDC NCM",
 	.flags = FLAG_POINTTOPOINT | FLAG_NO_SETINT | FLAG_MULTI_PACKET
 			| FLAG_LINK_INTR | FLAG_ETHER,
-	.bind = cdc_ncm_bind,
-	.unbind = cdc_ncm_unbind,
-	.manage_power = usbnet_manage_power,
-	.status = cdc_ncm_status,
-	.rx_fixup = cdc_ncm_rx_fixup,
-	.tx_fixup = cdc_ncm_tx_fixup,
-	.set_rx_mode = cdc_ncm_update_filter,
-};
-
-/* Same as cdc_ncm_info, but with FLAG_SEND_ZLP  */
-static const struct driver_info cdc_ncm_zlp_info = {
-	.description = "CDC NCM (SEND ZLP)",
-	.flags = FLAG_POINTTOPOINT | FLAG_NO_SETINT | FLAG_MULTI_PACKET
-			| FLAG_LINK_INTR | FLAG_ETHER | FLAG_SEND_ZLP,
-	.bind = cdc_ncm_bind,
-	.unbind = cdc_ncm_unbind,
-	.manage_power = usbnet_manage_power,
-	.status = cdc_ncm_status,
-	.rx_fixup = cdc_ncm_rx_fixup,
-	.tx_fixup = cdc_ncm_tx_fixup,
-	.set_rx_mode = cdc_ncm_update_filter,
-};
-
-/* Same as cdc_ncm_info, but with FLAG_SEND_ZLP */
-static const struct driver_info apple_tethering_interface_info = {
-	.description = "CDC NCM (Apple Tethering)",
-	.flags = FLAG_POINTTOPOINT | FLAG_NO_SETINT | FLAG_MULTI_PACKET
-			| FLAG_LINK_INTR | FLAG_ETHER | FLAG_SEND_ZLP,
-	.bind = cdc_ncm_bind,
-	.unbind = cdc_ncm_unbind,
-	.manage_power = usbnet_manage_power,
-	.status = cdc_ncm_status,
-	.rx_fixup = cdc_ncm_rx_fixup,
-	.tx_fixup = cdc_ncm_tx_fixup,
-	.set_rx_mode = usbnet_cdc_update_filter,
-};
-
-/* Same as apple_tethering_interface_info, but without FLAG_LINK_INTR */
-static const struct driver_info apple_private_interface_info = {
-	.description = "CDC NCM (Apple Private)",
-	.flags = FLAG_POINTTOPOINT | FLAG_NO_SETINT | FLAG_MULTI_PACKET
-			| FLAG_ETHER | FLAG_SEND_ZLP,
 	.bind = cdc_ncm_bind,
 	.unbind = cdc_ncm_unbind,
 	.manage_power = usbnet_manage_power,
@@ -1976,7 +1919,7 @@ static const struct driver_info wwan_info = {
 	.status = cdc_ncm_status,
 	.rx_fixup = cdc_ncm_rx_fixup,
 	.tx_fixup = cdc_ncm_tx_fixup,
-	.set_rx_mode = cdc_ncm_update_filter,
+	.set_rx_mode = usbnet_cdc_update_filter,
 };
 
 /* Same as wwan_info, but with FLAG_NOARP  */
@@ -1990,26 +1933,10 @@ static const struct driver_info wwan_noarp_info = {
 	.status = cdc_ncm_status,
 	.rx_fixup = cdc_ncm_rx_fixup,
 	.tx_fixup = cdc_ncm_tx_fixup,
-	.set_rx_mode = cdc_ncm_update_filter,
+	.set_rx_mode = usbnet_cdc_update_filter,
 };
 
 static const struct usb_device_id cdc_devs[] = {
-	/* iPhone */
-	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x12a8, 2),
-		.driver_info = (unsigned long)&apple_tethering_interface_info,
-	},
-	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x12a8, 4),
-		.driver_info = (unsigned long)&apple_private_interface_info,
-	},
-
-	/* iPad */
-	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x12ab, 2),
-		.driver_info = (unsigned long)&apple_tethering_interface_info,
-	},
-	{ USB_DEVICE_INTERFACE_NUMBER(0x05ac, 0x12ab, 4),
-		.driver_info = (unsigned long)&apple_private_interface_info,
-	},
-
 	/* Ericsson MBM devices like F5521gw */
 	{ .match_flags = USB_DEVICE_ID_MATCH_INT_INFO
 		| USB_DEVICE_ID_MATCH_VENDOR,
@@ -2085,23 +2012,6 @@ static const struct usb_device_id cdc_devs[] = {
 		USB_CLASS_COMM,
 		USB_CDC_SUBCLASS_NCM, USB_CDC_PROTO_NONE),
 	  .driver_info = (unsigned long)&wwan_info,
-	},
-
-	/* Intel modem (label from OEM reads Fibocom L850-GL) */
-	{ USB_DEVICE_AND_INTERFACE_INFO(0x8087, 0x095a,
-		USB_CLASS_COMM,
-		USB_CDC_SUBCLASS_NCM, USB_CDC_PROTO_NONE),
-	  .driver_info = (unsigned long)&wwan_info,
-	},
-
-	/* DisplayLink docking stations */
-	{ .match_flags = USB_DEVICE_ID_MATCH_INT_INFO
-		| USB_DEVICE_ID_MATCH_VENDOR,
-	  .idVendor = 0x17e9,
-	  .bInterfaceClass = USB_CLASS_COMM,
-	  .bInterfaceSubClass = USB_CDC_SUBCLASS_NCM,
-	  .bInterfaceProtocol = USB_CDC_PROTO_NONE,
-	  .driver_info = (unsigned long)&cdc_ncm_zlp_info,
 	},
 
 	/* Generic CDC-NCM devices */

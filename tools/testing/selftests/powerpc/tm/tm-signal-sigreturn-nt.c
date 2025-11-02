@@ -32,7 +32,6 @@ int tm_signal_sigreturn_nt(void)
 	struct sigaction trap_sa;
 
 	SKIP_IF(!have_htm());
-	SKIP_IF(htm_is_synthetic());
 
 	trap_sa.sa_flags = SA_SIGINFO;
 	trap_sa.sa_sigaction = trap_signal_handler;
@@ -46,5 +45,6 @@ int tm_signal_sigreturn_nt(void)
 
 int main(int argc, char **argv)
 {
-	return test_harness(tm_signal_sigreturn_nt, "tm_signal_sigreturn_nt");
+	test_harness(tm_signal_sigreturn_nt, "tm_signal_sigreturn_nt");
 }
+

@@ -22,33 +22,19 @@
 #include <linux/pm_qos.h>
 #include <linux/slab.h>
 #include <linux/types.h>
-#include <linux/input/touch-overlay.h>
 
 #define ST1232_TS_NAME	"st1232-ts"
 #define ST1633_TS_NAME	"st1633-ts"
 
-#define REG_STATUS		0x01	/* Device Status | Error Code */
-
-#define STATUS_NORMAL		0x00
-#define STATUS_INIT		0x01
-#define STATUS_ERROR		0x02
-#define STATUS_AUTO_TUNING	0x03
-#define STATUS_IDLE		0x04
-#define STATUS_POWER_DOWN	0x05
-
-#define ERROR_NONE		0x00
-#define ERROR_INVALID_ADDRESS	0x10
-#define ERROR_INVALID_VALUE	0x20
-#define ERROR_INVALID_PLATFORM	0x30
-
-#define REG_XY_RESOLUTION	0x04
-#define REG_XY_COORDINATES	0x12
 #define ST_TS_MAX_FINGERS	10
 
 struct st_chip_info {
 	bool	have_z;
+	u16	max_x;
+	u16	max_y;
 	u16	max_area;
 	u16	max_fingers;
+	u8	start_reg;
 };
 
 struct st1232_ts_data {
@@ -58,25 +44,24 @@ struct st1232_ts_data {
 	struct dev_pm_qos_request low_latency_req;
 	struct gpio_desc *reset_gpio;
 	const struct st_chip_info *chip_info;
-	struct list_head touch_overlay_list;
 	int read_buf_len;
 	u8 *read_buf;
 };
 
-static int st1232_ts_read_data(struct st1232_ts_data *ts, u8 reg,
-			       unsigned int n)
+static int st1232_ts_read_data(struct st1232_ts_data *ts)
 {
 	struct i2c_client *client = ts->client;
+	u8 start_reg = ts->chip_info->start_reg;
 	struct i2c_msg msg[] = {
 		{
 			.addr	= client->addr,
-			.len	= sizeof(reg),
-			.buf	= &reg,
+			.len	= sizeof(start_reg),
+			.buf	= &start_reg,
 		},
 		{
 			.addr	= client->addr,
 			.flags	= I2C_M_RD | I2C_M_DMA_SAFE,
-			.len	= n,
+			.len	= ts->read_buf_len,
 			.buf	= ts->read_buf,
 		}
 	};
@@ -85,46 +70,6 @@ static int st1232_ts_read_data(struct st1232_ts_data *ts, u8 reg,
 	ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
 	if (ret != ARRAY_SIZE(msg))
 		return ret < 0 ? ret : -EIO;
-
-	return 0;
-}
-
-static int st1232_ts_wait_ready(struct st1232_ts_data *ts)
-{
-	unsigned int retries;
-	int error;
-
-	for (retries = 100; retries; retries--) {
-		error = st1232_ts_read_data(ts, REG_STATUS, 1);
-		if (!error) {
-			switch (ts->read_buf[0]) {
-			case STATUS_NORMAL | ERROR_NONE:
-			case STATUS_IDLE | ERROR_NONE:
-				return 0;
-			}
-		}
-
-		usleep_range(1000, 2000);
-	}
-
-	return -ENXIO;
-}
-
-static int st1232_ts_read_resolution(struct st1232_ts_data *ts, u16 *max_x,
-				     u16 *max_y)
-{
-	u8 *buf;
-	int error;
-
-	/* select resolution register */
-	error = st1232_ts_read_data(ts, REG_XY_RESOLUTION, 3);
-	if (error)
-		return error;
-
-	buf = ts->read_buf;
-
-	*max_x = (((buf[0] & 0x0070) << 4) | buf[1]) - 1;
-	*max_y = (((buf[0] & 0x0007) << 8) | buf[2]) - 1;
 
 	return 0;
 }
@@ -158,10 +103,6 @@ static int st1232_ts_parse_and_report(struct st1232_ts_data *ts)
 
 	input_mt_assign_slots(input, slots, pos, n_contacts, 0);
 	for (i = 0; i < n_contacts; i++) {
-		if (touch_overlay_process_contact(&ts->touch_overlay_list,
-						  input, &pos[i], slots[i]))
-			continue;
-
 		input_mt_slot(input, slots[i]);
 		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
 		input_report_abs(input, ABS_MT_POSITION_X, pos[i].x);
@@ -170,7 +111,6 @@ static int st1232_ts_parse_and_report(struct st1232_ts_data *ts)
 			input_report_abs(input, ABS_MT_TOUCH_MAJOR, z[i]);
 	}
 
-	touch_overlay_sync_frame(&ts->touch_overlay_list, input);
 	input_mt_sync_frame(input);
 	input_sync(input);
 
@@ -183,7 +123,7 @@ static irqreturn_t st1232_ts_irq_handler(int irq, void *dev_id)
 	int count;
 	int error;
 
-	error = st1232_ts_read_data(ts, REG_XY_COORDINATES, ts->read_buf_len);
+	error = st1232_ts_read_data(ts);
 	if (error)
 		goto out;
 
@@ -217,23 +157,28 @@ static void st1232_ts_power_off(void *data)
 
 static const struct st_chip_info st1232_chip_info = {
 	.have_z		= true,
+	.max_x		= 0x31f, /* 800 - 1 */
+	.max_y		= 0x1df, /* 480 -1 */
 	.max_area	= 0xff,
 	.max_fingers	= 2,
+	.start_reg	= 0x12,
 };
 
 static const struct st_chip_info st1633_chip_info = {
 	.have_z		= false,
+	.max_x		= 0x13f, /* 320 - 1 */
+	.max_y		= 0x1df, /* 480 -1 */
 	.max_area	= 0x00,
 	.max_fingers	= 5,
+	.start_reg	= 0x12,
 };
 
-static int st1232_ts_probe(struct i2c_client *client)
+static int st1232_ts_probe(struct i2c_client *client,
+			   const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	const struct st_chip_info *match;
 	struct st1232_ts_data *ts;
 	struct input_dev *input_dev;
-	u16 max_x, max_y;
 	int error;
 
 	match = device_get_match_data(&client->dev);
@@ -294,39 +239,14 @@ static int st1232_ts_probe(struct i2c_client *client)
 	input_dev->name = "st1232-touchscreen";
 	input_dev->id.bustype = BUS_I2C;
 
-	/* Wait until device is ready */
-	error = st1232_ts_wait_ready(ts);
-	if (error)
-		return error;
-
 	if (ts->chip_info->have_z)
 		input_set_abs_params(input_dev, ABS_MT_TOUCH_MAJOR, 0,
 				     ts->chip_info->max_area, 0, 0);
 
-	/* map overlay objects if defined in the device tree */
-	INIT_LIST_HEAD(&ts->touch_overlay_list);
-	error = touch_overlay_map(&ts->touch_overlay_list, input_dev);
-	if (error)
-		return error;
-
-	if (touch_overlay_mapped_touchscreen(&ts->touch_overlay_list)) {
-		/* Read resolution from the overlay touchscreen if defined */
-		touch_overlay_get_touchscreen_abs(&ts->touch_overlay_list,
-						  &max_x, &max_y);
-	} else {
-		/* Read resolution from the chip */
-		error = st1232_ts_read_resolution(ts, &max_x, &max_y);
-		if (error) {
-			dev_err(&client->dev,
-				"Failed to read resolution: %d\n", error);
-			return error;
-		}
-	}
-
 	input_set_abs_params(input_dev, ABS_MT_POSITION_X,
-			     0, max_x, 0, 0);
+			     0, ts->chip_info->max_x, 0, 0);
 	input_set_abs_params(input_dev, ABS_MT_POSITION_Y,
-			     0, max_y, 0, 0);
+			     0, ts->chip_info->max_y, 0, 0);
 
 	touchscreen_parse_properties(input_dev, true, &ts->prop);
 
@@ -359,7 +279,7 @@ static int st1232_ts_probe(struct i2c_client *client)
 	return 0;
 }
 
-static int st1232_ts_suspend(struct device *dev)
+static int __maybe_unused st1232_ts_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct st1232_ts_data *ts = i2c_get_clientdata(client);
@@ -372,7 +292,7 @@ static int st1232_ts_suspend(struct device *dev)
 	return 0;
 }
 
-static int st1232_ts_resume(struct device *dev)
+static int __maybe_unused st1232_ts_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct st1232_ts_data *ts = i2c_get_clientdata(client);
@@ -385,8 +305,8 @@ static int st1232_ts_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(st1232_ts_pm_ops,
-				st1232_ts_suspend, st1232_ts_resume);
+static SIMPLE_DEV_PM_OPS(st1232_ts_pm_ops,
+			 st1232_ts_suspend, st1232_ts_resume);
 
 static const struct i2c_device_id st1232_ts_id[] = {
 	{ ST1232_TS_NAME, (unsigned long)&st1232_chip_info },
@@ -408,8 +328,7 @@ static struct i2c_driver st1232_ts_driver = {
 	.driver = {
 		.name	= ST1232_TS_NAME,
 		.of_match_table = st1232_ts_dt_ids,
-		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
-		.pm	= pm_sleep_ptr(&st1232_ts_pm_ops),
+		.pm	= &st1232_ts_pm_ops,
 	},
 };
 

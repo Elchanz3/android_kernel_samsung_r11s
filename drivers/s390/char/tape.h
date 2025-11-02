@@ -264,6 +264,7 @@ extern void tape_state_set(struct tape_device *, enum tape_state);
 
 extern int tape_generic_online(struct tape_device *, struct tape_discipline *);
 extern int tape_generic_offline(struct ccw_device *);
+extern int tape_generic_pm_suspend(struct ccw_device *);
 
 /* Externals from tape_devmap.c */
 extern int tape_generic_probe(struct ccw_device *);
@@ -305,9 +306,7 @@ tape_ccw_cc(struct ccw1 *ccw, __u8 cmd_code, __u16 memsize, void *cda)
 	ccw->cmd_code = cmd_code;
 	ccw->flags = CCW_FLAG_CC;
 	ccw->count = memsize;
-	ccw->cda = 0;
-	if (cda)
-		ccw->cda = virt_to_dma32(cda);
+	ccw->cda = (__u32)(addr_t) cda;
 	return ccw + 1;
 }
 
@@ -317,9 +316,7 @@ tape_ccw_end(struct ccw1 *ccw, __u8 cmd_code, __u16 memsize, void *cda)
 	ccw->cmd_code = cmd_code;
 	ccw->flags = 0;
 	ccw->count = memsize;
-	ccw->cda = 0;
-	if (cda)
-		ccw->cda = virt_to_dma32(cda);
+	ccw->cda = (__u32)(addr_t) cda;
 	return ccw + 1;
 }
 
@@ -329,7 +326,7 @@ tape_ccw_cmd(struct ccw1 *ccw, __u8 cmd_code)
 	ccw->cmd_code = cmd_code;
 	ccw->flags = 0;
 	ccw->count = 0;
-	ccw->cda = virt_to_dma32(&ccw->cmd_code);
+	ccw->cda = (__u32)(addr_t) &ccw->cmd_code;
 	return ccw + 1;
 }
 
@@ -340,7 +337,7 @@ tape_ccw_repeat(struct ccw1 *ccw, __u8 cmd_code, int count)
 		ccw->cmd_code = cmd_code;
 		ccw->flags = CCW_FLAG_CC;
 		ccw->count = 0;
-		ccw->cda = virt_to_dma32(&ccw->cmd_code);
+		ccw->cda = (__u32)(addr_t) &ccw->cmd_code;
 		ccw++;
 	}
 	return ccw;

@@ -250,8 +250,8 @@ static int zl38_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		return -EINVAL;
 	}
 
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBM_CFM:
 		/* always 32 bits per frame (= 16 bits/channel, 2 channels) */
 		err = regmap_update_bits(priv->regmap, REG_TDMA_CFG_CLK,
 					 CFG_CLK_MASTER | CFG_CLK_PCLK_MASK,
@@ -360,8 +360,8 @@ static struct snd_soc_dai_driver zl38_dai = {
 		.formats = ZL38_FORMATS,
 	},
 	.ops = &zl38_dai_ops,
-	.symmetric_rate = 1,
-	.symmetric_sample_bits = 1,
+	.symmetric_rates = 1,
+	.symmetric_samplebits = 1,
 	.symmetric_channels = 1,
 };
 
@@ -385,14 +385,15 @@ static const struct snd_soc_component_driver zl38_component_dev = {
 	.dapm_routes		= zl38_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(zl38_dapm_routes),
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
-static int chip_gpio_set(struct gpio_chip *c, unsigned int offset, int val)
+static void chip_gpio_set(struct gpio_chip *c, unsigned int offset, int val)
 {
 	struct regmap *regmap = gpiochip_get_data(c);
 	unsigned int mask = BIT(offset);
 
-	return regmap_update_bits(regmap, REG_GPIO_DAT, mask, val ? mask : 0);
+	regmap_update_bits(regmap, REG_GPIO_DAT, mask, val ? mask : 0);
 }
 
 static int chip_gpio_get(struct gpio_chip *c, unsigned int offset)
@@ -422,12 +423,8 @@ chip_direction_output(struct gpio_chip *c, unsigned int offset, int val)
 {
 	struct regmap *regmap = gpiochip_get_data(c);
 	unsigned int mask = BIT(offset);
-	int ret;
 
-	ret = chip_gpio_set(c, offset, val);
-	if (ret)
-		return ret;
-
+	chip_gpio_set(c, offset, val);
 	return regmap_update_bits(regmap, REG_GPIO_DIR, mask, mask);
 }
 
@@ -592,7 +589,9 @@ static int zl38_spi_probe(struct spi_device *spi)
 				       sizeof(template_chip), GFP_KERNEL);
 	if (!priv->gpio_chip)
 		return -ENOMEM;
-	priv->gpio_chip->parent = dev;
+#ifdef CONFIG_OF_GPIO
+	priv->gpio_chip->of_node = dev->of_node;
+#endif
 	err = devm_gpiochip_add_data(dev, priv->gpio_chip, priv->regmap);
 	if (err)
 		return err;
@@ -612,7 +611,7 @@ static int zl38_spi_probe(struct spi_device *spi)
 					       &zl38_dai, 1);
 }
 
-static const struct of_device_id zl38_dt_ids[] __maybe_unused = {
+static const struct of_device_id zl38_dt_ids[] = {
 	{ .compatible = "mscc,zl38060", },
 	{ /* sentinel */ }
 };

@@ -7,7 +7,7 @@
  *     'int set_selection_kernel(struct tiocl_selection *, struct tty_struct *)'
  *     'void clear_selection(void)'
  *     'int paste_selection(struct tty_struct *)'
- *     'int sel_loadlut(u32 __user *)'
+ *     'int sel_loadlut(char __user *)'
  *
  * Now that /dev/vcs exists, most of this can disappear again.
  */
@@ -33,7 +33,7 @@
 #include <linux/sched/signal.h>
 
 /* Don't take this from <ctype.h>: 011-015 on the screen aren't spaces */
-#define is_space_on_vt(c)	((c) == ' ')
+#define isspace(c)	((c) == ' ')
 
 /* FIXME: all this needs locking */
 static struct vc_selection {
@@ -68,17 +68,14 @@ sel_pos(int n, bool unicode)
 {
 	if (unicode)
 		return screen_glyph_unicode(vc_sel.cons, n / 2);
-	return inverse_translate(vc_sel.cons, screen_glyph(vc_sel.cons, n),
-			false);
+	return inverse_translate(vc_sel.cons, screen_glyph(vc_sel.cons, n), 0);
 }
 
 /**
- * clear_selection - remove current selection
+ *	clear_selection		-	remove current selection
  *
- * Remove the current selection highlight, if any from the console holding the
- * selection.
- *
- * Locking: The caller must hold the console lock.
+ *	Remove the current selection highlight, if any from the console
+ *	holding the selection. The caller must hold the console lock.
  */
 void clear_selection(void)
 {
@@ -90,7 +87,7 @@ void clear_selection(void)
 }
 EXPORT_SYMBOL_GPL(clear_selection);
 
-bool vc_is_sel(const struct vc_data *vc)
+bool vc_is_sel(struct vc_data *vc)
 {
 	return vc == vc_sel.cons;
 }
@@ -112,24 +109,18 @@ static inline int inword(const u32 c)
 }
 
 /**
- * sel_loadlut() - load the LUT table
- * @lut: user table
+ *	set loadlut		-	load the LUT table
+ *	@p: user table
  *
- * Load the LUT table from user space. Make a temporary copy so a partial
- * update doesn't make a mess.
- *
- * Locking: The console lock is acquired.
+ *	Load the LUT table from user space. The caller must hold the console
+ *	lock. Make a temporary copy so a partial update doesn't make a mess.
  */
-int sel_loadlut(u32 __user *lut)
+int sel_loadlut(char __user *p)
 {
 	u32 tmplut[ARRAY_SIZE(inwordLut)];
-
-	if (copy_from_user(tmplut, lut, sizeof(inwordLut)))
+	if (copy_from_user(tmplut, (u32 __user *)(p+4), sizeof(inwordLut)))
 		return -EFAULT;
-
-	guard(console_lock)();
 	memcpy(inwordLut, tmplut, sizeof(inwordLut));
-
 	return 0;
 }
 
@@ -174,14 +165,14 @@ static int store_utf8(u32 c, char *p)
 }
 
 /**
- * set_selection_user - set the current selection.
- * @sel: user selection info
- * @tty: the console tty
+ *	set_selection_user	-	set the current selection.
+ *	@sel: user selection info
+ *	@tty: the console tty
  *
- * Invoked by the ioctl handle for the vt layer.
+ *	Invoked by the ioctl handle for the vt layer.
  *
- * Locking: The entire selection process is managed under the console_lock.
- * It's a lot under the lock but its hardly a performance path.
+ *	The entire selection process is managed under the console_lock. It's
+ *	 a lot under the lock but its hardly a performance path
  */
 int set_selection_user(const struct tiocl_selection __user *sel,
 		       struct tty_struct *tty)
@@ -190,19 +181,6 @@ int set_selection_user(const struct tiocl_selection __user *sel,
 
 	if (copy_from_user(&v, sel, sizeof(*sel)))
 		return -EFAULT;
-
-	/*
-	 * TIOCL_SELCLEAR and TIOCL_SELPOINTER are OK to use without
-	 * CAP_SYS_ADMIN as they do not modify the selection.
-	 */
-	switch (v.sel_mode) {
-	case TIOCL_SELCLEAR:
-	case TIOCL_SELPOINTER:
-		break;
-	default:
-		if (!capable(CAP_SYS_ADMIN))
-			return -EPERM;
-	}
 
 	return set_selection_kernel(&v, tty);
 }
@@ -231,7 +209,7 @@ static int vc_selection_store_chars(struct vc_data *vc, bool unicode)
 			bp += store_utf8(c, bp);
 		else
 			*bp++ = c;
-		if (!is_space_on_vt(c))
+		if (!isspace(c))
 			obp = bp;
 		if (!((i + 2) % vc->vc_size_row)) {
 			/* strip trailing blanks from line and add newline,
@@ -260,9 +238,9 @@ static int vc_do_selection(struct vc_data *vc, unsigned short mode, int ps,
 		new_sel_end = pe;
 		break;
 	case TIOCL_SELWORD:	/* word-by-word selection */
-		spc = is_space_on_vt(sel_pos(ps, unicode));
+		spc = isspace(sel_pos(ps, unicode));
 		for (new_sel_start = ps; ; ps -= 2) {
-			if ((spc && !is_space_on_vt(sel_pos(ps, unicode))) ||
+			if ((spc && !isspace(sel_pos(ps, unicode))) ||
 			    (!spc && !inword(sel_pos(ps, unicode))))
 				break;
 			new_sel_start = ps;
@@ -270,9 +248,9 @@ static int vc_do_selection(struct vc_data *vc, unsigned short mode, int ps,
 				break;
 		}
 
-		spc = is_space_on_vt(sel_pos(pe, unicode));
+		spc = isspace(sel_pos(pe, unicode));
 		for (new_sel_end = pe; ; pe += 2) {
-			if ((spc && !is_space_on_vt(sel_pos(pe, unicode))) ||
+			if ((spc && !isspace(sel_pos(pe, unicode))) ||
 			    (!spc && !inword(sel_pos(pe, unicode))))
 				break;
 			new_sel_end = pe;
@@ -298,12 +276,12 @@ static int vc_do_selection(struct vc_data *vc, unsigned short mode, int ps,
 	/* select to end of line if on trailing space */
 	if (new_sel_end > new_sel_start &&
 		!atedge(new_sel_end, vc->vc_size_row) &&
-		is_space_on_vt(sel_pos(new_sel_end, unicode))) {
+		isspace(sel_pos(new_sel_end, unicode))) {
 		for (pe = new_sel_end + 2; ; pe += 2)
-			if (!is_space_on_vt(sel_pos(pe, unicode)) ||
+			if (!isspace(sel_pos(pe, unicode)) ||
 			    atedge(pe, vc->vc_size_row))
 				break;
-		if (is_space_on_vt(sel_pos(pe, unicode)))
+		if (isspace(sel_pos(pe, unicode)))
 			new_sel_end = pe;
 	}
 	if (vc_sel.start == -1)	/* no current selection */
@@ -374,9 +352,15 @@ static int vc_selection(struct vc_data *vc, struct tiocl_selection *v,
 
 int set_selection_kernel(struct tiocl_selection *v, struct tty_struct *tty)
 {
-	guard(mutex)(&vc_sel.lock);
-	guard(console_lock)();
-	return vc_selection(vc_cons[fg_console].d, v, tty);
+	int ret;
+
+	mutex_lock(&vc_sel.lock);
+	console_lock();
+	ret = vc_selection(vc_cons[fg_console].d, v, tty);
+	console_unlock();
+	mutex_unlock(&vc_sel.lock);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(set_selection_kernel);
 
@@ -391,19 +375,14 @@ int paste_selection(struct tty_struct *tty)
 {
 	struct vc_data *vc = tty->driver_data;
 	int	pasted = 0;
-	size_t count;
+	unsigned int count;
 	struct  tty_ldisc *ld;
 	DECLARE_WAITQUEUE(wait, current);
 	int ret = 0;
 
-	bool bp = vc->vc_bracketed_paste;
-	static const char bracketed_paste_start[] = "\033[200~";
-	static const char bracketed_paste_end[]   = "\033[201~";
-	const char *bps = bp ? bracketed_paste_start : NULL;
-	const char *bpe = bp ? bracketed_paste_end : NULL;
-
-	scoped_guard(console_lock)
-		poke_blanked_console();
+	console_lock();
+	poke_blanked_console();
+	console_unlock();
 
 	ld = tty_ldisc_ref_wait(tty);
 	if (!ld)
@@ -412,7 +391,7 @@ int paste_selection(struct tty_struct *tty)
 
 	add_wait_queue(&vc->paste_wait, &wait);
 	mutex_lock(&vc_sel.lock);
-	while (vc_sel.buffer && (vc_sel.buf_len > pasted || bpe)) {
+	while (vc_sel.buffer && vc_sel.buf_len > pasted) {
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (signal_pending(current)) {
 			ret = -EINTR;
@@ -425,27 +404,10 @@ int paste_selection(struct tty_struct *tty)
 			continue;
 		}
 		__set_current_state(TASK_RUNNING);
-
-		if (bps) {
-			bps += tty_ldisc_receive_buf(ld, bps, NULL, strlen(bps));
-			if (*bps != '\0')
-				continue;
-			bps = NULL;
-		}
-
 		count = vc_sel.buf_len - pasted;
-		if (count) {
-			pasted += tty_ldisc_receive_buf(ld, vc_sel.buffer + pasted,
-							NULL, count);
-			if (vc_sel.buf_len > pasted)
-				continue;
-		}
-
-		if (bpe) {
-			bpe += tty_ldisc_receive_buf(ld, bpe, NULL, strlen(bpe));
-			if (*bpe == '\0')
-				bpe = NULL;
-		}
+		count = tty_ldisc_receive_buf(ld, vc_sel.buffer + pasted, NULL,
+					      count);
+		pasted += count;
 	}
 	mutex_unlock(&vc_sel.lock);
 	remove_wait_queue(&vc->paste_wait, &wait);

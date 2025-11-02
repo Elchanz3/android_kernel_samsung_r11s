@@ -2,7 +2,6 @@
 #include <linux/dma-direct.h>
 #include <linux/init.h>
 #include <linux/swiotlb.h>
-#include <asm/bootinfo.h>
 #include <boot_param.h>
 
 dma_addr_t phys_to_dma(struct device *dev, phys_addr_t paddr)
@@ -25,5 +24,5 @@ phys_addr_t dma_to_phys(struct device *dev, dma_addr_t daddr)
 
 void __init plat_swiotlb_setup(void)
 {
-	swiotlb_init(true, SWIOTLB_VERBOSE);
+	swiotlb_init(1);
 }

@@ -26,10 +26,6 @@
 #include "core_types.h"
 #include "clk_mgr_internal.h"
 #include "reg_helper.h"
-#include "dm_helpers.h"
-
-#include "rn_clk_mgr_vbios_smu.h"
-
 #include <linux/delay.h>
 
 #include "renoir_ip_offset.h"
@@ -42,12 +38,6 @@
 
 #define FN(reg_name, field) \
 	FD(reg_name##__##field)
-
-#include "logger_types.h"
-#undef DC_LOGGER
-#define DC_LOGGER \
-	CTX->logger
-#define smu_print(str, ...) {DC_LOG_SMU(str, ##__VA_ARGS__); }
 
 #define VBIOSSMC_MSG_TestMessage                  0x1
 #define VBIOSSMC_MSG_GetSmuVersion                0x2
@@ -96,20 +86,9 @@ static uint32_t rn_smu_wait_for_response(struct clk_mgr_internal *clk_mgr, unsig
 }
 
 
-static int rn_vbios_smu_send_msg_with_param(struct clk_mgr_internal *clk_mgr,
-					    unsigned int msg_id,
-					    unsigned int param)
+int rn_vbios_smu_send_msg_with_param(struct clk_mgr_internal *clk_mgr, unsigned int msg_id, unsigned int param)
 {
 	uint32_t result;
-
-	result = rn_smu_wait_for_response(clk_mgr, 10, 200000);
-
-	if (result != VBIOSSMC_Result_OK)
-		smu_print("SMU Response was not OK. SMU response after wait received is: %d\n", result);
-
-	if (result == VBIOSSMC_Status_BUSY) {
-		return -1;
-	}
 
 	/* First clear response register */
 	REG_WRITE(MP1_SMN_C2PMSG_91, VBIOSSMC_Status_BUSY);
@@ -120,12 +99,9 @@ static int rn_vbios_smu_send_msg_with_param(struct clk_mgr_internal *clk_mgr,
 	/* Trigger the message transaction by writing the message ID */
 	REG_WRITE(MP1_SMN_C2PMSG_67, msg_id);
 
-	result = rn_smu_wait_for_response(clk_mgr, 10, 200000);
+	result = rn_smu_wait_for_response(clk_mgr, 10, 1000);
 
-	if (IS_SMU_TIMEOUT(result)) {
-		ASSERT(0);
-		dm_helpers_smu_timeout(CTX, msg_id, param, 10 * 200000);
-	}
+	ASSERT(result == VBIOSSMC_Result_OK || result == VBIOSSMC_Result_UnknownCmd);
 
 	/* Actual dispclk set is returned in the parameter register */
 	return REG_READ(MP1_SMN_C2PMSG_83);
@@ -150,18 +126,31 @@ int rn_vbios_smu_set_dispclk(struct clk_mgr_internal *clk_mgr, int requested_dis
 	actual_dispclk_set_mhz = rn_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetDispclkFreq,
-			khz_to_mhz_ceil(requested_dispclk_khz));
+			requested_dispclk_khz / 1000);
 
-	if (dmcu && dmcu->funcs->is_dmcu_initialized(dmcu)) {
-		if (clk_mgr->dfs_bypass_disp_clk != actual_dispclk_set_mhz)
-			dmcu->funcs->set_psr_wait_loop(dmcu,
-					actual_dispclk_set_mhz / 7);
+	if (!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment)) {
+		if (dmcu && dmcu->funcs->is_dmcu_initialized(dmcu)) {
+			if (clk_mgr->dfs_bypass_disp_clk != actual_dispclk_set_mhz)
+				dmcu->funcs->set_psr_wait_loop(dmcu,
+						actual_dispclk_set_mhz / 7);
+		}
 	}
 
-	// pmfw always set clock more than or equal requested clock
-	ASSERT(actual_dispclk_set_mhz >= khz_to_mhz_ceil(requested_dispclk_khz));
-
 	return actual_dispclk_set_mhz * 1000;
+}
+
+int rn_vbios_smu_set_dprefclk(struct clk_mgr_internal *clk_mgr)
+{
+	int actual_dprefclk_set_mhz = -1;
+
+	actual_dprefclk_set_mhz = rn_vbios_smu_send_msg_with_param(
+			clk_mgr,
+			VBIOSSMC_MSG_SetDprefclkFreq,
+			clk_mgr->base.dprefclk_khz / 1000);
+
+	/* TODO: add code for programing DP DTO, currently this is down by command table */
+
+	return actual_dprefclk_set_mhz * 1000;
 }
 
 int rn_vbios_smu_set_hard_min_dcfclk(struct clk_mgr_internal *clk_mgr, int requested_dcfclk_khz)
@@ -174,7 +163,7 @@ int rn_vbios_smu_set_hard_min_dcfclk(struct clk_mgr_internal *clk_mgr, int reque
 	actual_dcfclk_set_mhz = rn_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetHardMinDcfclkByFreq,
-			khz_to_mhz_ceil(requested_dcfclk_khz));
+			requested_dcfclk_khz / 1000);
 
 	return actual_dcfclk_set_mhz * 1000;
 }
@@ -189,7 +178,7 @@ int rn_vbios_smu_set_min_deep_sleep_dcfclk(struct clk_mgr_internal *clk_mgr, int
 	actual_min_ds_dcfclk_mhz = rn_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetMinDeepSleepDcfclk,
-			khz_to_mhz_ceil(requested_min_ds_dcfclk_khz));
+			requested_min_ds_dcfclk_khz / 1000);
 
 	return actual_min_ds_dcfclk_mhz * 1000;
 }
@@ -199,7 +188,7 @@ void rn_vbios_smu_set_phyclk(struct clk_mgr_internal *clk_mgr, int requested_phy
 	rn_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetPhyclkVoltageByFreq,
-			khz_to_mhz_ceil(requested_phyclk_khz));
+			requested_phyclk_khz / 1000);
 }
 
 int rn_vbios_smu_set_dppclk(struct clk_mgr_internal *clk_mgr, int requested_dpp_khz)
@@ -209,9 +198,7 @@ int rn_vbios_smu_set_dppclk(struct clk_mgr_internal *clk_mgr, int requested_dpp_
 	actual_dppclk_set_mhz = rn_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetDppclkFreq,
-			khz_to_mhz_ceil(requested_dpp_khz));
-
-	ASSERT(actual_dppclk_set_mhz >= khz_to_mhz_ceil(requested_dpp_khz));
+			requested_dpp_khz / 1000);
 
 	return actual_dppclk_set_mhz * 1000;
 }
@@ -252,6 +239,5 @@ int rn_vbios_smu_is_periodic_retraining_disabled(struct clk_mgr_internal *clk_mg
 	return rn_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_IsPeriodicRetrainingDisabled,
-			1);	// if PMFW doesn't support this message, assume retraining is disabled
-				// so we only use most optimal watermark if we know retraining is enabled.
+			0);
 }

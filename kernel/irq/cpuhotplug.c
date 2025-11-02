@@ -37,12 +37,12 @@ static inline bool irq_needs_fixup(struct irq_data *d)
 	 * has been removed from the online mask already.
 	 */
 	if (cpumask_any_but(m, cpu) < nr_cpu_ids &&
-	    !cpumask_intersects(m, cpu_online_mask)) {
+	    cpumask_any_and(m, cpu_online_mask) >= nr_cpu_ids) {
 		/*
 		 * If this happens then there was a missed IRQ fixup at some
 		 * point. Warn about it and enforce fixup.
 		 */
-		pr_warn("Eff. affinity %*pbl of IRQ %u contains only offline CPUs after offlining CPU %u\n",
+		pr_debug("Eff. affinity %*pbl of IRQ %u contains only offline CPUs after offlining CPU %u\n",
 			cpumask_pr_args(m), d->irq, cpu);
 		return true;
 	}
@@ -110,7 +110,7 @@ static bool migrate_one_irq(struct irq_desc *desc)
 	if (maskchip && chip->irq_mask)
 		chip->irq_mask(d);
 
-	if (!cpumask_intersects(affinity, cpu_online_mask)) {
+	if (cpumask_any_and(affinity, cpu_online_mask) >= nr_cpu_ids) {
 		/*
 		 * If the interrupt is managed, then shut it down and leave
 		 * the affinity untouched.
@@ -122,6 +122,8 @@ static bool migrate_one_irq(struct irq_desc *desc)
 		}
 		affinity = cpu_online_mask;
 		brokeaff = true;
+	} else if (unlikely(d->common->state_use_accessors & IRQD_GIC_MULTI_TARGET)) {
+		return false;
 	}
 	/*
 	 * Do not set the force argument of irq_do_set_affinity() as this
@@ -130,22 +132,6 @@ static bool migrate_one_irq(struct irq_desc *desc)
 	 * CPU.
 	 */
 	err = irq_do_set_affinity(d, affinity, false);
-
-	/*
-	 * If there are online CPUs in the affinity mask, but they have no
-	 * vectors left to make the migration work, try to break the
-	 * affinity by migrating to any online CPU.
-	 */
-	if (err == -ENOSPC && !irqd_affinity_is_managed(d) && affinity != cpu_online_mask) {
-		pr_debug("IRQ%u: set affinity failed for %*pbl, re-try with online CPUs\n",
-			 d->irq, cpumask_pr_args(affinity));
-
-		affinity = cpu_online_mask;
-		brokeaff = true;
-
-		err = irq_do_set_affinity(d, affinity, false);
-	}
-
 	if (err) {
 		pr_warn_ratelimited("IRQ%u: set affinity failed(%d).\n",
 				    d->irq, err);
@@ -177,8 +163,9 @@ void irq_migrate_all_off_this_cpu(void)
 		bool affinity_broken;
 
 		desc = irq_to_desc(irq);
-		scoped_guard(raw_spinlock, &desc->lock)
-			affinity_broken = migrate_one_irq(desc);
+		raw_spin_lock(&desc->lock);
+		affinity_broken = migrate_one_irq(desc);
+		raw_spin_unlock(&desc->lock);
 
 		if (affinity_broken) {
 			pr_debug_ratelimited("IRQ %u: no longer affine to CPU%u\n",
@@ -191,10 +178,10 @@ static bool hk_should_isolate(struct irq_data *data, unsigned int cpu)
 {
 	const struct cpumask *hk_mask;
 
-	if (!housekeeping_enabled(HK_TYPE_MANAGED_IRQ))
+	if (!housekeeping_enabled(HK_FLAG_MANAGED_IRQ))
 		return false;
 
-	hk_mask = housekeeping_cpumask(HK_TYPE_MANAGED_IRQ);
+	hk_mask = housekeeping_cpumask(HK_FLAG_MANAGED_IRQ);
 	if (cpumask_subset(irq_data_get_effective_affinity_mask(data), hk_mask))
 		return false;
 
@@ -210,8 +197,10 @@ static void irq_restore_affinity_of_irq(struct irq_desc *desc, unsigned int cpu)
 	    !irq_data_get_irq_chip(data) || !cpumask_test_cpu(cpu, affinity))
 		return;
 
-	if (irqd_is_managed_and_shutdown(data))
-		irq_startup_managed(desc);
+	if (irqd_is_managed_and_shutdown(data)) {
+		irq_startup(desc, IRQ_RESEND, IRQ_START_COND);
+		return;
+	}
 
 	/*
 	 * If the interrupt can only be directed to a single target
@@ -236,8 +225,9 @@ int irq_affinity_online_cpu(unsigned int cpu)
 	irq_lock_sparse();
 	for_each_active_irq(irq) {
 		desc = irq_to_desc(irq);
-		scoped_guard(raw_spinlock_irq, &desc->lock)
-			irq_restore_affinity_of_irq(desc, cpu);
+		raw_spin_lock_irq(&desc->lock);
+		irq_restore_affinity_of_irq(desc, cpu);
+		raw_spin_unlock_irq(&desc->lock);
 	}
 	irq_unlock_sparse();
 

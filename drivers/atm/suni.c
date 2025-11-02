@@ -21,6 +21,7 @@
 #include <linux/timer.h>
 #include <linux/init.h>
 #include <linux/capability.h>
+#include <linux/atm_suni.h>
 #include <linux/slab.h>
 #include <asm/param.h>
 #include <linux/uaccess.h>
@@ -347,7 +348,7 @@ static int suni_stop(struct atm_dev *dev)
 	for (walk = &sunis; *walk != PRIV(dev);
 	    walk = &PRIV((*walk)->dev)->next);
 	*walk = PRIV((*walk)->dev)->next;
-	if (!sunis) timer_delete_sync(&poll_timer);
+	if (!sunis) del_timer_sync(&poll_timer);
 	spin_unlock_irqrestore(&sunis_lock,flags);
 	kfree(PRIV(dev));
 
@@ -387,5 +388,4 @@ int suni_init(struct atm_dev *dev)
 
 EXPORT_SYMBOL(suni_init);
 
-MODULE_DESCRIPTION("S/UNI PHY driver");
 MODULE_LICENSE("GPL");

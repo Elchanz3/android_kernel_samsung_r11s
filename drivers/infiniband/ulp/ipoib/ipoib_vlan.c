@@ -30,6 +30,7 @@
  * SOFTWARE.
  */
 
+#include <linux/module.h>
 #include <linux/sched/signal.h>
 
 #include <linux/init.h>
@@ -39,21 +40,22 @@
 
 #include "ipoib.h"
 
-static ssize_t parent_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_parent(struct device *d, struct device_attribute *attr,
 			   char *buf)
 {
 	struct net_device *dev = to_net_dev(d);
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
-	return sysfs_emit(buf, "%s\n", priv->parent->name);
+	return sprintf(buf, "%s\n", priv->parent->name);
 }
-static DEVICE_ATTR_RO(parent);
+static DEVICE_ATTR(parent, S_IRUGO, show_parent, NULL);
 
 static bool is_child_unique(struct ipoib_dev_priv *ppriv,
 			    struct ipoib_dev_priv *priv)
 {
 	struct ipoib_dev_priv *tpriv;
-	bool result = true;
+
+	ASSERT_RTNL();
 
 	/*
 	 * Since the legacy sysfs interface uses pkey for deletion it cannot
@@ -72,17 +74,13 @@ static bool is_child_unique(struct ipoib_dev_priv *ppriv,
 	if (ppriv->pkey == priv->pkey)
 		return false;
 
-	netdev_lock(ppriv->dev);
 	list_for_each_entry(tpriv, &ppriv->child_intfs, list) {
 		if (tpriv->pkey == priv->pkey &&
-		    tpriv->child_type == IPOIB_LEGACY_CHILD) {
-			result = false;
-			break;
-		}
+		    tpriv->child_type == IPOIB_LEGACY_CHILD)
+			return false;
 	}
-	netdev_unlock(ppriv->dev);
 
-	return result;
+	return true;
 }
 
 /*
@@ -100,6 +98,8 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 	struct net_device *ndev = priv->dev;
 	int result;
 	struct rdma_netdev *rn = netdev_priv(ndev);
+
+	ASSERT_RTNL();
 
 	/*
 	 * We do not need to touch priv if register_netdevice fails, so just
@@ -268,7 +268,6 @@ int ipoib_vlan_delete(struct net_device *pdev, unsigned short pkey)
 	ppriv = ipoib_priv(pdev);
 
 	rc = -ENODEV;
-	netdev_lock(ppriv->dev);
 	list_for_each_entry_safe(priv, tpriv, &ppriv->child_intfs, list) {
 		if (priv->pkey == pkey &&
 		    priv->child_type == IPOIB_LEGACY_CHILD) {
@@ -280,7 +279,9 @@ int ipoib_vlan_delete(struct net_device *pdev, unsigned short pkey)
 				goto out;
 			}
 
+			down_write(&ppriv->vlan_rwsem);
 			list_del_init(&priv->list);
+			up_write(&ppriv->vlan_rwsem);
 			work->dev = priv->dev;
 			INIT_WORK(&work->work, ipoib_vlan_delete_task);
 			queue_work(ipoib_workqueue, &work->work);
@@ -291,7 +292,6 @@ int ipoib_vlan_delete(struct net_device *pdev, unsigned short pkey)
 	}
 
 out:
-	netdev_unlock(ppriv->dev);
 	rtnl_unlock();
 
 	return rc;

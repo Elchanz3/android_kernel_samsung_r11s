@@ -2,52 +2,40 @@
 #ifndef __SELFTESTS_X86_HELPERS_H
 #define __SELFTESTS_X86_HELPERS_H
 
-#include <signal.h>
-#include <string.h>
-
 #include <asm/processor-flags.h>
-
-#include "../kselftest.h"
 
 static inline unsigned long get_eflags(void)
 {
+	unsigned long eflags;
+
+	asm volatile (
 #ifdef __x86_64__
-	return __builtin_ia32_readeflags_u64();
+		"subq $128, %%rsp\n\t"
+		"pushfq\n\t"
+		"popq %0\n\t"
+		"addq $128, %%rsp"
 #else
-	return __builtin_ia32_readeflags_u32();
+		"pushfl\n\t"
+		"popl %0"
 #endif
+		: "=r" (eflags) :: "memory");
+
+	return eflags;
 }
 
 static inline void set_eflags(unsigned long eflags)
 {
+	asm volatile (
 #ifdef __x86_64__
-	__builtin_ia32_writeeflags_u64(eflags);
+		"subq $128, %%rsp\n\t"
+		"pushq %0\n\t"
+		"popfq\n\t"
+		"addq $128, %%rsp"
 #else
-	__builtin_ia32_writeeflags_u32(eflags);
+		"pushl %0\n\t"
+		"popfl"
 #endif
-}
-
-static inline void sethandler(int sig, void (*handler)(int, siginfo_t *, void *), int flags)
-{
-	struct sigaction sa;
-
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_sigaction = handler;
-	sa.sa_flags = SA_SIGINFO | flags;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(sig, &sa, 0))
-		ksft_exit_fail_msg("sigaction failed");
-}
-
-static inline void clearhandler(int sig)
-{
-	struct sigaction sa;
-
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = SIG_DFL;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(sig, &sa, 0))
-		ksft_exit_fail_msg("sigaction failed");
+		:: "r" (eflags) : "flags", "memory");
 }
 
 #endif /* __SELFTESTS_X86_HELPERS_H */

@@ -1,8 +1,8 @@
 .. SPDX-License-Identifier: GPL-2.0
 
-=============
-Block Devices
-=============
+===========================
+The Linux RapidIO Subsystem
+===========================
 
 .. toctree::
    :maxdepth: 1
@@ -11,7 +11,6 @@ Block Devices
    nbd
    paride
    ramdisk
-   zoned_loop
    zram
 
    drbd/index

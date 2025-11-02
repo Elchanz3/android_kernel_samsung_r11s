@@ -3,7 +3,6 @@
 #include <linux/errno.h>
 #include <linux/errname.h>
 #include <linux/kernel.h>
-#include <linux/math.h>
 
 /*
  * Ensure these tables do not accidentally become gigantic if some
@@ -222,4 +221,3 @@ const char *errname(int err)
 
 	return err > 0 ? name + 1 : name;
 }
-EXPORT_SYMBOL(errname);

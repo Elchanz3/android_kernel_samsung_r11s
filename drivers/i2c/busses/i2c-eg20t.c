@@ -48,6 +48,8 @@
 
 #define BUS_IDLE_TIMEOUT	20
 #define PCH_I2CCTL_I2CMEN	0x0080
+#define TEN_BIT_ADDR_DEFAULT	0xF000
+#define TEN_BIT_ADDR_MASK	0xF0
 #define PCH_START		0x0020
 #define PCH_RESTART		0x0004
 #define PCH_ESR_START		0x0001
@@ -56,6 +58,7 @@
 #define PCH_ACK			0x0008
 #define PCH_GETACK		0x0001
 #define CLR_REG			0x0
+#define I2C_RD			0x1
 #define I2CMCF_BIT		0x0080
 #define I2CMIF_BIT		0x0002
 #define I2CMAL_BIT		0x0010
@@ -73,6 +76,8 @@
 #define I2CMBB_BIT		0x0020
 #define BUFFER_MODE_MASK	(I2CBMFI_BIT | I2CBMAL_BIT | I2CBMNA_BIT | \
 				I2CBMTO_BIT | I2CBMIS_BIT)
+#define I2C_ADDR_MSK		0xFF
+#define I2C_MSB_2B_MSK		0x300
 #define FAST_MODE_CLK		400
 #define FAST_MODE_EN		0x0001
 #define SUB_ADDR_LEN_MAX	4
@@ -143,7 +148,7 @@ struct i2c_algo_pch_data {
 
 /**
  * struct adapter_info - This structure holds the adapter information for the
- *			 PCH i2c controller
+			 PCH i2c controller
  * @pch_data:		stores a list of i2c_algo_pch_data
  * @pch_i2c_suspended:	specifies whether the system is suspended or not
  *			perhaps with more lines and words.
@@ -353,7 +358,6 @@ static void pch_i2c_repstart(struct i2c_algo_pch_data *adap)
 /**
  * pch_i2c_writebytes() - write data to I2C bus in normal mode
  * @i2c_adap:	Pointer to the struct i2c_adapter.
- * @msgs:	Pointer to the i2c message structure.
  * @last:	specifies whether last message or not.
  *		In the case of compound mode it will be 1 for last message,
  *		otherwise 0.
@@ -366,12 +370,16 @@ static s32 pch_i2c_writebytes(struct i2c_adapter *i2c_adap,
 	struct i2c_algo_pch_data *adap = i2c_adap->algo_data;
 	u8 *buf;
 	u32 length;
+	u32 addr;
+	u32 addr_2_msb;
+	u32 addr_8_lsb;
 	s32 wrcount;
 	s32 rtn;
 	void __iomem *p = adap->pch_base_address;
 
 	length = msgs->len;
 	buf = msgs->buf;
+	addr = msgs->addr;
 
 	/* enable master tx */
 	pch_setbit(adap->pch_base_address, PCH_I2CCTL, I2C_TX_MODE);
@@ -385,7 +393,8 @@ static s32 pch_i2c_writebytes(struct i2c_adapter *i2c_adap,
 	}
 
 	if (msgs->flags & I2C_M_TEN) {
-		iowrite32(i2c_10bit_addr_hi_from_msg(msgs), p + PCH_I2CDR);
+		addr_2_msb = ((addr & I2C_MSB_2B_MSK) >> 7) & 0x06;
+		iowrite32(addr_2_msb | TEN_BIT_ADDR_MASK, p + PCH_I2CDR);
 		if (first)
 			pch_i2c_start(adap);
 
@@ -393,7 +402,8 @@ static s32 pch_i2c_writebytes(struct i2c_adapter *i2c_adap,
 		if (rtn)
 			return rtn;
 
-		iowrite32(i2c_10bit_addr_lo_from_msg(msgs), p + PCH_I2CDR);
+		addr_8_lsb = (addr & I2C_ADDR_MSK);
+		iowrite32(addr_8_lsb, p + PCH_I2CDR);
 	} else {
 		/* set 7 bit slave address and R/W bit as 0 */
 		iowrite32(i2c_8bit_addr_from_msg(msgs), p + PCH_I2CDR);
@@ -479,11 +489,15 @@ static s32 pch_i2c_readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
 	u8 *buf;
 	u32 count;
 	u32 length;
+	u32 addr;
+	u32 addr_2_msb;
+	u32 addr_8_lsb;
 	void __iomem *p = adap->pch_base_address;
 	s32 rtn;
 
 	length = msgs->len;
 	buf = msgs->buf;
+	addr = msgs->addr;
 
 	/* enable master reception */
 	pch_clrbit(adap->pch_base_address, PCH_I2CCTL, I2C_TX_MODE);
@@ -494,7 +508,8 @@ static s32 pch_i2c_readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
 	}
 
 	if (msgs->flags & I2C_M_TEN) {
-		iowrite32(i2c_10bit_addr_hi_from_msg(msgs) & ~I2C_M_RD, p + PCH_I2CDR);
+		addr_2_msb = ((addr & I2C_MSB_2B_MSK) >> 7);
+		iowrite32(addr_2_msb | TEN_BIT_ADDR_MASK, p + PCH_I2CDR);
 		if (first)
 			pch_i2c_start(adap);
 
@@ -502,7 +517,8 @@ static s32 pch_i2c_readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
 		if (rtn)
 			return rtn;
 
-		iowrite32(i2c_10bit_addr_lo_from_msg(msgs), p + PCH_I2CDR);
+		addr_8_lsb = (addr & I2C_ADDR_MSK);
+		iowrite32(addr_8_lsb, p + PCH_I2CDR);
 
 		pch_i2c_restart(adap);
 
@@ -510,7 +526,8 @@ static s32 pch_i2c_readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
 		if (rtn)
 			return rtn;
 
-		iowrite32(i2c_10bit_addr_hi_from_msg(msgs), p + PCH_I2CDR);
+		addr_2_msb |= I2C_RD;
+		iowrite32(addr_2_msb | TEN_BIT_ADDR_MASK, p + PCH_I2CDR);
 	} else {
 		/* 7 address bits + R/W bit */
 		iowrite32(i2c_8bit_addr_from_msg(msgs), p + PCH_I2CDR);
@@ -690,7 +707,7 @@ static u32 pch_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm pch_algorithm = {
-	.xfer = pch_i2c_xfer,
+	.master_xfer = pch_i2c_xfer,
 	.functionality = pch_i2c_func
 };
 
@@ -755,7 +772,7 @@ static int pch_i2c_probe(struct pci_dev *pdev,
 
 		pch_adap->owner = THIS_MODULE;
 		pch_adap->class = I2C_CLASS_HWMON;
-		strscpy(pch_adap->name, KBUILD_MODNAME, sizeof(pch_adap->name));
+		strlcpy(pch_adap->name, KBUILD_MODNAME, sizeof(pch_adap->name));
 		pch_adap->algo = &pch_algorithm;
 		pch_adap->algo_data = &adap_info->pch_data[i];
 

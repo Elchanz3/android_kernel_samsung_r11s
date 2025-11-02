@@ -111,7 +111,8 @@ static const struct rtc_class_ops em3027_rtc_ops = {
 	.set_time = em3027_set_time,
 };
 
-static int em3027_probe(struct i2c_client *client)
+static int em3027_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	struct rtc_device *rtc;
 
@@ -129,7 +130,7 @@ static int em3027_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id em3027_id[] = {
-	{ "em3027" },
+	{ "em3027", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, em3027_id);
@@ -147,7 +148,7 @@ static struct i2c_driver em3027_driver = {
 		   .name = "rtc-em3027",
 		   .of_match_table = of_match_ptr(em3027_of_match),
 	},
-	.probe = em3027_probe,
+	.probe = &em3027_probe,
 	.id_table = em3027_id,
 };
 

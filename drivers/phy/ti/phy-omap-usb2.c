@@ -19,7 +19,6 @@
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/sys_soc.h>
@@ -90,9 +89,9 @@ static inline void omap_usb_writel(void __iomem *addr, unsigned int offset,
 }
 
 /**
- * omap_usb2_set_comparator() - links the comparator present in the system with this phy
- *
- * @comparator:  the companion phy(comparator) for this phy
+ * omap_usb2_set_comparator - links the comparator present in the system with
+ *	this phy
+ * @comparator - the companion phy(comparator) for this phy
  *
  * The phy companion driver should call this API passing the phy_companion
  * filled with set_vbus and start_srp to be used by usb phy.
@@ -363,28 +362,25 @@ static void omap_usb2_init_errata(struct omap_usb *phy)
 		phy->flags |= OMAP_USB2_DISABLE_CHRG_DET;
 }
 
-static void omap_usb2_put_device(void *_dev)
-{
-	struct device *dev = _dev;
-
-	put_device(dev);
-}
-
 static int omap_usb2_probe(struct platform_device *pdev)
 {
 	struct omap_usb	*phy;
 	struct phy *generic_phy;
+	struct resource *res;
 	struct phy_provider *phy_provider;
 	struct usb_otg *otg;
 	struct device_node *node = pdev->dev.of_node;
 	struct device_node *control_node;
 	struct platform_device *control_pdev;
-	const struct usb_phy_data *phy_data;
-	int ret;
+	const struct of_device_id *of_id;
+	struct usb_phy_data *phy_data;
 
-	phy_data = device_get_match_data(&pdev->dev);
-	if (!phy_data)
+	of_id = of_match_device(omap_usb2_id_table, &pdev->dev);
+
+	if (!of_id)
 		return -EINVAL;
+
+	phy_data = (struct usb_phy_data *)of_id->data;
 
 	phy = devm_kzalloc(&pdev->dev, sizeof(*phy), GFP_KERNEL);
 	if (!phy)
@@ -407,7 +403,8 @@ static int omap_usb2_probe(struct platform_device *pdev)
 
 	omap_usb2_init_errata(phy);
 
-	phy->phy_base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	phy->phy_base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(phy->phy_base))
 		return PTR_ERR(phy->phy_base);
 
@@ -431,11 +428,6 @@ static int omap_usb2_probe(struct platform_device *pdev)
 			return -EINVAL;
 		}
 		phy->control_dev = &control_pdev->dev;
-
-		ret = devm_add_action_or_reset(&pdev->dev, omap_usb2_put_device,
-					       phy->control_dev);
-		if (ret)
-			return ret;
 	} else {
 		if (of_property_read_u32_index(node,
 					       "syscon-phy-power", 1,
@@ -455,9 +447,11 @@ static int omap_usb2_probe(struct platform_device *pdev)
 			 PTR_ERR(phy->wkupclk));
 		phy->wkupclk = devm_clk_get(phy->dev, "usb_phy_cm_clk32k");
 
-		if (IS_ERR(phy->wkupclk))
-			return dev_err_probe(&pdev->dev, PTR_ERR(phy->wkupclk),
-					     "unable to get usb_phy_cm_clk32k\n");
+		if (IS_ERR(phy->wkupclk)) {
+			if (PTR_ERR(phy->wkupclk) != -EPROBE_DEFER)
+				dev_err(&pdev->dev, "unable to get usb_phy_cm_clk32k\n");
+			return PTR_ERR(phy->wkupclk);
+		}
 
 		dev_warn(&pdev->dev,
 			 "found usb_phy_cm_clk32k, please fix DTS\n");
@@ -514,12 +508,14 @@ static int omap_usb2_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void omap_usb2_remove(struct platform_device *pdev)
+static int omap_usb2_remove(struct platform_device *pdev)
 {
 	struct omap_usb	*phy = platform_get_drvdata(pdev);
 
 	usb_remove_phy(&phy->phy);
 	pm_runtime_disable(phy->dev);
+
+	return 0;
 }
 
 static struct platform_driver omap_usb2_driver = {
@@ -533,6 +529,7 @@ static struct platform_driver omap_usb2_driver = {
 
 module_platform_driver(omap_usb2_driver);
 
+MODULE_ALIAS("platform:omap_usb2");
 MODULE_AUTHOR("Texas Instruments Inc.");
 MODULE_DESCRIPTION("OMAP USB2 phy driver");
 MODULE_LICENSE("GPL v2");

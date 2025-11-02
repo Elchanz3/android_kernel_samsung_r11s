@@ -9,13 +9,11 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/gpio/driver.h>
-#include <linux/gpio/generic.h>
 #include <linux/spinlock.h>
 #include <linux/acpi.h>
 #include <linux/platform_device.h>
 
 #define PT_TOTAL_GPIO 8
-#define PT_TOTAL_GPIO_EX 24
 
 /* PCI-E MMIO register offsets */
 #define PT_DIRECTION_REG   0x00
@@ -25,55 +23,61 @@
 #define PT_SYNC_REG        0x28
 
 struct pt_gpio_chip {
-	struct gpio_generic_chip chip;
+	struct gpio_chip         gc;
 	void __iomem             *reg_base;
 };
 
 static int pt_gpio_request(struct gpio_chip *gc, unsigned offset)
 {
-	struct gpio_generic_chip *gen_gc = to_gpio_generic_chip(gc);
 	struct pt_gpio_chip *pt_gpio = gpiochip_get_data(gc);
+	unsigned long flags;
 	u32 using_pins;
 
 	dev_dbg(gc->parent, "pt_gpio_request offset=%x\n", offset);
 
-	guard(gpio_generic_lock_irqsave)(gen_gc);
+	spin_lock_irqsave(&gc->bgpio_lock, flags);
 
 	using_pins = readl(pt_gpio->reg_base + PT_SYNC_REG);
 	if (using_pins & BIT(offset)) {
 		dev_warn(gc->parent, "PT GPIO pin %x reconfigured\n",
 			 offset);
+		spin_unlock_irqrestore(&gc->bgpio_lock, flags);
 		return -EINVAL;
 	}
 
 	writel(using_pins | BIT(offset), pt_gpio->reg_base + PT_SYNC_REG);
+
+	spin_unlock_irqrestore(&gc->bgpio_lock, flags);
 
 	return 0;
 }
 
 static void pt_gpio_free(struct gpio_chip *gc, unsigned offset)
 {
-	struct gpio_generic_chip *gen_gc = to_gpio_generic_chip(gc);
 	struct pt_gpio_chip *pt_gpio = gpiochip_get_data(gc);
+	unsigned long flags;
 	u32 using_pins;
 
-	guard(gpio_generic_lock_irqsave)(gen_gc);
+	spin_lock_irqsave(&gc->bgpio_lock, flags);
 
 	using_pins = readl(pt_gpio->reg_base + PT_SYNC_REG);
 	using_pins &= ~BIT(offset);
 	writel(using_pins, pt_gpio->reg_base + PT_SYNC_REG);
+
+	spin_unlock_irqrestore(&gc->bgpio_lock, flags);
 
 	dev_dbg(gc->parent, "pt_gpio_free offset=%x\n", offset);
 }
 
 static int pt_gpio_probe(struct platform_device *pdev)
 {
-	struct gpio_generic_chip_config config;
 	struct device *dev = &pdev->dev;
+	struct acpi_device *acpi_dev;
+	acpi_handle handle = ACPI_HANDLE(dev);
 	struct pt_gpio_chip *pt_gpio;
 	int ret = 0;
 
-	if (!ACPI_COMPANION(dev)) {
+	if (acpi_bus_get_device(handle, &acpi_dev)) {
 		dev_err(dev, "PT GPIO device node not found\n");
 		return -ENODEV;
 	}
@@ -88,27 +92,24 @@ static int pt_gpio_probe(struct platform_device *pdev)
 		return PTR_ERR(pt_gpio->reg_base);
 	}
 
-	config = (struct gpio_generic_chip_config) {
-		.dev = dev,
-		.sz = 4,
-		.dat = pt_gpio->reg_base + PT_INPUTDATA_REG,
-		.set = pt_gpio->reg_base + PT_OUTPUTDATA_REG,
-		.dirout = pt_gpio->reg_base + PT_DIRECTION_REG,
-		.flags = GPIO_GENERIC_READ_OUTPUT_REG_SET,
-	};
-
-	ret = gpio_generic_chip_init(&pt_gpio->chip, &config);
+	ret = bgpio_init(&pt_gpio->gc, dev, 4,
+			 pt_gpio->reg_base + PT_INPUTDATA_REG,
+			 pt_gpio->reg_base + PT_OUTPUTDATA_REG, NULL,
+			 pt_gpio->reg_base + PT_DIRECTION_REG, NULL,
+			 BGPIOF_READ_OUTPUT_REG_SET);
 	if (ret) {
-		dev_err(dev, "failed to initialize the generic GPIO chip\n");
+		dev_err(dev, "bgpio_init failed\n");
 		return ret;
 	}
 
-	pt_gpio->chip.gc.owner = THIS_MODULE;
-	pt_gpio->chip.gc.request = pt_gpio_request;
-	pt_gpio->chip.gc.free = pt_gpio_free;
-	pt_gpio->chip.gc.ngpio = (uintptr_t)device_get_match_data(dev);
-
-	ret = devm_gpiochip_add_data(dev, &pt_gpio->chip.gc, pt_gpio);
+	pt_gpio->gc.owner            = THIS_MODULE;
+	pt_gpio->gc.request          = pt_gpio_request;
+	pt_gpio->gc.free             = pt_gpio_free;
+	pt_gpio->gc.ngpio            = PT_TOTAL_GPIO;
+#if defined(CONFIG_OF_GPIO)
+	pt_gpio->gc.of_node          = dev->of_node;
+#endif
+	ret = gpiochip_add_data(&pt_gpio->gc, pt_gpio);
 	if (ret) {
 		dev_err(dev, "Failed to register GPIO lib\n");
 		return ret;
@@ -124,10 +125,18 @@ static int pt_gpio_probe(struct platform_device *pdev)
 	return ret;
 }
 
+static int pt_gpio_remove(struct platform_device *pdev)
+{
+	struct pt_gpio_chip *pt_gpio = platform_get_drvdata(pdev);
+
+	gpiochip_remove(&pt_gpio->gc);
+
+	return 0;
+}
+
 static const struct acpi_device_id pt_gpio_acpi_match[] = {
-	{ "AMDF030", PT_TOTAL_GPIO },
-	{ "AMDIF030", PT_TOTAL_GPIO },
-	{ "AMDIF031", PT_TOTAL_GPIO_EX },
+	{ "AMDF030", 0 },
+	{ "AMDIF030", 0 },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, pt_gpio_acpi_match);
@@ -138,6 +147,7 @@ static struct platform_driver pt_gpio_driver = {
 		.acpi_match_table = ACPI_PTR(pt_gpio_acpi_match),
 	},
 	.probe = pt_gpio_probe,
+	.remove = pt_gpio_remove,
 };
 
 module_platform_driver(pt_gpio_driver);

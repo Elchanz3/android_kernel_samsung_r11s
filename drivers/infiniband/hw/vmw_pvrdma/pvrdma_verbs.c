@@ -125,7 +125,7 @@ int pvrdma_query_device(struct ib_device *ibdev,
  *
  * @return: 0 on success, otherwise negative errno
  */
-int pvrdma_query_port(struct ib_device *ibdev, u32 port,
+int pvrdma_query_port(struct ib_device *ibdev, u8 port,
 		      struct ib_port_attr *props)
 {
 	struct pvrdma_dev *dev = to_vdev(ibdev);
@@ -183,7 +183,7 @@ int pvrdma_query_port(struct ib_device *ibdev, u32 port,
  *
  * @return: 0 on success, otherwise negative errno
  */
-int pvrdma_query_gid(struct ib_device *ibdev, u32 port, int index,
+int pvrdma_query_gid(struct ib_device *ibdev, u8 port, int index,
 		     union ib_gid *gid)
 {
 	struct pvrdma_dev *dev = to_vdev(ibdev);
@@ -205,7 +205,7 @@ int pvrdma_query_gid(struct ib_device *ibdev, u32 port, int index,
  *
  * @return: 0 on success, otherwise negative errno
  */
-int pvrdma_query_pkey(struct ib_device *ibdev, u32 port, u16 index,
+int pvrdma_query_pkey(struct ib_device *ibdev, u8 port, u16 index,
 		      u16 *pkey)
 {
 	int err = 0;
@@ -232,9 +232,37 @@ int pvrdma_query_pkey(struct ib_device *ibdev, u32 port, u16 index,
 }
 
 enum rdma_link_layer pvrdma_port_link_layer(struct ib_device *ibdev,
-					    u32 port)
+					    u8 port)
 {
 	return IB_LINK_LAYER_ETHERNET;
+}
+
+int pvrdma_modify_device(struct ib_device *ibdev, int mask,
+			 struct ib_device_modify *props)
+{
+	unsigned long flags;
+
+	if (mask & ~(IB_DEVICE_MODIFY_SYS_IMAGE_GUID |
+		     IB_DEVICE_MODIFY_NODE_DESC)) {
+		dev_warn(&to_vdev(ibdev)->pdev->dev,
+			 "unsupported device modify mask %#x\n", mask);
+		return -EOPNOTSUPP;
+	}
+
+	if (mask & IB_DEVICE_MODIFY_NODE_DESC) {
+		spin_lock_irqsave(&to_vdev(ibdev)->desc_lock, flags);
+		memcpy(ibdev->node_desc, props->node_desc, 64);
+		spin_unlock_irqrestore(&to_vdev(ibdev)->desc_lock, flags);
+	}
+
+	if (mask & IB_DEVICE_MODIFY_SYS_IMAGE_GUID) {
+		mutex_lock(&to_vdev(ibdev)->port_mutex);
+		to_vdev(ibdev)->sys_image_guid =
+			cpu_to_be64(props->sys_image_guid);
+		mutex_unlock(&to_vdev(ibdev)->port_mutex);
+	}
+
+	return 0;
 }
 
 /**
@@ -246,7 +274,7 @@ enum rdma_link_layer pvrdma_port_link_layer(struct ib_device *ibdev,
  *
  * @return: 0 on success, otherwise negative errno
  */
-int pvrdma_modify_port(struct ib_device *ibdev, u32 port, int mask,
+int pvrdma_modify_port(struct ib_device *ibdev, u8 port, int mask,
 		       struct ib_port_modify *props)
 {
 	struct ib_port_attr attr;
@@ -380,7 +408,7 @@ int pvrdma_mmap(struct ib_ucontext *ibcontext, struct vm_area_struct *vma)
 	}
 
 	/* Map UAR to kernel space, VM_LOCKED? */
-	vm_flags_set(vma, VM_DONTCOPY | VM_DONTEXPAND);
+	vma->vm_flags |= VM_DONTCOPY | VM_DONTEXPAND;
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 	if (io_remap_pfn_range(vma, start, context->uar.pfn, size,
 			       vma->vm_page_prot))
@@ -488,7 +516,7 @@ int pvrdma_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 	struct pvrdma_dev *dev = to_vdev(ibah->device);
 	struct pvrdma_ah *ah = to_vah(ibah);
 	const struct ib_global_route *grh;
-	u32 port_num = rdma_ah_get_port_num(ah_attr);
+	u8 port_num = rdma_ah_get_port_num(ah_attr);
 
 	if (!(rdma_ah_get_ah_flags(ah_attr) & IB_AH_GRH))
 		return -EINVAL;

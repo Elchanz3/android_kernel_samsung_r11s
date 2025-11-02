@@ -34,6 +34,22 @@ When mounting an XFS filesystem, the following options are accepted.
 	to the file. Specifying a fixed ``allocsize`` value turns off
 	the dynamic behaviour.
 
+  attr2 or noattr2
+	The options enable/disable an "opportunistic" improvement to
+	be made in the way inline extended attributes are stored
+	on-disk.  When the new form is used for the first time when
+	``attr2`` is selected (either when setting or removing extended
+	attributes) the on-disk superblock feature bit field will be
+	updated to reflect this format being in use.
+
+	The default behaviour is determined by the on-disk feature
+	bit indicating that ``attr2`` behaviour is active. If either
+	mount option is set, then that becomes the new default used
+	by the filesystem.
+
+	CRC enabled filesystems always use the ``attr2`` format, and so
+	will reject the ``noattr2`` mount option if it is set.
+
   discard or nodiscard (default)
 	Enable/disable the issuing of commands to let the block
 	device reclaim space freed by the filesystem.  This is
@@ -58,6 +74,12 @@ When mounting an XFS filesystem, the following options are accepted.
 	Make the data allocator use the filestreams allocation mode
 	across the entire filesystem rather than just on directories
 	configured to use it.
+
+  ikeep or noikeep (default)
+	When ``ikeep`` is specified, XFS does not delete empty inode
+	clusters and keeps them around on disk.  When ``noikeep`` is
+	specified, empty inode clusters are returned to the free
+	space pool.
 
   inode32 or inode64 (default)
 	When ``inode32`` is specified, it indicates that XFS limits
@@ -102,14 +124,6 @@ When mounting an XFS filesystem, the following options are accepted.
 	controls the size of each buffer and so is also relevant to
 	this case.
 
-  lifetime (default) or nolifetime
-	Enable data placement based on write life time hints provided
-	by the user. This turns on co-allocation of data of similar
-	life times when statistically favorable to reduce garbage
-	collection cost.
-
-	These options are only available for zoned rt file systems.
-
   logbsize=value
 	Set the size of each in-memory log buffer.  The size may be
 	specified in bytes, or in kilobytes with a "k" suffix.
@@ -128,25 +142,6 @@ When mounting an XFS filesystem, the following options are accepted.
 	section, and a real-time section.  The real-time section is
 	optional, and the log section can be separate from the data
 	section or contained within it.
-
-  max_atomic_write=value
-	Set the maximum size of an atomic write.  The size may be
-	specified in bytes, in kilobytes with a "k" suffix, in megabytes
-	with a "m" suffix, or in gigabytes with a "g" suffix.  The size
-	cannot be larger than the maximum write size, larger than the
-	size of any allocation group, or larger than the size of a
-	remapping operation that the log can complete atomically.
-
-	The default value is to set the maximum I/O completion size
-	to allow each CPU to handle one at a time.
-
-  max_open_zones=value
-	Specify the max number of zones to keep open for writing on a
-	zoned rt device. Many open zones aids file data separation
-	but may impact performance on HDDs.
-
-	If ``max_open_zones`` is not specified, the value is determined
-	by the capabilities and the size of the zoned rt device.
 
   noalign
 	Data allocations will not be aligned at stripe unit
@@ -197,7 +192,7 @@ When mounting an XFS filesystem, the following options are accepted.
 	are any integer multiple of a valid ``sunit`` value.
 
 	Typically the only time these mount options are necessary if
-	after an underlying RAID device has had its geometry
+	after an underlying RAID device has had it's geometry
 	modified, such as adding a new disk to a RAID5 lun and
 	reshaping it.
 
@@ -231,8 +226,9 @@ latest version and try again.
 
 The deprecation will take place in two parts.  Support for mounting V4
 filesystems can now be disabled at kernel build time via Kconfig option.
-These options were changed to default to no in September 2025.  In
-September 2030, support will be removed from the codebase entirely.
+The option will default to yes until September 2025, at which time it
+will be changed to default to no.  In September 2030, support will be
+removed from the codebase entirely.
 
 Note: Distributors may choose to withdraw V4 format support earlier than
 the dates listed above.
@@ -240,12 +236,13 @@ the dates listed above.
 Deprecated Mount Options
 ========================
 
-============================    ================
+===========================     ================
   Name				Removal Schedule
-============================    ================
+===========================     ================
 Mounting with V4 filesystem     September 2030
-Mounting ascii-ci filesystem    September 2030
-============================    ================
+ikeep/noikeep			September 2025
+attr2/noattr2			September 2025
+===========================     ================
 
 
 Removed Mount Options
@@ -260,8 +257,6 @@ Removed Mount Options
   osyncisdsync/osyncisosync	v4.0
   barrier			v4.19
   nobarrier			v4.19
-  ikeep/noikeep			v6.18
-  attr2/noattr2			v6.18
 ===========================     =======
 
 sysctls
@@ -298,7 +293,7 @@ The following sysctls are available for the XFS filesystem:
 		XFS_ERRLEVEL_LOW:       1
 		XFS_ERRLEVEL_HIGH:      5
 
-  fs.xfs.panic_mask		(Min: 0  Default: 0  Max: 511)
+  fs.xfs.panic_mask		(Min: 0  Default: 0  Max: 256)
 	Causes certain error conditions to call BUG(). Value is a bitmask;
 	OR together the tags which represent errors which should cause panics:
 
@@ -314,6 +309,17 @@ The following sysctls are available for the XFS filesystem:
 		XFS_PTAG_VERIFIER_ERROR         0x00000100
 
 	This option is intended for debugging only.
+
+  fs.xfs.irix_symlink_mode	(Min: 0  Default: 0  Max: 1)
+	Controls whether symlinks are created with mode 0777 (default)
+	or whether their mode is affected by the umask (irix mode).
+
+  fs.xfs.irix_sgid_inherit	(Min: 0  Default: 0  Max: 1)
+	Controls files created in SGID directories.
+	If the group ID of the new file does not match the effective group
+	ID or one of the supplementary group IDs of the parent dir, the
+	ISGID bit is cleared if the irix_sgid_inherit compatibility sysctl
+	is set.
 
   fs.xfs.inherit_sync		(Min: 0  Default: 1  Max: 1)
 	Setting this to "1" will cause the "sync" flag set
@@ -350,20 +356,23 @@ The following sysctls are available for the XFS filesystem:
 Deprecated Sysctls
 ==================
 
-None currently.
+===========================     ================
+  Name				Removal Schedule
+===========================     ================
+fs.xfs.irix_sgid_inherit        September 2025
+fs.xfs.irix_symlink_mode        September 2025
+===========================     ================
+
 
 Removed Sysctls
 ===============
 
-==========================================   =======
-  Name                                       Removed
-==========================================   =======
-  fs.xfs.xfsbufd_centisec                    v4.0
-  fs.xfs.age_buffer_centisecs                v4.0
-  fs.xfs.irix_symlink_mode                   v6.18
-  fs.xfs.irix_sgid_inherit                   v6.18
-  fs.xfs.speculative_cow_prealloc_lifetime   v6.18
-==========================================   =======
+=============================	=======
+  Name				Removed
+=============================	=======
+  fs.xfs.xfsbufd_centisec	v4.0
+  fs.xfs.age_buffer_centisecs	v4.0
+=============================	=======
 
 Error handling
 ==============
@@ -486,66 +495,3 @@ the class and error context. For example, the default values for
 "metadata/ENODEV" are "0" rather than "-1" so that this error handler defaults
 to "fail immediately" behaviour. This is done because ENODEV is a fatal,
 unrecoverable error no matter how many times the metadata IO is retried.
-
-Workqueue Concurrency
-=====================
-
-XFS uses kernel workqueues to parallelize metadata update processes.  This
-enables it to take advantage of storage hardware that can service many IO
-operations simultaneously.  This interface exposes internal implementation
-details of XFS, and as such is explicitly not part of any userspace API/ABI
-guarantee the kernel may give userspace.  These are undocumented features of
-the generic workqueue implementation XFS uses for concurrency, and they are
-provided here purely for diagnostic and tuning purposes and may change at any
-time in the future.
-
-The control knobs for a filesystem's workqueues are organized by task at hand
-and the short name of the data device.  They all can be found in:
-
-  /sys/bus/workqueue/devices/${task}!${device}
-
-================  ===========
-  Task            Description
-================  ===========
-  xfs_iwalk-$pid  Inode scans of the entire filesystem. Currently limited to
-                  mount time quotacheck.
-  xfs-gc          Background garbage collection of disk space that have been
-                  speculatively allocated beyond EOF or for staging copy on
-                  write operations.
-================  ===========
-
-For example, the knobs for the quotacheck workqueue for /dev/nvme0n1 would be
-found in /sys/bus/workqueue/devices/xfs_iwalk-1111!nvme0n1/.
-
-The interesting knobs for XFS workqueues are as follows:
-
-============     ===========
-  Knob           Description
-============     ===========
-  max_active     Maximum number of background threads that can be started to
-                 run the work.
-  cpumask        CPUs upon which the threads are allowed to run.
-  nice           Relative priority of scheduling the threads.  These are the
-                 same nice levels that can be applied to userspace processes.
-============     ===========
-
-Zoned Filesystems
-=================
-
-For zoned file systems, the following attributes are exposed in:
-
-  /sys/fs/xfs/<dev>/zoned/
-
-  max_open_zones		(Min:  1  Default:  Varies  Max:  UINTMAX)
-	This read-only attribute exposes the maximum number of open zones
-	available for data placement. The value is determined at mount time and
-	is limited by the capabilities of the backing zoned device, file system
-	size and the max_open_zones mount option.
-
-  zonegc_low_space		(Min:  0  Default:  0  Max:  100)
-	Define a percentage for how much of the unused space that GC should keep
-	available for writing. A high value will reclaim more of the space
-	occupied by unused blocks, creating a larger buffer against write
-	bursts at the cost of increased write amplification.  Regardless
-	of this value, garbage collection will always aim to free a minimum
-	amount of blocks to keep max_open_zones open for data placement purposes.

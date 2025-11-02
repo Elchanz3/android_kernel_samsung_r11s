@@ -242,7 +242,7 @@ static inline void qm_sg_entry_set_f(struct qm_sg_entry *sg, int len)
 
 static inline int qm_sg_entry_get_off(const struct qm_sg_entry *sg)
 {
-	return be16_to_cpu(sg->offset) & QM_SG_OFF_MASK;
+	return be32_to_cpu(sg->offset) & QM_SG_OFF_MASK;
 }
 
 /* "Frame Dequeue Response" */
@@ -689,8 +689,7 @@ enum qman_cb_dqrr_result {
 };
 typedef enum qman_cb_dqrr_result (*qman_cb_dqrr)(struct qman_portal *qm,
 					struct qman_fq *fq,
-					const struct qm_dqrr_entry *dqrr,
-					bool sched_napi);
+					const struct qm_dqrr_entry *dqrr);
 
 /*
  * This callback type is used when handling ERNs, FQRNs and FQRLs via MR. They

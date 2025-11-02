@@ -121,15 +121,6 @@ Specifically, it provides the following information.
   non-standard PMBus commands to standard commands, or to augment standard
   command return values with device specific information.
 
-PEC Support
-===========
-
-Many PMBus devices support SMBus PEC (Packet Error Checking). If supported
-by both the I2C adapter and by the PMBus chip, it is by default enabled.
-If PEC is supported, the PMBus core driver adds an attribute named 'pec' to
-the I2C device. This attribute can be used to control PEC support in the
-communication with the PMBus chip.
-
 API functions
 =============
 
@@ -174,7 +165,7 @@ Read byte from page <page>, register <reg>.
   int (*read_word_data)(struct i2c_client *client, int page, int phase,
                         int reg);
 
-Read word from page <page>, phase <phase>, register <reg>. If the chip does not
+Read word from page <page>, phase <pase>, register <reg>. If the chip does not
 support multiple phases, the phase parameter can be ignored. If the chip
 supports multiple phases, a phase value of 0xff indicates all phases.
 
@@ -288,6 +279,12 @@ function.
 
 ::
 
+  void pmbus_do_remove(struct i2c_client *client);
+
+Execute driver remove function. Similar to standard driver remove function.
+
+::
+
   const struct pmbus_driver_info
 	*pmbus_get_driver_info(struct i2c_client *client);
 
@@ -298,30 +295,12 @@ PMBus driver platform data
 ==========================
 
 PMBus platform data is defined in include/linux/pmbus.h. Platform data
-currently provides a flags field with four bits used::
+currently only provides a flag field with a single bit used::
 
-	#define PMBUS_SKIP_STATUS_CHECK			BIT(0)
-
-	#define PMBUS_WRITE_PROTECTED			BIT(1)
-
-	#define PMBUS_NO_CAPABILITY			BIT(2)
-
-	#define PMBUS_READ_STATUS_AFTER_FAILED_CHECK	BIT(3)
-
-	#define PMBUS_NO_WRITE_PROTECT			BIT(4)
-
-	#define PMBUS_USE_COEFFICIENTS_CMD		BIT(5)
-
-	#define PMBUS_OP_PROTECTED			BIT(6)
-
-	#define PMBUS_VOUT_PROTECTED			BIT(7)
+	#define PMBUS_SKIP_STATUS_CHECK (1 << 0)
 
 	struct pmbus_platform_data {
 		u32 flags;              /* Device specific flags */
-
-		/* regulator support */
-		int num_regulators;
-		struct regulator_init_data *reg_init_data;
 	};
 
 
@@ -329,9 +308,8 @@ Flags
 -----
 
 PMBUS_SKIP_STATUS_CHECK
-
-During register detection, skip checking the status register for
-communication or command errors.
+	During register detection, skip checking the status register for
+	communication or command errors.
 
 Some PMBus chips respond with valid data when trying to read an unsupported
 register. For such chips, checking the status register is mandatory when
@@ -343,68 +321,3 @@ status register must be disabled.
 Some i2c controllers do not support single-byte commands (write commands with
 no data, i2c_smbus_write_byte()). With such controllers, clearing the status
 register is impossible, and the PMBUS_SKIP_STATUS_CHECK flag must be set.
-
-PMBUS_WRITE_PROTECTED
-
-Set if the chip is write protected and write protection is not determined
-by the standard WRITE_PROTECT command.
-
-PMBUS_NO_CAPABILITY
-
-Some PMBus chips don't respond with valid data when reading the CAPABILITY
-register. For such chips, this flag should be set so that the PMBus core
-driver doesn't use CAPABILITY to determine its behavior.
-
-PMBUS_READ_STATUS_AFTER_FAILED_CHECK
-
-Read the STATUS register after each failed register check.
-
-Some PMBus chips end up in an undefined state when trying to read an
-unsupported register. For such chips, it is necessary to reset the
-chip pmbus controller to a known state after a failed register check.
-This can be done by reading a known register. By setting this flag the
-driver will try to read the STATUS register after each failed
-register check. This read may fail, but it will put the chip into a
-known state.
-
-PMBUS_NO_WRITE_PROTECT
-
-Some PMBus chips respond with invalid data when reading the WRITE_PROTECT
-register. For such chips, this flag should be set so that the PMBus core
-driver doesn't use the WRITE_PROTECT command to determine its behavior.
-
-PMBUS_USE_COEFFICIENTS_CMD
-
-When this flag is set the PMBus core driver will use the COEFFICIENTS
-register to initialize the coefficients for the direct mode format.
-
-PMBUS_OP_PROTECTED
-
-Set if the chip OPERATION command is protected and protection is not
-determined by the standard WRITE_PROTECT command.
-
-PMBUS_VOUT_PROTECTED
-
-Set if the chip VOUT_COMMAND command is protected and protection is not
-determined by the standard WRITE_PROTECT command.
-
-Module parameter
-----------------
-
-pmbus_core.wp: PMBus write protect forced mode
-
-PMBus may come up with a variety of write protection configuration.
-'pmbus_core.wp' may be used if a particular write protection is necessary.
-The ability to actually alter the protection may also depend on the chip
-so the actual runtime write protection configuration may differ from
-the requested one. pmbus_core currently support the following value:
-
-* 0: write protection removed.
-* 1: Disable all writes except to the WRITE_PROTECT, OPERATION,
-  PAGE, ON_OFF_CONFIG and VOUT_COMMAND commands.
-* 2: Disable all writes except to the WRITE_PROTECT, OPERATION and
-  PAGE commands.
-* 3: Disable all writes except to the WRITE_PROTECT command. Note that
-  protection should include the PAGE register. This may be problematic
-  for multi-page chips, if the chips strictly follows the PMBus
-  specification, preventing the chip from changing the active page.

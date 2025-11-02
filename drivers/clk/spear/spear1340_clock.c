@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-spear13xx/spear1340_clock.c
  *
@@ -6,12 +5,16 @@
  *
  * Copyright (C) 2012 ST Microelectronics
  * Viresh Kumar <vireshk@kernel.org>
+ *
+ * This file is licensed under the terms of the GNU General Public
+ * License version 2. This program is licensed "as is" without any
+ * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clkdev.h>
-#include <linux/clk/spear.h>
 #include <linux/err.h>
 #include <linux/io.h>
+#include <linux/of_platform.h>
 #include <linux/spinlock_types.h>
 #include "clk.h"
 
@@ -199,7 +202,7 @@ static struct frac_rate_tbl amba_synth_rtbl[] = {
  * We can program this synthesizer to make cpu run on different clock
  * frequencies.
  * Following table provides configuration values to let cpu run on 200,
- * 250, 332, 400 or 500 MHz considering different possibilities of input
+ * 250, 332, 400 or 500 MHz considering different possibilites of input
  * (vco1div2) clock.
  *
  * --------------------------------------------------------------------

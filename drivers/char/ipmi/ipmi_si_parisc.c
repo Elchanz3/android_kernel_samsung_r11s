@@ -13,7 +13,7 @@ static int __init ipmi_parisc_probe(struct parisc_device *dev)
 
 	memset(&io, 0, sizeof(io));
 
-	io.si_info	= &ipmi_kcs_si_info;
+	io.si_type	= SI_KCS;
 	io.addr_source	= SI_DEVICETREE;
 	io.addr_space	= IPMI_MEM_ADDR_SPACE;
 	io.addr_data	= dev->hpa.start;
@@ -29,9 +29,9 @@ static int __init ipmi_parisc_probe(struct parisc_device *dev)
 	return ipmi_si_add_smi(&io);
 }
 
-static void __exit ipmi_parisc_remove(struct parisc_device *dev)
+static int __exit ipmi_parisc_remove(struct parisc_device *dev)
 {
-	ipmi_si_remove_by_dev(&dev->dev);
+	return ipmi_si_remove_by_dev(&dev->dev);
 }
 
 static const struct parisc_device_id ipmi_parisc_tbl[] __initconst = {

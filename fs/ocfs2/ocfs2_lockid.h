@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  * ocfs2_lockid.h
  *
  * Defines OCFS2 lockid bits.
@@ -93,7 +95,7 @@ static char *ocfs2_lock_type_strings[] = {
 	[OCFS2_LOCK_TYPE_DATA] = "Data",
 	[OCFS2_LOCK_TYPE_SUPER] = "Super",
 	[OCFS2_LOCK_TYPE_RENAME] = "Rename",
-	/* Need to differentiate from [R]ename.. serializing writes is the
+	/* Need to differntiate from [R]ename.. serializing writes is the
 	 * important job it does, anyway. */
 	[OCFS2_LOCK_TYPE_RW] = "Write/Read",
 	[OCFS2_LOCK_TYPE_DENTRY] = "Dentry",

@@ -33,36 +33,36 @@ properties:
 
   vana-supply:
     description: Sensor 2.8 V analog supply.
+    maxItems: 1
 
   vdig-supply:
     description: Sensor 1.8 V digital core supply.
+    maxItems: 1
 
   vddl-supply:
     description: Sensor digital IO 1.2 V supply.
+    maxItems: 1
 
   port:
-    $ref: /schemas/graph.yaml#/properties/port
+    type: object
+    description: Output video port. See ../video-interfaces.txt.
 
 required:
   - compatible
   - reg
-  - clocks
-  - clock-names
   - port
 
 additionalProperties: false
 
 examples:
   - |
-    i2c {
+    i2c0 {
         #address-cells = <1>;
         #size-cells = <0>;
 
         imx274: camera-sensor@1a {
             compatible = "sony,imx274";
             reg = <0x1a>;
-            clocks = <&imx274_clk>;
-            clock-names = "inck";
             reset-gpios = <&gpio_sensor 0 0>;
 
             port {

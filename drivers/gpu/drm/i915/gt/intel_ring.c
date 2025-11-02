@@ -1,19 +1,14 @@
-// SPDX-License-Identifier: MIT
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * Copyright © 2019 Intel Corporation
  */
 
-#include "gem/i915_gem_internal.h"
-#include "gem/i915_gem_lmem.h"
 #include "gem/i915_gem_object.h"
-
 #include "i915_drv.h"
 #include "i915_vma.h"
 #include "intel_engine.h"
-#include "intel_engine_regs.h"
-#include "intel_gpu_commands.h"
 #include "intel_ring.h"
-#include "intel_gt.h"
 #include "intel_timeline.h"
 
 unsigned int intel_ring_update_space(struct intel_ring *ring)
@@ -45,7 +40,7 @@ int intel_ring_pin(struct intel_ring *ring, struct i915_gem_ww_ctx *ww)
 	/* Ring wraparound at offset 0 sometimes hangs. No idea why. */
 	flags = PIN_OFFSET_BIAS | i915_ggtt_pin_bias(vma);
 
-	if (i915_gem_object_is_stolen(vma->obj))
+	if (vma->obj->stolen)
 		flags |= PIN_MAPPABLE;
 	else
 		flags |= PIN_HIGH;
@@ -54,14 +49,11 @@ int intel_ring_pin(struct intel_ring *ring, struct i915_gem_ww_ctx *ww)
 	if (unlikely(ret))
 		goto err_unpin;
 
-	if (i915_vma_is_map_and_fenceable(vma) && !HAS_LLC(vma->vm->i915)) {
+	if (i915_vma_is_map_and_fenceable(vma) && !HAS_LLC(vma->vm->i915))
 		addr = (void __force *)i915_vma_pin_iomap(vma);
-	} else {
-		int type = intel_gt_coherent_map_type(vma->vm->gt, vma->obj, false);
-
-		addr = i915_gem_object_pin_map(vma->obj, type);
-	}
-
+	else
+		addr = i915_gem_object_pin_map(vma->obj,
+					       i915_coherent_map_type(vma->vm->i915));
 	if (IS_ERR(addr)) {
 		ret = PTR_ERR(addr);
 		goto err_ring;
@@ -115,9 +107,8 @@ static struct i915_vma *create_ring_vma(struct i915_ggtt *ggtt, int size)
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
 
-	obj = i915_gem_object_create_lmem(i915, size, I915_BO_ALLOC_VOLATILE |
-					  I915_BO_ALLOC_PM_VOLATILE);
-	if (IS_ERR(obj) && i915_ggtt_has_aperture(ggtt) && !HAS_LLC(i915))
+	obj = ERR_PTR(-ENODEV);
+	if (i915_ggtt_has_aperture(ggtt) && !HAS_LLC(i915))
 		obj = i915_gem_object_create_stolen(i915, size);
 	if (IS_ERR(obj))
 		obj = i915_gem_object_create_internal(i915, size);
@@ -300,12 +291,35 @@ u32 *intel_ring_begin(struct i915_request *rq, unsigned int num_dwords)
 	GEM_BUG_ON(ring->emit > ring->size - bytes);
 	GEM_BUG_ON(ring->space < bytes);
 	cs = ring->vaddr + ring->emit;
-	if (IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM))
-		memset32(cs, POISON_INUSE, bytes / sizeof(*cs));
+	GEM_DEBUG_EXEC(memset32(cs, POISON_INUSE, bytes / sizeof(*cs)));
 	ring->emit += bytes;
 	ring->space -= bytes;
 
 	return cs;
+}
+
+/* Align the ring tail to a cacheline boundary */
+int intel_ring_cacheline_align(struct i915_request *rq)
+{
+	int num_dwords;
+	void *cs;
+
+	num_dwords = (rq->ring->emit & (CACHELINE_BYTES - 1)) / sizeof(u32);
+	if (num_dwords == 0)
+		return 0;
+
+	num_dwords = CACHELINE_DWORDS - num_dwords;
+	GEM_BUG_ON(num_dwords & 1);
+
+	cs = intel_ring_begin(rq, num_dwords);
+	if (IS_ERR(cs))
+		return PTR_ERR(cs);
+
+	memset64(cs, (u64)MI_NOOP << 32 | MI_NOOP, num_dwords / 2);
+	intel_ring_advance(rq, cs + num_dwords);
+
+	GEM_BUG_ON(rq->ring->emit & (CACHELINE_BYTES - 1));
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)

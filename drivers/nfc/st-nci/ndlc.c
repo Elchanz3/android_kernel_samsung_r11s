@@ -161,8 +161,8 @@ static void llt_ndlc_rcv_queue(struct llt_ndlc *ndlc)
 			case PCB_SYNC_ACK:
 				skb = skb_dequeue(&ndlc->ack_pending_q);
 				kfree_skb(skb);
-				timer_delete_sync(&ndlc->t1_timer);
-				timer_delete_sync(&ndlc->t2_timer);
+				del_timer_sync(&ndlc->t1_timer);
+				del_timer_sync(&ndlc->t2_timer);
 				ndlc->t2_active = false;
 				ndlc->t1_active = false;
 				break;
@@ -213,8 +213,8 @@ static void llt_ndlc_sm_work(struct work_struct *work)
 		pr_debug("Handle T2(recv DATA) elapsed (T2 now inactive)\n");
 		ndlc->t2_active = false;
 		ndlc->t1_active = false;
-		timer_delete_sync(&ndlc->t1_timer);
-		timer_delete_sync(&ndlc->t2_timer);
+		del_timer_sync(&ndlc->t1_timer);
+		del_timer_sync(&ndlc->t2_timer);
 		ndlc_close(ndlc);
 		ndlc->hard_fault = -EREMOTEIO;
 	}
@@ -237,21 +237,25 @@ EXPORT_SYMBOL(ndlc_recv);
 
 static void ndlc_t1_timeout(struct timer_list *t)
 {
-	struct llt_ndlc *ndlc = timer_container_of(ndlc, t, t1_timer);
+	struct llt_ndlc *ndlc = from_timer(ndlc, t, t1_timer);
+
+	pr_debug("\n");
 
 	schedule_work(&ndlc->sm_work);
 }
 
 static void ndlc_t2_timeout(struct timer_list *t)
 {
-	struct llt_ndlc *ndlc = timer_container_of(ndlc, t, t2_timer);
+	struct llt_ndlc *ndlc = from_timer(ndlc, t, t2_timer);
+
+	pr_debug("\n");
 
 	schedule_work(&ndlc->sm_work);
 }
 
-int ndlc_probe(void *phy_id, const struct nfc_phy_ops *phy_ops,
-	       struct device *dev, int phy_headroom, int phy_tailroom,
-	       struct llt_ndlc **ndlc_id, struct st_nci_se_status *se_status)
+int ndlc_probe(void *phy_id, struct nfc_phy_ops *phy_ops, struct device *dev,
+	       int phy_headroom, int phy_tailroom, struct llt_ndlc **ndlc_id,
+	       struct st_nci_se_status *se_status)
 {
 	struct llt_ndlc *ndlc;
 
@@ -283,8 +287,8 @@ EXPORT_SYMBOL(ndlc_probe);
 void ndlc_remove(struct llt_ndlc *ndlc)
 {
 	/* cancel timers */
-	timer_delete_sync(&ndlc->t1_timer);
-	timer_delete_sync(&ndlc->t2_timer);
+	del_timer_sync(&ndlc->t1_timer);
+	del_timer_sync(&ndlc->t2_timer);
 	ndlc->t2_active = false;
 	ndlc->t1_active = false;
 	/* cancel work */

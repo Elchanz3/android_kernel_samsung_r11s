@@ -22,6 +22,7 @@
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Sound Core " CARD_NAME);
 MODULE_LICENSE("GPL");
+MODULE_SUPPORTED_DEVICE("{{Sound Core," CARD_NAME "}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -85,13 +86,14 @@ static int snd_pdacf_probe(struct pcmcia_device *link)
 		.dev_free =	snd_pdacf_dev_free,
 	};
 
+	snd_printdd(KERN_DEBUG "pdacf_attach called\n");
 	/* find an empty slot from the card list */
 	for (i = 0; i < SNDRV_CARDS; i++) {
 		if (! card_list[i])
 			break;
 	}
 	if (i >= SNDRV_CARDS) {
-		dev_err(&link->dev, "pdacf: too many cards found\n");
+		snd_printk(KERN_ERR "pdacf: too many cards found\n");
 		return -EINVAL;
 	}
 	if (! enable[i])
@@ -101,7 +103,7 @@ static int snd_pdacf_probe(struct pcmcia_device *link)
 	err = snd_card_new(&link->dev, index[i], id[i], THIS_MODULE,
 			   0, &card);
 	if (err < 0) {
-		dev_err(&link->dev, "pdacf: cannot create a card instance\n");
+		snd_printk(KERN_ERR "pdacf: cannot create a card instance\n");
 		return err;
 	}
 
@@ -151,7 +153,7 @@ static int snd_pdacf_assign_resources(struct snd_pdacf *pdacf, int port, int irq
 	int err;
 	struct snd_card *card = pdacf->card;
 
-	dev_dbg(card->dev, "pdacf assign resources: port = 0x%x, irq = %d\n", port, irq);
+	snd_printdd(KERN_DEBUG "pdacf assign resources: port = 0x%x, irq = %d\n", port, irq);
 	pdacf->port = port;
 	pdacf->irq = irq;
 	pdacf->chip_status |= PDAUDIOCF_STAT_IS_CONFIGURED;
@@ -160,7 +162,7 @@ static int snd_pdacf_assign_resources(struct snd_pdacf *pdacf, int port, int irq
 	if (err < 0)
 		return err;	
 
-	strscpy(card->driver, "PDAudio-CF");
+	strcpy(card->driver, "PDAudio-CF");
 	sprintf(card->shortname, "Core Sound %s", card->driver);
 	sprintf(card->longname, "%s at 0x%x, irq %i",
 		card->shortname, port, irq);
@@ -169,8 +171,7 @@ static int snd_pdacf_assign_resources(struct snd_pdacf *pdacf, int port, int irq
 	if (err < 0)
 		return err;
 
-	err = snd_card_register(card);
-	if (err < 0)
+	if ((err = snd_card_register(card)) < 0)
 		return err;
 
 	return 0;
@@ -183,6 +184,8 @@ static int snd_pdacf_assign_resources(struct snd_pdacf *pdacf, int port, int irq
 static void snd_pdacf_detach(struct pcmcia_device *link)
 {
 	struct snd_pdacf *chip = link->priv;
+
+	snd_printdd(KERN_DEBUG "pdacf_detach called\n");
 
 	if (chip->chip_status & PDAUDIOCF_STAT_IS_CONFIGURED)
 		snd_pdacf_powerdown(chip);
@@ -200,6 +203,7 @@ static int pdacf_config(struct pcmcia_device *link)
 	struct snd_pdacf *pdacf = link->priv;
 	int ret;
 
+	snd_printdd(KERN_DEBUG "pdacf_config called\n");
 	link->config_index = 0x5;
 	link->config_flags |= CONF_ENABLE_IRQ | CONF_ENABLE_PULSE_IRQ;
 
@@ -237,8 +241,11 @@ static int pdacf_suspend(struct pcmcia_device *link)
 {
 	struct snd_pdacf *chip = link->priv;
 
-	if (chip)
+	snd_printdd(KERN_DEBUG "SUSPEND\n");
+	if (chip) {
+		snd_printdd(KERN_DEBUG "snd_pdacf_suspend calling\n");
 		snd_pdacf_suspend(chip);
+	}
 
 	return 0;
 }
@@ -247,10 +254,14 @@ static int pdacf_resume(struct pcmcia_device *link)
 {
 	struct snd_pdacf *chip = link->priv;
 
+	snd_printdd(KERN_DEBUG "RESUME\n");
 	if (pcmcia_dev_present(link)) {
-		if (chip)
+		if (chip) {
+			snd_printdd(KERN_DEBUG "calling snd_pdacf_resume\n");
 			snd_pdacf_resume(chip);
+		}
 	}
+	snd_printdd(KERN_DEBUG "resume done!\n");
 
 	return 0;
 }

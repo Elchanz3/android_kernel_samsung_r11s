@@ -318,10 +318,6 @@ void mips_set_personality_nan(struct arch_elf_state *state)
 	t->thread.fpu.fcr31 = c->fpu_csr31;
 	switch (state->nan_2008) {
 	case 0:
-		if (!(c->fpu_msk31 & FPU_CSR_NAN2008))
-			t->thread.fpu.fcr31 &= ~FPU_CSR_NAN2008;
-		if (!(c->fpu_msk31 & FPU_CSR_ABS2008))
-			t->thread.fpu.fcr31 &= ~FPU_CSR_ABS2008;
 		break;
 	case 1:
 		if (!(c->fpu_msk31 & FPU_CSR_NAN2008))
@@ -338,10 +334,16 @@ void mips_set_personality_nan(struct arch_elf_state *state)
 
 int mips_elf_read_implies_exec(void *elf_ex, int exstack)
 {
-	/*
-	 * Set READ_IMPLIES_EXEC only on non-NX systems that
-	 * do not request a specific state via PT_GNU_STACK.
-	 */
-	return (!cpu_has_rixi && exstack == EXSTACK_DEFAULT);
+	if (exstack != EXSTACK_DISABLE_X) {
+		/* The binary doesn't request a non-executable stack */
+		return 1;
+	}
+
+	if (!cpu_has_rixi) {
+		/* The CPU doesn't support non-executable memory */
+		return 1;
+	}
+
+	return 0;
 }
 EXPORT_SYMBOL(mips_elf_read_implies_exec);

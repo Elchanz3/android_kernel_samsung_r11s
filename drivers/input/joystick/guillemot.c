@@ -7,6 +7,9 @@
  * Guillemot Digital Interface Protocol driver for Linux
  */
 
+/*
+ */
+
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
@@ -163,7 +166,7 @@ static int guillemot_connect(struct gameport *gameport, struct gameport_driver *
 	int i, t;
 	int err;
 
-	guillemot = kzalloc(sizeof(*guillemot), GFP_KERNEL);
+	guillemot = kzalloc(sizeof(struct guillemot), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!guillemot || !input_dev) {
 		err = -ENOMEM;

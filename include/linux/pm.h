@@ -8,20 +8,20 @@
 #ifndef _LINUX_PM_H
 #define _LINUX_PM_H
 
-#include <linux/completion.h>
-#include <linux/export.h>
-#include <linux/hrtimer_types.h>
-#include <linux/mutex.h>
+#include <linux/list.h>
+#include <linux/workqueue.h>
 #include <linux/spinlock.h>
-#include <linux/types.h>
-#include <linux/util_macros.h>
 #include <linux/wait.h>
-#include <linux/workqueue_types.h>
+#include <linux/timer.h>
+#include <linux/hrtimer.h>
+#include <linux/completion.h>
+#include <linux/android_kabi.h>
 
 /*
  * Callbacks for platform drivers to implement.
  */
 extern void (*pm_power_off)(void);
+extern void (*pm_power_off_prepare)(void);
 
 struct device; /* we have a circular dep with device.h */
 #ifdef CONFIG_VT_CONSOLE_SLEEP
@@ -36,19 +36,11 @@ static inline void pm_vt_switch_unregister(struct device *dev)
 }
 #endif /* CONFIG_VT_CONSOLE_SLEEP */
 
-#ifdef CONFIG_CXL_SUSPEND
-bool cxl_mem_active(void);
-#else
-static inline bool cxl_mem_active(void)
-{
-	return false;
-}
-#endif
-
 /*
  * Device power management
  */
 
+struct device;
 
 #ifdef CONFIG_PM
 extern const char power_group_name[];		/* = "power" */
@@ -308,131 +300,59 @@ struct dev_pm_ops {
 	int (*runtime_suspend)(struct device *dev);
 	int (*runtime_resume)(struct device *dev);
 	int (*runtime_idle)(struct device *dev);
+
+	ANDROID_KABI_RESERVE(1);
 };
-
-#define SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	.suspend = pm_sleep_ptr(suspend_fn), \
-	.resume = pm_sleep_ptr(resume_fn), \
-	.freeze = pm_sleep_ptr(suspend_fn), \
-	.thaw = pm_sleep_ptr(resume_fn), \
-	.poweroff = pm_sleep_ptr(suspend_fn), \
-	.restore = pm_sleep_ptr(resume_fn),
-
-#define LATE_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	.suspend_late = pm_sleep_ptr(suspend_fn), \
-	.resume_early = pm_sleep_ptr(resume_fn), \
-	.freeze_late = pm_sleep_ptr(suspend_fn), \
-	.thaw_early = pm_sleep_ptr(resume_fn), \
-	.poweroff_late = pm_sleep_ptr(suspend_fn), \
-	.restore_early = pm_sleep_ptr(resume_fn),
-
-#define NOIRQ_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	.suspend_noirq = pm_sleep_ptr(suspend_fn), \
-	.resume_noirq = pm_sleep_ptr(resume_fn), \
-	.freeze_noirq = pm_sleep_ptr(suspend_fn), \
-	.thaw_noirq = pm_sleep_ptr(resume_fn), \
-	.poweroff_noirq = pm_sleep_ptr(suspend_fn), \
-	.restore_noirq = pm_sleep_ptr(resume_fn),
-
-#define RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn) \
-	.runtime_suspend = suspend_fn, \
-	.runtime_resume = resume_fn, \
-	.runtime_idle = idle_fn,
 
 #ifdef CONFIG_PM_SLEEP
 #define SET_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
+	.suspend = suspend_fn, \
+	.resume = resume_fn, \
+	.freeze = suspend_fn, \
+	.thaw = resume_fn, \
+	.poweroff = suspend_fn, \
+	.restore = resume_fn,
 #else
 #define SET_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
 #endif
 
 #ifdef CONFIG_PM_SLEEP
 #define SET_LATE_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	LATE_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
+	.suspend_late = suspend_fn, \
+	.resume_early = resume_fn, \
+	.freeze_late = suspend_fn, \
+	.thaw_early = resume_fn, \
+	.poweroff_late = suspend_fn, \
+	.restore_early = resume_fn,
 #else
 #define SET_LATE_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
 #endif
 
 #ifdef CONFIG_PM_SLEEP
 #define SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	NOIRQ_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
+	.suspend_noirq = suspend_fn, \
+	.resume_noirq = resume_fn, \
+	.freeze_noirq = suspend_fn, \
+	.thaw_noirq = resume_fn, \
+	.poweroff_noirq = suspend_fn, \
+	.restore_noirq = resume_fn,
 #else
 #define SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
 #endif
 
 #ifdef CONFIG_PM
 #define SET_RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn) \
-	RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn)
+	.runtime_suspend = suspend_fn, \
+	.runtime_resume = resume_fn, \
+	.runtime_idle = idle_fn,
 #else
 #define SET_RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn)
 #endif
 
-#define _DEFINE_DEV_PM_OPS(name, \
-			   suspend_fn, resume_fn, \
-			   runtime_suspend_fn, runtime_resume_fn, idle_fn) \
-const struct dev_pm_ops name = { \
-	SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	RUNTIME_PM_OPS(runtime_suspend_fn, runtime_resume_fn, idle_fn) \
-}
-
-#define _EXPORT_PM_OPS(name, license, ns)				\
-	const struct dev_pm_ops name;					\
-	__EXPORT_SYMBOL(name, license, ns);				\
-	const struct dev_pm_ops name
-
-#define _DISCARD_PM_OPS(name, license, ns)				\
-	static __maybe_unused const struct dev_pm_ops __static_##name
-
-#ifdef CONFIG_PM
-#define _EXPORT_DEV_PM_OPS(name, license, ns)		_EXPORT_PM_OPS(name, license, ns)
-#else
-#define _EXPORT_DEV_PM_OPS(name, license, ns)		_DISCARD_PM_OPS(name, license, ns)
-#endif
-
-#ifdef CONFIG_PM_SLEEP
-#define _EXPORT_DEV_SLEEP_PM_OPS(name, license, ns)	_EXPORT_PM_OPS(name, license, ns)
-#else
-#define _EXPORT_DEV_SLEEP_PM_OPS(name, license, ns)	_DISCARD_PM_OPS(name, license, ns)
-#endif
-
-#define EXPORT_DEV_PM_OPS(name)				_EXPORT_DEV_PM_OPS(name, "", "")
-#define EXPORT_GPL_DEV_PM_OPS(name)			_EXPORT_DEV_PM_OPS(name, "GPL", "")
-#define EXPORT_NS_DEV_PM_OPS(name, ns)			_EXPORT_DEV_PM_OPS(name, "", #ns)
-#define EXPORT_NS_GPL_DEV_PM_OPS(name, ns)		_EXPORT_DEV_PM_OPS(name, "GPL", #ns)
-
-#define EXPORT_DEV_SLEEP_PM_OPS(name)			_EXPORT_DEV_SLEEP_PM_OPS(name, "", "")
-#define EXPORT_GPL_DEV_SLEEP_PM_OPS(name)		_EXPORT_DEV_SLEEP_PM_OPS(name, "GPL", "")
-#define EXPORT_NS_DEV_SLEEP_PM_OPS(name, ns)		_EXPORT_DEV_SLEEP_PM_OPS(name, "", #ns)
-#define EXPORT_NS_GPL_DEV_SLEEP_PM_OPS(name, ns)	_EXPORT_DEV_SLEEP_PM_OPS(name, "GPL", #ns)
-
 /*
  * Use this if you want to use the same suspend and resume callbacks for suspend
  * to RAM and hibernation.
- *
- * If the underlying dev_pm_ops struct symbol has to be exported, use
- * EXPORT_SIMPLE_DEV_PM_OPS() or EXPORT_GPL_SIMPLE_DEV_PM_OPS() instead.
  */
-#define DEFINE_SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn) \
-	_DEFINE_DEV_PM_OPS(name, suspend_fn, resume_fn, NULL, NULL, NULL)
-
-#define EXPORT_SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn) \
-	EXPORT_DEV_SLEEP_PM_OPS(name) = { \
-		SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	}
-#define EXPORT_GPL_SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn) \
-	EXPORT_GPL_DEV_SLEEP_PM_OPS(name) = { \
-		SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	}
-#define EXPORT_NS_SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn, ns)	\
-	EXPORT_NS_DEV_SLEEP_PM_OPS(name, ns) = { \
-		SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	}
-#define EXPORT_NS_GPL_SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn, ns)	\
-	EXPORT_NS_GPL_DEV_SLEEP_PM_OPS(name, ns) = { \
-		SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-	}
-
-/* Deprecated. Use DEFINE_SIMPLE_DEV_PM_OPS() instead. */
 #define SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn) \
 const struct dev_pm_ops __maybe_unused name = { \
 	SET_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
@@ -450,9 +370,6 @@ const struct dev_pm_ops __maybe_unused name = { \
  * suspend and "early" resume callback pointers, .suspend_late() and
  * .resume_early(), to the same routines as .runtime_suspend() and
  * .runtime_resume(), respectively (and analogously for hibernation).
- *
- * Deprecated. You most likely don't want this macro. Use
- * DEFINE_RUNTIME_DEV_PM_OPS() instead.
  */
 #define UNIVERSAL_DEV_PM_OPS(name, suspend_fn, resume_fn, idle_fn) \
 const struct dev_pm_ops __maybe_unused name = { \
@@ -460,17 +377,11 @@ const struct dev_pm_ops __maybe_unused name = { \
 	SET_RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn) \
 }
 
-/*
- * Use this if you want to have the suspend and resume callbacks be called
- * with IRQs disabled.
- */
-#define DEFINE_NOIRQ_DEV_PM_OPS(name, suspend_fn, resume_fn) \
-const struct dev_pm_ops name = { \
-	NOIRQ_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
-}
-
-#define pm_ptr(_ptr) PTR_IF(IS_ENABLED(CONFIG_PM), (_ptr))
-#define pm_sleep_ptr(_ptr) PTR_IF(IS_ENABLED(CONFIG_PM_SLEEP), (_ptr))
+#ifdef CONFIG_PM
+#define pm_ptr(_ptr) (_ptr)
+#else
+#define pm_ptr(_ptr) NULL
+#endif
 
 /*
  * PM_EVENT_ messages
@@ -567,8 +478,7 @@ const struct dev_pm_ops name = { \
 					{ .event = PM_EVENT_AUTO_RESUME, })
 
 #define PMSG_IS_AUTO(msg)	(((msg).event & PM_EVENT_AUTO) != 0)
-#define PMSG_NO_WAKEUP(msg)	(((msg).event & \
-				(PM_EVENT_FREEZE | PM_EVENT_QUIESCE)) != 0)
+
 /*
  * Device run-time power management status.
  *
@@ -593,12 +503,10 @@ const struct dev_pm_ops name = { \
  */
 
 enum rpm_status {
-	RPM_INVALID = -1,
 	RPM_ACTIVE = 0,
 	RPM_RESUMING,
 	RPM_SUSPENDED,
 	RPM_SUSPENDING,
-	RPM_BLOCKED,
 };
 
 /*
@@ -632,8 +540,6 @@ struct pm_subsys_data {
 	spinlock_t lock;
 	unsigned int refcount;
 #ifdef CONFIG_PM_CLK
-	unsigned int clock_op_might_sleep;
-	struct mutex clock_mutex;
 	struct list_head clock_list;
 #endif
 #ifdef CONFIG_PM_GENERIC_DOMAINS
@@ -661,8 +567,8 @@ struct pm_subsys_data {
 
 struct dev_pm_info {
 	pm_message_t		power_state;
-	bool			can_wakeup:1;
-	bool			async_suspend:1;
+	unsigned int		can_wakeup:1;
+	unsigned int		async_suspend:1;
 	bool			in_dpm_list:1;	/* Owned by the PM core */
 	bool			is_prepared:1;	/* Owned by the PM core */
 	bool			is_suspended:1;	/* Ditto */
@@ -680,13 +586,10 @@ struct dev_pm_info {
 	bool			wakeup_path:1;
 	bool			syscore:1;
 	bool			no_pm_callbacks:1;	/* Owned by the PM core */
-	bool			work_in_progress:1;	/* Owned by the PM core */
-	bool			smart_suspend:1;	/* Owned by the PM core */
-	bool			must_resume:1;		/* Owned by the PM core */
-	bool			may_skip_resume:1;	/* Set by subsystems */
-	bool			strict_midlayer:1;
+	unsigned int		must_resume:1;	/* Owned by the PM core */
+	unsigned int		may_skip_resume:1;	/* Set by subsystems */
 #else
-	bool			should_wakeup:1;
+	unsigned int		should_wakeup:1;
 #endif
 #ifdef CONFIG_PM
 	struct hrtimer		suspend_timer;
@@ -697,21 +600,20 @@ struct dev_pm_info {
 	atomic_t		usage_count;
 	atomic_t		child_count;
 	unsigned int		disable_depth:3;
-	bool			idle_notification:1;
-	bool			request_pending:1;
-	bool			deferred_resume:1;
-	bool			needs_force_resume:1;
-	bool			runtime_auto:1;
+	unsigned int		idle_notification:1;
+	unsigned int		request_pending:1;
+	unsigned int		deferred_resume:1;
+	unsigned int		needs_force_resume:1;
+	unsigned int		runtime_auto:1;
 	bool			ignore_children:1;
-	bool			no_callbacks:1;
-	bool			irq_safe:1;
-	bool			use_autosuspend:1;
-	bool			timer_autosuspends:1;
-	bool			memalloc_noio:1;
+	unsigned int		no_callbacks:1;
+	unsigned int		irq_safe:1;
+	unsigned int		use_autosuspend:1;
+	unsigned int		timer_autosuspends:1;
+	unsigned int		memalloc_noio:1;
 	unsigned int		links_count;
 	enum rpm_request	request;
 	enum rpm_status		runtime_status;
-	enum rpm_status		last_status;
 	int			runtime_error;
 	int			autosuspend_delay;
 	u64			last_busy;
@@ -722,7 +624,9 @@ struct dev_pm_info {
 	struct pm_subsys_data	*subsys_data;  /* Owned by the subsystem. */
 	void (*set_latency_tolerance)(struct device *, s32);
 	struct dev_pm_qos	*qos;
-	bool			detach_power_off:1;	/* Owned by the driver core */
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 extern int dev_pm_get_subsys_data(struct device *dev);
@@ -737,7 +641,6 @@ extern void dev_pm_put_subsys_data(struct device *dev);
  * @activate: Called before executing probe routines for bus types and drivers.
  * @sync: Called after successful driver probe.
  * @dismiss: Called after unsuccessful driver probe and after driver removal.
- * @set_performance_state: Called to request a new performance state.
  *
  * Power domains provide callbacks that are executed during system suspend,
  * hibernation, system resume and during runtime PM transitions instead of
@@ -750,7 +653,8 @@ struct dev_pm_domain {
 	int (*activate)(struct device *dev);
 	void (*sync)(struct device *dev);
 	void (*dismiss)(struct device *dev);
-	int (*set_performance_state)(struct device *dev, unsigned int state);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*
@@ -824,11 +728,11 @@ extern int dpm_suspend_late(pm_message_t state);
 extern int dpm_suspend(pm_message_t state);
 extern int dpm_prepare(pm_message_t state);
 
-extern void __suspend_report_result(const char *function, struct device *dev, void *fn, int ret);
+extern void __suspend_report_result(const char *function, void *fn, int ret);
 
-#define suspend_report_result(dev, fn, ret)				\
+#define suspend_report_result(fn, ret)					\
 	do {								\
-		__suspend_report_result(__func__, dev, fn, ret);	\
+		__suspend_report_result(__func__, fn, ret);		\
 	} while (0)
 
 extern int device_pm_wait_for_dev(struct device *sub, struct device *dev);
@@ -842,8 +746,10 @@ extern int pm_generic_resume_early(struct device *dev);
 extern int pm_generic_resume_noirq(struct device *dev);
 extern int pm_generic_resume(struct device *dev);
 extern int pm_generic_freeze_noirq(struct device *dev);
+extern int pm_generic_freeze_late(struct device *dev);
 extern int pm_generic_freeze(struct device *dev);
 extern int pm_generic_thaw_noirq(struct device *dev);
+extern int pm_generic_thaw_early(struct device *dev);
 extern int pm_generic_thaw(struct device *dev);
 extern int pm_generic_restore_noirq(struct device *dev);
 extern int pm_generic_restore_early(struct device *dev);
@@ -866,7 +772,7 @@ static inline int dpm_suspend_start(pm_message_t state)
 	return 0;
 }
 
-#define suspend_report_result(dev, fn, ret)	do {} while (0)
+#define suspend_report_result(fn, ret)		do {} while (0)
 
 static inline int device_pm_wait_for_dev(struct device *a, struct device *b)
 {
@@ -885,8 +791,10 @@ static inline void dpm_for_each_dev(void *data, void (*fn)(struct device *, void
 #define pm_generic_resume_noirq		NULL
 #define pm_generic_resume		NULL
 #define pm_generic_freeze_noirq		NULL
+#define pm_generic_freeze_late		NULL
 #define pm_generic_freeze		NULL
 #define pm_generic_thaw_noirq		NULL
+#define pm_generic_thaw_early		NULL
 #define pm_generic_thaw			NULL
 #define pm_generic_restore_noirq	NULL
 #define pm_generic_restore_early	NULL

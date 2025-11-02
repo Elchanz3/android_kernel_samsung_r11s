@@ -979,11 +979,9 @@ static int s6e8aa0_probe(struct mipi_dsi_device *dsi)
 	struct s6e8aa0 *ctx;
 	int ret;
 
-	ctx = devm_drm_panel_alloc(dev, struct s6e8aa0, panel,
-				   &s6e8aa0_drm_funcs,
-				   DRM_MODE_CONNECTOR_DSI);
-	if (IS_ERR(ctx))
-		return PTR_ERR(ctx);
+	ctx = devm_kzalloc(dev, sizeof(struct s6e8aa0), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 
@@ -992,7 +990,9 @@ static int s6e8aa0_probe(struct mipi_dsi_device *dsi)
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST
-		| MIPI_DSI_MODE_VIDEO_AUTO_VERT;
+		| MIPI_DSI_MODE_VIDEO_HFP | MIPI_DSI_MODE_VIDEO_HBP
+		| MIPI_DSI_MODE_VIDEO_HSA | MIPI_DSI_MODE_EOT_PACKET
+		| MIPI_DSI_MODE_VSYNC_FLUSH | MIPI_DSI_MODE_VIDEO_AUTO_VERT;
 
 	ret = s6e8aa0_parse_dt(ctx);
 	if (ret < 0)
@@ -1016,7 +1016,8 @@ static int s6e8aa0_probe(struct mipi_dsi_device *dsi)
 
 	ctx->brightness = GAMMA_LEVEL_NUM - 1;
 
-	ctx->panel.prepare_prev_first = true;
+	drm_panel_init(&ctx->panel, dev, &s6e8aa0_drm_funcs,
+		       DRM_MODE_CONNECTOR_DSI);
 
 	drm_panel_add(&ctx->panel);
 
@@ -1027,12 +1028,14 @@ static int s6e8aa0_probe(struct mipi_dsi_device *dsi)
 	return ret;
 }
 
-static void s6e8aa0_remove(struct mipi_dsi_device *dsi)
+static int s6e8aa0_remove(struct mipi_dsi_device *dsi)
 {
 	struct s6e8aa0 *ctx = mipi_dsi_get_drvdata(dsi);
 
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);
+
+	return 0;
 }
 
 static const struct of_device_id s6e8aa0_of_match[] = {

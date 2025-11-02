@@ -3,8 +3,6 @@
 #define __PERF_SYMBOL_CONF 1
 
 #include <stdbool.h>
-#include <linux/bitmap.h>
-#include "perf.h"
 
 struct strlist;
 struct intlist;
@@ -20,6 +18,7 @@ struct symbol_conf {
 			show_kernel_path,
 			use_modules,
 			allow_aliases,
+			sort_by_name,
 			show_nr_samples,
 			show_total_period,
 			use_callchain,
@@ -34,6 +33,7 @@ struct symbol_conf {
 			demangle_kernel,
 			filter_relative,
 			show_hist_headers,
+			branch_callstack,
 			has_filter,
 			show_ref_callgraph,
 			hide_unresolved,
@@ -42,16 +42,7 @@ struct symbol_conf {
 			report_block,
 			report_individual_block,
 			inline_name,
-			disable_add2line_warn,
-			no_buildid_mmap2,
-			guest_code,
-			lazy_load_kernel_maps,
-			keep_exited_threads,
-			annotate_data_member,
-			annotate_data_sample,
-			skip_empty,
-			enable_latency,
-			prefer_latency;
+			disable_add2line_warn;
 	const char	*vmlinux_name,
 			*kallsyms_name,
 			*source_prefix,
@@ -66,10 +57,8 @@ struct symbol_conf {
 			*pid_list_str,
 			*tid_list_str,
 			*sym_list_str,
-			*parallelism_list_str,
 			*col_width_list_str,
 			*bt_stop_list_str;
-	const char		*addr2line_path;
 	unsigned long	time_quantum;
        struct strlist	*dso_list,
 			*comm_list,
@@ -80,14 +69,11 @@ struct symbol_conf {
 			*sym_to_list,
 			*bt_stop_list;
 	struct intlist	*pid_list,
-			*tid_list,
-			*addr_list;
+			*tid_list;
 	const char	*symfs;
 	int		res_sample;
 	int		pad_output_len_dso;
 	int		group_sort_idx;
-	int		addr_range;
-	DECLARE_BITMAP(parallelism_filter, MAX_NR_CPUS + 1);
 };
 
 extern struct symbol_conf symbol_conf;

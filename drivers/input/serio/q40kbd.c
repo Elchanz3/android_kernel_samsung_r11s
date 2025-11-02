@@ -10,6 +10,9 @@
  * Q40 PS/2 keyboard controller driver for Linux/m68k
  */
 
+/*
+ */
+
 #include <linux/module.h>
 #include <linux/serio.h>
 #include <linux/interrupt.h>
@@ -39,13 +42,16 @@ struct q40kbd {
 static irqreturn_t q40kbd_interrupt(int irq, void *dev_id)
 {
 	struct q40kbd *q40kbd = dev_id;
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&q40kbd->lock);
+	spin_lock_irqsave(&q40kbd->lock, flags);
 
 	if (Q40_IRQ_KEYB_MASK & master_inb(INTERRUPT_REG))
 		serio_interrupt(q40kbd->port, master_inb(KEYCODE_REG), 0);
 
 	master_outb(-1, KEYBOARD_UNLOCK_REG);
+
+	spin_unlock_irqrestore(&q40kbd->lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -57,11 +63,14 @@ static irqreturn_t q40kbd_interrupt(int irq, void *dev_id)
 static void q40kbd_flush(struct q40kbd *q40kbd)
 {
 	int maxread = 100;
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&q40kbd->lock);
+	spin_lock_irqsave(&q40kbd->lock, flags);
 
 	while (maxread-- && (Q40_IRQ_KEYB_MASK & master_inb(INTERRUPT_REG)))
 		master_inb(KEYCODE_REG);
+
+	spin_unlock_irqrestore(&q40kbd->lock, flags);
 }
 
 static void q40kbd_stop(void)
@@ -102,8 +111,8 @@ static int q40kbd_probe(struct platform_device *pdev)
 	struct serio *port;
 	int error;
 
-	q40kbd = kzalloc(sizeof(*q40kbd), GFP_KERNEL);
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	q40kbd = kzalloc(sizeof(struct q40kbd), GFP_KERNEL);
+	port = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!q40kbd || !port) {
 		error = -ENOMEM;
 		goto err_free_mem;
@@ -117,8 +126,8 @@ static int q40kbd_probe(struct platform_device *pdev)
 	port->close = q40kbd_close;
 	port->port_data = q40kbd;
 	port->dev.parent = &pdev->dev;
-	strscpy(port->name, "Q40 Kbd Port", sizeof(port->name));
-	strscpy(port->phys, "Q40", sizeof(port->phys));
+	strlcpy(port->name, "Q40 Kbd Port", sizeof(port->name));
+	strlcpy(port->phys, "Q40", sizeof(port->phys));
 
 	q40kbd_stop();
 
@@ -142,7 +151,7 @@ err_free_mem:
 	return error;
 }
 
-static void q40kbd_remove(struct platform_device *pdev)
+static int q40kbd_remove(struct platform_device *pdev)
 {
 	struct q40kbd *q40kbd = platform_get_drvdata(pdev);
 
@@ -154,6 +163,8 @@ static void q40kbd_remove(struct platform_device *pdev)
 	serio_unregister_port(q40kbd->port);
 	free_irq(Q40_IRQ_KEYBOARD, q40kbd);
 	kfree(q40kbd);
+
+	return 0;
 }
 
 static struct platform_driver q40kbd_driver = {

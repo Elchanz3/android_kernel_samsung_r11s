@@ -22,8 +22,7 @@
 #include <linux/bitops.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
+#include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
@@ -153,7 +152,7 @@
 #define ILI9322_GAMMA_7			0x16
 #define ILI9322_GAMMA_8			0x17
 
-/*
+/**
  * enum ili9322_input - the format of the incoming signal to the panel
  *
  * The panel can be connected to various input streams and four of them can
@@ -318,12 +317,17 @@ static int ili9322_regmap_spi_read(void *context, const void *reg,
 	return spi_write_then_read(spi, buf, 1, val, 1);
 }
 
-static const struct regmap_bus ili9322_regmap_bus = {
+static struct regmap_bus ili9322_regmap_bus = {
 	.write = ili9322_regmap_spi_write,
 	.read = ili9322_regmap_spi_read,
 	.reg_format_endian_default = REGMAP_ENDIAN_BIG,
 	.val_format_endian_default = REGMAP_ENDIAN_BIG,
 };
+
+static bool ili9322_volatile_reg(struct device *dev, unsigned int reg)
+{
+	return false;
+}
 
 static bool ili9322_writeable_reg(struct device *dev, unsigned int reg)
 {
@@ -337,7 +341,8 @@ static const struct regmap_config ili9322_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = 0x44,
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
+	.volatile_reg = ili9322_volatile_reg,
 	.writeable_reg = ili9322_writeable_reg,
 };
 
@@ -722,10 +727,9 @@ static int ili9322_probe(struct spi_device *spi)
 	int ret;
 	int i;
 
-	ili = devm_drm_panel_alloc(dev, struct ili9322, panel,
-				   &ili9322_drm_funcs, DRM_MODE_CONNECTOR_DPI);
-	if (IS_ERR(ili))
-		return PTR_ERR(ili);
+	ili = devm_kzalloc(dev, sizeof(struct ili9322), GFP_KERNEL);
+	if (!ili)
+		return -ENOMEM;
 
 	spi_set_drvdata(spi, ili);
 
@@ -884,17 +888,22 @@ static int ili9322_probe(struct spi_device *spi)
 		ili->input = ili->conf->input;
 	}
 
+	drm_panel_init(&ili->panel, dev, &ili9322_drm_funcs,
+		       DRM_MODE_CONNECTOR_DPI);
+
 	drm_panel_add(&ili->panel);
 
 	return 0;
 }
 
-static void ili9322_remove(struct spi_device *spi)
+static int ili9322_remove(struct spi_device *spi)
 {
 	struct ili9322 *ili = spi_get_drvdata(spi);
 
 	ili9322_power_off(ili);
 	drm_panel_remove(&ili->panel);
+
+	return 0;
 }
 
 /*

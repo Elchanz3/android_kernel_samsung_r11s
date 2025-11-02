@@ -49,9 +49,7 @@
  */
 
 #include <linux/atomic.h>
-#include <linux/container_of.h>
-#include <linux/stddef.h>
-#include <linux/types.h>
+#include <linux/kernel.h>
 
 struct llist_head {
 	struct llist_node *first;
@@ -71,33 +69,6 @@ struct llist_node {
 static inline void init_llist_head(struct llist_head *list)
 {
 	list->first = NULL;
-}
-
-/**
- * init_llist_node - initialize lock-less list node
- * @node:	the node to be initialised
- *
- * In cases where there is a need to test if a node is on
- * a list or not, this initialises the node to clearly
- * not be on any list.
- */
-static inline void init_llist_node(struct llist_node *node)
-{
-	WRITE_ONCE(node->next, node);
-}
-
-/**
- * llist_on_list - test if a lock-list list node is on a list
- * @node:	the node to test
- *
- * When a node is on a list the ->next pointer will be NULL or
- * some other node.  It can never point to itself.  We use that
- * in init_llist_node() to record that a node is not on any list,
- * and here to test whether it is on any list.
- */
-static inline bool llist_on_list(const struct llist_node *node)
-{
-	return READ_ONCE(node->next) != node;
 }
 
 /**
@@ -220,39 +191,12 @@ static inline bool llist_empty(const struct llist_head *head)
 
 static inline struct llist_node *llist_next(struct llist_node *node)
 {
-	return READ_ONCE(node->next);
+	return node->next;
 }
 
-/**
- * llist_add_batch - add several linked entries in batch
- * @new_first:	first entry in batch to be added
- * @new_last:	last entry in batch to be added
- * @head:	the head for your lock-less list
- *
- * Return whether list is empty before adding.
- */
-static inline bool llist_add_batch(struct llist_node *new_first,
-				   struct llist_node *new_last,
-				   struct llist_head *head)
-{
-	struct llist_node *first = READ_ONCE(head->first);
-
-	do {
-		new_last->next = first;
-	} while (!try_cmpxchg(&head->first, &first, new_first));
-
-	return !first;
-}
-
-static inline bool __llist_add_batch(struct llist_node *new_first,
-				     struct llist_node *new_last,
-				     struct llist_head *head)
-{
-	new_last->next = head->first;
-	head->first = new_first;
-	return new_last->next == NULL;
-}
-
+extern bool llist_add_batch(struct llist_node *new_first,
+			    struct llist_node *new_last,
+			    struct llist_head *head);
 /**
  * llist_add - add a new entry
  * @new:	new entry to be added
@@ -263,11 +207,6 @@ static inline bool __llist_add_batch(struct llist_node *new_first,
 static inline bool llist_add(struct llist_node *new, struct llist_head *head)
 {
 	return llist_add_batch(new, new, head);
-}
-
-static inline bool __llist_add(struct llist_node *new, struct llist_head *head)
-{
-	return __llist_add_batch(new, new, head);
 }
 
 /**
@@ -283,34 +222,7 @@ static inline struct llist_node *llist_del_all(struct llist_head *head)
 	return xchg(&head->first, NULL);
 }
 
-static inline struct llist_node *__llist_del_all(struct llist_head *head)
-{
-	struct llist_node *first = head->first;
-
-	head->first = NULL;
-	return first;
-}
-
 extern struct llist_node *llist_del_first(struct llist_head *head);
-
-/**
- * llist_del_first_init - delete first entry from lock-list and mark is as being off-list
- * @head:	the head of lock-less list to delete from.
- *
- * This behave the same as llist_del_first() except that llist_init_node() is called
- * on the returned node so that llist_on_list() will report false for the node.
- */
-static inline struct llist_node *llist_del_first_init(struct llist_head *head)
-{
-	struct llist_node *n = llist_del_first(head);
-
-	if (n)
-		init_llist_node(n);
-	return n;
-}
-
-extern bool llist_del_first_this(struct llist_head *head,
-				 struct llist_node *this);
 
 struct llist_node *llist_reverse_order(struct llist_node *head);
 

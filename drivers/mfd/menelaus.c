@@ -29,6 +29,7 @@
 #include <linux/bcd.h>
 #include <linux/slab.h>
 #include <linux/mfd/menelaus.h>
+#include <linux/gpio.h>
 
 #include <asm/mach/irq.h>
 
@@ -1118,7 +1119,7 @@ static inline void menelaus_rtc_init(struct menelaus_chip *m)
 		menelaus_write_reg(MENELAUS_RTC_CTRL, m->rtc_control);
 	}
 
-	err = devm_rtc_register_device(m->rtc);
+	err = rtc_register_device(m->rtc);
 	if (err) {
 		if (alarm) {
 			menelaus_remove_irq_work(MENELAUS_RTCALM_IRQ);
@@ -1141,7 +1142,8 @@ static inline void menelaus_rtc_init(struct menelaus_chip *m)
 
 static struct i2c_driver menelaus_i2c_driver;
 
-static int menelaus_probe(struct i2c_client *client)
+static int menelaus_probe(struct i2c_client *client,
+			  const struct i2c_device_id *id)
 {
 	struct menelaus_chip	*menelaus;
 	int			rev = 0;
@@ -1220,17 +1222,18 @@ fail:
 	return err;
 }
 
-static void menelaus_remove(struct i2c_client *client)
+static int menelaus_remove(struct i2c_client *client)
 {
 	struct menelaus_chip	*menelaus = i2c_get_clientdata(client);
 
 	free_irq(client->irq, menelaus);
 	flush_work(&menelaus->work);
 	the_menelaus = NULL;
+	return 0;
 }
 
 static const struct i2c_device_id menelaus_id[] = {
-	{ "menelaus" },
+	{ "menelaus", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, menelaus_id);

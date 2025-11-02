@@ -11,7 +11,6 @@
 
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/irqdomain.h>
 #include <linux/of.h>
 
 static u32 ienable;
@@ -19,9 +18,11 @@ static u32 ienable;
 asmlinkage void do_IRQ(int hwirq, struct pt_regs *regs)
 {
 	struct pt_regs *oldregs = set_irq_regs(regs);
+	int irq;
 
 	irq_enter();
-	generic_handle_domain_irq(NULL, hwirq);
+	irq = irq_find_mapping(NULL, hwirq);
+	generic_handle_irq(irq);
 	irq_exit();
 
 	set_irq_regs(oldregs);
@@ -69,11 +70,10 @@ void __init init_IRQ(void)
 
 	BUG_ON(!node);
 
-	domain = irq_domain_create_linear(of_fwnode_handle(node),
-					  NIOS2_CPU_NR_IRQS, &irq_ops, NULL);
+	domain = irq_domain_add_linear(node, NIOS2_CPU_NR_IRQS, &irq_ops, NULL);
 	BUG_ON(!domain);
 
-	irq_set_default_domain(domain);
+	irq_set_default_host(domain);
 	of_node_put(node);
 	/* Load the initial ienable value */
 	ienable = RDCTL(CTL_IENABLE);

@@ -9,7 +9,7 @@
 #include <linux/memblock.h>
 #include <linux/random.h>
 #include <asm/dmi.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #ifndef SMBIOS_ENTRY_POINT_SCAN_START
 #define SMBIOS_ENTRY_POINT_SCAN_START 0xF0000
@@ -42,7 +42,6 @@ static struct dmi_memdev_info {
 	u8 type;		/* DDR2, DDR3, DDR4 etc */
 } *dmi_memdev;
 static int dmi_memdev_nr;
-static int dmi_memdev_populated_nr __initdata;
 
 static const char * __init dmi_string_nosave(const struct dmi_header *dm, u8 s)
 {
@@ -178,7 +177,6 @@ static int __init dmi_checksum(const u8 *buf, u8 len)
 static const char *dmi_ident[DMI_STRING_MAX];
 static LIST_HEAD(dmi_devices);
 int dmi_available;
-EXPORT_SYMBOL_GPL(dmi_available);
 
 /*
  *	Save a DMI string
@@ -460,9 +458,6 @@ static void __init save_mem_devices(const struct dmi_header *dm, void *v)
 	else
 		bytes = (u64)get_unaligned((u32 *)&d[0x1C]) << 20;
 
-	if (bytes)
-		dmi_memdev_populated_nr++;
-
 	dmi_memdev[nr].size = bytes;
 	nr++;
 }
@@ -582,13 +577,8 @@ static int __init dmi_present(const u8 *buf)
 {
 	u32 smbios_ver;
 
-	/*
-	 * The size of this structure is 31 bytes, but we also accept value
-	 * 30 due to a mistake in SMBIOS specification version 2.1.
-	 */
 	if (memcmp(buf, "_SM_", 4) == 0 &&
-	    buf[5] >= 30 && buf[5] <= 32 &&
-	    dmi_checksum(buf, buf[5])) {
+	    buf[5] < 32 && dmi_checksum(buf, buf[5])) {
 		smbios_ver = get_unaligned_be16(buf + 6);
 		smbios_entry_point_size = buf[5];
 		memcpy(smbios_entry_point, buf, smbios_entry_point_size);
@@ -649,9 +639,8 @@ static int __init dmi_present(const u8 *buf)
 static int __init dmi_smbios3_present(const u8 *buf)
 {
 	if (memcmp(buf, "_SM3_", 5) == 0 &&
-	    buf[6] >= 24 && buf[6] <= 32 &&
-	    dmi_checksum(buf, buf[6])) {
-		dmi_ver = get_unaligned_be24(buf + 7);
+	    buf[6] < 32 && dmi_checksum(buf, buf[6])) {
+		dmi_ver = get_unaligned_be32(buf + 6) & 0xFFFFFF;
 		dmi_num = 0;			/* No longer specified */
 		dmi_len = get_unaligned_le32(buf + 12);
 		dmi_base = get_unaligned_le64(buf + 16);
@@ -761,8 +750,16 @@ static void __init dmi_scan_machine(void)
 	pr_info("DMI not present or invalid.\n");
 }
 
-static __ro_after_init BIN_ATTR_SIMPLE_ADMIN_RO(smbios_entry_point);
-static __ro_after_init BIN_ATTR_SIMPLE_ADMIN_RO(DMI);
+static ssize_t raw_table_read(struct file *file, struct kobject *kobj,
+			      struct bin_attribute *attr, char *buf,
+			      loff_t pos, size_t count)
+{
+	memcpy(buf, attr->private + pos, count);
+	return count;
+}
+
+static BIN_ATTR(smbios_entry_point, S_IRUSR, raw_table_read, NULL, 0);
+static BIN_ATTR(DMI, S_IRUSR, raw_table_read, NULL, 0);
 
 static int __init dmi_init(void)
 {
@@ -831,8 +828,6 @@ void __init dmi_setup(void)
 		return;
 
 	dmi_memdev_walk();
-	pr_info("DMI: Memory slots populated: %d/%d\n",
-		dmi_memdev_populated_nr, dmi_memdev_nr);
 	dump_stack_set_arch_desc("%s", dmi_ids_string);
 }
 

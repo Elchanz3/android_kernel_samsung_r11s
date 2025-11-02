@@ -201,7 +201,8 @@ static unsigned int tifm_ms_transfer_data(struct tifm_ms *host)
 		unsigned int p_off;
 
 		if (host->req->long_data) {
-			pg = sg_page(&host->req->sg) + (off >> PAGE_SHIFT);
+			pg = nth_page(sg_page(&host->req->sg),
+				      off >> PAGE_SHIFT);
 			p_off = offset_in_page(off);
 			p_cnt = PAGE_SIZE - p_off;
 			p_cnt = min(p_cnt, length);
@@ -278,8 +279,8 @@ static int tifm_ms_issue_cmd(struct tifm_ms *host)
 	if (host->use_dma) {
 		if (1 != tifm_map_sg(sock, &host->req->sg, 1,
 				     host->req->data_dir == READ
-				     ? DMA_FROM_DEVICE
-				     : DMA_TO_DEVICE)) {
+				     ? PCI_DMA_FROMDEVICE
+				     : PCI_DMA_TODEVICE)) {
 			host->req->error = -ENOMEM;
 			return host->req->error;
 		}
@@ -336,7 +337,7 @@ static void tifm_ms_complete_cmd(struct tifm_ms *host)
 	struct memstick_host *msh = tifm_get_drvdata(sock);
 	int rc;
 
-	timer_delete(&host->timer);
+	del_timer(&host->timer);
 
 	host->req->int_reg = readl(sock->addr + SOCK_MS_STATUS) & 0xff;
 	host->req->int_reg = (host->req->int_reg & 1)
@@ -349,8 +350,8 @@ static void tifm_ms_complete_cmd(struct tifm_ms *host)
 	if (host->use_dma) {
 		tifm_unmap_sg(sock, &host->req->sg, 1,
 			      host->req->data_dir == READ
-			      ? DMA_FROM_DEVICE
-			      : DMA_TO_DEVICE);
+			      ? PCI_DMA_FROMDEVICE
+			      : PCI_DMA_TODEVICE);
 	}
 
 	writel((~TIFM_CTRL_LED) & readl(sock->addr + SOCK_CONTROL),
@@ -527,14 +528,14 @@ static int tifm_ms_set_param(struct memstick_host *msh,
 		} else
 			return -EINVAL;
 		break;
-	}
+	};
 
 	return 0;
 }
 
 static void tifm_ms_abort(struct timer_list *t)
 {
-	struct tifm_ms *host = timer_container_of(host, t, timer);
+	struct tifm_ms *host = from_timer(host, t, timer);
 
 	dev_dbg(&host->dev->dev, "status %x\n",
 		readl(host->dev->addr + SOCK_MS_STATUS));
@@ -599,15 +600,15 @@ static void tifm_ms_remove(struct tifm_dev *sock)
 	spin_lock_irqsave(&sock->lock, flags);
 	host->eject = 1;
 	if (host->req) {
-		timer_delete(&host->timer);
+		del_timer(&host->timer);
 		writel(TIFM_FIFO_INT_SETALL,
 		       sock->addr + SOCK_DMA_FIFO_INT_ENABLE_CLEAR);
 		writel(TIFM_DMA_RESET, sock->addr + SOCK_DMA_CONTROL);
 		if (host->use_dma)
 			tifm_unmap_sg(sock, &host->req->sg, 1,
 				      host->req->data_dir == READ
-				      ? DMA_TO_DEVICE
-				      : DMA_FROM_DEVICE);
+				      ? PCI_DMA_TODEVICE
+				      : PCI_DMA_FROMDEVICE);
 		host->req->error = -ETIME;
 
 		do {

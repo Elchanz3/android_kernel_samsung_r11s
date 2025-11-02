@@ -16,6 +16,13 @@
 #include <net/ip6_route.h>
 #include <net/xfrm.h>
 
+int xfrm6_find_1stfragopt(struct xfrm_state *x, struct sk_buff *skb,
+			  u8 **prevhdr)
+{
+	return ip6_find_1stfragopt(skb, prevhdr);
+}
+EXPORT_SYMBOL(xfrm6_find_1stfragopt);
+
 void xfrm6_local_rxpmtu(struct sk_buff *skb, u32 mtu)
 {
 	struct flowi6 fl6;
@@ -82,20 +89,20 @@ static int __xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 	toobig = skb->len > mtu && !skb_is_gso(skb);
 
-	if (toobig && xfrm6_local_dontfrag(sk)) {
+	if (toobig && xfrm6_local_dontfrag(skb->sk)) {
 		xfrm6_local_rxpmtu(skb, mtu);
 		kfree_skb(skb);
 		return -EMSGSIZE;
 	} else if (toobig && xfrm6_noneed_fragment(skb)) {
 		skb->ignore_df = 1;
 		goto skip_frag;
-	} else if (!skb->ignore_df && toobig && sk) {
+	} else if (!skb->ignore_df && toobig && skb->sk) {
 		xfrm_local_error(skb, mtu);
 		kfree_skb(skb);
 		return -EMSGSIZE;
 	}
 
-	if (toobig)
+	if (toobig || dst_allfrag(skb_dst(skb)))
 		return ip6_fragment(net, sk, skb,
 				    __xfrm6_output_finish);
 
@@ -106,7 +113,7 @@ skip_frag:
 int xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
-			    net, sk, skb,  skb->dev, skb_dst_dev(skb),
+			    net, sk, skb,  skb->dev, skb_dst(skb)->dev,
 			    __xfrm6_output,
 			    !(IP6CB(skb)->flags & IP6SKB_REROUTED));
 }

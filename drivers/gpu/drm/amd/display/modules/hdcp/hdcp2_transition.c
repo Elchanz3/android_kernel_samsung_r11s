@@ -184,28 +184,17 @@ enum mod_hdcp_status mod_hdcp_hdcp2_transition(struct mod_hdcp *hdcp,
 		callback_in_ms(0, output);
 		set_state_id(hdcp, output, H2_A2_LOCALITY_CHECK);
 		break;
-	case H2_A2_LOCALITY_CHECK: {
-		const bool use_fw = hdcp->config.ddc.funcs.atomic_write_poll_read_i2c
-				&& !adjust->hdcp2.force_sw_locality_check;
-
-		/*
-		 * 1A-05: consider disconnection after LC init a failure
-		 * 1A-13-1: consider invalid l' a failure
-		 * 1A-13-2: consider l' timeout a failure
-		 */
+	case H2_A2_LOCALITY_CHECK:
 		if (hdcp->state.stay_count > 10 ||
 				input->lc_init_prepare != PASS ||
-				(!use_fw && input->lc_init_write != PASS) ||
-				(!use_fw && input->l_prime_available_poll != PASS)) {
-			fail_and_restart_in_ms(0, &status, output);
-			break;
-		} else if (input->l_prime_read != PASS) {
-			if (use_fw && hdcp->config.debug.lc_enable_sw_fallback) {
-				adjust->hdcp2.force_sw_locality_check = true;
-				callback_in_ms(0, output);
-				break;
-			}
-
+				input->lc_init_write != PASS ||
+				input->l_prime_available_poll != PASS ||
+				input->l_prime_read != PASS) {
+			/*
+			 * 1A-05: consider disconnection after LC init a failure
+			 * 1A-13-1: consider invalid l' a failure
+			 * 1A-13-2: consider l' timeout a failure
+			 */
 			fail_and_restart_in_ms(0, &status, output);
 			break;
 		} else if (input->l_prime_validation != PASS) {
@@ -216,7 +205,6 @@ enum mod_hdcp_status mod_hdcp_hdcp2_transition(struct mod_hdcp *hdcp,
 		callback_in_ms(0, output);
 		set_state_id(hdcp, output, H2_A3_EXCHANGE_KS_AND_TEST_FOR_REPEATER);
 		break;
-	}
 	case H2_A3_EXCHANGE_KS_AND_TEST_FOR_REPEATER:
 		if (input->eks_prepare != PASS ||
 				input->eks_write != PASS) {
@@ -254,11 +242,11 @@ enum mod_hdcp_status mod_hdcp_hdcp2_transition(struct mod_hdcp *hdcp,
 		}
 		callback_in_ms(0, output);
 		set_state_id(hdcp, output, H2_A5_AUTHENTICATED);
-		set_auth_complete(hdcp, output);
+		HDCP_FULL_DDC_TRACE(hdcp);
 		break;
 	case H2_A5_AUTHENTICATED:
-		if (input->rxstatus_read == FAIL ||
-				input->reauth_request_check == FAIL) {
+		if (input->rxstatus_read != PASS ||
+				input->reauth_request_check != PASS) {
 			fail_and_restart_in_ms(0, &status, output);
 			break;
 		} else if (event_ctx->rx_id_list_ready && conn->is_repeater) {
@@ -510,23 +498,12 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 		callback_in_ms(0, output);
 		set_state_id(hdcp, output, D2_A2_LOCALITY_CHECK);
 		break;
-	case D2_A2_LOCALITY_CHECK: {
-		const bool use_fw = hdcp->config.ddc.funcs.atomic_write_poll_read_aux
-				&& !adjust->hdcp2.force_sw_locality_check;
-
+	case D2_A2_LOCALITY_CHECK:
 		if (hdcp->state.stay_count > 10 ||
 				input->lc_init_prepare != PASS ||
-				(!use_fw && input->lc_init_write != PASS)) {
+				input->lc_init_write != PASS ||
+				input->l_prime_read != PASS) {
 			/* 1A-12: consider invalid l' a failure */
-			fail_and_restart_in_ms(0, &status, output);
-			break;
-		} else if (input->l_prime_read != PASS) {
-			if (use_fw && hdcp->config.debug.lc_enable_sw_fallback) {
-				adjust->hdcp2.force_sw_locality_check = true;
-				callback_in_ms(0, output);
-				break;
-			}
-
 			fail_and_restart_in_ms(0, &status, output);
 			break;
 		} else if (input->l_prime_validation != PASS) {
@@ -537,7 +514,6 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 		callback_in_ms(0, output);
 		set_state_id(hdcp, output, D2_A34_EXCHANGE_KS_AND_TEST_FOR_REPEATER);
 		break;
-	}
 	case D2_A34_EXCHANGE_KS_AND_TEST_FOR_REPEATER:
 		if (input->eks_prepare != PASS ||
 				input->eks_write != PASS) {
@@ -548,7 +524,7 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 			set_watchdog_in_ms(hdcp, 3000, output);
 			set_state_id(hdcp, output, D2_A6_WAIT_FOR_RX_ID_LIST);
 		} else {
-			callback_in_ms(1, output);
+			callback_in_ms(0, output);
 			set_state_id(hdcp, output, D2_SEND_CONTENT_STREAM_TYPE);
 		}
 		break;
@@ -583,14 +559,14 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 			break;
 		}
 		set_state_id(hdcp, output, D2_A5_AUTHENTICATED);
-		set_auth_complete(hdcp, output);
+		HDCP_FULL_DDC_TRACE(hdcp);
 		break;
 	case D2_A5_AUTHENTICATED:
-		if (input->rxstatus_read == FAIL ||
-				input->reauth_request_check == FAIL) {
-			fail_and_restart_in_ms(100, &status, output);
+		if (input->rxstatus_read != PASS ||
+				input->reauth_request_check != PASS) {
+			fail_and_restart_in_ms(0, &status, output);
 			break;
-		} else if (input->link_integrity_check_dp == FAIL) {
+		} else if (input->link_integrity_check_dp != PASS) {
 			if (hdcp->connection.hdcp2_retry_count >= 1)
 				adjust->hdcp2.force_type = MOD_HDCP_FORCE_TYPE_0;
 			fail_and_restart_in_ms(0, &status, output);

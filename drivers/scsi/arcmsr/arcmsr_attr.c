@@ -58,9 +58,11 @@
 #include <scsi/scsi_transport.h>
 #include "arcmsr.h"
 
+struct device_attribute *arcmsr_host_attrs[];
+
 static ssize_t arcmsr_sysfs_iop_message_read(struct file *filp,
 					     struct kobject *kobj,
-					     const struct bin_attribute *bin,
+					     struct bin_attribute *bin,
 					     char *buf, loff_t off,
 					     size_t count)
 {
@@ -107,7 +109,7 @@ static ssize_t arcmsr_sysfs_iop_message_read(struct file *filp,
 
 static ssize_t arcmsr_sysfs_iop_message_write(struct file *filp,
 					      struct kobject *kobj,
-					      const struct bin_attribute *bin,
+					      struct bin_attribute *bin,
 					      char *buf, loff_t off,
 					      size_t count)
 {
@@ -155,7 +157,7 @@ static ssize_t arcmsr_sysfs_iop_message_write(struct file *filp,
 
 static ssize_t arcmsr_sysfs_iop_message_clear(struct file *filp,
 					      struct kobject *kobj,
-					      const struct bin_attribute *bin,
+					      struct bin_attribute *bin,
 					      char *buf, loff_t off,
 					      size_t count)
 {
@@ -387,25 +389,16 @@ static DEVICE_ATTR(host_fw_numbers_queue, S_IRUGO, arcmsr_attr_host_fw_numbers_q
 static DEVICE_ATTR(host_fw_sdram_size, S_IRUGO, arcmsr_attr_host_fw_sdram_size, NULL);
 static DEVICE_ATTR(host_fw_hd_channels, S_IRUGO, arcmsr_attr_host_fw_hd_channels, NULL);
 
-static struct attribute *arcmsr_host_attrs[] = {
-	&dev_attr_host_driver_version.attr,
-	&dev_attr_host_driver_posted_cmd.attr,
-	&dev_attr_host_driver_reset.attr,
-	&dev_attr_host_driver_abort.attr,
-	&dev_attr_host_fw_model.attr,
-	&dev_attr_host_fw_version.attr,
-	&dev_attr_host_fw_request_len.attr,
-	&dev_attr_host_fw_numbers_queue.attr,
-	&dev_attr_host_fw_sdram_size.attr,
-	&dev_attr_host_fw_hd_channels.attr,
+struct device_attribute *arcmsr_host_attrs[] = {
+	&dev_attr_host_driver_version,
+	&dev_attr_host_driver_posted_cmd,
+	&dev_attr_host_driver_reset,
+	&dev_attr_host_driver_abort,
+	&dev_attr_host_fw_model,
+	&dev_attr_host_fw_version,
+	&dev_attr_host_fw_request_len,
+	&dev_attr_host_fw_numbers_queue,
+	&dev_attr_host_fw_sdram_size,
+	&dev_attr_host_fw_hd_channels,
 	NULL,
-};
-
-static const struct attribute_group arcmsr_host_attr_group = {
-	.attrs = arcmsr_host_attrs,
-};
-
-const struct attribute_group *arcmsr_host_groups[] = {
-	&arcmsr_host_attr_group,
-	NULL
 };

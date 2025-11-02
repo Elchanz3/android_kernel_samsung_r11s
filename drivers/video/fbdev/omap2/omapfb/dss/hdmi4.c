@@ -20,7 +20,6 @@
 #include <linux/pm_runtime.h>
 #include <linux/clk.h>
 #include <linux/of.h>
-#include <linux/of_graph.h>
 #include <linux/regulator/consumer.h>
 #include <linux/component.h>
 #include <video/omapfb_dss.h>
@@ -39,9 +38,11 @@ static int hdmi_runtime_get(void)
 
 	DSSDBG("hdmi_runtime_get\n");
 
-	r = pm_runtime_resume_and_get(&hdmi.pdev->dev);
-	if (WARN_ON(r < 0))
+	r = pm_runtime_get_sync(&hdmi.pdev->dev);
+	if (WARN_ON(r < 0)) {
+		pm_runtime_put_sync(&hdmi.pdev->dev);
 		return r;
+	}
 
 	return 0;
 }
@@ -530,7 +531,7 @@ static int hdmi_probe_of(struct platform_device *pdev)
 	struct device_node *ep;
 	int r;
 
-	ep = of_graph_get_endpoint_by_regs(node, 0, -1);
+	ep = omapdss_of_get_first_endpoint(node);
 	if (!ep)
 		return 0;
 
@@ -671,7 +672,7 @@ static int hdmi4_bind(struct device *dev, struct device *master, void *data)
 	int irq;
 
 	hdmi.pdev = pdev;
-	platform_set_drvdata(pdev, &hdmi);
+	dev_set_drvdata(&pdev->dev, &hdmi);
 
 	mutex_init(&hdmi.lock);
 	spin_lock_init(&hdmi.audio_playing_lock);
@@ -757,9 +758,10 @@ static int hdmi4_probe(struct platform_device *pdev)
 	return component_add(&pdev->dev, &hdmi4_component_ops);
 }
 
-static void hdmi4_remove(struct platform_device *pdev)
+static int hdmi4_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &hdmi4_component_ops);
+	return 0;
 }
 
 static int hdmi_runtime_suspend(struct device *dev)
@@ -793,8 +795,8 @@ static const struct of_device_id hdmi_of_match[] = {
 static struct platform_driver omapdss_hdmihw_driver = {
 	.probe		= hdmi4_probe,
 	.remove		= hdmi4_remove,
-	.driver		= {
-		.name	= "omapdss_hdmi",
+	.driver         = {
+		.name   = "omapdss_hdmi",
 		.pm	= &hdmi_pm_ops,
 		.of_match_table = hdmi_of_match,
 		.suppress_bind_attrs = true,

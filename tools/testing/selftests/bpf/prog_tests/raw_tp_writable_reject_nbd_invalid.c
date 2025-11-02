@@ -2,7 +2,6 @@
 
 #include <test_progs.h>
 #include <linux/nbd.h>
-#include "bpf_util.h"
 
 void test_raw_tp_writable_reject_nbd_invalid(void)
 {
@@ -19,15 +18,15 @@ void test_raw_tp_writable_reject_nbd_invalid(void)
 		BPF_EXIT_INSN(),
 	};
 
-	LIBBPF_OPTS(bpf_prog_load_opts, opts,
+	struct bpf_load_program_attr load_attr = {
+		.prog_type = BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
+		.license = "GPL v2",
+		.insns = program,
+		.insns_cnt = sizeof(program) / sizeof(struct bpf_insn),
 		.log_level = 2,
-		.log_buf = error,
-		.log_size = sizeof(error),
-	);
+	};
 
-	bpf_fd = bpf_prog_load(BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE, NULL, "GPL v2",
-			       program, ARRAY_SIZE(program),
-			       &opts);
+	bpf_fd = bpf_load_program_xattr(&load_attr, error, sizeof(error));
 	if (CHECK(bpf_fd < 0, "bpf_raw_tracepoint_writable load",
 		  "failed: %d errno %d\n", bpf_fd, errno))
 		return;

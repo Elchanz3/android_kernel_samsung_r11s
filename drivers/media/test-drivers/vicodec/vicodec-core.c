@@ -26,7 +26,7 @@
 #include "codec-v4l2-fwht.h"
 
 MODULE_DESCRIPTION("Virtual codec device");
-MODULE_AUTHOR("Hans Verkuil <hverkuil@kernel.org>");
+MODULE_AUTHOR("Hans Verkuil <hans.verkuil@cisco.com>");
 MODULE_LICENSE("GPL v2");
 
 static bool multiplanar;
@@ -43,8 +43,6 @@ MODULE_PARM_DESC(debug, " activates debug info");
 #define MIN_WIDTH		640U
 #define MAX_HEIGHT		2160U
 #define MIN_HEIGHT		360U
-/* Recommended number of buffers for the stateful codecs */
-#define VICODEC_REC_BUFS	2
 
 #define dprintk(dev, fmt, arg...) \
 	v4l2_dbg(1, debug, &dev->v4l2_dev, "%s: " fmt, __func__, ## arg)
@@ -144,7 +142,7 @@ static const struct v4l2_event vicodec_eos_event = {
 
 static inline struct vicodec_ctx *file2ctx(struct file *file)
 {
-	return container_of(file_to_v4l2_fh(file), struct vicodec_ctx, fh);
+	return container_of(file->private_data, struct vicodec_ctx, fh);
 }
 
 static struct vicodec_q_data *get_q_data(struct vicodec_ctx *ctx,
@@ -202,14 +200,14 @@ static void copy_cap_to_ref(const u8 *cap, const struct v4l2_fwht_pixfmt_info *i
 
 static bool validate_by_version(unsigned int flags, unsigned int version)
 {
-	if (!version || version > V4L2_FWHT_VERSION)
+	if (!version || version > FWHT_VERSION)
 		return false;
 
 	if (version >= 2) {
 		unsigned int components_num = 1 +
-			((flags & V4L2_FWHT_FL_COMPONENTS_NUM_MSK) >>
-			 V4L2_FWHT_FL_COMPONENTS_NUM_OFFSET);
-		unsigned int pixenc = flags & V4L2_FWHT_FL_PIXENC_MSK;
+			((flags & FWHT_FL_COMPONENTS_NUM_MSK) >>
+			 FWHT_FL_COMPONENTS_NUM_OFFSET);
+		unsigned int pixenc = flags & FWHT_FL_PIXENC_MSK;
 
 		if (components_num == 0 || components_num > 4 || !pixenc)
 			return false;
@@ -221,18 +219,18 @@ static bool validate_stateless_params_flags(const struct v4l2_ctrl_fwht_params *
 					    const struct v4l2_fwht_pixfmt_info *cur_info)
 {
 	unsigned int width_div =
-		(params->flags & V4L2_FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
+		(params->flags & FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
 	unsigned int height_div =
-		(params->flags & V4L2_FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
+		(params->flags & FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
 	unsigned int components_num = 3;
 	unsigned int pixenc = 0;
 
 	if (params->version < 3)
 		return false;
 
-	components_num = 1 + ((params->flags & V4L2_FWHT_FL_COMPONENTS_NUM_MSK) >>
-			      V4L2_FWHT_FL_COMPONENTS_NUM_OFFSET);
-	pixenc = (params->flags & V4L2_FWHT_FL_PIXENC_MSK);
+	components_num = 1 + ((params->flags & FWHT_FL_COMPONENTS_NUM_MSK) >>
+			      FWHT_FL_COMPONENTS_NUM_OFFSET);
+	pixenc = (params->flags & FWHT_FL_PIXENC_MSK);
 	if (v4l2_fwht_validate_fmt(cur_info, width_div, height_div,
 				    components_num, pixenc))
 		return true;
@@ -280,15 +278,19 @@ static int device_process(struct vicodec_ctx *ctx,
 		 * set the reference buffer from the reference timestamp
 		 * only if this is a P-frame
 		 */
-		if (!(ntohl(ctx->state.header.flags) & V4L2_FWHT_FL_I_FRAME)) {
+		if (!(ntohl(ctx->state.header.flags) & FWHT_FL_I_FRAME)) {
 			struct vb2_buffer *ref_vb2_buf;
+			int ref_buf_idx;
 			struct vb2_queue *vq_cap =
 				v4l2_m2m_get_vq(ctx->fh.m2m_ctx,
 						V4L2_BUF_TYPE_VIDEO_CAPTURE);
 
-			ref_vb2_buf = vb2_find_buffer(vq_cap, ctx->state.ref_frame_ts);
-			if (!ref_vb2_buf)
+			ref_buf_idx = vb2_find_timestamp(vq_cap,
+							 ctx->state.ref_frame_ts, 0);
+			if (ref_buf_idx < 0)
 				return -EINVAL;
+
+			ref_vb2_buf = vq_cap->bufs[ref_buf_idx];
 			if (ref_vb2_buf->state == VB2_BUF_STATE_ERROR)
 				ret = -EINVAL;
 			ctx->state.ref_frame.buf =
@@ -329,7 +331,7 @@ static int device_process(struct vicodec_ctx *ctx,
 			copy_cap_to_ref(p_dst, ctx->state.info, &ctx->state);
 
 		vb2_set_plane_payload(&dst_vb->vb2_buf, 0, q_dst->sizeimage);
-		if (ntohl(ctx->state.header.flags) & V4L2_FWHT_FL_I_FRAME)
+		if (ntohl(ctx->state.header.flags) & FWHT_FL_I_FRAME)
 			dst_vb->flags |= V4L2_BUF_FLAG_KEYFRAME;
 		else
 			dst_vb->flags |= V4L2_BUF_FLAG_PFRAME;
@@ -478,16 +480,16 @@ static const struct v4l2_fwht_pixfmt_info *
 info_from_header(const struct fwht_cframe_hdr *p_hdr)
 {
 	unsigned int flags = ntohl(p_hdr->flags);
-	unsigned int width_div = (flags & V4L2_FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
-	unsigned int height_div = (flags & V4L2_FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
+	unsigned int width_div = (flags & FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
+	unsigned int height_div = (flags & FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
 	unsigned int components_num = 3;
 	unsigned int pixenc = 0;
 	unsigned int version = ntohl(p_hdr->version);
 
 	if (version >= 2) {
-		components_num = 1 + ((flags & V4L2_FWHT_FL_COMPONENTS_NUM_MSK) >>
-				V4L2_FWHT_FL_COMPONENTS_NUM_OFFSET);
-		pixenc = (flags & V4L2_FWHT_FL_PIXENC_MSK);
+		components_num = 1 + ((flags & FWHT_FL_COMPONENTS_NUM_MSK) >>
+				FWHT_FL_COMPONENTS_NUM_OFFSET);
+		pixenc = (flags & FWHT_FL_PIXENC_MSK);
 	}
 	return v4l2_fwht_find_nth_fmt(width_div, height_div,
 				     components_num, pixenc, 0);
@@ -520,8 +522,8 @@ static void update_capture_data_from_header(struct vicodec_ctx *ctx)
 	const struct fwht_cframe_hdr *p_hdr = &ctx->state.header;
 	const struct v4l2_fwht_pixfmt_info *info = info_from_header(p_hdr);
 	unsigned int flags = ntohl(p_hdr->flags);
-	unsigned int hdr_width_div = (flags & V4L2_FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
-	unsigned int hdr_height_div = (flags & V4L2_FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
+	unsigned int hdr_width_div = (flags & FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
+	unsigned int hdr_height_div = (flags & FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
 
 	/*
 	 * This function should not be used by a stateless codec since
@@ -655,8 +657,8 @@ restart:
 	if (!is_header_valid(&ctx->state.header) && ctx->comp_has_frame)
 		return 1;
 	flags = ntohl(ctx->state.header.flags);
-	hdr_width_div = (flags & V4L2_FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
-	hdr_height_div = (flags & V4L2_FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
+	hdr_width_div = (flags & FWHT_FL_CHROMA_FULL_WIDTH) ? 1 : 2;
+	hdr_height_div = (flags & FWHT_FL_CHROMA_FULL_HEIGHT) ? 1 : 2;
 
 	if (ntohl(ctx->state.header.width) != q_dst->visible_width ||
 	    ntohl(ctx->state.header.height) != q_dst->visible_height ||
@@ -809,6 +811,9 @@ static int vidioc_g_fmt(struct vicodec_ctx *ctx, struct v4l2_format *f)
 		pix_mp->xfer_func = ctx->state.xfer_func;
 		pix_mp->ycbcr_enc = ctx->state.ycbcr_enc;
 		pix_mp->quantization = ctx->state.quantization;
+		memset(pix_mp->reserved, 0, sizeof(pix_mp->reserved));
+		memset(pix_mp->plane_fmt[0].reserved, 0,
+		       sizeof(pix_mp->plane_fmt[0].reserved));
 		break;
 	default:
 		return -EINVAL;
@@ -881,6 +886,8 @@ static int vidioc_try_fmt(struct vicodec_ctx *ctx, struct v4l2_format *f)
 			info->sizeimage_mult / info->sizeimage_div;
 		if (pix_mp->pixelformat == V4L2_PIX_FMT_FWHT)
 			plane->sizeimage += sizeof(struct fwht_cframe_hdr);
+		memset(pix_mp->reserved, 0, sizeof(pix_mp->reserved));
+		memset(plane->reserved, 0, sizeof(plane->reserved));
 		break;
 	default:
 		return -EINVAL;
@@ -1207,20 +1214,21 @@ static int vidioc_s_selection(struct file *file, void *priv,
 	return 0;
 }
 
-static int vicodec_encoder_cmd(struct file *file, void *priv,
+static int vicodec_encoder_cmd(struct file *file, void *fh,
 			    struct v4l2_encoder_cmd *ec)
 {
 	struct vicodec_ctx *ctx = file2ctx(file);
 	int ret;
 
-	ret = v4l2_m2m_ioctl_try_encoder_cmd(file, priv, ec);
+	ret = v4l2_m2m_ioctl_try_encoder_cmd(file, fh, ec);
 	if (ret < 0)
 		return ret;
 
-	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
+	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->cap_q_ctx.q) ||
+	    !vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
 		return 0;
 
-	ret = v4l2_m2m_ioctl_encoder_cmd(file, priv, ec);
+	ret = v4l2_m2m_ioctl_encoder_cmd(file, fh, ec);
 	if (ret < 0)
 		return ret;
 
@@ -1235,26 +1243,21 @@ static int vicodec_encoder_cmd(struct file *file, void *priv,
 	return 0;
 }
 
-static int vicodec_decoder_cmd(struct file *file, void *priv,
+static int vicodec_decoder_cmd(struct file *file, void *fh,
 			    struct v4l2_decoder_cmd *dc)
 {
 	struct vicodec_ctx *ctx = file2ctx(file);
 	int ret;
 
-	/*
-	 * This ioctl should not be used with a stateless codec that doesn't
-	 * support holding buffers and the associated flush command.
-	 */
-	WARN_ON(ctx->is_stateless);
-
-	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, priv, dc);
+	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, fh, dc);
 	if (ret < 0)
 		return ret;
 
-	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
+	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->cap_q_ctx.q) ||
+	    !vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
 		return 0;
 
-	ret = v4l2_m2m_ioctl_decoder_cmd(file, priv, dc);
+	ret = v4l2_m2m_ioctl_decoder_cmd(file, fh, dc);
 	if (ret < 0)
 		return ret;
 
@@ -1269,7 +1272,7 @@ static int vicodec_decoder_cmd(struct file *file, void *priv,
 	return 0;
 }
 
-static int vicodec_enum_framesizes(struct file *file, void *priv,
+static int vicodec_enum_framesizes(struct file *file, void *fh,
 				   struct v4l2_frmsizeenum *fsize)
 {
 	switch (fsize->pixel_format) {
@@ -1345,7 +1348,6 @@ static const struct v4l2_ioctl_ops vicodec_ioctl_ops = {
 	.vidioc_prepare_buf	= v4l2_m2m_ioctl_prepare_buf,
 	.vidioc_create_bufs	= v4l2_m2m_ioctl_create_bufs,
 	.vidioc_expbuf		= v4l2_m2m_ioctl_expbuf,
-	.vidioc_remove_bufs	= v4l2_m2m_ioctl_remove_bufs,
 
 	.vidioc_streamon	= v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff	= v4l2_m2m_ioctl_streamoff,
@@ -1446,7 +1448,7 @@ static void vicodec_buf_queue(struct vb2_buffer *vb)
 		unsigned int i;
 
 		for (i = 0; i < vb->num_planes; i++)
-			vb2_set_plane_payload(vb, i, 0);
+			vb->planes[i].bytesused = 0;
 
 		vbuf->field = V4L2_FIELD_NONE;
 		vbuf->sequence =
@@ -1690,6 +1692,8 @@ static const struct vb2_ops vicodec_qops = {
 	.buf_request_complete	= vicodec_buf_request_complete,
 	.start_streaming	= vicodec_start_streaming,
 	.stop_streaming		= vicodec_stop_streaming,
+	.wait_prepare		= vb2_ops_wait_prepare,
+	.wait_finish		= vb2_ops_wait_finish,
 };
 
 static int queue_init(void *priv, struct vb2_queue *src_vq,
@@ -1707,14 +1711,12 @@ static int queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->ops = &vicodec_qops;
 	src_vq->mem_ops = &vb2_vmalloc_memops;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
-	if (ctx->is_enc) {
+	if (ctx->is_enc)
 		src_vq->lock = &ctx->dev->stateful_enc.mutex;
-		src_vq->min_reqbufs_allocation = VICODEC_REC_BUFS;
-	} else if (ctx->is_stateless) {
+	else if (ctx->is_stateless)
 		src_vq->lock = &ctx->dev->stateless_dec.mutex;
-	} else {
+	else
 		src_vq->lock = &ctx->dev->stateful_dec.mutex;
-	}
 	src_vq->supports_requests = ctx->is_stateless;
 	src_vq->requires_requests = ctx->is_stateless;
 	ret = vb2_queue_init(src_vq);
@@ -1725,15 +1727,12 @@ static int queue_init(void *priv, struct vb2_queue *src_vq,
 			V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
 			V4L2_BUF_TYPE_VIDEO_CAPTURE);
 	dst_vq->io_modes = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
-	dst_vq->max_num_buffers = 64;
 	dst_vq->drv_priv = ctx;
 	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 	dst_vq->ops = &vicodec_qops;
 	dst_vq->mem_ops = &vb2_vmalloc_memops;
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	dst_vq->lock = src_vq->lock;
-	if (!ctx->is_stateless && !ctx->is_enc)
-		dst_vq->min_reqbufs_allocation = VICODEC_REC_BUFS;
 
 	return vb2_queue_init(dst_vq);
 }
@@ -1747,7 +1746,7 @@ static int vicodec_try_ctrl(struct v4l2_ctrl *ctrl)
 			V4L2_BUF_TYPE_VIDEO_CAPTURE);
 
 	switch (ctrl->id) {
-	case V4L2_CID_STATELESS_FWHT_PARAMS:
+	case V4L2_CID_MPEG_VIDEO_FWHT_PARAMS:
 		if (!q_dst->info)
 			return -EINVAL;
 		params = ctrl->p_new.p_fwht_params;
@@ -1800,7 +1799,7 @@ static int vicodec_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_FWHT_P_FRAME_QP:
 		ctx->state.p_frame_qp = ctrl->val;
 		return 0;
-	case V4L2_CID_STATELESS_FWHT_PARAMS:
+	case V4L2_CID_MPEG_VIDEO_FWHT_PARAMS:
 		params = ctrl->p_new.p_fwht_params;
 		update_header_from_stateless_params(ctx, params);
 		ctx->state.ref_frame_ts = params->backward_ref_ts;
@@ -1816,7 +1815,7 @@ static const struct v4l2_ctrl_ops vicodec_ctrl_ops = {
 
 static const struct v4l2_ctrl_config vicodec_ctrl_stateless_state = {
 	.ops		= &vicodec_ctrl_ops,
-	.id		= V4L2_CID_STATELESS_FWHT_PARAMS,
+	.id		= V4L2_CID_MPEG_VIDEO_FWHT_PARAMS,
 	.elem_size      = sizeof(struct v4l2_ctrl_fwht_params),
 };
 
@@ -1848,6 +1847,7 @@ static int vicodec_open(struct file *file)
 		ctx->is_stateless = true;
 
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
+	file->private_data = &ctx->fh;
 	ctx->dev = dev;
 	hdl = &ctx->hdl;
 	v4l2_ctrl_handler_init(hdl, 5);
@@ -1857,16 +1857,11 @@ static int vicodec_open(struct file *file)
 			  1, 31, 1, 20);
 	v4l2_ctrl_new_std(hdl, &vicodec_ctrl_ops, V4L2_CID_FWHT_P_FRAME_QP,
 			  1, 31, 1, 20);
-
+	if (ctx->is_enc)
+		v4l2_ctrl_new_std(hdl, &vicodec_ctrl_ops,
+				  V4L2_CID_MIN_BUFFERS_FOR_OUTPUT, 1, 1, 1, 1);
 	if (ctx->is_stateless)
 		v4l2_ctrl_new_custom(hdl, &vicodec_ctrl_stateless_state, NULL);
-	else
-		v4l2_ctrl_new_std(hdl, &vicodec_ctrl_ops, ctx->is_enc ?
-				  V4L2_CID_MIN_BUFFERS_FOR_OUTPUT :
-				  V4L2_CID_MIN_BUFFERS_FOR_CAPTURE,
-				  VICODEC_REC_BUFS, VICODEC_REC_BUFS, 1,
-				  VICODEC_REC_BUFS);
-
 	if (hdl->error) {
 		rc = hdl->error;
 		v4l2_ctrl_handler_free(hdl);
@@ -1931,7 +1926,7 @@ static int vicodec_open(struct file *file)
 		goto open_unlock;
 	}
 
-	v4l2_fh_add(&ctx->fh, file);
+	v4l2_fh_add(&ctx->fh);
 
 open_unlock:
 	mutex_unlock(vfd->lock);
@@ -1946,7 +1941,7 @@ static int vicodec_release(struct file *file)
 	mutex_lock(vfd->lock);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	mutex_unlock(vfd->lock);
-	v4l2_fh_del(&ctx->fh, file);
+	v4l2_fh_del(&ctx->fh);
 	v4l2_fh_exit(&ctx->fh);
 	v4l2_ctrl_handler_free(&ctx->hdl);
 	kvfree(ctx->state.compressed_frame);
@@ -2039,7 +2034,7 @@ static const struct v4l2_m2m_ops m2m_ops = {
 
 static int register_instance(struct vicodec_dev *dev,
 			     struct vicodec_dev_instance *dev_instance,
-			     const char *name, bool is_enc, bool is_stateless)
+			     const char *name, bool is_enc)
 {
 	struct video_device *vfd;
 	int ret;
@@ -2059,11 +2054,10 @@ static int register_instance(struct vicodec_dev *dev,
 	strscpy(vfd->name, name, sizeof(vfd->name));
 	vfd->device_caps = V4L2_CAP_STREAMING |
 		(multiplanar ? V4L2_CAP_VIDEO_M2M_MPLANE : V4L2_CAP_VIDEO_M2M);
-	if (is_enc || is_stateless) {
+	if (is_enc) {
 		v4l2_disable_ioctl(vfd, VIDIOC_DECODER_CMD);
 		v4l2_disable_ioctl(vfd, VIDIOC_TRY_DECODER_CMD);
-	}
-	if (!is_enc) {
+	} else {
 		v4l2_disable_ioctl(vfd, VIDIOC_ENCODER_CMD);
 		v4l2_disable_ioctl(vfd, VIDIOC_TRY_ENCODER_CMD);
 	}
@@ -2122,17 +2116,17 @@ static int vicodec_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, dev);
 
 	ret = register_instance(dev, &dev->stateful_enc, "stateful-encoder",
-				true, false);
+				true);
 	if (ret)
 		goto unreg_dev;
 
 	ret = register_instance(dev, &dev->stateful_dec, "stateful-decoder",
-				false, false);
+				false);
 	if (ret)
 		goto unreg_sf_enc;
 
 	ret = register_instance(dev, &dev->stateless_dec, "stateless-decoder",
-				false, true);
+				false);
 	if (ret)
 		goto unreg_sf_dec;
 
@@ -2194,7 +2188,7 @@ free_dev:
 	return ret;
 }
 
-static void vicodec_remove(struct platform_device *pdev)
+static int vicodec_remove(struct platform_device *pdev)
 {
 	struct vicodec_dev *dev = platform_get_drvdata(pdev);
 
@@ -2211,6 +2205,8 @@ static void vicodec_remove(struct platform_device *pdev)
 	video_unregister_device(&dev->stateful_dec.vfd);
 	video_unregister_device(&dev->stateless_dec.vfd);
 	v4l2_device_put(&dev->v4l2_dev);
+
+	return 0;
 }
 
 static struct platform_driver vicodec_pdrv = {

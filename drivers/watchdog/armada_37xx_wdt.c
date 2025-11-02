@@ -2,7 +2,7 @@
 /*
  * Watchdog driver for Marvell Armada 37xx SoCs
  *
- * Author: Marek Behún <kabel@kernel.org>
+ * Author: Marek Behun <marek.behun@nic.cz>
  */
 
 #include <linux/clk.h>
@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/types.h>
@@ -178,8 +179,6 @@ static int armada_37xx_wdt_set_timeout(struct watchdog_device *wdt,
 	dev->timeout = (u64)dev->clk_rate * timeout;
 	do_div(dev->timeout, CNTR_CTRL_PRESCALE_MIN);
 
-	set_counter_value(dev, CNTR_ID_WDOG, dev->timeout);
-
 	return 0;
 }
 
@@ -245,9 +244,15 @@ static const struct watchdog_ops armada_37xx_wdt_ops = {
 	.get_timeleft = armada_37xx_wdt_get_timeleft,
 };
 
+static void armada_clk_disable_unprepare(void *data)
+{
+	clk_disable_unprepare(data);
+}
+
 static int armada_37xx_wdt_probe(struct platform_device *pdev)
 {
 	struct armada_37xx_watchdog *dev;
+	struct resource *res;
 	struct regmap *regmap;
 	int ret;
 
@@ -265,14 +270,25 @@ static int armada_37xx_wdt_probe(struct platform_device *pdev)
 		return PTR_ERR(regmap);
 	dev->cpu_misc = regmap;
 
-	dev->reg = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(dev->reg))
-		return PTR_ERR(dev->reg);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -ENODEV;
+	dev->reg = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	if (!dev->reg)
+		return -ENOMEM;
 
 	/* init clock */
-	dev->clk = devm_clk_get_enabled(&pdev->dev, NULL);
+	dev->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(dev->clk))
 		return PTR_ERR(dev->clk);
+
+	ret = clk_prepare_enable(dev->clk);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(&pdev->dev,
+				       armada_clk_disable_unprepare, dev->clk);
+	if (ret)
+		return ret;
 
 	dev->clk_rate = clk_get_rate(dev->clk);
 	if (!dev->clk_rate)
@@ -352,7 +368,7 @@ static struct platform_driver armada_37xx_wdt_driver = {
 
 module_platform_driver(armada_37xx_wdt_driver);
 
-MODULE_AUTHOR("Marek Behun <kabel@kernel.org>");
+MODULE_AUTHOR("Marek Behun <marek.behun@nic.cz>");
 MODULE_DESCRIPTION("Armada 37xx CPU Watchdog");
 
 MODULE_LICENSE("GPL v2");

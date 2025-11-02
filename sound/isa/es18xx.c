@@ -82,10 +82,14 @@
 #define SNDRV_LEGACY_FIND_FREE_DMA
 #include <sound/initval.h>
 
+#define PFX "es18xx: "
+
 struct snd_es18xx {
-	struct snd_card *card;
 	unsigned long port;		/* port of ESS chip */
 	unsigned long ctrl_port;	/* Control port of ESS chip */
+	struct resource *res_port;
+	struct resource *res_mpu_port;
+	struct resource *res_ctrl_port;
 	int irq;			/* IRQ number of ESS chip */
 	int dma1;			/* DMA1 */
 	int dma2;			/* DMA2 */
@@ -164,7 +168,7 @@ static int snd_es18xx_dsp_command(struct snd_es18xx *chip, unsigned char val)
                         outb(val, chip->port + 0x0C);
                         return 0;
                 }
-	dev_err(chip->card->dev, "dsp_command: timeout (0x%x)\n", val);
+	snd_printk(KERN_ERR "dsp_command: timeout (0x%x)\n", val);
         return -EINVAL;
 }
 
@@ -175,8 +179,8 @@ static int snd_es18xx_dsp_get_byte(struct snd_es18xx *chip)
         for(i = MILLISECOND/10; i; i--)
                 if (inb(chip->port + 0x0C) & 0x40)
                         return inb(chip->port + 0x0A);
-	dev_err(chip->card->dev, "dsp_get_byte failed: 0x%lx = 0x%x!!!\n",
-		chip->port + 0x0A, inb(chip->port + 0x0A));
+	snd_printk(KERN_ERR "dsp_get_byte failed: 0x%lx = 0x%x!!!\n",
+		   chip->port + 0x0A, inb(chip->port + 0x0A));
         return -ENODEV;
 }
 
@@ -185,35 +189,40 @@ static int snd_es18xx_dsp_get_byte(struct snd_es18xx *chip)
 static int snd_es18xx_write(struct snd_es18xx *chip,
 			    unsigned char reg, unsigned char data)
 {
+	unsigned long flags;
 	int ret;
 	
-	guard(spinlock_irqsave)(&chip->reg_lock);
+        spin_lock_irqsave(&chip->reg_lock, flags);
 	ret = snd_es18xx_dsp_command(chip, reg);
 	if (ret < 0)
-		return ret;
+		goto end;
         ret = snd_es18xx_dsp_command(chip, data);
+ end:
+        spin_unlock_irqrestore(&chip->reg_lock, flags);
 #ifdef REG_DEBUG
-	dev_dbg(chip->card->dev, "Reg %02x set to %02x\n", reg, data);
+	snd_printk(KERN_DEBUG "Reg %02x set to %02x\n", reg, data);
 #endif
 	return ret;
 }
 
 static int snd_es18xx_read(struct snd_es18xx *chip, unsigned char reg)
 {
+	unsigned long flags;
 	int ret, data;
-
-	guard(spinlock_irqsave)(&chip->reg_lock);
+        spin_lock_irqsave(&chip->reg_lock, flags);
 	ret = snd_es18xx_dsp_command(chip, 0xC0);
 	if (ret < 0)
-		return ret;
+		goto end;
         ret = snd_es18xx_dsp_command(chip, reg);
 	if (ret < 0)
-		return ret;
+		goto end;
 	data = snd_es18xx_dsp_get_byte(chip);
 	ret = data;
 #ifdef REG_DEBUG
-	dev_dbg(chip->card->dev, "Reg %02x now is %02x (%d)\n", reg, data, ret);
+	snd_printk(KERN_DEBUG "Reg %02x now is %02x (%d)\n", reg, data, ret);
 #endif
+ end:
+        spin_unlock_irqrestore(&chip->reg_lock, flags);
 	return ret;
 }
 
@@ -223,55 +232,62 @@ static int snd_es18xx_bits(struct snd_es18xx *chip, unsigned char reg,
 {
         int ret;
 	unsigned char old, new, oval;
-
-	guard(spinlock_irqsave)(&chip->reg_lock);
+	unsigned long flags;
+        spin_lock_irqsave(&chip->reg_lock, flags);
         ret = snd_es18xx_dsp_command(chip, 0xC0);
 	if (ret < 0)
-		return ret;
+		goto end;
         ret = snd_es18xx_dsp_command(chip, reg);
 	if (ret < 0)
-		return ret;
+		goto end;
 	ret = snd_es18xx_dsp_get_byte(chip);
-	if (ret < 0)
-		return ret;
+	if (ret < 0) {
+		goto end;
+	}
 	old = ret;
 	oval = old & mask;
 	if (val != oval) {
 		ret = snd_es18xx_dsp_command(chip, reg);
 		if (ret < 0)
-			return ret;
+			goto end;
 		new = (old & ~mask) | (val & mask);
 		ret = snd_es18xx_dsp_command(chip, new);
 		if (ret < 0)
-			return ret;
+			goto end;
 #ifdef REG_DEBUG
-		dev_dbg(chip->card->dev, "Reg %02x was %02x, set to %02x (%d)\n",
-			reg, old, new, ret);
+		snd_printk(KERN_DEBUG "Reg %02x was %02x, set to %02x (%d)\n",
+			   reg, old, new, ret);
 #endif
 	}
-	return oval;
+	ret = oval;
+ end:
+        spin_unlock_irqrestore(&chip->reg_lock, flags);
+	return ret;
 }
 
 static inline void snd_es18xx_mixer_write(struct snd_es18xx *chip,
 			    unsigned char reg, unsigned char data)
 {
-	guard(spinlock_irqsave)(&chip->mixer_lock);
+	unsigned long flags;
+        spin_lock_irqsave(&chip->mixer_lock, flags);
         outb(reg, chip->port + 0x04);
         outb(data, chip->port + 0x05);
+        spin_unlock_irqrestore(&chip->mixer_lock, flags);
 #ifdef REG_DEBUG
-	dev_dbg(chip->card->dev, "Mixer reg %02x set to %02x\n", reg, data);
+	snd_printk(KERN_DEBUG "Mixer reg %02x set to %02x\n", reg, data);
 #endif
 }
 
 static inline int snd_es18xx_mixer_read(struct snd_es18xx *chip, unsigned char reg)
 {
+	unsigned long flags;
 	int data;
-
-	guard(spinlock_irqsave)(&chip->mixer_lock);
+        spin_lock_irqsave(&chip->mixer_lock, flags);
         outb(reg, chip->port + 0x04);
 	data = inb(chip->port + 0x05);
+        spin_unlock_irqrestore(&chip->mixer_lock, flags);
 #ifdef REG_DEBUG
-	dev_dbg(chip->card->dev, "Mixer reg %02x now is %02x\n", reg, data);
+	snd_printk(KERN_DEBUG "Mixer reg %02x now is %02x\n", reg, data);
 #endif
         return data;
 }
@@ -281,8 +297,8 @@ static inline int snd_es18xx_mixer_bits(struct snd_es18xx *chip, unsigned char r
 					unsigned char mask, unsigned char val)
 {
 	unsigned char old, new, oval;
-
-	guard(spinlock_irqsave)(&chip->mixer_lock);
+	unsigned long flags;
+        spin_lock_irqsave(&chip->mixer_lock, flags);
         outb(reg, chip->port + 0x04);
 	old = inb(chip->port + 0x05);
 	oval = old & mask;
@@ -290,10 +306,11 @@ static inline int snd_es18xx_mixer_bits(struct snd_es18xx *chip, unsigned char r
 		new = (old & ~mask) | (val & mask);
 		outb(new, chip->port + 0x05);
 #ifdef REG_DEBUG
-		dev_dbg(chip->card->dev, "Mixer reg %02x was %02x, set to %02x\n",
-			reg, old, new);
+		snd_printk(KERN_DEBUG "Mixer reg %02x was %02x, set to %02x\n",
+			   reg, old, new);
 #endif
 	}
+        spin_unlock_irqrestore(&chip->mixer_lock, flags);
 	return oval;
 }
 
@@ -301,16 +318,17 @@ static inline int snd_es18xx_mixer_writable(struct snd_es18xx *chip, unsigned ch
 					    unsigned char mask)
 {
 	int old, expected, new;
-
-	guard(spinlock_irqsave)(&chip->mixer_lock);
+	unsigned long flags;
+        spin_lock_irqsave(&chip->mixer_lock, flags);
         outb(reg, chip->port + 0x04);
 	old = inb(chip->port + 0x05);
 	expected = old ^ mask;
 	outb(expected, chip->port + 0x05);
 	new = inb(chip->port + 0x05);
+        spin_unlock_irqrestore(&chip->mixer_lock, flags);
 #ifdef REG_DEBUG
-	dev_dbg(chip->card->dev, "Mixer reg %02x was %02x, set to %02x, now is %02x\n",
-		reg, old, expected, new);
+	snd_printk(KERN_DEBUG "Mixer reg %02x was %02x, set to %02x, now is %02x\n",
+		   reg, old, expected, new);
 #endif
 	return expected == new;
 }
@@ -1329,8 +1347,11 @@ ES18XX_SINGLE("GPO1 Switch", 0, ES18XX_PM, 1, 1, ES18XX_FL_PMPORT),
 
 static int snd_es18xx_config_read(struct snd_es18xx *chip, unsigned char reg)
 {
+	int data;
+
 	outb(reg, chip->ctrl_port);
-	return inb(chip->ctrl_port + 1);
+	data = inb(chip->ctrl_port + 1);
+	return data;
 }
 
 static void snd_es18xx_config_write(struct snd_es18xx *chip,
@@ -1341,7 +1362,7 @@ static void snd_es18xx_config_write(struct snd_es18xx *chip,
 	outb(reg, chip->ctrl_port);
 	outb(data, chip->ctrl_port + 1);
 #ifdef REG_DEBUG
-	dev_dbg(chip->card->dev, "Config reg %02x set to %02x\n", reg, data);
+	snd_printk(KERN_DEBUG "Config reg %02x set to %02x\n", reg, data);
 #endif
 }
 
@@ -1410,7 +1431,7 @@ static int snd_es18xx_initialize(struct snd_es18xx *chip,
 			irqmask = 3;
 			break;
 		default:
-			dev_err(chip->card->dev, "invalid irq %d\n", chip->irq);
+			snd_printk(KERN_ERR "invalid irq %d\n", chip->irq);
 			return -ENODEV;
 		}
 		switch (chip->dma1) {
@@ -1424,7 +1445,7 @@ static int snd_es18xx_initialize(struct snd_es18xx *chip,
 			dma1mask = 3;
 			break;
 		default:
-			dev_err(chip->card->dev, "invalid dma1 %d\n", chip->dma1);
+			snd_printk(KERN_ERR "invalid dma1 %d\n", chip->dma1);
 			return -ENODEV;
 		}
 		switch (chip->dma2) {
@@ -1441,7 +1462,7 @@ static int snd_es18xx_initialize(struct snd_es18xx *chip,
 			dma2mask = 3;
 			break;
 		default:
-			dev_err(chip->card->dev, "invalid dma2 %d\n", chip->dma2);
+			snd_printk(KERN_ERR "invalid dma2 %d\n", chip->dma2);
 			return -ENODEV;
 		}
 
@@ -1510,13 +1531,13 @@ static int snd_es18xx_initialize(struct snd_es18xx *chip,
         return 0;
 }
 
-static int snd_es18xx_identify(struct snd_card *card, struct snd_es18xx *chip)
+static int snd_es18xx_identify(struct snd_es18xx *chip)
 {
 	int hi,lo;
 
 	/* reset */
 	if (snd_es18xx_reset(chip) < 0) {
-		dev_err(card->dev, "reset at 0x%lx failed!!!\n", chip->port);
+		snd_printk(KERN_ERR "reset at 0x%lx failed!!!\n", chip->port);
 		return -ENODEV;
 	}
 
@@ -1552,9 +1573,8 @@ static int snd_es18xx_identify(struct snd_card *card, struct snd_es18xx *chip)
 		udelay(10);
 		chip->ctrl_port += inb(chip->port + 0x05);
 
-		if (!devm_request_region(card->dev, chip->ctrl_port, 8,
-					 "ES18xx - CTRL")) {
-			dev_err(card->dev, "unable go grab port 0x%lx\n", chip->ctrl_port);
+		if ((chip->res_ctrl_port = request_region(chip->ctrl_port, 8, "ES18xx - CTRL")) == NULL) {
+			snd_printk(KERN_ERR PFX "unable go grab port 0x%lx\n", chip->ctrl_port);
 			return -EBUSY;
 		}
 
@@ -1580,13 +1600,12 @@ static int snd_es18xx_identify(struct snd_card *card, struct snd_es18xx *chip)
 	return 0;
 }
 
-static int snd_es18xx_probe(struct snd_card *card,
-			    struct snd_es18xx *chip,
+static int snd_es18xx_probe(struct snd_es18xx *chip,
 			    unsigned long mpu_port,
 			    unsigned long fm_port)
 {
-	if (snd_es18xx_identify(card, chip) < 0) {
-		dev_err(card->dev, "[0x%lx] ESS chip not found\n", chip->port);
+	if (snd_es18xx_identify(chip) < 0) {
+		snd_printk(KERN_ERR PFX "[0x%lx] ESS chip not found\n", chip->port);
                 return -ENODEV;
 	}
 
@@ -1608,12 +1627,12 @@ static int snd_es18xx_probe(struct snd_card *card,
 		chip->caps = ES18XX_PCM2 | ES18XX_RECMIX | ES18XX_AUXB | ES18XX_DUPLEX_SAME | ES18XX_GPO_2BIT;
 		break;
 	default:
-		dev_err(card->dev, "[0x%lx] unsupported chip ES%x\n",
-			chip->port, chip->version);
+		snd_printk(KERN_ERR "[0x%lx] unsupported chip ES%x\n",
+                           chip->port, chip->version);
                 return -ENODEV;
         }
 
-	dev_dbg(card->dev, "[0x%lx] ESS%x chip found\n", chip->port, chip->version);
+        snd_printd("[0x%lx] ESS%x chip found\n", chip->port, chip->version);
 
 	if (chip->dma1 == chip->dma2)
 		chip->caps &= ~(ES18XX_PCM2 | ES18XX_DUPLEX_SAME);
@@ -1702,6 +1721,31 @@ static int snd_es18xx_resume(struct snd_card *card)
 }
 #endif /* CONFIG_PM */
 
+static int snd_es18xx_free(struct snd_card *card)
+{
+	struct snd_es18xx *chip = card->private_data;
+
+	release_and_free_resource(chip->res_port);
+	release_and_free_resource(chip->res_ctrl_port);
+	release_and_free_resource(chip->res_mpu_port);
+	if (chip->irq >= 0)
+		free_irq(chip->irq, (void *) card);
+	if (chip->dma1 >= 0) {
+		disable_dma(chip->dma1);
+		free_dma(chip->dma1);
+	}
+	if (chip->dma2 >= 0 && chip->dma1 != chip->dma2) {
+		disable_dma(chip->dma2);
+		free_dma(chip->dma2);
+	}
+	return 0;
+}
+
+static int snd_es18xx_dev_free(struct snd_device *device)
+{
+	return snd_es18xx_free(device->card);
+}
+
 static int snd_es18xx_new_device(struct snd_card *card,
 				 unsigned long port,
 				 unsigned long mpu_port,
@@ -1709,8 +1753,11 @@ static int snd_es18xx_new_device(struct snd_card *card,
 				 int irq, int dma1, int dma2)
 {
 	struct snd_es18xx *chip = card->private_data;
+	static const struct snd_device_ops ops = {
+		.dev_free =	snd_es18xx_dev_free,
+        };
+	int err;
 
-	chip->card = card;
 	spin_lock_init(&chip->reg_lock);
  	spin_lock_init(&chip->mixer_lock);
         chip->port = port;
@@ -1720,34 +1767,45 @@ static int snd_es18xx_new_device(struct snd_card *card,
         chip->audio2_vol = 0x00;
 	chip->active = 0;
 
-	if (!devm_request_region(card->dev, port, 16, "ES18xx")) {
-		dev_err(card->dev, "unable to grab ports 0x%lx-0x%lx\n", port, port + 16 - 1);
+	chip->res_port = request_region(port, 16, "ES18xx");
+	if (chip->res_port == NULL) {
+		snd_es18xx_free(card);
+		snd_printk(KERN_ERR PFX "unable to grap ports 0x%lx-0x%lx\n", port, port + 16 - 1);
 		return -EBUSY;
 	}
 
-	if (devm_request_irq(card->dev, irq, snd_es18xx_interrupt, 0, "ES18xx",
-			     (void *) card)) {
-		dev_err(card->dev, "unable to grab IRQ %d\n", irq);
+	if (request_irq(irq, snd_es18xx_interrupt, 0, "ES18xx",
+			(void *) card)) {
+		snd_es18xx_free(card);
+		snd_printk(KERN_ERR PFX "unable to grap IRQ %d\n", irq);
 		return -EBUSY;
 	}
 	chip->irq = irq;
 	card->sync_irq = chip->irq;
 
-	if (snd_devm_request_dma(card->dev, dma1, "ES18xx DMA 1")) {
-		dev_err(card->dev, "unable to grab DMA1 %d\n", dma1);
+	if (request_dma(dma1, "ES18xx DMA 1")) {
+		snd_es18xx_free(card);
+		snd_printk(KERN_ERR PFX "unable to grap DMA1 %d\n", dma1);
 		return -EBUSY;
 	}
 	chip->dma1 = dma1;
 
-	if (dma2 != dma1 &&
-	    snd_devm_request_dma(card->dev, dma2, "ES18xx DMA 2")) {
-		dev_err(card->dev, "unable to grab DMA2 %d\n", dma2);
+	if (dma2 != dma1 && request_dma(dma2, "ES18xx DMA 2")) {
+		snd_es18xx_free(card);
+		snd_printk(KERN_ERR PFX "unable to grap DMA2 %d\n", dma2);
 		return -EBUSY;
 	}
 	chip->dma2 = dma2;
 
-	if (snd_es18xx_probe(card, chip, mpu_port, fm_port) < 0)
+	if (snd_es18xx_probe(chip, mpu_port, fm_port) < 0) {
+		snd_es18xx_free(card);
 		return -ENODEV;
+	}
+	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);
+	if (err < 0) {
+		snd_es18xx_free(card);
+		return err;
+	}
         return 0;
 }
 
@@ -1757,7 +1815,7 @@ static int snd_es18xx_mixer(struct snd_card *card)
 	int err;
 	unsigned int idx;
 
-	strscpy(card->mixername, chip->pcm->name);
+	strcpy(card->mixername, chip->pcm->name);
 
 	for (idx = 0; idx < ARRAY_SIZE(snd_es18xx_base_controls); idx++) {
 		struct snd_kcontrol *kctl;
@@ -1774,48 +1832,41 @@ static int snd_es18xx_mixer(struct snd_card *card)
 				break;
 			}
 		}
-		err = snd_ctl_add(card, kctl);
-		if (err < 0)
+		if ((err = snd_ctl_add(card, kctl)) < 0)
 			return err;
 	}
 	if (chip->caps & ES18XX_PCM2) {
 		for (idx = 0; idx < ARRAY_SIZE(snd_es18xx_pcm2_controls); idx++) {
-			err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_pcm2_controls[idx], chip));
-			if (err < 0)
+			if ((err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_pcm2_controls[idx], chip))) < 0)
 				return err;
 		} 
 	} else {
 		for (idx = 0; idx < ARRAY_SIZE(snd_es18xx_pcm1_controls); idx++) {
-			err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_pcm1_controls[idx], chip));
-			if (err < 0)
+			if ((err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_pcm1_controls[idx], chip))) < 0)
 				return err;
 		}
 	}
 
 	if (chip->caps & ES18XX_RECMIX) {
 		for (idx = 0; idx < ARRAY_SIZE(snd_es18xx_recmix_controls); idx++) {
-			err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_recmix_controls[idx], chip));
-			if (err < 0)
+			if ((err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_recmix_controls[idx], chip))) < 0)
 				return err;
 		}
 	}
 	switch (chip->version) {
 	default:
-		err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_micpre1_control, chip));
-		if (err < 0)
+		if ((err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_micpre1_control, chip))) < 0)
 			return err;
 		break;
 	case 0x1869:
 	case 0x1879:
-		err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_micpre2_control, chip));
-		if (err < 0)
+		if ((err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_micpre2_control, chip))) < 0)
 			return err;
 		break;
 	}
 	if (chip->caps & ES18XX_SPATIALIZER) {
 		for (idx = 0; idx < ARRAY_SIZE(snd_es18xx_spatializer_controls); idx++) {
-			err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_spatializer_controls[idx], chip));
-			if (err < 0)
+			if ((err = snd_ctl_add(card, snd_ctl_new1(&snd_es18xx_spatializer_controls[idx], chip))) < 0)
 				return err;
 		}
 	}
@@ -1828,8 +1879,7 @@ static int snd_es18xx_mixer(struct snd_card *card)
 			else
 				chip->hw_switch = kctl;
 			kctl->private_free = snd_es18xx_hwv_free;
-			err = snd_ctl_add(card, kctl);
-			if (err < 0)
+			if ((err = snd_ctl_add(card, kctl)) < 0)
 				return err;
 			
 		}
@@ -1879,9 +1929,17 @@ static int snd_es18xx_mixer(struct snd_card *card)
 
 /* Card level */
 
-MODULE_AUTHOR("Christian Fischbach <fishbach@pool.informatik.rwth-aachen.de>, Abramo Bagnara <abramo@alsa-project.org>");
+MODULE_AUTHOR("Christian Fischbach <fishbach@pool.informatik.rwth-aachen.de>, Abramo Bagnara <abramo@alsa-project.org>");  
 MODULE_DESCRIPTION("ESS ES18xx AudioDrive");
 MODULE_LICENSE("GPL");
+MODULE_SUPPORTED_DEVICE("{{ESS,ES1868 PnP AudioDrive},"
+		"{ESS,ES1869 PnP AudioDrive},"
+		"{ESS,ES1878 PnP AudioDrive},"
+		"{ESS,ES1879 PnP AudioDrive},"
+		"{ESS,ES1887 PnP AudioDrive},"
+		"{ESS,ES1888 PnP AudioDrive},"
+		"{ESS,ES1887 AudioDrive},"
+		"{ESS,ES1888 AudioDrive}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -1940,7 +1998,7 @@ MODULE_DEVICE_TABLE(pnp, snd_audiodrive_pnpbiosids);
 static int snd_audiodrive_pnp_init_main(int dev, struct pnp_dev *pdev)
 {
 	if (pnp_activate_dev(pdev) < 0) {
-		dev_err(&pdev->dev, "PnP configure failure (out of resources?)\n");
+		snd_printk(KERN_ERR PFX "PnP configure failure (out of resources?)\n");
 		return -EBUSY;
 	}
 	/* ok. hack using Vendor-Defined Card-Level registers */
@@ -1959,12 +2017,8 @@ static int snd_audiodrive_pnp_init_main(int dev, struct pnp_dev *pdev)
 	dma1[dev] = pnp_dma(pdev, 0);
 	dma2[dev] = pnp_dma(pdev, 1);
 	irq[dev] = pnp_irq(pdev, 0);
-	dev_dbg(&pdev->dev,
-		"PnP ES18xx: port=0x%lx, fm port=0x%lx, mpu port=0x%lx\n",
-		port[dev], fm_port[dev], mpu_port[dev]);
-	dev_dbg(&pdev->dev,
-		"PnP ES18xx: dma1=%i, dma2=%i, irq=%i\n",
-		dma1[dev], dma2[dev], irq[dev]);
+	snd_printdd("PnP ES18xx: port=0x%lx, fm port=0x%lx, mpu port=0x%lx\n", port[dev], fm_port[dev], mpu_port[dev]);
+	snd_printdd("PnP ES18xx: dma1=%i, dma2=%i, irq=%i\n", dma1[dev], dma2[dev], irq[dev]);
 	return 0;
 }
 
@@ -2012,12 +2066,11 @@ static int snd_audiodrive_pnpc(int dev, struct snd_es18xx *chip,
 
 	/* Control port initialization */
 	if (pnp_activate_dev(chip->devc) < 0) {
-		dev_err(chip->card->dev,
-			"PnP control configure failure (out of resources?)\n");
+		snd_printk(KERN_ERR PFX "PnP control configure failure (out of resources?)\n");
 		return -EAGAIN;
 	}
-	dev_dbg(chip->card->dev, "pnp: port=0x%llx\n",
-		(unsigned long long)pnp_port_start(chip->devc, 0));
+	snd_printdd("pnp: port=0x%llx\n",
+			(unsigned long long)pnp_port_start(chip->devc, 0));
 	if (snd_audiodrive_pnp_init_main(dev, chip->dev) < 0)
 		return -EBUSY;
 
@@ -2034,8 +2087,8 @@ static int snd_audiodrive_pnpc(int dev, struct snd_es18xx *chip,
 static int snd_es18xx_card_new(struct device *pdev, int dev,
 			       struct snd_card **cardp)
 {
-	return snd_devm_card_new(pdev, index[dev], id[dev], THIS_MODULE,
-				 sizeof(struct snd_es18xx), cardp);
+	return snd_card_new(pdev, index[dev], id[dev], THIS_MODULE,
+			    sizeof(struct snd_es18xx), cardp);
 }
 
 static int snd_audiodrive_probe(struct snd_card *card, int dev)
@@ -2075,9 +2128,9 @@ static int snd_audiodrive_probe(struct snd_card *card, int dev)
 	if (fm_port[dev] > 0 && fm_port[dev] != SNDRV_AUTO_PORT) {
 		if (snd_opl3_create(card, fm_port[dev], fm_port[dev] + 2,
 				    OPL3_HW_OPL3, 0, &opl3) < 0) {
-			dev_warn(card->dev,
-				 "opl3 not detected at 0x%lx\n",
-				 fm_port[dev]);
+			snd_printk(KERN_WARNING PFX
+				   "opl3 not detected at 0x%lx\n",
+				   fm_port[dev]);
 		} else {
 			err = snd_opl3_hwdep_new(opl3, 0, 1, NULL);
 			if (err < 0)
@@ -2109,9 +2162,10 @@ static int snd_es18xx_isa_probe1(int dev, struct device *devptr)
 	err = snd_es18xx_card_new(devptr, dev, &card);
 	if (err < 0)
 		return err;
-	err = snd_audiodrive_probe(card, dev);
-	if (err < 0)
+	if ((err = snd_audiodrive_probe(card, dev)) < 0) {
+		snd_card_free(card);
 		return err;
+	}
 	dev_set_drvdata(devptr, card);
 	return 0;
 }
@@ -2123,23 +2177,20 @@ static int snd_es18xx_isa_probe(struct device *pdev, unsigned int dev)
 	static const int possible_dmas[] = {1, 0, 3, 5, -1};
 
 	if (irq[dev] == SNDRV_AUTO_IRQ) {
-		irq[dev] = snd_legacy_find_free_irq(possible_irqs);
-		if (irq[dev] < 0) {
-			dev_err(pdev, "unable to find a free IRQ\n");
+		if ((irq[dev] = snd_legacy_find_free_irq(possible_irqs)) < 0) {
+			snd_printk(KERN_ERR PFX "unable to find a free IRQ\n");
 			return -EBUSY;
 		}
 	}
 	if (dma1[dev] == SNDRV_AUTO_DMA) {
-		dma1[dev] = snd_legacy_find_free_dma(possible_dmas);
-		if (dma1[dev] < 0) {
-			dev_err(pdev, "unable to find a free DMA1\n");
+		if ((dma1[dev] = snd_legacy_find_free_dma(possible_dmas)) < 0) {
+			snd_printk(KERN_ERR PFX "unable to find a free DMA1\n");
 			return -EBUSY;
 		}
 	}
 	if (dma2[dev] == SNDRV_AUTO_DMA) {
-		dma2[dev] = snd_legacy_find_free_dma(possible_dmas);
-		if (dma2[dev] < 0) {
-			dev_err(pdev, "unable to find a free DMA2\n");
+		if ((dma2[dev] = snd_legacy_find_free_dma(possible_dmas)) < 0) {
+			snd_printk(KERN_ERR PFX "unable to find a free DMA2\n");
 			return -EBUSY;
 		}
 	}
@@ -2157,6 +2208,13 @@ static int snd_es18xx_isa_probe(struct device *pdev, unsigned int dev)
 		}
 		return err;
 	}
+}
+
+static int snd_es18xx_isa_remove(struct device *devptr,
+				 unsigned int dev)
+{
+	snd_card_free(dev_get_drvdata(devptr));
+	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -2177,6 +2235,7 @@ static int snd_es18xx_isa_resume(struct device *dev, unsigned int n)
 static struct isa_driver snd_es18xx_isa_driver = {
 	.match		= snd_es18xx_isa_match,
 	.probe		= snd_es18xx_isa_probe,
+	.remove		= snd_es18xx_isa_remove,
 #ifdef CONFIG_PM
 	.suspend	= snd_es18xx_isa_suspend,
 	.resume		= snd_es18xx_isa_resume,
@@ -2207,15 +2266,22 @@ static int snd_audiodrive_pnp_detect(struct pnp_dev *pdev,
 	err = snd_es18xx_card_new(&pdev->dev, dev, &card);
 	if (err < 0)
 		return err;
-	err = snd_audiodrive_pnp(dev, card->private_data, pdev);
-	if (err < 0)
+	if ((err = snd_audiodrive_pnp(dev, card->private_data, pdev)) < 0) {
+		snd_card_free(card);
 		return err;
-	err = snd_audiodrive_probe(card, dev);
-	if (err < 0)
+	}
+	if ((err = snd_audiodrive_probe(card, dev)) < 0) {
+		snd_card_free(card);
 		return err;
+	}
 	pnp_set_drvdata(pdev, card);
 	dev++;
 	return 0;
+}
+
+static void snd_audiodrive_pnp_remove(struct pnp_dev *pdev)
+{
+	snd_card_free(pnp_get_drvdata(pdev));
 }
 
 #ifdef CONFIG_PM
@@ -2233,6 +2299,7 @@ static struct pnp_driver es18xx_pnp_driver = {
 	.name = "es18xx-pnpbios",
 	.id_table = snd_audiodrive_pnpbiosids,
 	.probe = snd_audiodrive_pnp_detect,
+	.remove = snd_audiodrive_pnp_remove,
 #ifdef CONFIG_PM
 	.suspend = snd_audiodrive_pnp_suspend,
 	.resume = snd_audiodrive_pnp_resume,
@@ -2257,16 +2324,24 @@ static int snd_audiodrive_pnpc_detect(struct pnp_card_link *pcard,
 	if (res < 0)
 		return res;
 
-	res = snd_audiodrive_pnpc(dev, card->private_data, pcard, pid);
-	if (res < 0)
+	if ((res = snd_audiodrive_pnpc(dev, card->private_data, pcard, pid)) < 0) {
+		snd_card_free(card);
 		return res;
-	res = snd_audiodrive_probe(card, dev);
-	if (res < 0)
+	}
+	if ((res = snd_audiodrive_probe(card, dev)) < 0) {
+		snd_card_free(card);
 		return res;
+	}
 
 	pnp_set_card_drvdata(pcard, card);
 	dev++;
 	return 0;
+}
+
+static void snd_audiodrive_pnpc_remove(struct pnp_card_link *pcard)
+{
+	snd_card_free(pnp_get_card_drvdata(pcard));
+	pnp_set_card_drvdata(pcard, NULL);
 }
 
 #ifdef CONFIG_PM
@@ -2287,6 +2362,7 @@ static struct pnp_card_driver es18xx_pnpc_driver = {
 	.name = "es18xx",
 	.id_table = snd_audiodrive_pnpids,
 	.probe = snd_audiodrive_pnpc_detect,
+	.remove = snd_audiodrive_pnpc_remove,
 #ifdef CONFIG_PM
 	.suspend	= snd_audiodrive_pnpc_suspend,
 	.resume		= snd_audiodrive_pnpc_resume,

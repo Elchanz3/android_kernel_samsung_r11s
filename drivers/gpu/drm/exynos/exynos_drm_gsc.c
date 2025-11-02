@@ -11,10 +11,9 @@
 #include <linux/component.h>
 #include <linux/kernel.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mod_devicetable.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/property.h>
 #include <linux/regmap.h>
 
 #include <drm/drm_fourcc.h>
@@ -87,6 +86,7 @@ struct gsc_scaler {
 /*
  * A structure of gsc context.
  *
+ * @regs_res: register resources.
  * @regs: memory mapped io registers.
  * @gsc_clk: gsc gate clock.
  * @sc: scaler infomations.
@@ -103,8 +103,9 @@ struct gsc_context {
 	struct exynos_drm_ipp_formats	*formats;
 	unsigned int			num_formats;
 
+	struct resource	*regs_res;
 	void __iomem	*regs;
-	const char	*const *clk_names;
+	const char	**clk_names;
 	struct clk	*clocks[GSC_MAX_CLOCKS];
 	int		num_clocks;
 	struct gsc_scaler	sc;
@@ -117,7 +118,6 @@ struct gsc_context {
  * struct gsc_driverdata - per device type driver data for init time.
  *
  * @limits: picture size limits array
- * @num_limits: number of items in the aforementioned array
  * @clk_names: names of clocks needed by this variant
  * @num_clocks: the number of clocks needed by this variant
  */
@@ -1117,12 +1117,7 @@ static int gsc_commit(struct exynos_drm_ipp *ipp,
 	struct gsc_context *ctx = container_of(ipp, struct gsc_context, ipp);
 	int ret;
 
-	ret = pm_runtime_resume_and_get(ctx->dev);
-	if (ret < 0) {
-		dev_err(ctx->dev, "failed to enable GScaler device.\n");
-		return ret;
-	}
-
+	pm_runtime_get_sync(ctx->dev);
 	ctx->task = task;
 
 	ret = gsc_reset(ctx);
@@ -1162,7 +1157,7 @@ static void gsc_abort(struct exynos_drm_ipp *ipp,
 	}
 }
 
-static const struct exynos_drm_ipp_funcs ipp_funcs = {
+static struct exynos_drm_ipp_funcs ipp_funcs = {
 	.commit = gsc_commit,
 	.abort = gsc_abort,
 };
@@ -1174,7 +1169,7 @@ static int gsc_bind(struct device *dev, struct device *master, void *data)
 	struct exynos_drm_ipp *ipp = &ctx->ipp;
 
 	ctx->drm_dev = drm_dev;
-	ipp->drm_dev = drm_dev;
+	ctx->drm_dev = drm_dev;
 	exynos_drm_register_dma(drm_dev, dev, &ctx->dma_priv);
 
 	exynos_drm_ipp_register(dev, ipp, &ipp_funcs,
@@ -1218,16 +1213,17 @@ static const unsigned int gsc_tiled_formats[] = {
 static int gsc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	const struct gsc_driverdata *driver_data;
+	struct gsc_driverdata *driver_data;
 	struct exynos_drm_ipp_formats *formats;
 	struct gsc_context *ctx;
+	struct resource *res;
 	int num_formats, ret, i, j;
 
 	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 
-	driver_data = device_get_match_data(dev);
+	driver_data = (struct gsc_driverdata *)of_device_get_match_data(dev);
 	ctx->dev = dev;
 	ctx->num_clocks = driver_data->num_clocks;
 	ctx->clk_names = driver_data->clk_names;
@@ -1270,15 +1266,20 @@ static int gsc_probe(struct platform_device *pdev)
 		}
 	}
 
-	ctx->regs = devm_platform_ioremap_resource(pdev, 0);
+	/* resource memory */
+	ctx->regs_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	ctx->regs = devm_ioremap_resource(dev, ctx->regs_res);
 	if (IS_ERR(ctx->regs))
 		return PTR_ERR(ctx->regs);
 
 	/* resource irq */
-	ctx->irq = platform_get_irq(pdev, 0);
-	if (ctx->irq < 0)
-		return ctx->irq;
+	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!res) {
+		dev_err(dev, "failed to request irq resource.\n");
+		return -ENOENT;
+	}
 
+	ctx->irq = res->start;
 	ret = devm_request_irq(dev, ctx->irq, gsc_irq_handler, 0,
 			       dev_name(dev), ctx);
 	if (ret < 0) {
@@ -1286,7 +1287,7 @@ static int gsc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	/* context initialization */
+	/* context initailization */
 	ctx->id = pdev->id;
 
 	platform_set_drvdata(pdev, ctx);
@@ -1309,13 +1310,15 @@ err_pm_dis:
 	return ret;
 }
 
-static void gsc_remove(struct platform_device *pdev)
+static int gsc_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 
 	component_del(dev, &gsc_component_ops);
 	pm_runtime_dont_use_autosuspend(dev);
 	pm_runtime_disable(dev);
+
+	return 0;
 }
 
 static int __maybe_unused gsc_runtime_suspend(struct device *dev)
@@ -1423,7 +1426,8 @@ struct platform_driver gsc_driver = {
 	.remove		= gsc_remove,
 	.driver		= {
 		.name	= "exynos-drm-gsc",
+		.owner	= THIS_MODULE,
 		.pm	= &gsc_pm_ops,
-		.of_match_table = exynos_drm_gsc_of_match,
+		.of_match_table = of_match_ptr(exynos_drm_gsc_of_match),
 	},
 };

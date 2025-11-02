@@ -18,6 +18,7 @@
 #define CHIP_NAME "PMac"
 
 MODULE_DESCRIPTION("PowerMac");
+MODULE_SUPPORTED_DEVICE("{{Apple,PowerMac}}");
 MODULE_LICENSE("GPL");
 
 static int index = SNDRV_DEFAULT_IDX1;		/* Index 0-MAX */
@@ -48,28 +49,25 @@ static int snd_pmac_probe(struct platform_device *devptr)
 	if (err < 0)
 		return err;
 
-	err = snd_pmac_new(card, &chip);
-	if (err < 0)
+	if ((err = snd_pmac_new(card, &chip)) < 0)
 		goto __error;
 	card->private_data = chip;
 
 	switch (chip->model) {
 	case PMAC_BURGUNDY:
-		strscpy(card->driver, "PMac Burgundy");
-		strscpy(card->shortname, "PowerMac Burgundy");
+		strcpy(card->driver, "PMac Burgundy");
+		strcpy(card->shortname, "PowerMac Burgundy");
 		sprintf(card->longname, "%s (Dev %d) Sub-frame %d",
 			card->shortname, chip->device_id, chip->subframe);
-		err = snd_pmac_burgundy_init(chip);
-		if (err < 0)
+		if ((err = snd_pmac_burgundy_init(chip)) < 0)
 			goto __error;
 		break;
 	case PMAC_DACA:
-		strscpy(card->driver, "PMac DACA");
-		strscpy(card->shortname, "PowerMac DACA");
+		strcpy(card->driver, "PMac DACA");
+		strcpy(card->shortname, "PowerMac DACA");
 		sprintf(card->longname, "%s (Dev %d) Sub-frame %d",
 			card->shortname, chip->device_id, chip->subframe);
-		err = snd_pmac_daca_init(chip);
-		if (err < 0)
+		if ((err = snd_pmac_daca_init(chip)) < 0)
 			goto __error;
 		break;
 	case PMAC_TUMBLER:
@@ -99,26 +97,23 @@ static int snd_pmac_probe(struct platform_device *devptr)
 			name_ext = "";
 		sprintf(card->longname, "%s%s Rev %d",
 			card->shortname, name_ext, chip->revision);
-		err = snd_pmac_awacs_init(chip);
-		if (err < 0)
+		if ((err = snd_pmac_awacs_init(chip)) < 0)
 			goto __error;
 		break;
 	default:
-		dev_err(&devptr->dev, "unsupported hardware %d\n", chip->model);
+		snd_printk(KERN_ERR "unsupported hardware %d\n", chip->model);
 		err = -EINVAL;
 		goto __error;
 	}
 
-	err = snd_pmac_pcm_new(chip);
-	if (err < 0)
+	if ((err = snd_pmac_pcm_new(chip)) < 0)
 		goto __error;
 
 	chip->initialized = 1;
 	if (enable_beep)
 		snd_pmac_attach_beep(chip);
 
-	err = snd_card_register(card);
-	if (err < 0)
+	if ((err = snd_card_register(card)) < 0)
 		goto __error;
 
 	platform_set_drvdata(devptr, card);
@@ -130,9 +125,10 @@ __error:
 }
 
 
-static void snd_pmac_remove(struct platform_device *devptr)
+static int snd_pmac_remove(struct platform_device *devptr)
 {
 	snd_card_free(platform_get_drvdata(devptr));
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -171,8 +167,7 @@ static int __init alsa_card_pmac_init(void)
 {
 	int err;
 
-	err = platform_driver_register(&snd_pmac_driver);
-	if (err < 0)
+	if ((err = platform_driver_register(&snd_pmac_driver)) < 0)
 		return err;
 	device = platform_device_register_simple(SND_PMAC_DRIVER, -1, NULL, 0);
 	return 0;

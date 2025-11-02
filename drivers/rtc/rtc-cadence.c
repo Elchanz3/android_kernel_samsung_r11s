@@ -336,7 +336,7 @@ static int cdns_rtc_probe(struct platform_device *pdev)
 	writel(0, crtc->regs + CDNS_RTC_HMR);
 	writel(CDNS_RTC_KRTCR_KRTC, crtc->regs + CDNS_RTC_KRTCR);
 
-	ret = devm_rtc_register_device(crtc->rtc_dev);
+	ret = rtc_register_device(crtc->rtc_dev);
 	if (ret)
 		goto err_disable_wakeup;
 
@@ -354,15 +354,17 @@ err_disable_pclk:
 	return ret;
 }
 
-static void cdns_rtc_remove(struct platform_device *pdev)
+static int cdns_rtc_remove(struct platform_device *pdev)
 {
 	struct cdns_rtc *crtc = platform_get_drvdata(pdev);
 
 	cdns_rtc_alarm_irq_enable(&pdev->dev, 0);
-	device_init_wakeup(&pdev->dev, false);
+	device_init_wakeup(&pdev->dev, 0);
 
 	clk_disable_unprepare(crtc->pclk);
 	clk_disable_unprepare(crtc->ref_clk);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

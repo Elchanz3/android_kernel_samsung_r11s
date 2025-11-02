@@ -5,7 +5,6 @@
  * Copyright (C) 2015-2016 Broadcom
  */
 
-#include <linux/cfi_types.h>
 #include <linux/err.h>
 #include <linux/spinlock.h>
 #include <linux/io.h>
@@ -75,7 +74,7 @@ static inline void __b15_rac_flush(void)
 	__raw_writel(FLUSH_RAC, b15_rac_base + rac_flush_offset);
 	do {
 		/* This dmb() is required to force the Bus Interface Unit
-		 * to clean outstanding writes, and forces an idle cycle
+		 * to clean oustanding writes, and forces an idle cycle
 		 * to be inserted.
 		 */
 		dmb();

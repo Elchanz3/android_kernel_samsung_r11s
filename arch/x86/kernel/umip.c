@@ -92,8 +92,8 @@ static const char * const umip_insns[5] = {
 
 #define umip_pr_err(regs, fmt, ...) \
 	umip_printk(regs, KERN_ERR, fmt, ##__VA_ARGS__)
-#define umip_pr_debug(regs, fmt, ...) \
-	umip_printk(regs, KERN_DEBUG, fmt,  ##__VA_ARGS__)
+#define umip_pr_warn(regs, fmt, ...) \
+	umip_printk(regs, KERN_WARNING, fmt,  ##__VA_ARGS__)
 
 /**
  * umip_printk() - Print a rate-limited message
@@ -156,26 +156,15 @@ static int identify_insn(struct insn *insn)
 	if (!insn->modrm.nbytes)
 		return -EINVAL;
 
-	/* The instructions of interest have 2-byte opcodes: 0F 00 or 0F 01. */
-	if (insn->opcode.nbytes < 2 || insn->opcode.bytes[0] != 0xf)
+	/* All the instructions of interest start with 0x0f. */
+	if (insn->opcode.bytes[0] != 0xf)
 		return -EINVAL;
 
 	if (insn->opcode.bytes[1] == 0x1) {
 		switch (X86_MODRM_REG(insn->modrm.value)) {
 		case 0:
-			/* The reg form of 0F 01 /0 encodes VMX instructions. */
-			if (X86_MODRM_MOD(insn->modrm.value) == 3)
-				return -EINVAL;
-
 			return UMIP_INST_SGDT;
 		case 1:
-			/*
-			 * The reg form of 0F 01 /1 encodes MONITOR/MWAIT,
-			 * STAC/CLAC, and ENCLS.
-			 */
-			if (X86_MODRM_MOD(insn->modrm.value) == 3)
-				return -EINVAL;
-
 			return UMIP_INST_SIDT;
 		case 4:
 			return UMIP_INST_SMSW;
@@ -283,7 +272,7 @@ static int emulate_umip_insn(struct insn *insn, int umip_inst,
 		 * by whether the operand is a register or a memory location.
 		 * If operand is a register, return as many bytes as the operand
 		 * size. If operand is memory, return only the two least
-		 * significant bytes.
+		 * siginificant bytes.
 		 */
 		if (X86_MODRM_MOD(insn->modrm.value) == 3)
 			*data_size = insn->opnd_bytes;
@@ -357,12 +346,14 @@ bool fixup_umip_exception(struct pt_regs *regs)
 	if (!regs)
 		return false;
 
-	/*
-	 * Give up on emulation if fetching the instruction failed. Should a
-	 * page fault or a #GP be issued?
-	 */
 	nr_copied = insn_fetch_from_user(regs, buf);
-	if (nr_copied <= 0)
+
+	/*
+	 * The insn_fetch_from_user above could have failed if user code
+	 * is protected by a memory protection key. Give up on emulation
+	 * in such a case.  Should we issue a page fault?
+	 */
+	if (!nr_copied)
 		return false;
 
 	if (!insn_decode_from_regs(&insn, regs, buf, nr_copied))
@@ -372,10 +363,10 @@ bool fixup_umip_exception(struct pt_regs *regs)
 	if (umip_inst < 0)
 		return false;
 
-	umip_pr_debug(regs, "%s instruction cannot be used by applications.\n",
+	umip_pr_warn(regs, "%s instruction cannot be used by applications.\n",
 			umip_insns[umip_inst]);
 
-	umip_pr_debug(regs, "For now, expensive software emulation returns the result.\n");
+	umip_pr_warn(regs, "For now, expensive software emulation returns the result.\n");
 
 	if (emulate_umip_insn(&insn, umip_inst, dummy_data, &dummy_data_size,
 			      user_64bit_mode(regs)))

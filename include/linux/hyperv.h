@@ -24,7 +24,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/interrupt.h>
 #include <linux/reciprocal_div.h>
-#include <hyperv/hvhdk.h>
+#include <asm/hyperv-tlfs.h>
 
 #define MAX_PAGE_BUFFER_COUNT				32
 #define MAX_MULTIPAGE_BUFFER_COUNT			32 /* 128K */
@@ -201,10 +201,6 @@ struct hv_ring_buffer_info {
 	 * being freed while the ring buffer is being accessed.
 	 */
 	struct mutex ring_buffer_mutex;
-
-	/* Buffer that holds a copy of an incoming host packet */
-	void *pkt_buffer;
-	u32 pkt_buffer_size;
 };
 
 
@@ -250,19 +246,14 @@ static inline u32 hv_get_avail_to_write_percent(
  * two 16 bit quantities: major_number. minor_number.
  *
  * 0 . 13 (Windows Server 2008)
- * 1 . 1  (Windows 7, WS2008 R2)
- * 2 . 4  (Windows 8, WS2012)
- * 3 . 0  (Windows 8.1, WS2012 R2)
+ * 1 . 1  (Windows 7)
+ * 2 . 4  (Windows 8)
+ * 3 . 0  (Windows 8 R2)
  * 4 . 0  (Windows 10)
  * 4 . 1  (Windows 10 RS3)
  * 5 . 0  (Newer Windows 10)
  * 5 . 1  (Windows 10 RS4)
  * 5 . 2  (Windows Server 2019, RS5)
- * 5 . 3  (Windows Server 2022)
- *
- * The WS2008 and WIN7 versions are listed here for
- * completeness but are no longer supported in the
- * Linux kernel.
  */
 
 #define VERSION_WS2008  ((0 << 16) | (13))
@@ -274,7 +265,6 @@ static inline u32 hv_get_avail_to_write_percent(
 #define VERSION_WIN10_V5 ((5 << 16) | (0))
 #define VERSION_WIN10_V5_1 ((5 << 16) | (1))
 #define VERSION_WIN10_V5_2 ((5 << 16) | (2))
-#define VERSION_WIN10_V5_3 ((5 << 16) | (3))
 
 /* Make maximum size of pipe payload of 16K */
 #define MAX_PIPE_DATA_PAYLOAD		(sizeof(u8) * 16384)
@@ -314,7 +304,7 @@ struct vmbus_channel_offer {
 
 		/*
 		 * Pipes:
-		 * The following structure is an integrated pipe protocol, which
+		 * The following sructure is an integrated pipe protocol, which
 		 * is implemented on top of standard user-defined data. Pipe
 		 * clients have MAX_PIPE_USER_DEFINED_BYTES left for their own
 		 * use.
@@ -368,7 +358,20 @@ struct vmtransfer_page_packet_header {
 	u8  sender_owns_set;
 	u8 reserved;
 	u32 range_cnt;
-	struct vmtransfer_page_range ranges[];
+	struct vmtransfer_page_range ranges[1];
+} __packed;
+
+struct vmgpadl_packet_header {
+	struct vmpacket_descriptor d;
+	u32 gpadl;
+	u32 reserved;
+} __packed;
+
+struct vmadd_remove_transfer_page_set {
+	struct vmpacket_descriptor d;
+	u32 gpadl;
+	u16 xfer_pageset_id;
+	u16 reserved;
 } __packed;
 
 /*
@@ -382,6 +385,30 @@ struct gpa_range {
 };
 
 /*
+ * This is the format for an Establish Gpadl packet, which contains a handle by
+ * which this GPADL will be known and a set of GPA ranges associated with it.
+ * This can be converted to a MDL by the guest OS.  If there are multiple GPA
+ * ranges, then the resulting MDL will be "chained," representing multiple VA
+ * ranges.
+ */
+struct vmestablish_gpadl {
+	struct vmpacket_descriptor d;
+	u32 gpadl;
+	u32 range_cnt;
+	struct gpa_range range[1];
+} __packed;
+
+/*
+ * This is the format for a Teardown Gpadl packet, which indicates that the
+ * GPADL handle in the Establish Gpadl packet will never be referenced again.
+ */
+struct vmteardown_gpadl {
+	struct vmpacket_descriptor d;
+	u32 gpadl;
+	u32 reserved;	/* for alignment to a 8-byte boundary */
+} __packed;
+
+/*
  * This is the format for a GPA-Direct packet, which contains a set of GPA
  * ranges, in addition to commands and/or data.
  */
@@ -391,6 +418,25 @@ struct vmdata_gpa_direct {
 	u32 range_cnt;
 	struct gpa_range range[1];
 } __packed;
+
+/* This is the format for a Additional Data Packet. */
+struct vmadditional_data {
+	struct vmpacket_descriptor d;
+	u64 total_bytes;
+	u32 offset;
+	u32 byte_cnt;
+	unsigned char data[1];
+} __packed;
+
+union vmpacket_largest_possible_header {
+	struct vmpacket_descriptor simple_hdr;
+	struct vmtransfer_page_packet_header xfer_page_hdr;
+	struct vmgpadl_packet_header gpadl_hdr;
+	struct vmadd_remove_transfer_page_set add_rm_xfer_page_hdr;
+	struct vmestablish_gpadl establish_gpadl_hdr;
+	struct vmteardown_gpadl teardown_gpadl_hdr;
+	struct vmdata_gpa_direct data_gpa_direct_hdr;
+};
 
 #define VMPACKET_DATA_START_ADDRESS(__packet)	\
 	(void *)(((unsigned char *)__packet) +	\
@@ -449,7 +495,6 @@ enum vmbus_channel_message_type {
 	CHANNELMSG_TL_CONNECT_REQUEST		= 21,
 	CHANNELMSG_MODIFYCHANNEL		= 22,
 	CHANNELMSG_TL_CONNECT_RESULT		= 23,
-	CHANNELMSG_MODIFYCHANNEL_RESPONSE	= 24,
 	CHANNELMSG_COUNT
 };
 
@@ -506,6 +551,12 @@ struct vmbus_channel_rescind_offer {
 	u32 child_relid;
 } __packed;
 
+static inline u32
+hv_ringbuffer_pending_size(const struct hv_ring_buffer_info *rbi)
+{
+	return rbi->ring_buffer->pending_send_sz;
+}
+
 /*
  * Request Offer -- no parameters, SynIC message contains the partition ID
  * Set Snoop -- no parameters, SynIC message contains the partition ID
@@ -554,13 +605,6 @@ struct vmbus_channel_open_result {
 	struct vmbus_channel_message_header header;
 	u32 child_relid;
 	u32 openid;
-	u32 status;
-} __packed;
-
-/* Modify Channel Result parameters */
-struct vmbus_channel_modifychannel_response {
-	struct vmbus_channel_message_header header;
-	u32 child_relid;
 	u32 status;
 } __packed;
 
@@ -629,8 +673,8 @@ struct vmbus_channel_initiate_contact {
 		u64 interrupt_page;
 		struct {
 			u8	msg_sint;
-			u8	msg_vtl;
-			u8	reserved[6];
+			u8	padding1[3];
+			u32	padding2;
 		};
 	};
 	u64 monitor_page1;
@@ -696,7 +740,6 @@ struct vmbus_channel_msginfo {
 		struct vmbus_channel_gpadl_torndown gpadl_torndown;
 		struct vmbus_channel_gpadl_created gpadl_created;
 		struct vmbus_channel_version_response version_response;
-		struct vmbus_channel_modifychannel_response modify_response;
 	} response;
 
 	u32 msgsize;
@@ -705,6 +748,20 @@ struct vmbus_channel_msginfo {
 	 * It will contain at minimum the VMBUS_CHANNEL_MESSAGE_HEADER header
 	 */
 	unsigned char msg[];
+};
+
+struct vmbus_close_msg {
+	struct vmbus_channel_msginfo info;
+	struct vmbus_channel_close_channel msg;
+};
+
+/* Define connection identifier type. */
+union hv_connection_id {
+	u32 asu32;
+	struct {
+		u32 id:24;
+		u32 reserved:8;
+	} u;
 };
 
 enum vmbus_device_type {
@@ -742,29 +799,12 @@ struct vmbus_requestor {
 
 #define VMBUS_NO_RQSTOR U64_MAX
 #define VMBUS_RQST_ERROR (U64_MAX - 1)
-#define VMBUS_RQST_ADDR_ANY U64_MAX
-/* NetVSC-specific */
 #define VMBUS_RQST_ID_NO_RESPONSE (U64_MAX - 2)
-/* StorVSC-specific */
-#define VMBUS_RQST_INIT (U64_MAX - 2)
-#define VMBUS_RQST_RESET (U64_MAX - 3)
 
 struct vmbus_device {
-	/* preferred ring buffer size in KB, 0 means no preferred size for this device */
-	size_t pref_ring_size;
 	u16  dev_type;
 	guid_t guid;
 	bool perf_device;
-	bool allowed_in_isolated;
-};
-
-#define VMBUS_DEFAULT_MAX_PKT_SIZE 4096
-
-struct vmbus_gpadl {
-	u32 gpadl_handle;
-	u32 size;
-	void *buffer;
-	bool decrypted;
 };
 
 struct vmbus_channel {
@@ -783,10 +823,9 @@ struct vmbus_channel {
 	u8 monitor_bit;
 
 	bool rescind; /* got rescind msg */
-	bool rescind_ref; /* got rescind msg, got channel reference */
 	struct completion rescind_event;
 
-	struct vmbus_gpadl ringbuffer_gpadlhandle;
+	u32 ringbuffer_gpadlhandle;
 
 	/* Allocated memory for ring buffer */
 	struct page *ringbuffer_page;
@@ -795,7 +834,7 @@ struct vmbus_channel {
 	struct hv_ring_buffer_info outbound;	/* send to parent */
 	struct hv_ring_buffer_info inbound;	/* receive from parent */
 
-	struct vmbus_channel_close_channel close_msg;
+	struct vmbus_close_msg close_msg;
 
 	/* Statistics */
 	u64	interrupts;	/* Host to Guest interrupts */
@@ -862,11 +901,11 @@ struct vmbus_channel {
 	 * Support for sub-channels. For high performance devices,
 	 * it will be useful to have multiple sub-channels to support
 	 * a scalable communication infrastructure with the host.
-	 * The support for sub-channels is implemented as an extension
+	 * The support for sub-channels is implemented as an extention
 	 * to the current infrastructure.
 	 * The initial offer is considered the primary channel and this
 	 * offer message will indicate if the host supports sub-channels.
-	 * The guest is free to ask for sub-channels to be offered and can
+	 * The guest is free to ask for sub-channels to be offerred and can
 	 * open these sub-channels as a normal "primary" channel. However,
 	 * all sub-channels will have the same type and instance guids as the
 	 * primary channel. Requests sent on a given channel will result in a
@@ -922,7 +961,7 @@ struct vmbus_channel {
 	 * mechanism improves throughput by:
 	 *
 	 * A) Making the host more efficient - each time it wakes up,
-	 *    potentially it will process more number of packets. The
+	 *    potentially it will process morev number of packets. The
 	 *    monitor latency allows a batch to build up.
 	 * B) By deferring the hypercall to signal, we will also minimize
 	 *    the interrupts.
@@ -930,7 +969,7 @@ struct vmbus_channel {
 	 * Clearly, these optimizations improve throughput at the expense of
 	 * latency. Furthermore, since the channel is shared for both
 	 * control and data messages, control messages currently suffer
-	 * unnecessary latency adversely impacting performance and boot
+	 * unnecessary latency adversley impacting performance and boot
 	 * time. To fix this issue, permit tagging the channel as being
 	 * in "low latency" mode. In this mode, we will bypass the monitor
 	 * mechanism.
@@ -986,55 +1025,18 @@ struct vmbus_channel {
 	u32 fuzz_testing_interrupt_delay;
 	u32 fuzz_testing_message_delay;
 
-	/* callback to generate a request ID from a request address */
-	u64 (*next_request_id_callback)(struct vmbus_channel *channel, u64 rqst_addr);
-	/* callback to retrieve a request address from a request ID */
-	u64 (*request_addr_callback)(struct vmbus_channel *channel, u64 rqst_id);
-
 	/* request/transaction ids for VMBus */
 	struct vmbus_requestor requestor;
 	u32 rqstor_size;
-
-	/* The max size of a packet on this channel */
-	u32 max_pkt_size;
-
-	/* function to mmap ring buffer memory to the channel's sysfs ring attribute */
-	int (*mmap_ring_buffer)(struct vmbus_channel *channel, struct vm_area_struct *vma);
-
-	/* boolean to control visibility of sysfs for ring buffer */
-	bool ring_sysfs_visible;
 };
 
-#define lock_requestor(channel, flags)					\
-do {									\
-	struct vmbus_requestor *rqstor = &(channel)->requestor;		\
-									\
-	spin_lock_irqsave(&rqstor->req_lock, flags);			\
-} while (0)
-
-static __always_inline void unlock_requestor(struct vmbus_channel *channel,
-					     unsigned long flags)
-{
-	struct vmbus_requestor *rqstor = &channel->requestor;
-
-	spin_unlock_irqrestore(&rqstor->req_lock, flags);
-}
-
-u64 vmbus_next_request_id(struct vmbus_channel *channel, u64 rqst_addr);
-u64 __vmbus_request_addr_match(struct vmbus_channel *channel, u64 trans_id,
-			       u64 rqst_addr);
-u64 vmbus_request_addr_match(struct vmbus_channel *channel, u64 trans_id,
-			     u64 rqst_addr);
-u64 vmbus_request_addr(struct vmbus_channel *channel, u64 trans_id);
-
-static inline bool is_hvsock_offer(const struct vmbus_channel_offer_channel *o)
-{
-	return !!(o->offer.chn_flags & VMBUS_CHANNEL_TLNPI_PROVIDER_OFFER);
-}
+u64 vmbus_next_request_id(struct vmbus_requestor *rqstor, u64 rqst_addr);
+u64 vmbus_request_addr(struct vmbus_requestor *rqstor, u64 trans_id);
 
 static inline bool is_hvsock_channel(const struct vmbus_channel *c)
 {
-	return is_hvsock_offer(&c->offermsg);
+	return !!(c->offermsg.offer.chn_flags &
+		  VMBUS_CHANNEL_TLNPI_PROVIDER_OFFER);
 }
 
 static inline bool is_sub_channel(const struct vmbus_channel *c)
@@ -1079,6 +1081,16 @@ static inline void set_channel_pending_send_size(struct vmbus_channel *c,
 	c->outbound.ring_buffer->pending_send_sz = size;
 }
 
+static inline void set_low_latency_mode(struct vmbus_channel *c)
+{
+	c->low_latency = true;
+}
+
+static inline void clear_low_latency_mode(struct vmbus_channel *c)
+{
+	c->low_latency = false;
+}
+
 void vmbus_onmessage(struct vmbus_channel_message_header *hdr);
 
 int vmbus_request_offers(void);
@@ -1092,6 +1104,19 @@ void vmbus_set_sc_create_callback(struct vmbus_channel *primary_channel,
 
 void vmbus_set_chn_rescind_callback(struct vmbus_channel *channel,
 		void (*chn_rescind_cb)(struct vmbus_channel *));
+
+/*
+ * Check if sub-channels have already been offerred. This API will be useful
+ * when the driver is unloaded after establishing sub-channels. In this case,
+ * when the driver is re-loaded, the driver would have to check if the
+ * subchannels have already been established before attempting to request
+ * the creation of sub-channels.
+ * This function returns TRUE to indicate that subchannels have already been
+ * created.
+ * This function should be invoked after setting the callback function for
+ * sub-channel creation.
+ */
+bool vmbus_are_subchannels_present(struct vmbus_channel *primary);
 
 /* The format must be the same as struct vmdata_gpa_direct */
 struct vmbus_channel_packet_page_buffer {
@@ -1148,19 +1173,19 @@ extern int vmbus_open(struct vmbus_channel *channel,
 
 extern void vmbus_close(struct vmbus_channel *channel);
 
-extern int vmbus_sendpacket_getid(struct vmbus_channel *channel,
-				  void *buffer,
-				  u32 bufferLen,
-				  u64 requestid,
-				  u64 *trans_id,
-				  enum vmbus_packet_type type,
-				  u32 flags);
 extern int vmbus_sendpacket(struct vmbus_channel *channel,
 				  void *buffer,
 				  u32 bufferLen,
 				  u64 requestid,
 				  enum vmbus_packet_type type,
 				  u32 flags);
+
+extern int vmbus_sendpacket_pagebuffer(struct vmbus_channel *channel,
+					    struct hv_page_buffer pagebuffers[],
+					    u32 pagecount,
+					    void *buffer,
+					    u32 bufferlen,
+					    u64 requestid);
 
 extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
 				     struct vmbus_packet_mpb_array *mpb,
@@ -1172,10 +1197,10 @@ extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
 extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
 				      void *kbuffer,
 				      u32 size,
-				      struct vmbus_gpadl *gpadl);
+				      u32 *gpadl_handle);
 
 extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
-				     struct vmbus_gpadl *gpadl);
+				     u32 gpadl_handle);
 
 void vmbus_reset_channel_cb(struct vmbus_channel *channel);
 
@@ -1190,6 +1215,9 @@ extern int vmbus_recvpacket_raw(struct vmbus_channel *channel,
 				     u32 bufferlen,
 				     u32 *buffer_actual_len,
 				     u64 *requestid);
+
+
+extern void vmbus_ontimer(unsigned long data);
 
 /* Base driver object */
 struct hv_driver {
@@ -1222,7 +1250,7 @@ struct hv_driver {
 	} dynids;
 
 	int (*probe)(struct hv_device *, const struct hv_vmbus_device_id *);
-	void (*remove)(struct hv_device *dev);
+	int (*remove)(struct hv_device *);
 	void (*shutdown)(struct hv_device *);
 
 	int (*suspend)(struct hv_device *);
@@ -1241,16 +1269,10 @@ struct hv_device {
 	u16 device_id;
 
 	struct device device;
-	/*
-	 * Driver name to force a match.  Do not set directly, because core
-	 * frees it.  Use driver_set_override() to set or clear it.
-	 */
-	const char *driver_override;
+	char *driver_override; /* Driver name to force a match */
 
 	struct vmbus_channel *channel;
 	struct kset	     *channels_kset;
-	struct device_dma_parameters dma_parms;
-	u64 dma_mask;
 
 	/* place holder to keep track of the dir for hv device in debugfs */
 	struct dentry *debug_dir;
@@ -1258,8 +1280,15 @@ struct hv_device {
 };
 
 
-#define device_to_hv_device(d)	container_of_const(d, struct hv_device, device)
-#define drv_to_hv_drv(d)	container_of_const(d, struct hv_driver, driver)
+static inline struct hv_device *device_to_hv_device(struct device *d)
+{
+	return container_of(d, struct hv_device, device);
+}
+
+static inline struct hv_driver *drv_to_hv_drv(struct device_driver *d)
+{
+	return container_of(d, struct hv_driver, driver);
+}
 
 static inline void hv_set_drvdata(struct hv_device *dev, void *data)
 {
@@ -1270,8 +1299,6 @@ static inline void *hv_get_drvdata(struct hv_device *dev)
 {
 	return dev_get_drvdata(&dev->device);
 }
-
-struct device *hv_get_vmbus_root_device(void);
 
 struct hv_ring_buffer_debug_info {
 	u32 current_interrupt_mask;
@@ -1436,14 +1463,12 @@ void vmbus_free_mmio(resource_size_t start, resource_size_t size);
 			  0x80, 0x2e, 0x27, 0xed, 0xe1, 0x9f)
 
 /*
- * Linux doesn't support these 4 devices: the first two are for
- * Automatic Virtual Machine Activation, the third is for
- * Remote Desktop Virtualization, and the fourth is Initial
- * Machine Configuration (IMC) used only by Windows guests.
+ * Linux doesn't support the 3 devices: the first two are for
+ * Automatic Virtual Machine Activation, and the third is for
+ * Remote Desktop Virtualization.
  * {f8e65716-3cb3-4a06-9a60-1889c5cccab5}
  * {3375baf4-9e15-4b30-b765-67acb10d607b}
  * {276aacf4-ac15-426c-98dd-7521ad3f01fe}
- * {c376c1c3-d276-48d2-90a9-c04748072c60}
  */
 
 #define HV_AVMA1_GUID \
@@ -1458,10 +1483,6 @@ void vmbus_free_mmio(resource_size_t start, resource_size_t size);
 	.guid = GUID_INIT(0x276aacf4, 0xac15, 0x426c, 0x98, 0xdd, \
 			  0x75, 0x21, 0xad, 0x3f, 0x01, 0xfe)
 
-#define HV_IMC_GUID \
-	.guid = GUID_INIT(0xc376c1c3, 0xd276, 0x48d2, 0x90, 0xa9, \
-			  0xc0, 0x47, 0x48, 0x07, 0x2c, 0x60)
-
 /*
  * Common header for Hyper-V ICs
  */
@@ -1472,7 +1493,6 @@ void vmbus_free_mmio(resource_size_t start, resource_size_t size);
 #define ICMSGTYPE_SHUTDOWN		3
 #define ICMSGTYPE_TIMESYNC		4
 #define ICMSGTYPE_VSS			5
-#define ICMSGTYPE_FCOPY			7
 
 #define ICMSGHDRFLAG_TRANSACTION	1
 #define ICMSGHDRFLAG_REQUEST		2
@@ -1490,7 +1510,6 @@ struct hv_util_service {
 	void *channel;
 	void (*util_cb)(void *);
 	int (*util_init)(struct hv_util_service *);
-	int (*util_init_transport)(void);
 	void (*util_deinit)(void);
 	int (*util_pre_suspend)(void);
 	int (*util_pre_resume)(void);
@@ -1517,17 +1536,11 @@ struct icmsg_hdr {
 	u8 reserved[2];
 } __packed;
 
-#define IC_VERSION_NEGOTIATION_MAX_VER_COUNT 100
-#define ICMSG_HDR (sizeof(struct vmbuspipe_hdr) + sizeof(struct icmsg_hdr))
-#define ICMSG_NEGOTIATE_PKT_SIZE(icframe_vercnt, icmsg_vercnt) \
-	(ICMSG_HDR + sizeof(struct icmsg_negotiate) + \
-	 (((icframe_vercnt) + (icmsg_vercnt)) * sizeof(struct ic_version)))
-
 struct icmsg_negotiate {
 	u16 icframe_vercnt;
 	u16 icmsg_vercnt;
 	u32 reserved;
-	struct ic_version icversion_data[]; /* any size array */
+	struct ic_version icversion_data[1]; /* any size array */
 } __packed;
 
 struct shutdown_msg_data {
@@ -1577,13 +1590,8 @@ struct hyperv_service_callback {
 	void (*callback)(void *context);
 };
 
-struct hv_dma_range {
-	dma_addr_t dma;
-	u32 mapping_size;
-};
-
 #define MAX_SRV_VER	0x7ffffff
-extern bool vmbus_prep_negotiate_resp(struct icmsg_hdr *icmsghdrp, u8 *buf, u32 buflen,
+extern bool vmbus_prep_negotiate_resp(struct icmsg_hdr *icmsghdrp, u8 *buf,
 				const int *fw_version, int fw_vercnt,
 				const int *srv_version, int srv_vercnt,
 				int *nego_fw_version, int *nego_srv_version);
@@ -1599,9 +1607,8 @@ extern __u32 vmbus_proto_version;
 
 int vmbus_send_tl_connect_request(const guid_t *shv_guest_servie_id,
 				  const guid_t *shv_host_servie_id);
-int vmbus_send_modifychannel(struct vmbus_channel *channel, u32 target_vp);
+int vmbus_send_modifychannel(u32 child_relid, u32 target_vp);
 void vmbus_set_event(struct vmbus_channel *channel);
-int vmbus_channel_set_cpu(struct vmbus_channel *channel, u32 target_cpu);
 
 /* Get the start of the ring buffer. */
 static inline void *
@@ -1656,11 +1663,6 @@ static inline u32 hv_pkt_datalen(const struct vmpacket_descriptor *desc)
 	return (desc->len8 << 3) - (desc->offset8 << 3);
 }
 
-/* Get packet length associated with descriptor */
-static inline u32 hv_pkt_len(const struct vmpacket_descriptor *desc)
-{
-	return desc->len8 << 3;
-}
 
 struct vmpacket_descriptor *
 hv_pkt_iter_first(struct vmbus_channel *channel);
@@ -1671,6 +1673,10 @@ __hv_pkt_iter_next(struct vmbus_channel *channel,
 
 void hv_pkt_iter_close(struct vmbus_channel *channel);
 
+/*
+ * Get next packet descriptor from iterator
+ * If at end of list, return NULL and update host.
+ */
 static inline struct vmpacket_descriptor *
 hv_pkt_iter_next(struct vmbus_channel *channel,
 		 const struct vmpacket_descriptor *pkt)
@@ -1733,7 +1739,6 @@ static inline unsigned long virt_to_hvpfn(void *addr)
 #define NR_HV_HYP_PAGES_IN_PAGE	(PAGE_SIZE / HV_HYP_PAGE_SIZE)
 #define offset_in_hvpage(ptr)	((unsigned long)(ptr) & ~HV_HYP_PAGE_MASK)
 #define HVPFN_UP(x)	(((x) + HV_HYP_PAGE_SIZE-1) >> HV_HYP_PAGE_SHIFT)
-#define HVPFN_DOWN(x)	((x) >> HV_HYP_PAGE_SHIFT)
 #define page_to_hvpfn(page)	(page_to_pfn(page) * NR_HV_HYP_PAGES_IN_PAGE)
 
 #endif /* _HYPERV_H */

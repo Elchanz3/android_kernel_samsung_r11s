@@ -29,11 +29,9 @@ static int patch_build_controls(struct snd_ac97 * ac97, const struct snd_kcontro
 {
 	int idx, err;
 
-	for (idx = 0; idx < count; idx++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&controls[idx], ac97));
-		if (err < 0)
+	for (idx = 0; idx < count; idx++)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&controls[idx], ac97))) < 0)
 			return err;
-	}
 	return 0;
 }
 
@@ -41,9 +39,12 @@ static int patch_build_controls(struct snd_ac97 * ac97, const struct snd_kcontro
 static void reset_tlv(struct snd_ac97 *ac97, const char *name,
 		      const unsigned int *tlv)
 {
+	struct snd_ctl_elem_id sid;
 	struct snd_kcontrol *kctl;
-
-	kctl = snd_ctl_find_id_mixer(ac97->bus->card, name);
+	memset(&sid, 0, sizeof(sid));
+	strcpy(sid.name, name);
+	sid.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+	kctl = snd_ctl_find_id(ac97->bus->card, &sid);
 	if (kctl && kctl->tlv.p)
 		kctl->tlv.p = tlv;
 }
@@ -54,11 +55,12 @@ static int ac97_update_bits_page(struct snd_ac97 *ac97, unsigned short reg, unsi
 	unsigned short page_save;
 	int ret;
 
-	guard(mutex)(&ac97->page_mutex);
+	mutex_lock(&ac97->page_mutex);
 	page_save = snd_ac97_read(ac97, AC97_INT_PAGING) & AC97_PAGE_MASK;
 	snd_ac97_update_bits(ac97, AC97_INT_PAGING, AC97_PAGE_MASK, page);
 	ret = snd_ac97_update_bits(ac97, reg, mask, value);
 	snd_ac97_update_bits(ac97, AC97_INT_PAGING, AC97_PAGE_MASK, page_save);
+	mutex_unlock(&ac97->page_mutex); /* unlock paging */
 	return ret;
 }
 
@@ -297,7 +299,7 @@ static int patch_yamaha_ymf7x3_3d(struct snd_ac97 *ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strscpy(kctl->id.name, "3D Control - Wide");
+	strcpy(kctl->id.name, "3D Control - Wide");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 9, 7, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	err = snd_ctl_add(ac97->bus->card,
@@ -414,8 +416,7 @@ static int patch_yamaha_ymf753_post_spdif(struct snd_ac97 * ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, snd_ac97_ymf753_controls_spdif, ARRAY_SIZE(snd_ac97_ymf753_controls_spdif));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_ymf753_controls_spdif, ARRAY_SIZE(snd_ac97_ymf753_controls_spdif))) < 0)
 		return err;
 	return 0;
 }
@@ -460,8 +461,7 @@ static int patch_wolfson_wm9703_specific(struct snd_ac97 * ac97)
 	int err, i;
 	
 	for (i = 0; i < ARRAY_SIZE(wm97xx_snd_ac97_controls); i++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm97xx_snd_ac97_controls[i], ac97));
-		if (err < 0)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm97xx_snd_ac97_controls[i], ac97))) < 0)
 			return err;
 	}
 	snd_ac97_write_cache(ac97,  AC97_WM97XX_FMIXER_VOL, 0x0808);
@@ -491,8 +491,7 @@ static int patch_wolfson_wm9704_specific(struct snd_ac97 * ac97)
 {
 	int err, i;
 	for (i = 0; i < ARRAY_SIZE(wm9704_snd_ac97_controls); i++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm9704_snd_ac97_controls[i], ac97));
-		if (err < 0)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm9704_snd_ac97_controls[i], ac97))) < 0)
 			return err;
 	}
 	/* patch for DVD noise */
@@ -632,8 +631,7 @@ static int patch_wolfson_wm9711_specific(struct snd_ac97 * ac97)
 	int err, i;
 	
 	for (i = 0; i < ARRAY_SIZE(wm9711_snd_ac97_controls); i++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm9711_snd_ac97_controls[i], ac97));
-		if (err < 0)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm9711_snd_ac97_controls[i], ac97))) < 0)
 			return err;
 	}
 	snd_ac97_write_cache(ac97,  AC97_CODEC_CLASS_REV, 0x0808);
@@ -800,8 +798,7 @@ static int patch_wolfson_wm9713_3d (struct snd_ac97 * ac97)
 	int err, i;
     
 	for (i = 0; i < ARRAY_SIZE(wm13_snd_ac97_controls_3d); i++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm13_snd_ac97_controls_3d[i], ac97));
-		if (err < 0)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm13_snd_ac97_controls_3d[i], ac97))) < 0)
 			return err;
 	}
 	return 0;
@@ -812,8 +809,7 @@ static int patch_wolfson_wm9713_specific(struct snd_ac97 * ac97)
 	int err, i;
 	
 	for (i = 0; i < ARRAY_SIZE(wm13_snd_ac97_controls); i++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm13_snd_ac97_controls[i], ac97));
-		if (err < 0)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ac97_cnew(&wm13_snd_ac97_controls[i], ac97))) < 0)
 			return err;
 	}
 	snd_ac97_write_cache(ac97, AC97_PC_BEEP, 0x0808);
@@ -887,10 +883,9 @@ static int patch_sigmatel_stac9700_3d(struct snd_ac97 * ac97)
 	struct snd_kcontrol *kctl;
 	int err;
 
-	err = snd_ctl_add(ac97->bus->card, kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97));
-	if (err < 0)
+	if ((err = snd_ctl_add(ac97->bus->card, kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97))) < 0)
 		return err;
-	strscpy(kctl->id.name, "3D Control Sigmatel - Depth");
+	strcpy(kctl->id.name, "3D Control Sigmatel - Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 2, 3, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	return 0;
@@ -901,17 +896,13 @@ static int patch_sigmatel_stac9708_3d(struct snd_ac97 * ac97)
 	struct snd_kcontrol *kctl;
 	int err;
 
-	kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97);
-	err = snd_ctl_add(ac97->bus->card, kctl);
-	if (err < 0)
+	if ((err = snd_ctl_add(ac97->bus->card, kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97))) < 0)
 		return err;
-	strscpy(kctl->id.name, "3D Control Sigmatel - Depth");
+	strcpy(kctl->id.name, "3D Control Sigmatel - Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 0, 3, 0);
-	kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97);
-	err = snd_ctl_add(ac97->bus->card, kctl);
-	if (err < 0)
+	if ((err = snd_ctl_add(ac97->bus->card, kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97))) < 0)
 		return err;
-	strscpy(kctl->id.name, "3D Control Sigmatel - Rear Depth");
+	strcpy(kctl->id.name, "3D Control Sigmatel - Rear Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 2, 3, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	return 0;
@@ -936,26 +927,18 @@ static int patch_sigmatel_stac97xx_specific(struct snd_ac97 * ac97)
 	int err;
 
 	snd_ac97_write_cache(ac97, AC97_SIGMATEL_ANALOG, snd_ac97_read(ac97, AC97_SIGMATEL_ANALOG) & ~0x0003);
-	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_ANALOG, 1)) {
-		err = patch_build_controls(ac97, &snd_ac97_sigmatel_controls[0], 1);
-		if (err < 0)
+	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_ANALOG, 1))
+		if ((err = patch_build_controls(ac97, &snd_ac97_sigmatel_controls[0], 1)) < 0)
 			return err;
-	}
-	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_ANALOG, 0)) {
-		err = patch_build_controls(ac97, &snd_ac97_sigmatel_controls[1], 1);
-		if (err < 0)
+	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_ANALOG, 0))
+		if ((err = patch_build_controls(ac97, &snd_ac97_sigmatel_controls[1], 1)) < 0)
 			return err;
-	}
-	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_DAC2INVERT, 2)) {
-		err = patch_build_controls(ac97, &snd_ac97_sigmatel_4speaker, 1);
-		if (err < 0)
+	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_DAC2INVERT, 2))
+		if ((err = patch_build_controls(ac97, &snd_ac97_sigmatel_4speaker, 1)) < 0)
 			return err;
-	}
-	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_DAC2INVERT, 3)) {
-		err = patch_build_controls(ac97, &snd_ac97_sigmatel_phaseinvert, 1);
-		if (err < 0)
+	if (snd_ac97_try_bit(ac97, AC97_SIGMATEL_DAC2INVERT, 3))
+		if ((err = patch_build_controls(ac97, &snd_ac97_sigmatel_phaseinvert, 1)) < 0)
 			return err;
-	}
 	return 0;
 }
 
@@ -975,11 +958,12 @@ static int snd_ac97_stac9708_put_bias(struct snd_kcontrol *kcontrol, struct snd_
 	struct snd_ac97 *ac97 = snd_kcontrol_chip(kcontrol);
 	int err;
 
-	guard(mutex)(&ac97->page_mutex);
+	mutex_lock(&ac97->page_mutex);
 	snd_ac97_write(ac97, AC97_SIGMATEL_BIAS1, 0xabba);
 	err = snd_ac97_update_bits(ac97, AC97_SIGMATEL_BIAS2, 0x0010,
 				   (ucontrol->value.integer.value[0] & 1) << 4);
 	snd_ac97_write(ac97, AC97_SIGMATEL_BIAS1, 0);
+	mutex_unlock(&ac97->page_mutex);
 	return err;
 }
 
@@ -1000,8 +984,7 @@ static int patch_sigmatel_stac9708_specific(struct snd_ac97 *ac97)
 	snd_ac97_remove_ctl(ac97, "PCM Out Path & Mute", NULL);
 
 	snd_ac97_rename_vol_ctl(ac97, "Headphone Playback", "Sigmatel Surround Playback");
-	err = patch_build_controls(ac97, &snd_ac97_stac9708_bias_control, 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_stac9708_bias_control, 1)) < 0)
 		return err;
 	return patch_sigmatel_stac97xx_specific(ac97);
 }
@@ -1279,17 +1262,14 @@ static int patch_cirrus_build_spdif(struct snd_ac97 * ac97)
 	int err;
 
 	/* con mask, pro mask, default */
-	err = patch_build_controls(ac97, &snd_ac97_controls_spdif[0], 3);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_controls_spdif[0], 3)) < 0)
 		return err;
 	/* switch, spsa */
-	err = patch_build_controls(ac97, &snd_ac97_cirrus_controls_spdif[0], 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_cirrus_controls_spdif[0], 1)) < 0)
 		return err;
 	switch (ac97->id & AC97_ID_CS_MASK) {
 	case AC97_ID_CS4205:
-		err = patch_build_controls(ac97, &snd_ac97_cirrus_controls_spdif[1], 1);
-		if (err < 0)
+		if ((err = patch_build_controls(ac97, &snd_ac97_cirrus_controls_spdif[1], 1)) < 0)
 			return err;
 		break;
 	}
@@ -1344,12 +1324,10 @@ static int patch_conexant_build_spdif(struct snd_ac97 * ac97)
 	int err;
 
 	/* con mask, pro mask, default */
-	err = patch_build_controls(ac97, &snd_ac97_controls_spdif[0], 3);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_controls_spdif[0], 3)) < 0)
 		return err;
 	/* switch */
-	err = patch_build_controls(ac97, &snd_ac97_conexant_controls_spdif[0], 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_conexant_controls_spdif[0], 1)) < 0)
 		return err;
 	/* set default PCM S/PDIF params */
 	/* consumer,PCM audio,no copyright,no preemphasis,PCM coder,original,48000Hz */
@@ -1614,8 +1592,7 @@ static int patch_ad1885_specific(struct snd_ac97 * ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, snd_ac97_controls_ad1885, ARRAY_SIZE(snd_ac97_controls_ad1885));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_controls_ad1885, ARRAY_SIZE(snd_ac97_controls_ad1885))) < 0)
 		return err;
 	reset_tlv(ac97, "Headphone Playback Volume",
 		  db_scale_6bit_6db_max);
@@ -1898,8 +1875,7 @@ static int patch_ad1981b_specific(struct snd_ac97 *ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1)) < 0)
 		return err;
 	if (check_list(ac97, ad1981_jacks_denylist))
 		return 0;
@@ -2084,8 +2060,7 @@ static int patch_ad1980_specific(struct snd_ac97 *ac97)
 {
 	int err;
 
-	err = patch_ad1888_specific(ac97);
-	if (err < 0)
+	if ((err = patch_ad1888_specific(ac97)) < 0)
 		return err;
 	return patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1);
 }
@@ -2193,8 +2168,7 @@ static int patch_ad1985_specific(struct snd_ac97 *ac97)
 				"Master Surround Playback");
 	snd_ac97_rename_vol_ctl(ac97, "Headphone Playback", "Master Playback");
 
-	err = patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1)) < 0)
 		return err;
 
 	return patch_build_controls(ac97, snd_ac97_ad1985_controls,
@@ -2486,8 +2460,7 @@ static int patch_ad1986_specific(struct snd_ac97 *ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_ad198x_2cmic, 1)) < 0)
 		return err;
 
 	return patch_build_controls(ac97, snd_ac97_ad1986_controls,
@@ -2609,12 +2582,10 @@ static int patch_alc650_specific(struct snd_ac97 * ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, snd_ac97_controls_alc650, ARRAY_SIZE(snd_ac97_controls_alc650));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_controls_alc650, ARRAY_SIZE(snd_ac97_controls_alc650))) < 0)
 		return err;
 	if (ac97->ext_id & AC97_EI_SPDIF) {
-		err = patch_build_controls(ac97, snd_ac97_spdif_controls_alc650, ARRAY_SIZE(snd_ac97_spdif_controls_alc650));
-		if (err < 0)
+		if ((err = patch_build_controls(ac97, snd_ac97_spdif_controls_alc650, ARRAY_SIZE(snd_ac97_spdif_controls_alc650))) < 0)
 			return err;
 	}
 	if (ac97->id != AC97_ID_ALC650F)
@@ -2764,12 +2735,10 @@ static int patch_alc655_specific(struct snd_ac97 * ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, snd_ac97_controls_alc655, ARRAY_SIZE(snd_ac97_controls_alc655));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_controls_alc655, ARRAY_SIZE(snd_ac97_controls_alc655))) < 0)
 		return err;
 	if (ac97->ext_id & AC97_EI_SPDIF) {
-		err = patch_build_controls(ac97, snd_ac97_spdif_controls_alc655, ARRAY_SIZE(snd_ac97_spdif_controls_alc655));
-		if (err < 0)
+		if ((err = patch_build_controls(ac97, snd_ac97_spdif_controls_alc655, ARRAY_SIZE(snd_ac97_spdif_controls_alc655))) < 0)
 			return err;
 	}
 	return 0;
@@ -2878,12 +2847,10 @@ static int patch_alc850_specific(struct snd_ac97 *ac97)
 {
 	int err;
 
-	err = patch_build_controls(ac97, snd_ac97_controls_alc850, ARRAY_SIZE(snd_ac97_controls_alc850));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_controls_alc850, ARRAY_SIZE(snd_ac97_controls_alc850))) < 0)
 		return err;
 	if (ac97->ext_id & AC97_EI_SPDIF) {
-		err = patch_build_controls(ac97, snd_ac97_spdif_controls_alc655, ARRAY_SIZE(snd_ac97_spdif_controls_alc655));
-		if (err < 0)
+		if ((err = patch_build_controls(ac97, snd_ac97_spdif_controls_alc655, ARRAY_SIZE(snd_ac97_spdif_controls_alc655))) < 0)
 			return err;
 	}
 	return 0;
@@ -3426,7 +3393,11 @@ static const char * const follower_sws_vt1616[] = {
 static struct snd_kcontrol *snd_ac97_find_mixer_ctl(struct snd_ac97 *ac97,
 						    const char *name)
 {
-	return snd_ctl_find_id_mixer(ac97->bus->card, name);
+	struct snd_ctl_elem_id id;
+	memset(&id, 0, sizeof(id));
+	id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+	strcpy(id.name, name);
+	return snd_ctl_find_id(ac97->bus->card, &id);
 }
 
 /* create a virtual master control and add followers */
@@ -3435,6 +3406,7 @@ static int snd_ac97_add_vmaster(struct snd_ac97 *ac97, char *name,
 				const char * const *followers)
 {
 	struct snd_kcontrol *kctl;
+	const char * const *s;
 	int err;
 
 	kctl = snd_ctl_make_virtual_master(name, tlv);
@@ -3444,7 +3416,20 @@ static int snd_ac97_add_vmaster(struct snd_ac97 *ac97, char *name,
 	if (err < 0)
 		return err;
 
-	return snd_ctl_add_followers(ac97->bus->card, kctl, followers);
+	for (s = followers; *s; s++) {
+		struct snd_kcontrol *sctl;
+
+		sctl = snd_ac97_find_mixer_ctl(ac97, *s);
+		if (!sctl) {
+			dev_dbg(ac97->bus->card->dev,
+				"Cannot find follower %s, skipped\n", *s);
+			continue;
+		}
+		err = snd_ctl_add_follower(kctl, sctl);
+		if (err < 0)
+			return err;
+	}
+	return 0;
 }
 
 static int patch_vt1616_specific(struct snd_ac97 * ac97)
@@ -3452,13 +3437,10 @@ static int patch_vt1616_specific(struct snd_ac97 * ac97)
 	struct snd_kcontrol *kctl;
 	int err;
 
-	if (snd_ac97_try_bit(ac97, 0x5a, 9)) {
-		err = patch_build_controls(ac97, &snd_ac97_controls_vt1616[0], 1);
-		if (err < 0)
+	if (snd_ac97_try_bit(ac97, 0x5a, 9))
+		if ((err = patch_build_controls(ac97, &snd_ac97_controls_vt1616[0], 1)) < 0)
 			return err;
-	}
-	err = patch_build_controls(ac97, &snd_ac97_controls_vt1616[1], ARRAY_SIZE(snd_ac97_controls_vt1616) - 1);
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, &snd_ac97_controls_vt1616[1], ARRAY_SIZE(snd_ac97_controls_vt1616) - 1)) < 0)
 		return err;
 
 	/* There is already a misnamed master switch.  Rename it.  */
@@ -3697,7 +3679,7 @@ static int snd_ac97_vt1618_UAJ_get(struct snd_kcontrol *kcontrol,
 	unsigned short datpag, uaj;
 	struct snd_ac97 *pac97 = snd_kcontrol_chip(kcontrol);
 
-	guard(mutex)(&pac97->page_mutex);
+	mutex_lock(&pac97->page_mutex);
 
 	datpag = snd_ac97_read(pac97, AC97_INT_PAGING) & AC97_PAGE_MASK;
 	snd_ac97_update_bits(pac97, AC97_INT_PAGING, AC97_PAGE_MASK, 0);
@@ -3706,6 +3688,7 @@ static int snd_ac97_vt1618_UAJ_get(struct snd_kcontrol *kcontrol,
 		vt1618_uaj[kcontrol->private_value].mask;
 
 	snd_ac97_update_bits(pac97, AC97_INT_PAGING, AC97_PAGE_MASK, datpag);
+	mutex_unlock(&pac97->page_mutex);
 
 	ucontrol->value.enumerated.item[0] = uaj >>
 		vt1618_uaj[kcontrol->private_value].shift;
@@ -3827,11 +3810,9 @@ static const struct snd_kcontrol_new snd_ac97_spdif_controls_it2646[] = {
 static int patch_it2646_specific(struct snd_ac97 * ac97)
 {
 	int err;
-	err = patch_build_controls(ac97, snd_ac97_controls_it2646, ARRAY_SIZE(snd_ac97_controls_it2646));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_controls_it2646, ARRAY_SIZE(snd_ac97_controls_it2646))) < 0)
 		return err;
-	err = patch_build_controls(ac97, snd_ac97_spdif_controls_it2646, ARRAY_SIZE(snd_ac97_spdif_controls_it2646));
-	if (err < 0)
+	if ((err = patch_build_controls(ac97, snd_ac97_spdif_controls_it2646, ARRAY_SIZE(snd_ac97_spdif_controls_it2646))) < 0)
 		return err;
 	return 0;
 }
@@ -3864,11 +3845,9 @@ AC97_DOUBLE("Modem Speaker Volume", 0x5c, 14, 12, 3, 1)
 static int patch_si3036_specific(struct snd_ac97 * ac97)
 {
 	int idx, err;
-	for (idx = 0; idx < ARRAY_SIZE(snd_ac97_controls_si3036); idx++) {
-		err = snd_ctl_add(ac97->bus->card, snd_ctl_new1(&snd_ac97_controls_si3036[idx], ac97));
-		if (err < 0)
+	for (idx = 0; idx < ARRAY_SIZE(snd_ac97_controls_si3036); idx++)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ctl_new1(&snd_ac97_controls_si3036[idx], ac97))) < 0)
 			return err;
-	}
 	return 0;
 }
 
@@ -3911,5 +3890,43 @@ static const struct snd_ac97_res_table lm4550_restbl[] = {
 static int patch_lm4550(struct snd_ac97 *ac97)
 {
 	ac97->res_table = lm4550_restbl;
+	return 0;
+}
+
+/* 
+ *  UCB1400 codec (http://www.semiconductors.philips.com/acrobat_download/datasheets/UCB1400-02.pdf)
+ */
+static const struct snd_kcontrol_new snd_ac97_controls_ucb1400[] = {
+/* enable/disable headphone driver which allows direct connection to
+   stereo headphone without the use of external DC blocking
+   capacitors */
+AC97_SINGLE("Headphone Driver", 0x6a, 6, 1, 0),
+/* Filter used to compensate the DC offset is added in the ADC to remove idle
+   tones from the audio band. */
+AC97_SINGLE("DC Filter", 0x6a, 4, 1, 0),
+/* Control smart-low-power mode feature. Allows automatic power down
+   of unused blocks in the ADC analog front end and the PLL. */
+AC97_SINGLE("Smart Low Power Mode", 0x6c, 4, 3, 0),
+};
+
+static int patch_ucb1400_specific(struct snd_ac97 * ac97)
+{
+	int idx, err;
+	for (idx = 0; idx < ARRAY_SIZE(snd_ac97_controls_ucb1400); idx++)
+		if ((err = snd_ctl_add(ac97->bus->card, snd_ctl_new1(&snd_ac97_controls_ucb1400[idx], ac97))) < 0)
+			return err;
+	return 0;
+}
+
+static const struct snd_ac97_build_ops patch_ucb1400_ops = {
+	.build_specific	= patch_ucb1400_specific,
+};
+
+static int patch_ucb1400(struct snd_ac97 * ac97)
+{
+	ac97->build_ops = &patch_ucb1400_ops;
+	/* enable headphone driver and smart low power mode by default */
+	snd_ac97_write_cache(ac97, 0x6a, 0x0050);
+	snd_ac97_write_cache(ac97, 0x6c, 0x0030);
 	return 0;
 }

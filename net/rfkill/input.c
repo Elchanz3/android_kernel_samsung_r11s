@@ -36,7 +36,7 @@ module_param_named(master_switch_mode, rfkill_master_switch_mode, uint, 0);
 MODULE_PARM_DESC(master_switch_mode,
 	"SW_RFKILL_ALL ON should: 0=do nothing (only unlock); 1=restore; 2=unblock all");
 
-static DEFINE_SPINLOCK(rfkill_op_lock);
+static spinlock_t rfkill_op_lock;
 static bool rfkill_op_pending;
 static unsigned long rfkill_sw_pending[BITS_TO_LONGS(NUM_RFKILL_TYPES)];
 static unsigned long rfkill_sw_state[BITS_TO_LONGS(NUM_RFKILL_TYPES)];
@@ -159,7 +159,7 @@ static void rfkill_schedule_global_op(enum rfkill_sched_op op)
 	rfkill_op_pending = true;
 	if (op == RFKILL_GLOBAL_OP_EPO && !rfkill_is_epo_lock_active()) {
 		/* bypass the limiter for EPO */
-		mod_delayed_work(system_percpu_wq, &rfkill_op_work, 0);
+		mod_delayed_work(system_wq, &rfkill_op_work, 0);
 		rfkill_last_scheduled = jiffies;
 	} else
 		rfkill_schedule_ratelimited();
@@ -329,6 +329,8 @@ int __init rfkill_handler_init(void)
 	default:
 		return -EINVAL;
 	}
+
+	spin_lock_init(&rfkill_op_lock);
 
 	/* Avoid delay at first schedule */
 	rfkill_last_scheduled =

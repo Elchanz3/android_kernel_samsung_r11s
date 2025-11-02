@@ -6,7 +6,6 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/cros_ec_proto.h>
 #include <linux/platform_data/cros_usbpd_notify.h>
@@ -54,6 +53,50 @@ void cros_usbpd_unregister_notify(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(cros_usbpd_unregister_notify);
 
+/**
+ * cros_ec_pd_command - Send a command to the EC.
+ *
+ * @ec_dev: EC device
+ * @command: EC command
+ * @outdata: EC command output data
+ * @outsize: Size of outdata
+ * @indata: EC command input data
+ * @insize: Size of indata
+ *
+ * Return: >= 0 on success, negative error number on failure.
+ */
+static int cros_ec_pd_command(struct cros_ec_device *ec_dev,
+			      int command,
+			      uint8_t *outdata,
+			      int outsize,
+			      uint8_t *indata,
+			      int insize)
+{
+	struct cros_ec_command *msg;
+	int ret;
+
+	msg = kzalloc(sizeof(*msg) + max(insize, outsize), GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->command = command;
+	msg->outsize = outsize;
+	msg->insize = insize;
+
+	if (outsize)
+		memcpy(msg->data, outdata, outsize);
+
+	ret = cros_ec_cmd_xfer_status(ec_dev, msg);
+	if (ret < 0)
+		goto error;
+
+	if (insize)
+		memcpy(indata, msg->data, insize);
+error:
+	kfree(msg);
+	return ret;
+}
+
 static void cros_usbpd_get_event_and_notify(struct device  *dev,
 					    struct cros_ec_device *ec_dev)
 {
@@ -72,8 +115,10 @@ static void cros_usbpd_get_event_and_notify(struct device  *dev,
 	}
 
 	/* Check for PD host events on EC. */
-	ret = cros_ec_cmd(ec_dev, 0, EC_CMD_PD_HOST_EVENT_STATUS,
-			  NULL, 0, &host_event_status, sizeof(host_event_status));
+	ret = cros_ec_pd_command(ec_dev, EC_CMD_PD_HOST_EVENT_STATUS,
+				 NULL, 0,
+				 (uint8_t *)&host_event_status,
+				 sizeof(host_event_status));
 	if (ret < 0) {
 		dev_warn(dev, "Can't get host event status (err: %d)\n", ret);
 		goto send_notify;
@@ -135,13 +180,15 @@ static int cros_usbpd_notify_probe_acpi(struct platform_device *pdev)
 	return 0;
 }
 
-static void cros_usbpd_notify_remove_acpi(struct platform_device *pdev)
+static int cros_usbpd_notify_remove_acpi(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct acpi_device *adev = ACPI_COMPANION(dev);
 
 	acpi_remove_notify_handler(adev->handle, ACPI_ALL_NOTIFY,
 				   cros_usbpd_notify_acpi);
+
+	return 0;
 }
 
 static const struct acpi_device_id cros_usbpd_notify_acpi_device_ids[] = {
@@ -173,8 +220,7 @@ static int cros_usbpd_notify_plat(struct notifier_block *nb,
 	if (!host_event)
 		return NOTIFY_DONE;
 
-	if (host_event & (EC_HOST_EVENT_MASK(EC_HOST_EVENT_PD_MCU) |
-			  EC_HOST_EVENT_MASK(EC_HOST_EVENT_USB_MUX))) {
+	if (host_event & EC_HOST_EVENT_MASK(EC_HOST_EVENT_PD_MCU)) {
 		cros_usbpd_get_event_and_notify(pdnotify->dev, ec_dev);
 		return NOTIFY_OK;
 	}
@@ -208,7 +254,7 @@ static int cros_usbpd_notify_probe_plat(struct platform_device *pdev)
 	return 0;
 }
 
-static void cros_usbpd_notify_remove_plat(struct platform_device *pdev)
+static int cros_usbpd_notify_remove_plat(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct cros_ec_dev *ecdev = dev_get_drvdata(dev->parent);
@@ -217,13 +263,9 @@ static void cros_usbpd_notify_remove_plat(struct platform_device *pdev)
 
 	blocking_notifier_chain_unregister(&ecdev->ec_dev->event_notifier,
 					   &pdnotify->nb);
-}
 
-static const struct platform_device_id cros_usbpd_notify_id[] = {
-	{ DRV_NAME, 0 },
-	{}
-};
-MODULE_DEVICE_TABLE(platform, cros_usbpd_notify_id);
+	return 0;
+}
 
 static struct platform_driver cros_usbpd_notify_plat_driver = {
 	.driver = {
@@ -231,7 +273,6 @@ static struct platform_driver cros_usbpd_notify_plat_driver = {
 	},
 	.probe = cros_usbpd_notify_probe_plat,
 	.remove = cros_usbpd_notify_remove_plat,
-	.id_table = cros_usbpd_notify_id,
 };
 
 static int __init cros_usbpd_notify_init(void)
@@ -266,3 +307,4 @@ module_exit(cros_usbpd_notify_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ChromeOS power delivery notifier device");
 MODULE_AUTHOR("Jon Flatley <jflat@chromium.org>");
+MODULE_ALIAS("platform:" DRV_NAME);

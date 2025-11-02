@@ -34,14 +34,13 @@
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_request.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_transport_sas.h>
 
 #include "scsi_sas_internal.h"
-#include "scsi_priv.h"
-
 struct sas_host_attrs {
 	struct list_head rphy_list;
 	struct mutex lock;
@@ -155,7 +154,6 @@ static struct {
 	{ SAS_LINK_RATE_3_0_GBPS,	"3.0 Gbit" },
 	{ SAS_LINK_RATE_6_0_GBPS,	"6.0 Gbit" },
 	{ SAS_LINK_RATE_12_0_GBPS,	"12.0 Gbit" },
-	{ SAS_LINK_RATE_22_5_GBPS,	"22.5 Gbit" },
 };
 sas_bitfield_name_search(linkspeed, sas_linkspeed_names)
 sas_bitfield_name_set(linkspeed, sas_linkspeed_names)
@@ -199,7 +197,7 @@ static int sas_bsg_initialize(struct Scsi_Host *shost, struct sas_rphy *rphy)
 	}
 
 	if (rphy) {
-		q = bsg_setup_queue(&rphy->dev, dev_name(&rphy->dev), NULL,
+		q = bsg_setup_queue(&rphy->dev, dev_name(&rphy->dev),
 				sas_smp_dispatch, NULL, 0);
 		if (IS_ERR(q))
 			return PTR_ERR(q);
@@ -208,7 +206,7 @@ static int sas_bsg_initialize(struct Scsi_Host *shost, struct sas_rphy *rphy)
 		char name[20];
 
 		snprintf(name, sizeof(name), "sas_host%d", shost->host_no);
-		q = bsg_setup_queue(&shost->shost_gendev, name, NULL,
+		q = bsg_setup_queue(&shost->shost_gendev, name,
 				sas_smp_dispatch, NULL, 0);
 		if (IS_ERR(q))
 			return PTR_ERR(q);
@@ -227,7 +225,6 @@ static int sas_host_setup(struct transport_container *tc, struct device *dev,
 {
 	struct Scsi_Host *shost = dev_to_shost(dev);
 	struct sas_host_attrs *sas_host = to_sas_host_attrs(shost);
-	struct device *dma_dev = shost->dma_dev;
 
 	INIT_LIST_HEAD(&sas_host->rphy_list);
 	mutex_init(&sas_host->lock);
@@ -238,11 +235,6 @@ static int sas_host_setup(struct transport_container *tc, struct device *dev,
 	if (sas_bsg_initialize(shost, NULL))
 		dev_printk(KERN_ERR, dev, "fail to a bsg device %d\n",
 			   shost->host_no);
-
-	if (dma_dev->dma_mask) {
-		shost->opt_sectors = min_t(unsigned int, shost->max_sectors,
-				dma_opt_mapping_size(dma_dev) >> SECTOR_SHIFT);
-	}
 
 	return 0;
 }
@@ -417,29 +409,6 @@ unsigned int sas_is_tlr_enabled(struct scsi_device *sdev)
 	return rdev->tlr_enabled;
 }
 EXPORT_SYMBOL_GPL(sas_is_tlr_enabled);
-
-/**
- * sas_ata_ncq_prio_supported - Check for ATA NCQ command priority support
- * @sdev: SCSI device
- *
- * Check if an ATA device supports NCQ priority using VPD page 89h (ATA
- * Information). Since this VPD page is implemented only for ATA devices,
- * this function always returns false for SCSI devices.
- */
-bool sas_ata_ncq_prio_supported(struct scsi_device *sdev)
-{
-	struct scsi_vpd *vpd;
-	bool ncq_prio_supported = false;
-
-	rcu_read_lock();
-	vpd = rcu_dereference(sdev->vpd_pg89);
-	if (vpd && vpd->len >= 214)
-		ncq_prio_supported = (vpd->data[213] >> 4) & 1;
-	rcu_read_unlock();
-
-	return ncq_prio_supported;
-}
-EXPORT_SYMBOL_GPL(sas_ata_ncq_prio_supported);
 
 /*
  * SAS Phy attributes
@@ -890,8 +859,7 @@ static void sas_port_delete_link(struct sas_port *port,
 	sysfs_remove_link(&phy->dev.kobj, "port");
 }
 
-/**
- * sas_port_alloc - allocate and initialize a SAS port structure
+/** sas_port_alloc - allocate and initialize a SAS port structure
  *
  * @parent:	parent device
  * @port_id:	port number
@@ -900,7 +868,7 @@ static void sas_port_delete_link(struct sas_port *port,
  * below the device specified by @parent which must be either a Scsi_Host
  * or a sas_expander_device.
  *
- * Returns: %NULL on error
+ * Returns %NULL on error
  */
 struct sas_port *sas_port_alloc(struct device *parent, int port_id)
 {
@@ -935,8 +903,7 @@ struct sas_port *sas_port_alloc(struct device *parent, int port_id)
 }
 EXPORT_SYMBOL(sas_port_alloc);
 
-/**
- * sas_port_alloc_num - allocate and initialize a SAS port structure
+/** sas_port_alloc_num - allocate and initialize a SAS port structure
  *
  * @parent:	parent device
  *
@@ -946,7 +913,7 @@ EXPORT_SYMBOL(sas_port_alloc);
  * the device tree below the device specified by @parent which must be
  * either a Scsi_Host or a sas_expander_device.
  *
- * Returns: %NULL on error
+ * Returns %NULL on error
  */
 struct sas_port *sas_port_alloc_num(struct device *parent)
 {
@@ -1272,7 +1239,7 @@ int sas_read_port_mode_page(struct scsi_device *sdev)
 	if (!buffer)
 		return -ENOMEM;
 
-	error = scsi_mode_sense(sdev, 1, 0x19, 0, buffer, BUF_SIZE, 30*HZ, 3,
+	error = scsi_mode_sense(sdev, 1, 0x19, buffer, BUF_SIZE, 30*HZ, 3,
 				&mode_data, NULL);
 
 	if (error)
@@ -1685,22 +1652,6 @@ int scsi_is_sas_rphy(const struct device *dev)
 }
 EXPORT_SYMBOL(scsi_is_sas_rphy);
 
-static void scan_channel_zero(struct Scsi_Host *shost, uint id, u64 lun)
-{
-	struct sas_host_attrs *sas_host = to_sas_host_attrs(shost);
-	struct sas_rphy *rphy;
-
-	list_for_each_entry(rphy, &sas_host->rphy_list, list) {
-		if (rphy->identify.device_type != SAS_END_DEVICE ||
-		    rphy->scsi_target_id == -1)
-			continue;
-
-		if (id == SCAN_WILD_CARD || id == rphy->scsi_target_id) {
-			scsi_scan_target(&rphy->dev, 0, rphy->scsi_target_id,
-					 lun, SCSI_SCAN_MANUAL);
-		}
-	}
-}
 
 /*
  * SCSI scan helper
@@ -1710,41 +1661,23 @@ static int sas_user_scan(struct Scsi_Host *shost, uint channel,
 		uint id, u64 lun)
 {
 	struct sas_host_attrs *sas_host = to_sas_host_attrs(shost);
-	int res = 0;
-	int i;
+	struct sas_rphy *rphy;
 
-	switch (channel) {
-	case 0:
-		mutex_lock(&sas_host->lock);
-		scan_channel_zero(shost, id, lun);
-		mutex_unlock(&sas_host->lock);
-		break;
+	mutex_lock(&sas_host->lock);
+	list_for_each_entry(rphy, &sas_host->rphy_list, list) {
+		if (rphy->identify.device_type != SAS_END_DEVICE ||
+		    rphy->scsi_target_id == -1)
+			continue;
 
-	case SCAN_WILD_CARD:
-		mutex_lock(&sas_host->lock);
-		scan_channel_zero(shost, id, lun);
-		mutex_unlock(&sas_host->lock);
-
-		for (i = 1; i <= shost->max_channel; i++) {
-			res = scsi_scan_host_selected(shost, i, id, lun,
-						      SCSI_SCAN_MANUAL);
-			if (res)
-				goto exit_scan;
+		if ((channel == SCAN_WILD_CARD || channel == 0) &&
+		    (id == SCAN_WILD_CARD || id == rphy->scsi_target_id)) {
+			scsi_scan_target(&rphy->dev, 0, rphy->scsi_target_id,
+					 lun, SCSI_SCAN_MANUAL);
 		}
-		break;
-
-	default:
-		if (channel < shost->max_channel) {
-			res = scsi_scan_host_selected(shost, channel, id, lun,
-						      SCSI_SCAN_MANUAL);
-		} else {
-			res = -EINVAL;
-		}
-		break;
 	}
+	mutex_unlock(&sas_host->lock);
 
-exit_scan:
-	return res;
+	return 0;
 }
 
 

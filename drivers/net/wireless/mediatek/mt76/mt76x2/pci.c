@@ -10,9 +10,9 @@
 #include "mt76x2.h"
 
 static const struct pci_device_id mt76x2e_device_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7662) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7612) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7602) },
+	{ PCI_DEVICE(0x14c3, 0x7662) },
+	{ PCI_DEVICE(0x14c3, 0x7612) },
+	{ PCI_DEVICE(0x14c3, 0x7602) },
 	{ },
 };
 
@@ -22,11 +22,9 @@ mt76x2e_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	static const struct mt76_driver_ops drv_ops = {
 		.txwi_size = sizeof(struct mt76x02_txwi),
 		.drv_flags = MT_DRV_TX_ALIGNED4_SKBS |
-			     MT_DRV_SW_RX_AIRTIME |
-			     MT_DRV_IGNORE_TXS_FAILED,
+			     MT_DRV_SW_RX_AIRTIME,
 		.survey_flags = SURVEY_INFO_TIME_TX,
 		.update_survey = mt76x02_update_channel,
-		.set_channel = mt76x2e_set_channel,
 		.tx_prepare_skb = mt76x02_tx_prepare_skb,
 		.tx_complete_skb = mt76x02_tx_complete_skb,
 		.rx_skb = mt76x02_queue_rx_skb,
@@ -49,7 +47,7 @@ mt76x2e_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_set_master(pdev);
 
-	ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
 
@@ -151,18 +149,12 @@ mt76x2e_resume(struct pci_dev *pdev)
 	pci_restore_state(pdev);
 
 	mt76_worker_enable(&mdev->tx_worker);
-
 	mt76_for_each_q_rx(mdev, i) {
 		napi_enable(&mdev->napi[i]);
-	}
-	napi_enable(&mdev->tx_napi);
-
-	local_bh_disable();
-	mt76_for_each_q_rx(mdev, i) {
 		napi_schedule(&mdev->napi[i]);
 	}
+	napi_enable(&mdev->tx_napi);
 	napi_schedule(&mdev->tx_napi);
-	local_bh_enable();
 
 	return mt76x2_resume_device(dev);
 }
@@ -170,7 +162,6 @@ mt76x2e_resume(struct pci_dev *pdev)
 MODULE_DEVICE_TABLE(pci, mt76x2e_device_table);
 MODULE_FIRMWARE(MT7662_FIRMWARE);
 MODULE_FIRMWARE(MT7662_ROM_PATCH);
-MODULE_DESCRIPTION("MediaTek MT76x2E (PCIe) wireless driver");
 MODULE_LICENSE("Dual BSD/GPL");
 
 static struct pci_driver mt76pci_driver = {

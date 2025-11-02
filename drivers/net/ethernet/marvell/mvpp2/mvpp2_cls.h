@@ -143,7 +143,7 @@ struct mvpp2_cls_c2_entry {
 /* Number of per-port dedicated entries in the C2 TCAM */
 #define MVPP22_CLS_C2_PORT_N_FLOWS	MVPP2_N_RFS_ENTRIES_PER_FLOW
 
-/* Each port has one range per flow type + one entry controlling the global RSS
+/* Each port has oen range per flow type + one entry controling the global RSS
  * setting and the default rx queue
  */
 #define MVPP22_CLS_C2_PORT_RANGE	(MVPP22_CLS_C2_PORT_N_FLOWS + 1)
@@ -264,7 +264,7 @@ int mvpp22_port_rss_init(struct mvpp2_port *port);
 int mvpp22_port_rss_enable(struct mvpp2_port *port);
 int mvpp22_port_rss_disable(struct mvpp2_port *port);
 
-int mvpp22_port_rss_ctx_create(struct mvpp2_port *port, u32 rss_ctx);
+int mvpp22_port_rss_ctx_create(struct mvpp2_port *port, u32 *rss_ctx);
 int mvpp22_port_rss_ctx_delete(struct mvpp2_port *port, u32 rss_ctx);
 
 int mvpp22_port_rss_ctx_indir_set(struct mvpp2_port *port, u32 rss_ctx,
@@ -272,10 +272,8 @@ int mvpp22_port_rss_ctx_indir_set(struct mvpp2_port *port, u32 rss_ctx,
 int mvpp22_port_rss_ctx_indir_get(struct mvpp2_port *port, u32 rss_ctx,
 				  u32 *indir);
 
-int mvpp2_ethtool_rxfh_get(struct mvpp2_port *port,
-			   struct ethtool_rxfh_fields *info);
-int mvpp2_ethtool_rxfh_set(struct mvpp2_port *port,
-			   const struct ethtool_rxfh_fields *info);
+int mvpp2_ethtool_rxfh_get(struct mvpp2_port *port, struct ethtool_rxnfc *info);
+int mvpp2_ethtool_rxfh_set(struct mvpp2_port *port, struct ethtool_rxnfc *info);
 
 void mvpp2_cls_init(struct mvpp2 *priv);
 

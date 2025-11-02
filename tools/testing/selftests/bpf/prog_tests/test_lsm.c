@@ -10,9 +10,9 @@
 #include <unistd.h>
 #include <malloc.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "lsm.skel.h"
-#include "lsm_tailcall.skel.h"
 
 char *CMD_ARGS[] = {"true", NULL};
 
@@ -52,109 +52,44 @@ int exec_cmd(int *monitored_pid)
 	return -EINVAL;
 }
 
-static int test_lsm(struct lsm *skel)
+void test_test_lsm(void)
 {
-	struct bpf_link *link;
+	struct lsm *skel = NULL;
+	int err, duration = 0;
 	int buf = 1234;
-	int err;
+
+	skel = lsm__open_and_load();
+	if (CHECK(!skel, "skel_load", "lsm skeleton failed\n"))
+		goto close_prog;
 
 	err = lsm__attach(skel);
-	if (!ASSERT_OK(err, "attach"))
-		return err;
-
-	/* Check that already linked program can't be attached again. */
-	link = bpf_program__attach(skel->progs.test_int_hook);
-	if (!ASSERT_ERR_PTR(link, "attach_link"))
-		return -1;
+	if (CHECK(err, "attach", "lsm attach failed: %d\n", err))
+		goto close_prog;
 
 	err = exec_cmd(&skel->bss->monitored_pid);
-	if (!ASSERT_OK(err, "exec_cmd"))
-		return err;
+	if (CHECK(err < 0, "exec_cmd", "err %d errno %d\n", err, errno))
+		goto close_prog;
 
-	ASSERT_EQ(skel->bss->bprm_count, 1, "bprm_count");
+	CHECK(skel->bss->bprm_count != 1, "bprm_count", "bprm_count = %d\n",
+	      skel->bss->bprm_count);
 
 	skel->bss->monitored_pid = getpid();
 
 	err = stack_mprotect();
-	if (!ASSERT_EQ(err, -1, "stack_mprotect") ||
-	    !ASSERT_EQ(errno, EPERM, "stack_mprotect"))
-		return err;
+	if (CHECK(errno != EPERM, "stack_mprotect", "want err=EPERM, got %d\n",
+		  errno))
+		goto close_prog;
 
-	ASSERT_EQ(skel->bss->mprotect_count, 1, "mprotect_count");
+	CHECK(skel->bss->mprotect_count != 1, "mprotect_count",
+	      "mprotect_count = %d\n", skel->bss->mprotect_count);
 
 	syscall(__NR_setdomainname, &buf, -2L);
 	syscall(__NR_setdomainname, 0, -3L);
 	syscall(__NR_setdomainname, ~0L, -4L);
 
-	ASSERT_EQ(skel->bss->copy_test, 3, "copy_test");
-
-	lsm__detach(skel);
-
-	skel->bss->copy_test = 0;
-	skel->bss->bprm_count = 0;
-	skel->bss->mprotect_count = 0;
-	return 0;
-}
-
-static void test_lsm_basic(void)
-{
-	struct lsm *skel = NULL;
-	int err;
-
-	skel = lsm__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "lsm_skel_load"))
-		goto close_prog;
-
-	err = test_lsm(skel);
-	if (!ASSERT_OK(err, "test_lsm_first_attach"))
-		goto close_prog;
-
-	err = test_lsm(skel);
-	ASSERT_OK(err, "test_lsm_second_attach");
+	CHECK(skel->bss->copy_test != 3, "copy_test",
+	      "copy_test = %d\n", skel->bss->copy_test);
 
 close_prog:
 	lsm__destroy(skel);
-}
-
-static void test_lsm_tailcall(void)
-{
-	struct lsm_tailcall *skel = NULL;
-	int map_fd, prog_fd;
-	int err, key;
-
-	skel = lsm_tailcall__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "lsm_tailcall__skel_load"))
-		goto close_prog;
-
-	map_fd = bpf_map__fd(skel->maps.jmp_table);
-	if (CHECK_FAIL(map_fd < 0))
-		goto close_prog;
-
-	prog_fd = bpf_program__fd(skel->progs.lsm_file_permission_prog);
-	if (CHECK_FAIL(prog_fd < 0))
-		goto close_prog;
-
-	key = 0;
-	err = bpf_map_update_elem(map_fd, &key, &prog_fd, BPF_ANY);
-	if (CHECK_FAIL(!err))
-		goto close_prog;
-
-	prog_fd = bpf_program__fd(skel->progs.lsm_file_alloc_security_prog);
-	if (CHECK_FAIL(prog_fd < 0))
-		goto close_prog;
-
-	err = bpf_map_update_elem(map_fd, &key, &prog_fd, BPF_ANY);
-	if (CHECK_FAIL(err))
-		goto close_prog;
-
-close_prog:
-	lsm_tailcall__destroy(skel);
-}
-
-void test_test_lsm(void)
-{
-	if (test__start_subtest("lsm_basic"))
-		test_lsm_basic();
-	if (test__start_subtest("lsm_tailcall"))
-		test_lsm_tailcall();
 }

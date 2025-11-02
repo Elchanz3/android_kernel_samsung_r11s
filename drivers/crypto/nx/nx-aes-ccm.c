@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
+/**
  * AES CCM routines supporting the Power 7+ Nest Accelerators driver
  *
  * Copyright (C) 2012 International Business Machines Inc.
@@ -134,6 +134,7 @@ static int generate_b0(u8 *iv, unsigned int assoclen, unsigned int authsize,
 		       unsigned int cryptlen, u8 *b0)
 {
 	unsigned int l, lp, m = authsize;
+	int rc;
 
 	memcpy(b0, iv, 16);
 
@@ -147,7 +148,9 @@ static int generate_b0(u8 *iv, unsigned int assoclen, unsigned int authsize,
 	if (assoclen)
 		*b0 |= 64;
 
-	return set_msg_len(b0 + 16 - l, cryptlen, l);
+	rc = set_msg_len(b0 + 16 - l, cryptlen, l);
+
+	return rc;
 }
 
 static int generate_pat(u8                   *iv,
@@ -217,11 +220,13 @@ static int generate_pat(u8                   *iv,
 		memset(b1, 0, 16);
 		if (assoclen <= 65280) {
 			*(u16 *)b1 = assoclen;
-			memcpy_from_sglist(b1 + 2, req->src, 0, iauth_len);
+			scatterwalk_map_and_copy(b1 + 2, req->src, 0,
+					 iauth_len, SCATTERWALK_FROM_SG);
 		} else {
 			*(u16 *)b1 = (u16)(0xfffe);
 			*(u32 *)&b1[2] = assoclen;
-			memcpy_from_sglist(b1 + 6, req->src, 0, iauth_len);
+			scatterwalk_map_and_copy(b1 + 6, req->src, 0,
+					 iauth_len, SCATTERWALK_FROM_SG);
 		}
 	}
 
@@ -339,8 +344,9 @@ static int ccm_nx_decrypt(struct aead_request   *req,
 	nbytes -= authsize;
 
 	/* copy out the auth tag to compare with later */
-	memcpy_from_sglist(priv->oauth_tag, req->src, nbytes + req->assoclen,
-			   authsize);
+	scatterwalk_map_and_copy(priv->oauth_tag,
+				 req->src, nbytes + req->assoclen, authsize,
+				 SCATTERWALK_FROM_SG);
 
 	rc = generate_pat(iv, req, nx_ctx, authsize, nbytes, assoclen,
 			  csbcpb->cpb.aes_ccm.in_pat_or_b0);
@@ -385,7 +391,7 @@ static int ccm_nx_decrypt(struct aead_request   *req,
 
 		/* update stats */
 		atomic_inc(&(nx_ctx->stats->aes_ops));
-		atomic64_add(be32_to_cpu(csbcpb->csb.processed_byte_count),
+		atomic64_add(csbcpb->csb.processed_byte_count,
 			     &(nx_ctx->stats->aes_bytes));
 
 		processed += to_process;
@@ -454,7 +460,7 @@ static int ccm_nx_encrypt(struct aead_request   *req,
 
 		/* update stats */
 		atomic_inc(&(nx_ctx->stats->aes_ops));
-		atomic64_add(be32_to_cpu(csbcpb->csb.processed_byte_count),
+		atomic64_add(csbcpb->csb.processed_byte_count,
 			     &(nx_ctx->stats->aes_bytes));
 
 		processed += to_process;
@@ -462,8 +468,9 @@ static int ccm_nx_encrypt(struct aead_request   *req,
 	} while (processed < nbytes);
 
 	/* copy out the auth tag */
-	memcpy_to_sglist(req->dst, nbytes + req->assoclen,
-			 csbcpb->cpb.aes_ccm.out_pat_or_mac, authsize);
+	scatterwalk_map_and_copy(csbcpb->cpb.aes_ccm.out_pat_or_mac,
+				 req->dst, nbytes + req->assoclen, authsize,
+				 SCATTERWALK_TO_SG);
 
 out:
 	spin_unlock_irqrestore(&nx_ctx->lock, irq_flags);

@@ -7,10 +7,11 @@
 
 #ifndef __ASSEMBLY__
 /*
- * Warning: This code is meant to be used from the compat vDSO only.
+ * Warning: This code is meant to be used with
+ * ENABLE_COMPAT_VDSO only.
  */
-#ifdef __arch64__
-#error This header is meant to be used with from the compat vDSO only
+#ifndef ENABLE_COMPAT_VDSO
+#error This header is meant to be used with ENABLE_COMPAT_VDSO only
 #endif
 
 #ifdef dmb
@@ -19,9 +20,16 @@
 
 #define dmb(option) __asm__ __volatile__ ("dmb " #option : : : "memory")
 
+#if __LINUX_ARM_ARCH__ >= 8 && defined(CONFIG_AS_DMB_ISHLD)
 #define aarch32_smp_mb()	dmb(ish)
 #define aarch32_smp_rmb()	dmb(ishld)
 #define aarch32_smp_wmb()	dmb(ishst)
+#else
+#define aarch32_smp_mb()	dmb(ish)
+#define aarch32_smp_rmb()	aarch32_smp_mb()
+#define aarch32_smp_wmb()	dmb(ishst)
+#endif
+
 
 #undef smp_mb
 #undef smp_rmb

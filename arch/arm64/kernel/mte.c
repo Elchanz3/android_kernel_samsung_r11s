@@ -15,7 +15,6 @@
 #include <linux/swapops.h>
 #include <linux/thread_info.h>
 #include <linux/types.h>
-#include <linux/uaccess.h>
 #include <linux/uio.h>
 
 #include <asm/barrier.h>
@@ -24,45 +23,49 @@
 #include <asm/ptrace.h>
 #include <asm/sysreg.h>
 
+static bool report_fault_once = true;
+
 static DEFINE_PER_CPU_READ_MOSTLY(u64, mte_tcf_preferred);
 
 #ifdef CONFIG_KASAN_HW_TAGS
-/*
- * The asynchronous and asymmetric MTE modes have the same behavior for
- * store operations. This flag is set when either of these modes is enabled.
- */
-DEFINE_STATIC_KEY_FALSE(mte_async_or_asymm_mode);
-EXPORT_SYMBOL_GPL(mte_async_or_asymm_mode);
+/* Whether the MTE asynchronous mode is enabled. */
+DEFINE_STATIC_KEY_FALSE(mte_async_mode);
+EXPORT_SYMBOL_GPL(mte_async_mode);
 #endif
 
-void mte_sync_tags(pte_t pte, unsigned int nr_pages)
+static void mte_sync_page_tags(struct page *page, pte_t *ptep, bool check_swap)
+{
+	pte_t old_pte = READ_ONCE(*ptep);
+
+	if (check_swap && is_swap_pte(old_pte)) {
+		swp_entry_t entry = pte_to_swp_entry(old_pte);
+
+		if (!non_swap_entry(entry) && mte_restore_tags(entry, page))
+			return;
+	}
+
+	page_kasan_tag_reset(page);
+	/*
+	 * We need smp_wmb() in between setting the flags and clearing the
+	 * tags because if another thread reads page->flags and builds a
+	 * tagged address out of it, there is an actual dependency to the
+	 * memory access, but on the current thread we do not guarantee that
+	 * the new page->flags are visible before the tags were updated.
+	 */
+	smp_wmb();
+	mte_clear_page_tags(page_address(page));
+}
+
+void mte_sync_tags(pte_t *ptep, pte_t pte)
 {
 	struct page *page = pte_page(pte);
-	struct folio *folio = page_folio(page);
-	unsigned long i;
-
-	if (folio_test_hugetlb(folio)) {
-		unsigned long nr = folio_nr_pages(folio);
-
-		/* Hugetlb MTE flags are set for head page only */
-		if (folio_try_hugetlb_mte_tagging(folio)) {
-			for (i = 0; i < nr; i++, page++)
-				mte_clear_page_tags(page_address(page));
-			folio_set_hugetlb_mte_tagged(folio);
-		}
-
-		/* ensure the tags are visible before the PTE is set */
-		smp_wmb();
-
-		return;
-	}
+	long i, nr_pages = compound_nr(page);
+	bool check_swap = nr_pages == 1;
 
 	/* if PG_mte_tagged is set, tags have already been initialised */
 	for (i = 0; i < nr_pages; i++, page++) {
-		if (try_page_mte_tagging(page)) {
-			mte_clear_page_tags(page_address(page));
-			set_page_mte_tagged(page);
-		}
+		if (!test_and_set_bit(PG_mte_tagged, &page->flags))
+			mte_sync_page_tags(page, ptep, check_swap);
 	}
 
 	/* ensure the tags are visible before the PTE is set */
@@ -84,10 +87,11 @@ int memcmp_pages(struct page *page1, struct page *page2)
 	/*
 	 * If the page content is identical but at least one of the pages is
 	 * tagged, return non-zero to avoid KSM merging. If only one of the
-	 * pages is tagged, __set_ptes() may zero or change the tags of the
+	 * pages is tagged, set_pte_at() may zero or change the tags of the
 	 * other page via mte_sync_tags().
 	 */
-	if (page_mte_tagged(page1) || page_mte_tagged(page2))
+	if (test_bit(PG_mte_tagged, &page1->flags) ||
+	    test_bit(PG_mte_tagged, &page2->flags))
 		return addr1 != addr2;
 
 	return ret;
@@ -96,8 +100,7 @@ int memcmp_pages(struct page *page1, struct page *page2)
 static inline void __mte_enable_kernel(const char *mode, unsigned long tcf)
 {
 	/* Enable MTE Sync Mode for EL1. */
-	sysreg_clear_set(sctlr_el1, SCTLR_EL1_TCF_MASK,
-			 SYS_FIELD_PREP(SCTLR_EL1, TCF, tcf));
+	sysreg_clear_set(sctlr_el1, SCTLR_ELx_TCF_MASK, tcf);
 	isb();
 
 	pr_info_once("MTE: enabled in %s mode at EL1\n", mode);
@@ -110,15 +113,15 @@ void mte_enable_kernel_sync(void)
 	 * Make sure we enter this function when no PE has set
 	 * async mode previously.
 	 */
-	WARN_ONCE(system_uses_mte_async_or_asymm_mode(),
+	WARN_ONCE(system_uses_mte_async_mode(),
 			"MTE async mode enabled system wide!");
 
-	__mte_enable_kernel("synchronous", SCTLR_EL1_TCF_SYNC);
+	__mte_enable_kernel("synchronous", SCTLR_ELx_TCF_SYNC);
 }
 
 void mte_enable_kernel_async(void)
 {
-	__mte_enable_kernel("asynchronous", SCTLR_EL1_TCF_ASYNC);
+	__mte_enable_kernel("asynchronous", SCTLR_ELx_TCF_ASYNC);
 
 	/*
 	 * MTE async mode is set system wide by the first PE that
@@ -128,54 +131,20 @@ void mte_enable_kernel_async(void)
 	 * mode in between sync and async, this strategy needs
 	 * to be reviewed.
 	 */
-	if (!system_uses_mte_async_or_asymm_mode())
-		static_branch_enable(&mte_async_or_asymm_mode);
-}
-
-void mte_enable_kernel_asymm(void)
-{
-	if (cpus_have_cap(ARM64_MTE_ASYMM)) {
-		__mte_enable_kernel("asymmetric", SCTLR_EL1_TCF_ASYMM);
-
-		/*
-		 * MTE asymm mode behaves as async mode for store
-		 * operations. The mode is set system wide by the
-		 * first PE that executes this function.
-		 *
-		 * Note: If in future KASAN acquires a runtime switching
-		 * mode in between sync and async, this strategy needs
-		 * to be reviewed.
-		 */
-		if (!system_uses_mte_async_or_asymm_mode())
-			static_branch_enable(&mte_async_or_asymm_mode);
-	} else {
-		/*
-		 * If the CPU does not support MTE asymmetric mode the
-		 * kernel falls back on synchronous mode which is the
-		 * default for kasan=on.
-		 */
-		mte_enable_kernel_sync();
-	}
-}
-
-int mte_enable_kernel_store_only(void)
-{
-	/*
-	 * If the CPU does not support MTE store only,
-	 * the kernel checks all operations.
-	 */
-	if (!cpus_have_cap(ARM64_MTE_STORE_ONLY))
-		return -EINVAL;
-
-	sysreg_clear_set(sctlr_el1, SCTLR_EL1_TCSO_MASK,
-			 SYS_FIELD_PREP(SCTLR_EL1, TCSO, 1));
-	isb();
-
-	pr_info_once("MTE: enabled store only mode at EL1\n");
-
-	return 0;
+	if (!system_uses_mte_async_mode())
+		static_branch_enable(&mte_async_mode);
 }
 #endif
+
+void mte_set_report_once(bool state)
+{
+	WRITE_ONCE(report_fault_once, state);
+}
+
+bool mte_report_once(void)
+{
+	return READ_ONCE(report_fault_once);
+}
 
 #ifdef CONFIG_KASAN_HW_TAGS
 void mte_check_tfsr_el1(void)
@@ -195,11 +164,6 @@ void mte_check_tfsr_el1(void)
 }
 #endif
 
-/*
- * This is where we actually resolve the system and process MTE mode
- * configuration into an actual value in SCTLR_EL1 that affects
- * userspace.
- */
 static void mte_update_sctlr_user(struct task_struct *task)
 {
 	/*
@@ -213,27 +177,12 @@ static void mte_update_sctlr_user(struct task_struct *task)
 	unsigned long pref, resolved_mte_tcf;
 
 	pref = __this_cpu_read(mte_tcf_preferred);
-	/*
-	 * If there is no overlap between the system preferred and
-	 * program requested values go with what was requested.
-	 */
 	resolved_mte_tcf = (mte_ctrl & pref) ? pref : mte_ctrl;
-	sctlr &= ~(SCTLR_EL1_TCF0_MASK | SCTLR_EL1_TCSO0_MASK);
-	/*
-	 * Pick an actual setting. The order in which we check for
-	 * set bits and map into register values determines our
-	 * default order.
-	 */
-	if (resolved_mte_tcf & MTE_CTRL_TCF_ASYMM)
-		sctlr |= SYS_FIELD_PREP_ENUM(SCTLR_EL1, TCF0, ASYMM);
-	else if (resolved_mte_tcf & MTE_CTRL_TCF_ASYNC)
-		sctlr |= SYS_FIELD_PREP_ENUM(SCTLR_EL1, TCF0, ASYNC);
+	sctlr &= ~SCTLR_EL1_TCF0_MASK;
+	if (resolved_mte_tcf & MTE_CTRL_TCF_ASYNC)
+		sctlr |= SCTLR_EL1_TCF0_ASYNC;
 	else if (resolved_mte_tcf & MTE_CTRL_TCF_SYNC)
-		sctlr |= SYS_FIELD_PREP_ENUM(SCTLR_EL1, TCF0, SYNC);
-
-	if (mte_ctrl & MTE_CTRL_STORE_ONLY)
-		sctlr |= SYS_FIELD_PREP(SCTLR_EL1, TCSO0, 1);
-
+		sctlr |= SCTLR_EL1_TCF0_SYNC;
 	task->thread.sctlr_user = sctlr;
 }
 
@@ -252,11 +201,6 @@ static void mte_update_gcr_excl(struct task_struct *task)
 		SYS_GCR_EL1);
 }
 
-#ifdef CONFIG_KASAN_HW_TAGS
-/* Only called from assembly, silence sparse */
-void __init kasan_hw_tags_enable(struct alt_instr *alt, __le32 *origptr,
-				 __le32 *updptr, int nr_inst);
-
 void __init kasan_hw_tags_enable(struct alt_instr *alt, __le32 *origptr,
 				 __le32 *updptr, int nr_inst)
 {
@@ -265,7 +209,6 @@ void __init kasan_hw_tags_enable(struct alt_instr *alt, __le32 *origptr,
 	if (kasan_hw_tags_enabled())
 		*updptr = cpu_to_le32(aarch64_insn_gen_nop());
 }
-#endif
 
 void mte_thread_init_user(void)
 {
@@ -287,9 +230,6 @@ void mte_thread_switch(struct task_struct *next)
 
 	mte_update_sctlr_user(next);
 	mte_update_gcr_excl(next);
-
-	/* TCO may not have been disabled on exception entry for the current task. */
-	mte_disable_tco_entry(next);
 
 	/*
 	 * Check if an async tag exception occurred at EL1.
@@ -382,20 +322,6 @@ long set_mte_ctrl(struct task_struct *task, unsigned long arg)
 	if (arg & PR_MTE_TCF_SYNC)
 		mte_ctrl |= MTE_CTRL_TCF_SYNC;
 
-	/*
-	 * If the system supports it and both sync and async modes are
-	 * specified then implicitly enable asymmetric mode.
-	 * Userspace could see a mix of both sync and async anyway due
-	 * to differing or changing defaults on CPUs.
-	 */
-	if (cpus_have_cap(ARM64_MTE_ASYMM) &&
-	    (arg & PR_MTE_TCF_ASYNC) &&
-	    (arg & PR_MTE_TCF_SYNC))
-		mte_ctrl |= MTE_CTRL_TCF_ASYMM;
-
-	if (arg & PR_MTE_STORE_ONLY)
-		mte_ctrl |= MTE_CTRL_STORE_ONLY;
-
 	task->thread.mte_ctrl = mte_ctrl;
 	if (task == current) {
 		preempt_disable();
@@ -423,8 +349,6 @@ long get_mte_ctrl(struct task_struct *task)
 		ret |= PR_MTE_TCF_ASYNC;
 	if (mte_ctrl & MTE_CTRL_TCF_SYNC)
 		ret |= PR_MTE_TCF_SYNC;
-	if (mte_ctrl & MTE_CTRL_STORE_ONLY)
-		ret |= PR_MTE_STORE_ONLY;
 
 	return ret;
 }
@@ -437,9 +361,10 @@ long get_mte_ctrl(struct task_struct *task)
 static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 				struct iovec *kiov, unsigned int gup_flags)
 {
+	struct vm_area_struct *vma;
 	void __user *buf = kiov->iov_base;
 	size_t len = kiov->iov_len;
-	int err = 0;
+	int ret;
 	int write = gup_flags & FOLL_WRITE;
 
 	if (!access_ok(buf, len))
@@ -449,17 +374,14 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 		return -EIO;
 
 	while (len) {
-		struct vm_area_struct *vma;
 		unsigned long tags, offset;
 		void *maddr;
-		struct page *page = get_user_page_vma_remote(mm, addr,
-							     gup_flags, &vma);
-		struct folio *folio;
+		struct page *page = NULL;
 
-		if (IS_ERR(page)) {
-			err = PTR_ERR(page);
+		ret = get_user_pages_remote(mm, addr, 1, gup_flags, &page,
+					    &vma, NULL);
+		if (ret <= 0)
 			break;
-		}
 
 		/*
 		 * Only copy tags if the page has been mapped as PROT_MTE
@@ -469,16 +391,11 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 		 * was never mapped with PROT_MTE.
 		 */
 		if (!(vma->vm_flags & VM_MTE)) {
-			err = -EOPNOTSUPP;
+			ret = -EOPNOTSUPP;
 			put_page(page);
 			break;
 		}
-
-		folio = page_folio(page);
-		if (folio_test_hugetlb(folio))
-			WARN_ON_ONCE(!folio_test_hugetlb_mte_tagged(folio));
-		else
-			WARN_ON_ONCE(!page_mte_tagged(page) && !is_zero_page(page));
+		WARN_ON_ONCE(!test_bit(PG_mte_tagged, &page->flags));
 
 		/* limit access to the end of the page */
 		offset = offset_in_page(addr);
@@ -507,7 +424,7 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 	kiov->iov_len = buf - kiov->iov_base;
 	if (!kiov->iov_len) {
 		/* check for error accessing the tracee's address space */
-		if (err)
+		if (ret <= 0)
 			return -EIO;
 		else
 			return -EFAULT;
@@ -579,8 +496,6 @@ static ssize_t mte_tcf_preferred_show(struct device *dev,
 		return sysfs_emit(buf, "async\n");
 	case MTE_CTRL_TCF_SYNC:
 		return sysfs_emit(buf, "sync\n");
-	case MTE_CTRL_TCF_ASYMM:
-		return sysfs_emit(buf, "asymm\n");
 	default:
 		return sysfs_emit(buf, "???\n");
 	}
@@ -596,8 +511,6 @@ static ssize_t mte_tcf_preferred_store(struct device *dev,
 		tcf = MTE_CTRL_TCF_ASYNC;
 	else if (sysfs_streq(buf, "sync"))
 		tcf = MTE_CTRL_TCF_SYNC;
-	else if (cpus_have_cap(ARM64_MTE_ASYMM) && sysfs_streq(buf, "asymm"))
-		tcf = MTE_CTRL_TCF_ASYMM;
 	else
 		return -EINVAL;
 
@@ -625,30 +538,3 @@ static int register_mte_tcf_preferred_sysctl(void)
 	return 0;
 }
 subsys_initcall(register_mte_tcf_preferred_sysctl);
-
-/*
- * Return 0 on success, the number of bytes not probed otherwise.
- */
-size_t mte_probe_user_range(const char __user *uaddr, size_t size)
-{
-	const char __user *end = uaddr + size;
-	char val;
-
-	__raw_get_user(val, uaddr, efault);
-
-	uaddr = PTR_ALIGN(uaddr, MTE_GRANULE_SIZE);
-	while (uaddr < end) {
-		/*
-		 * A read is sufficient for mte, the caller should have probed
-		 * for the pte write permission if required.
-		 */
-		__raw_get_user(val, uaddr, efault);
-		uaddr += MTE_GRANULE_SIZE;
-	}
-	(void)val;
-
-	return 0;
-
-efault:
-	return end - uaddr;
-}

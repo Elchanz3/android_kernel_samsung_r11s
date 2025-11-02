@@ -15,6 +15,8 @@
 #include <linux/iio/sysfs.h>
 #include <linux/iio/dac/max517.h>
 
+#define MAX517_DRV_NAME	"max517"
+
 /* Commands */
 #define COMMAND_CHANNEL0	0x00
 #define COMMAND_CHANNEL1	0x01 /* for MAX518 and MAX519 */
@@ -98,21 +100,21 @@ static int max517_write_raw(struct iio_dev *indio_dev,
 	return ret;
 }
 
-static int max517_suspend(struct device *dev)
+static int __maybe_unused max517_suspend(struct device *dev)
 {
 	u8 outbuf = COMMAND_PD;
 
 	return i2c_master_send(to_i2c_client(dev), &outbuf, 1);
 }
 
-static int max517_resume(struct device *dev)
+static int __maybe_unused max517_resume(struct device *dev)
 {
 	u8 outbuf = 0;
 
 	return i2c_master_send(to_i2c_client(dev), &outbuf, 1);
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(max517_pm_ops, max517_suspend, max517_resume);
+static SIMPLE_DEV_PM_OPS(max517_pm_ops, max517_suspend, max517_resume);
 
 static const struct iio_info max517_info = {
 	.read_raw = max517_read_raw,
@@ -139,18 +141,19 @@ static const struct iio_chan_spec max517_channels[] = {
 	MAX517_CHANNEL(7),
 };
 
-static int max517_probe(struct i2c_client *client)
+static int max517_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
-	const struct max517_platform_data *platform_data = dev_get_platdata(&client->dev);
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct max517_data *data;
 	struct iio_dev *indio_dev;
+	struct max517_platform_data *platform_data = client->dev.platform_data;
 	int chan;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
 	if (!indio_dev)
 		return -ENOMEM;
 	data = iio_priv(indio_dev);
+	i2c_set_clientdata(client, indio_dev);
 	data->client = client;
 
 	switch (id->driver_data) {
@@ -183,7 +186,13 @@ static int max517_probe(struct i2c_client *client)
 			data->vref_mv[chan] = platform_data->vref_mv[chan];
 	}
 
-	return devm_iio_device_register(&client->dev, indio_dev);
+	return iio_device_register(indio_dev);
+}
+
+static int max517_remove(struct i2c_client *client)
+{
+	iio_device_unregister(i2c_get_clientdata(client));
+	return 0;
 }
 
 static const struct i2c_device_id max517_id[] = {
@@ -198,10 +207,11 @@ MODULE_DEVICE_TABLE(i2c, max517_id);
 
 static struct i2c_driver max517_driver = {
 	.driver = {
-		.name	= "max517",
-		.pm	= pm_sleep_ptr(&max517_pm_ops),
+		.name	= MAX517_DRV_NAME,
+		.pm	= &max517_pm_ops,
 	},
 	.probe		= max517_probe,
+	.remove		= max517_remove,
 	.id_table	= max517_id,
 };
 module_i2c_driver(max517_driver);

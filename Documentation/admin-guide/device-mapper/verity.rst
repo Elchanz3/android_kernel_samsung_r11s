@@ -69,7 +69,7 @@ Construction Parameters
 
 <#opt_params>
     Number of optional parameters. If there are no optional parameters,
-    the optional parameters section can be skipped or #opt_params can be zero.
+    the optional paramaters section can be skipped or #opt_params can be zero.
     Otherwise #opt_params is the number of following arguments.
 
     Example of optional parameters section:
@@ -86,15 +86,6 @@ restart_on_corruption
 panic_on_corruption
     Panic the device when a corrupted block is discovered. This option is
     not compatible with ignore_corruption and restart_on_corruption.
-
-restart_on_error
-    Restart the system when an I/O error is detected.
-    This option can be combined with the restart_on_corruption option.
-
-panic_on_error
-    Panic the device when an I/O error is detected. This option is
-    not compatible with the restart_on_error option but can be combined
-    with the panic_on_corruption option.
 
 ignore_zero_blocks
     Do not verify blocks that are expected to contain zeroes and always return
@@ -143,23 +134,7 @@ root_hash_sig_key_desc <key_description>
     the pkcs7 signature of the roothash. The pkcs7 signature is used to validate
     the root hash during the creation of the device mapper block device.
     Verification of roothash depends on the config DM_VERITY_VERIFY_ROOTHASH_SIG
-    being set in the kernel.  The signatures are checked against the builtin
-    trusted keyring by default, or the secondary trusted keyring if
-    DM_VERITY_VERIFY_ROOTHASH_SIG_SECONDARY_KEYRING is set.  The secondary
-    trusted keyring includes by default the builtin trusted keyring, and it can
-    also gain new certificates at run time if they are signed by a certificate
-    already in the secondary trusted keyring.
-
-try_verify_in_tasklet
-    If verity hashes are in cache and the IO size does not exceed the limit,
-    verify data blocks in bottom half instead of workqueue. This option can
-    reduce IO latency. The size limits can be configured via
-    /sys/module/dm_verity/parameters/use_bh_bytes. The four parameters
-    correspond to limits for IOPRIO_CLASS_NONE, IOPRIO_CLASS_RT,
-    IOPRIO_CLASS_BE and IOPRIO_CLASS_IDLE in turn.
-    For example:
-    <none>,<rt>,<be>,<idle>
-    4096,4096,4096,4096
+    being set in the kernel.
 
 Theory of operation
 ===================

@@ -104,7 +104,7 @@ static void ar5523_cmd_rx_cb(struct urb *urb)
 	}
 
 	if (urb->actual_length < sizeof(struct ar5523_cmd_hdr)) {
-		ar5523_err(ar, "RX USB too short.\n");
+		ar5523_err(ar, "RX USB to short.\n");
 		goto skip;
 	}
 
@@ -256,7 +256,7 @@ static int ar5523_cmd(struct ar5523 *ar, u32 code, const void *idata,
 	/* always bulk-out a multiple of 4 bytes */
 	xferlen = (sizeof(struct ar5523_cmd_hdr) + ilen + 3) & ~3;
 
-	hdr = cmd->buf_tx;
+	hdr = (struct ar5523_cmd_hdr *)cmd->buf_tx;
 	memset(hdr, 0, sizeof(struct ar5523_cmd_hdr));
 	hdr->len  = cpu_to_be32(xferlen);
 	hdr->code = cpu_to_be32(code);
@@ -733,7 +733,7 @@ static void ar5523_data_tx_pkt_put(struct ar5523 *ar)
 {
 	atomic_dec(&ar->tx_nr_total);
 	if (!atomic_dec_return(&ar->tx_nr_pending)) {
-		timer_delete(&ar->tx_wd_timer);
+		del_timer(&ar->tx_wd_timer);
 		wake_up(&ar->tx_flush_waitq);
 	}
 
@@ -902,7 +902,7 @@ static void ar5523_tx_work(struct work_struct *work)
 
 static void ar5523_tx_wd_timer(struct timer_list *t)
 {
-	struct ar5523 *ar = timer_container_of(ar, t, tx_wd_timer);
+	struct ar5523 *ar = from_timer(ar, t, tx_wd_timer);
 
 	ar5523_dbg(ar, "TX watchdog timer triggered\n");
 	ieee80211_queue_work(ar->hw, &ar->tx_wd_work);
@@ -1061,7 +1061,7 @@ err:
 	return error;
 }
 
-static void ar5523_stop(struct ieee80211_hw *hw, bool suspend)
+static void ar5523_stop(struct ieee80211_hw *hw)
 {
 	struct ar5523 *ar = hw->priv;
 
@@ -1076,15 +1076,14 @@ static void ar5523_stop(struct ieee80211_hw *hw, bool suspend)
 
 	ar5523_cmd_write(ar, WDCMSG_TARGET_STOP, NULL, 0, 0);
 
-	timer_delete_sync(&ar->tx_wd_timer);
+	del_timer_sync(&ar->tx_wd_timer);
 	cancel_work_sync(&ar->tx_wd_work);
 	cancel_work_sync(&ar->rx_refill_work);
 	ar5523_cancel_rx_bufs(ar);
 	mutex_unlock(&ar->mutex);
 }
 
-static int ar5523_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
-				    u32 value)
+static int ar5523_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
 {
 	struct ar5523 *ar = hw->priv;
 	int ret;
@@ -1138,7 +1137,7 @@ static void ar5523_remove_interface(struct ieee80211_hw *hw,
 	ar->vif = NULL;
 }
 
-static int ar5523_hwconfig(struct ieee80211_hw *hw, int radio_idx, u32 changed)
+static int ar5523_hwconfig(struct ieee80211_hw *hw, u32 changed)
 {
 	struct ar5523 *ar = hw->priv;
 
@@ -1167,7 +1166,7 @@ static int ar5523_get_wlan_mode(struct ar5523 *ar,
 		ar5523_info(ar, "STA not found!\n");
 		return WLAN_MODE_11b;
 	}
-	sta_rate_set = sta->deflink.supp_rates[ar->hw->conf.chandef.chan->band];
+	sta_rate_set = sta->supp_rates[ar->hw->conf.chandef.chan->band];
 
 	for (bit = 0; bit < band->n_bitrates; bit++) {
 		if (sta_rate_set & 1) {
@@ -1205,7 +1204,7 @@ static void ar5523_create_rateset(struct ar5523 *ar,
 		ar5523_info(ar, "STA not found. Cannot set rates\n");
 		sta_rate_set = bss_conf->basic_rates;
 	} else
-		sta_rate_set = sta->deflink.supp_rates[ar->hw->conf.chandef.chan->band];
+		sta_rate_set = sta->supp_rates[ar->hw->conf.chandef.chan->band];
 
 	ar5523_dbg(ar, "sta rate_set = %08x\n", sta_rate_set);
 
@@ -1263,14 +1262,14 @@ static int ar5523_create_connection(struct ar5523 *ar,
 				sizeof(create), 0);
 }
 
-static int ar5523_write_associd(struct ar5523 *ar, struct ieee80211_vif *vif)
+static int ar5523_write_associd(struct ar5523 *ar,
+				struct ieee80211_bss_conf *bss)
 {
-	struct ieee80211_bss_conf *bss = &vif->bss_conf;
 	struct ar5523_cmd_set_associd associd;
 
 	memset(&associd, 0, sizeof(associd));
 	associd.defaultrateix = cpu_to_be32(0);	/* XXX */
-	associd.associd = cpu_to_be32(vif->cfg.aid);
+	associd.associd = cpu_to_be32(bss->aid);
 	associd.timoffset = cpu_to_be32(0x3b);	/* XXX */
 	memcpy(associd.bssid, bss->bssid, ETH_ALEN);
 	return ar5523_cmd_write(ar, WDCMSG_WRITE_ASSOCID, &associd,
@@ -1280,7 +1279,7 @@ static int ar5523_write_associd(struct ar5523 *ar, struct ieee80211_vif *vif)
 static void ar5523_bss_info_changed(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
 				    struct ieee80211_bss_conf *bss,
-				    u64 changed)
+				    u32 changed)
 {
 	struct ar5523 *ar = hw->priv;
 	int error;
@@ -1291,7 +1290,7 @@ static void ar5523_bss_info_changed(struct ieee80211_hw *hw,
 	if (!(changed & BSS_CHANGED_ASSOC))
 		goto out_unlock;
 
-	if (vif->cfg.assoc) {
+	if (bss->assoc) {
 		error = ar5523_create_connection(ar, vif, bss);
 		if (error) {
 			ar5523_err(ar, "could not create connection\n");
@@ -1304,7 +1303,7 @@ static void ar5523_bss_info_changed(struct ieee80211_hw *hw,
 			goto out_unlock;
 		}
 
-		error = ar5523_write_associd(ar, vif);
+		error = ar5523_write_associd(ar, bss);
 		if (error) {
 			ar5523_err(ar, "could not set association\n");
 			goto out_unlock;
@@ -1359,14 +1358,9 @@ static void ar5523_configure_filter(struct ieee80211_hw *hw,
 }
 
 static const struct ieee80211_ops ar5523_ops = {
-	.add_chanctx = ieee80211_emulate_add_chanctx,
-	.remove_chanctx = ieee80211_emulate_remove_chanctx,
-	.change_chanctx = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.start			= ar5523_start,
 	.stop			= ar5523_stop,
 	.tx			= ar5523_tx,
-	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.set_rts_threshold	= ar5523_set_rts_threshold,
 	.add_interface		= ar5523_add_interface,
 	.remove_interface	= ar5523_remove_interface,
@@ -1512,7 +1506,7 @@ static int ar5523_load_firmware(struct usb_device *dev)
 		return -ENOENT;
 	}
 
-	txblock = kzalloc(sizeof(*txblock), GFP_KERNEL);
+	txblock = kmalloc(sizeof(*txblock), GFP_KERNEL);
 	if (!txblock)
 		goto out;
 
@@ -1524,6 +1518,7 @@ static int ar5523_load_firmware(struct usb_device *dev)
 	if (!fwbuf)
 		goto out_free_rxblock;
 
+	memset(txblock, 0, sizeof(struct ar5523_fwblock));
 	txblock->flags = cpu_to_be32(AR5523_WRITE_BLOCK);
 	txblock->total = cpu_to_be32(fw->size);
 
@@ -1801,8 +1796,9 @@ static const struct usb_device_id ar5523_id_table[] = {
 	AR5523_DEVICE_UG(0x0846, 0x5f00),	/* Netgear / WPN111 */
 	AR5523_DEVICE_UG(0x083a, 0x4506),	/* SMC / EZ Connect
 						   SMCWUSBT-G2 */
-	AR5523_DEVICE_UG(0x157e, 0x3006),	/* Umedia / AR5523_1, TEW444UBEU*/
+	AR5523_DEVICE_UG(0x157e, 0x3006),	/* Umedia / AR5523_1 */
 	AR5523_DEVICE_UX(0x157e, 0x3205),	/* Umedia / AR5523_2 */
+	AR5523_DEVICE_UG(0x157e, 0x3006),	/* Umedia / TEW444UBEU */
 	AR5523_DEVICE_UG(0x1435, 0x0826),	/* Wistronneweb / AR5523_1 */
 	AR5523_DEVICE_UX(0x1435, 0x0828),	/* Wistronneweb / AR5523_2 */
 	AR5523_DEVICE_UG(0x0cde, 0x0012),	/* Zcom / AR5523 */
@@ -1822,6 +1818,5 @@ static struct usb_driver ar5523_driver = {
 
 module_usb_driver(ar5523_driver);
 
-MODULE_DESCRIPTION("Atheros AR5523 wireless driver");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_FIRMWARE(AR5523_FIRMWARE_FILE);

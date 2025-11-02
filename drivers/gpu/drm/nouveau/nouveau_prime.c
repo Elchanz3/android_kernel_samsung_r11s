@@ -23,7 +23,6 @@
  */
 
 #include <linux/dma-buf.h>
-#include <drm/ttm/ttm_tt.h>
 
 #include "nouveau_drv.h"
 #include "nouveau_gem.h"
@@ -31,9 +30,29 @@
 struct sg_table *nouveau_gem_prime_get_sg_table(struct drm_gem_object *obj)
 {
 	struct nouveau_bo *nvbo = nouveau_gem_object(obj);
+	int npages = nvbo->bo.num_pages;
 
-	return drm_prime_pages_to_sg(obj->dev, nvbo->bo.ttm->pages,
-				     nvbo->bo.ttm->num_pages);
+	return drm_prime_pages_to_sg(obj->dev, nvbo->bo.ttm->pages, npages);
+}
+
+void *nouveau_gem_prime_vmap(struct drm_gem_object *obj)
+{
+	struct nouveau_bo *nvbo = nouveau_gem_object(obj);
+	int ret;
+
+	ret = ttm_bo_kmap(&nvbo->bo, 0, nvbo->bo.num_pages,
+			  &nvbo->dma_buf_vmap);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return nvbo->dma_buf_vmap.virtual;
+}
+
+void nouveau_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr)
+{
+	struct nouveau_bo *nvbo = nouveau_gem_object(obj);
+
+	ttm_bo_kunmap(&nvbo->dma_buf_vmap);
 }
 
 struct drm_gem_object *nouveau_gem_prime_import_sg_table(struct drm_device *dev,
@@ -50,7 +69,7 @@ struct drm_gem_object *nouveau_gem_prime_import_sg_table(struct drm_device *dev,
 
 	dma_resv_lock(robj, NULL);
 	nvbo = nouveau_bo_alloc(&drm->client, &size, &align,
-				NOUVEAU_GEM_DOMAIN_GART, 0, 0, true);
+				NOUVEAU_GEM_DOMAIN_GART, 0, 0);
 	if (IS_ERR(nvbo)) {
 		obj = ERR_CAST(nvbo);
 		goto unlock;
@@ -58,14 +77,11 @@ struct drm_gem_object *nouveau_gem_prime_import_sg_table(struct drm_device *dev,
 
 	nvbo->valid_domains = NOUVEAU_GEM_DOMAIN_GART;
 
-	nvbo->bo.base.funcs = &nouveau_gem_object_funcs;
-
 	/* Initialize the embedded gem-object. We return a single gem-reference
 	 * to the caller, instead of a normal nouveau_bo ttm reference. */
 	ret = drm_gem_object_init(dev, &nvbo->bo.base, size);
 	if (ret) {
-		drm_gem_object_release(&nvbo->bo.base);
-		kfree(nvbo);
+		nouveau_bo_ref(NULL, &nvbo);
 		obj = ERR_PTR(-ENOMEM);
 		goto unlock;
 	}
@@ -90,10 +106,25 @@ int nouveau_gem_prime_pin(struct drm_gem_object *obj)
 	int ret;
 
 	/* pin buffer into GTT */
-	ret = nouveau_bo_pin_locked(nvbo, NOUVEAU_GEM_DOMAIN_GART, false);
+	ret = nouveau_bo_pin(nvbo, NOUVEAU_GEM_DOMAIN_GART, false);
 	if (ret)
-		ret = -EINVAL;
+		return -EINVAL;
 
+	ret = ttm_bo_reserve(&nvbo->bo, false, false, NULL);
+	if (ret)
+		goto error;
+
+	if (nvbo->bo.moving)
+		ret = dma_fence_wait(nvbo->bo.moving, true);
+
+	ttm_bo_unreserve(&nvbo->bo);
+	if (ret)
+		goto error;
+
+	return ret;
+
+error:
+	nouveau_bo_unpin(nvbo);
 	return ret;
 }
 
@@ -101,28 +132,5 @@ void nouveau_gem_prime_unpin(struct drm_gem_object *obj)
 {
 	struct nouveau_bo *nvbo = nouveau_gem_object(obj);
 
-	nouveau_bo_unpin_locked(nvbo);
-}
-
-struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
-					 int flags)
-{
-	struct nouveau_bo *nvbo = nouveau_gem_object(gobj);
-	struct ttm_operation_ctx ctx = {
-		.interruptible = true,
-		.no_wait_gpu = true,
-		/* We opt to avoid OOM on system pages allocations */
-		.gfp_retry_mayfail = true,
-		.allow_res_evict = false,
-	};
-	int ret;
-
-	if (nvbo->no_share)
-		return ERR_PTR(-EPERM);
-
-	ret = ttm_bo_setup_export(&nvbo->bo, &ctx);
-	if (ret)
-		return ERR_PTR(ret);
-
-	return drm_gem_prime_export(gobj, flags);
+	nouveau_bo_unpin(nvbo);
 }

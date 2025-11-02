@@ -15,18 +15,14 @@
 
 #include <asm/domain.h>
 #include <asm/fixmap.h>
-#include <asm/page.h>
+#include <asm/memory.h>
 #include <asm/ptdump.h>
 
 static struct addr_marker address_markers[] = {
-#ifdef CONFIG_KASAN
-	{ KASAN_SHADOW_START,	"Kasan shadow start"},
-	{ KASAN_SHADOW_END,	"Kasan shadow end"},
-#endif
 	{ MODULES_VADDR,	"Modules" },
 	{ PAGE_OFFSET,		"Kernel Mapping" },
 	{ 0,			"vmalloc() Area" },
-	{ FDT_FIXED_BASE,	"FDT Area" },
+	{ VMALLOC_END,		"vmalloc() End" },
 	{ FIXADDR_START,	"Fixmap Area" },
 	{ VECTORS_BASE,	"Vectors" },
 	{ VECTORS_BASE + PAGE_SIZE * 2, "Vectors End" },
@@ -200,7 +196,6 @@ static const struct prot_bits section_bits[] = {
 };
 
 struct pg_level {
-	const char *name;
 	const struct prot_bits *bits;
 	size_t num;
 	u64 mask;
@@ -214,11 +209,9 @@ static struct pg_level pg_level[] = {
 	}, { /* p4d */
 	}, { /* pud */
 	}, { /* pmd */
-		.name	= (CONFIG_PGTABLE_LEVELS > 2) ? "PMD" : "PGD",
 		.bits	= section_bits,
 		.num	= ARRAY_SIZE(section_bits),
 	}, { /* pte */
-		.name	= "PTE",
 		.bits	= pte_bits,
 		.num	= ARRAY_SIZE(pte_bits),
 	},
@@ -285,8 +278,7 @@ static void note_page(struct pg_state *st, unsigned long addr,
 				delta >>= 10;
 				unit++;
 			}
-			pt_dump_seq_printf(st->seq, "%9lu%c %s", delta, *unit,
-					   pg_level[st->level].name);
+			pt_dump_seq_printf(st->seq, "%9lu%c", delta, *unit);
 			if (st->current_domain)
 				pt_dump_seq_printf(st->seq, " %s",
 							st->current_domain);
@@ -349,12 +341,12 @@ static void walk_pmd(struct pg_state *st, pud_t *pud, unsigned long start)
 	for (i = 0; i < PTRS_PER_PMD; i++, pmd++) {
 		addr = start + i * PMD_SIZE;
 		domain = get_domain_name(pmd);
-		if (pmd_none(*pmd) || pmd_leaf(*pmd) || !pmd_present(*pmd))
+		if (pmd_none(*pmd) || pmd_large(*pmd) || !pmd_present(*pmd))
 			note_page(st, addr, 4, pmd_val(*pmd), domain);
 		else
 			walk_pte(st, pmd, addr, domain);
 
-		if (SECTION_SIZE < PMD_SIZE && pmd_leaf(pmd[1])) {
+		if (SECTION_SIZE < PMD_SIZE && pmd_large(pmd[1])) {
 			addr += SECTION_SIZE;
 			pmd++;
 			domain = get_domain_name(pmd);
@@ -424,7 +416,7 @@ void ptdump_walk_pgd(struct seq_file *m, struct ptdump_info *info)
 	note_page(&st, 0, 0, 0, NULL);
 }
 
-static void __init ptdump_initialize(void)
+static void ptdump_initialize(void)
 {
 	unsigned i, j;
 
@@ -437,11 +429,8 @@ static void __init ptdump_initialize(void)
 				if (pg_level[i].bits[j].nx_bit)
 					pg_level[i].nx_bit = &pg_level[i].bits[j];
 			}
-#ifdef CONFIG_KASAN
-	address_markers[4].start_address = VMALLOC_START;
-#else
+
 	address_markers[2].start_address = VMALLOC_START;
-#endif
 }
 
 static struct ptdump_info kernel_ptdump_info = {
@@ -470,7 +459,7 @@ void ptdump_check_wx(void)
 		pr_info("Checked W+X mappings: passed, no W+X pages found\n");
 }
 
-static int __init ptdump_init(void)
+static int ptdump_init(void)
 {
 	ptdump_initialize();
 	ptdump_debugfs_register(&kernel_ptdump_info, "kernel_page_tables");

@@ -8,15 +8,13 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
-#include <linux/irqchip.h>
 #include <linux/irqdomain.h>
-#include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 
 #include <asm/bootinfo.h>
 #include <asm/irq_cpu.h>
-#include <asm/time.h>
 
 #include <lantiq_soc.h>
 #include <irq.h>
@@ -301,7 +299,7 @@ static void ltq_hw_irq_handler(struct irq_desc *desc)
 	 */
 	irq = __fls(irq);
 	hwirq = irq + MIPS_CPU_IRQ_CASCADE + (INT_NUM_IM_OFFSET * module);
-	generic_handle_domain_irq(ltq_domain, hwirq);
+	generic_handle_irq(irq_linear_revmap(ltq_domain, hwirq));
 
 	/* if this is a EBU irq, we need to ack it or get a deadlock */
 	if (irq == LTQ_ICU_EBU_IRQ && !module && LTQ_EBU_PCC_ISTAT != 0)
@@ -336,8 +334,7 @@ static const struct irq_domain_ops irq_domain_ops = {
 	.map = icu_map,
 };
 
-static int __init
-icu_of_init(struct device_node *node, struct device_node *parent)
+int __init icu_of_init(struct device_node *node, struct device_node *parent)
 {
 	struct device_node *eiu_node;
 	struct resource res;
@@ -379,7 +376,7 @@ icu_of_init(struct device_node *node, struct device_node *parent)
 	for (i = 0; i < MAX_IM; i++)
 		irq_set_chained_handler(i + 2, ltq_hw_irq_handler);
 
-	ltq_domain = irq_domain_create_linear(of_fwnode_handle(node),
+	ltq_domain = irq_domain_add_linear(node,
 		(MAX_IM * INT_NUM_IM_OFFSET) + MIPS_CPU_IRQ_CASCADE,
 		&irq_domain_ops, 0);
 
@@ -410,7 +407,6 @@ icu_of_init(struct device_node *node, struct device_node *parent)
 		if (!ltq_eiu_membase)
 			panic("Failed to remap eiu memory");
 	}
-	of_node_put(eiu_node);
 
 	return 0;
 }
@@ -426,9 +422,12 @@ unsigned int get_c0_compare_int(void)
 	return CP0_LEGACY_COMPARE_IRQ;
 }
 
-IRQCHIP_DECLARE(lantiq_icu, "lantiq,icu", icu_of_init);
+static const struct of_device_id of_irq_ids[] __initconst = {
+	{ .compatible = "lantiq,icu", .data = icu_of_init },
+	{},
+};
 
 void __init arch_init_irq(void)
 {
-	irqchip_init();
+	of_irq_init(of_irq_ids);
 }

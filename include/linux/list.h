@@ -2,16 +2,14 @@
 #ifndef _LINUX_LIST_H
 #define _LINUX_LIST_H
 
-#include <linux/container_of.h>
 #include <linux/types.h>
 #include <linux/stddef.h>
 #include <linux/poison.h>
 #include <linux/const.h>
-
-#include <asm/barrier.h>
+#include <linux/kernel.h>
 
 /*
- * Circular doubly linked list implementation.
+ * Simple doubly linked list implementation.
  *
  * Some of the internal functions ("__xxx") are useful when
  * manipulating whole lists rather than single entries, as
@@ -20,16 +18,8 @@
  * using the generic single-entry routines.
  */
 
-/**
- * LIST_HEAD_INIT - initialize a &struct list_head's links to point to itself
- * @name: name of the list_head
- */
 #define LIST_HEAD_INIT(name) { &(name), &(name) }
 
-/**
- * LIST_HEAD - definition of a &struct list_head with initialization values
- * @name: name of the list_head
- */
 #define LIST_HEAD(name) \
 	struct list_head name = LIST_HEAD_INIT(name)
 
@@ -43,95 +33,14 @@
 static inline void INIT_LIST_HEAD(struct list_head *list)
 {
 	WRITE_ONCE(list->next, list);
-	WRITE_ONCE(list->prev, list);
+	list->prev = list;
 }
-
-#ifdef CONFIG_LIST_HARDENED
 
 #ifdef CONFIG_DEBUG_LIST
-# define __list_valid_slowpath
-#else
-# define __list_valid_slowpath __cold __preserve_most
-#endif
-
-/*
- * Performs the full set of list corruption checks before __list_add().
- * On list corruption reports a warning, and returns false.
- */
-bool __list_valid_slowpath __list_add_valid_or_report(struct list_head *new,
-						      struct list_head *prev,
-						      struct list_head *next);
-
-/*
- * Performs list corruption checks before __list_add(). Returns false if a
- * corruption is detected, true otherwise.
- *
- * With CONFIG_LIST_HARDENED only, performs minimal list integrity checking
- * inline to catch non-faulting corruptions, and only if a corruption is
- * detected calls the reporting function __list_add_valid_or_report().
- */
-static __always_inline bool __list_add_valid(struct list_head *new,
-					     struct list_head *prev,
-					     struct list_head *next)
-{
-	bool ret = true;
-
-	if (!IS_ENABLED(CONFIG_DEBUG_LIST)) {
-		/*
-		 * With the hardening version, elide checking if next and prev
-		 * are NULL, since the immediate dereference of them below would
-		 * result in a fault if NULL.
-		 *
-		 * With the reduced set of checks, we can afford to inline the
-		 * checks, which also gives the compiler a chance to elide some
-		 * of them completely if they can be proven at compile-time. If
-		 * one of the pre-conditions does not hold, the slow-path will
-		 * show a report which pre-condition failed.
-		 */
-		if (likely(next->prev == prev && prev->next == next && new != prev && new != next))
-			return true;
-		ret = false;
-	}
-
-	ret &= __list_add_valid_or_report(new, prev, next);
-	return ret;
-}
-
-/*
- * Performs the full set of list corruption checks before __list_del_entry().
- * On list corruption reports a warning, and returns false.
- */
-bool __list_valid_slowpath __list_del_entry_valid_or_report(struct list_head *entry);
-
-/*
- * Performs list corruption checks before __list_del_entry(). Returns false if a
- * corruption is detected, true otherwise.
- *
- * With CONFIG_LIST_HARDENED only, performs minimal list integrity checking
- * inline to catch non-faulting corruptions, and only if a corruption is
- * detected calls the reporting function __list_del_entry_valid_or_report().
- */
-static __always_inline bool __list_del_entry_valid(struct list_head *entry)
-{
-	bool ret = true;
-
-	if (!IS_ENABLED(CONFIG_DEBUG_LIST)) {
-		struct list_head *prev = entry->prev;
-		struct list_head *next = entry->next;
-
-		/*
-		 * With the hardening version, elide checking if next and prev
-		 * are NULL, LIST_POISON1 or LIST_POISON2, since the immediate
-		 * dereference of them below would result in a fault.
-		 */
-		if (likely(prev->next == entry && next->prev == entry))
-			return true;
-		ret = false;
-	}
-
-	ret &= __list_del_entry_valid_or_report(entry);
-	return ret;
-}
+extern bool __list_add_valid(struct list_head *new,
+			      struct list_head *prev,
+			      struct list_head *next);
+extern bool __list_del_entry_valid(struct list_head *entry);
 #else
 static inline bool __list_add_valid(struct list_head *new,
 				struct list_head *prev,
@@ -347,7 +256,8 @@ static inline void list_bulk_move_tail(struct list_head *head,
  * @list: the entry to test
  * @head: the head of the list
  */
-static inline int list_is_first(const struct list_head *list, const struct list_head *head)
+static inline int list_is_first(const struct list_head *list,
+					const struct list_head *head)
 {
 	return list->prev == head;
 }
@@ -357,19 +267,10 @@ static inline int list_is_first(const struct list_head *list, const struct list_
  * @list: the entry to test
  * @head: the head of the list
  */
-static inline int list_is_last(const struct list_head *list, const struct list_head *head)
+static inline int list_is_last(const struct list_head *list,
+				const struct list_head *head)
 {
 	return list->next == head;
-}
-
-/**
- * list_is_head - tests whether @list is the list @head
- * @list: the entry to test
- * @head: the head of the list
- */
-static inline int list_is_head(const struct list_head *list, const struct list_head *head)
-{
-	return list == head;
 }
 
 /**
@@ -395,7 +296,7 @@ static inline int list_empty(const struct list_head *head)
 static inline void list_del_init_careful(struct list_head *entry)
 {
 	__list_del_entry(entry);
-	WRITE_ONCE(entry->prev, entry);
+	entry->prev = entry;
 	smp_store_release(&entry->next, entry);
 }
 
@@ -415,7 +316,7 @@ static inline void list_del_init_careful(struct list_head *entry)
 static inline int list_empty_careful(const struct list_head *head)
 {
 	struct list_head *next = smp_load_acquire(&head->next);
-	return list_is_head(next, head) && (next == READ_ONCE(head->prev));
+	return (next == head) && (next == head->prev);
 }
 
 /**
@@ -490,9 +391,10 @@ static inline void list_cut_position(struct list_head *list,
 {
 	if (list_empty(head))
 		return;
-	if (list_is_singular(head) && !list_is_head(entry, head) && (entry != head->next))
+	if (list_is_singular(head) &&
+		(head->next != entry && head != entry))
 		return;
-	if (list_is_head(entry, head))
+	if (entry == head)
 		INIT_LIST_HEAD(list);
 	else
 		__list_cut_position(list, head, entry);
@@ -645,39 +547,12 @@ static inline void list_splice_tail_init(struct list_head *list,
 })
 
 /**
- * list_last_entry_or_null - get the last element from a list
- * @ptr:	the list head to take the element from.
- * @type:	the type of the struct this is embedded in.
- * @member:	the name of the list_head within the struct.
- *
- * Note that if the list is empty, it returns NULL.
- */
-#define list_last_entry_or_null(ptr, type, member) ({ \
-	struct list_head *head__ = (ptr); \
-	struct list_head *pos__ = READ_ONCE(head__->prev); \
-	pos__ != head__ ? list_entry(pos__, type, member) : NULL; \
-})
-
-/**
  * list_next_entry - get the next element in list
  * @pos:	the type * to cursor
  * @member:	the name of the list_head within the struct.
  */
 #define list_next_entry(pos, member) \
 	list_entry((pos)->member.next, typeof(*(pos)), member)
-
-/**
- * list_next_entry_circular - get the next element in list
- * @pos:	the type * to cursor.
- * @head:	the list head to take the element from.
- * @member:	the name of the list_head within the struct.
- *
- * Wraparound if pos is the last element (return the first element).
- * Note, that list is expected to be not empty.
- */
-#define list_next_entry_circular(pos, head, member) \
-	(list_is_last(&(pos)->member, head) ? \
-	list_first_entry(head, typeof(*(pos)), member) : list_next_entry(pos, member))
 
 /**
  * list_prev_entry - get the prev element in list
@@ -688,25 +563,12 @@ static inline void list_splice_tail_init(struct list_head *list,
 	list_entry((pos)->member.prev, typeof(*(pos)), member)
 
 /**
- * list_prev_entry_circular - get the prev element in list
- * @pos:	the type * to cursor.
- * @head:	the list head to take the element from.
- * @member:	the name of the list_head within the struct.
- *
- * Wraparound if pos is the first element (return the last element).
- * Note, that list is expected to be not empty.
- */
-#define list_prev_entry_circular(pos, head, member) \
-	(list_is_first(&(pos)->member, head) ? \
-	list_last_entry(head, typeof(*(pos)), member) : list_prev_entry(pos, member))
-
-/**
  * list_for_each	-	iterate over a list
  * @pos:	the &struct list_head to use as a loop cursor.
  * @head:	the head for your list.
  */
 #define list_for_each(pos, head) \
-	for (pos = (head)->next; !list_is_head(pos, (head)); pos = pos->next)
+	for (pos = (head)->next; pos != (head); pos = pos->next)
 
 /**
  * list_for_each_continue - continue iteration over a list
@@ -716,7 +578,7 @@ static inline void list_splice_tail_init(struct list_head *list,
  * Continue to iterate over a list, continuing after the current position.
  */
 #define list_for_each_continue(pos, head) \
-	for (pos = pos->next; !list_is_head(pos, (head)); pos = pos->next)
+	for (pos = pos->next; pos != (head); pos = pos->next)
 
 /**
  * list_for_each_prev	-	iterate over a list backwards
@@ -724,7 +586,7 @@ static inline void list_splice_tail_init(struct list_head *list,
  * @head:	the head for your list.
  */
 #define list_for_each_prev(pos, head) \
-	for (pos = (head)->prev; !list_is_head(pos, (head)); pos = pos->prev)
+	for (pos = (head)->prev; pos != (head); pos = pos->prev)
 
 /**
  * list_for_each_safe - iterate over a list safe against removal of list entry
@@ -733,9 +595,8 @@ static inline void list_splice_tail_init(struct list_head *list,
  * @head:	the head for your list.
  */
 #define list_for_each_safe(pos, n, head) \
-	for (pos = (head)->next, n = pos->next; \
-	     !list_is_head(pos, (head)); \
-	     pos = n, n = pos->next)
+	for (pos = (head)->next, n = pos->next; pos != (head); \
+		pos = n, n = pos->next)
 
 /**
  * list_for_each_prev_safe - iterate over a list backwards safe against removal of list entry
@@ -745,23 +606,8 @@ static inline void list_splice_tail_init(struct list_head *list,
  */
 #define list_for_each_prev_safe(pos, n, head) \
 	for (pos = (head)->prev, n = pos->prev; \
-	     !list_is_head(pos, (head)); \
+	     pos != (head); \
 	     pos = n, n = pos->prev)
-
-/**
- * list_count_nodes - count nodes in the list
- * @head:	the head for your list.
- */
-static inline size_t list_count_nodes(struct list_head *head)
-{
-	struct list_head *pos;
-	size_t count = 0;
-
-	list_for_each(pos, head)
-		count++;
-
-	return count;
-}
 
 /**
  * list_entry_is_head - test if the entry points to the head of the list
@@ -770,7 +616,7 @@ static inline size_t list_count_nodes(struct list_head *head)
  * @member:	the name of the list_head within the struct.
  */
 #define list_entry_is_head(pos, head, member)				\
-	list_is_head(&pos->member, (head))
+	(&pos->member == (head))
 
 /**
  * list_for_each_entry	-	iterate over list of given type
@@ -1055,7 +901,7 @@ static inline void hlist_add_before(struct hlist_node *n,
 }
 
 /**
- * hlist_add_behind - add a new entry after the one specified
+ * hlist_add_behing - add a new entry after the one specified
  * @n: new entry to be added
  * @prev: hlist node to add it after, which must be non-NULL
  */
@@ -1123,26 +969,6 @@ static inline void hlist_move_list(struct hlist_head *old,
 	old->first = NULL;
 }
 
-/**
- * hlist_splice_init() - move all entries from one list to another
- * @from: hlist_head from which entries will be moved
- * @last: last entry on the @from list
- * @to:   hlist_head to which entries will be moved
- *
- * @to can be empty, @from must contain at least @last.
- */
-static inline void hlist_splice_init(struct hlist_head *from,
-				     struct hlist_node *last,
-				     struct hlist_head *to)
-{
-	if (to->first)
-		to->first->pprev = &last->next;
-	last->next = to->first;
-	to->first = from->first;
-	from->first->pprev = &to->first;
-	from->first = NULL;
-}
-
 #define hlist_entry(ptr, type, member) container_of(ptr,type,member)
 
 #define hlist_for_each(pos, head) \
@@ -1198,20 +1024,5 @@ static inline void hlist_splice_init(struct hlist_head *from,
 	for (pos = hlist_entry_safe((head)->first, typeof(*pos), member);\
 	     pos && ({ n = pos->member.next; 1; });			\
 	     pos = hlist_entry_safe(n, typeof(*pos), member))
-
-/**
- * hlist_count_nodes - count nodes in the hlist
- * @head:	the head for your hlist.
- */
-static inline size_t hlist_count_nodes(struct hlist_head *head)
-{
-	struct hlist_node *pos;
-	size_t count = 0;
-
-	hlist_for_each(pos, head)
-		count++;
-
-	return count;
-}
 
 #endif

@@ -18,14 +18,13 @@
 // Added saa7115 support by Kevin Thayer <nufan_wfk at yahoo.com>
 // (2/17/2003)
 //
-// VBI support (2004) and cleanups (2005) by Hans Verkuil <hverkuil@kernel.org>
+// VBI support (2004) and cleanups (2005) by Hans Verkuil <hverkuil@xs4all.nl>
 //
 // Copyright (c) 2005-2006 Mauro Carvalho Chehab <mchehab@kernel.org>
 //	SAA7111, SAA7113 and SAA7118 support
 
 #include "saa711x_regs.h"
 
-#include <linux/bitops.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -665,6 +664,15 @@ static const unsigned char saa7115_init_misc[] = {
 	0x00, 0x00
 };
 
+static int saa711x_odd_parity(u8 c)
+{
+	c ^= (c >> 4);
+	c ^= (c >> 2);
+	c ^= (c >> 1);
+
+	return c & 1;
+}
+
 static int saa711x_decode_vps(u8 *dst, u8 *p)
 {
 	static const u8 biphase_tbl[] = {
@@ -1121,7 +1129,7 @@ static void saa711x_set_lcr(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_forma
 
 static int saa711x_g_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_format *sliced)
 {
-	static const u16 lcr2vbi[] = {
+	static u16 lcr2vbi[] = {
 		0, V4L2_SLICED_TELETEXT_B, 0,	/* 1 */
 		0, V4L2_SLICED_CAPTION_525,	/* 4 */
 		V4L2_SLICED_WSS_625, 0,		/* 5 */
@@ -1159,7 +1167,7 @@ static int saa711x_s_sliced_fmt(struct v4l2_subdev *sd, struct v4l2_sliced_vbi_f
 }
 
 static int saa711x_set_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_state *sd_state,
+		struct v4l2_subdev_pad_config *cfg,
 		struct v4l2_subdev_format *format)
 {
 	struct v4l2_mbus_framefmt *fmt = &format->format;
@@ -1219,7 +1227,7 @@ static int saa711x_decode_vbi_line(struct v4l2_subdev *sd, struct v4l2_decode_vb
 		vbi->type = V4L2_SLICED_TELETEXT_B;
 		break;
 	case 4:
-		if (!parity8(p[0]) || !parity8(p[1]))
+		if (!saa711x_odd_parity(p[0]) || !saa711x_odd_parity(p[1]))
 			return 0;
 		vbi->type = V4L2_SLICED_CAPTION_525;
 		break;
@@ -1796,9 +1804,9 @@ static int saa711x_detect_chip(struct i2c_client *client,
 	return -ENODEV;
 }
 
-static int saa711x_probe(struct i2c_client *client)
+static int saa711x_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct saa711x_state *state;
 	struct v4l2_subdev *sd;
 	struct v4l2_ctrl_handler *hdl;
@@ -1919,12 +1927,13 @@ static int saa711x_probe(struct i2c_client *client)
 
 /* ----------------------------------------------------------------------- */
 
-static void saa711x_remove(struct i2c_client *client)
+static int saa711x_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(sd->ctrl_handler);
+	return 0;
 }
 
 static const struct i2c_device_id saa711x_id[] = {

@@ -18,7 +18,6 @@
 
 #include <linux/uaccess.h>
 
-#include <drm/drm_blend.h>
 #include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_mode.h>
@@ -89,7 +88,7 @@ void exynos_drm_ipp_unregister(struct device *dev,
 }
 
 /**
- * exynos_drm_ipp_get_res_ioctl - enumerate all ipp modules
+ * exynos_drm_ipp_ioctl_get_res_ioctl - enumerate all ipp modules
  * @dev: DRM device
  * @data: ioctl data
  * @file_priv: DRM file info
@@ -137,7 +136,7 @@ static inline struct exynos_drm_ipp *__ipp_get(uint32_t id)
 }
 
 /**
- * exynos_drm_ipp_get_caps_ioctl - get ipp module capabilities and formats
+ * exynos_drm_ipp_ioctl_get_caps - get ipp module capabilities and formats
  * @dev: DRM device
  * @data: ioctl data
  * @file_priv: DRM file info
@@ -271,7 +270,7 @@ static inline struct exynos_drm_ipp_task *
 	task->src.rect.h = task->dst.rect.h = UINT_MAX;
 	task->transform.rotation = DRM_MODE_ROTATE_0;
 
-	DRM_DEV_DEBUG_DRIVER(task->dev, "Allocated task %p\n", task);
+	DRM_DEV_DEBUG_DRIVER(task->dev, "Allocated task %pK\n", task);
 
 	return task;
 }
@@ -339,7 +338,7 @@ static int exynos_drm_ipp_task_set(struct exynos_drm_ipp_task *task,
 	}
 
 	DRM_DEV_DEBUG_DRIVER(task->dev,
-			     "Got task %p configuration from userspace\n",
+			     "Got task %pK configuration from userspace\n",
 			     task);
 	return 0;
 }
@@ -394,7 +393,7 @@ static void exynos_drm_ipp_task_release_buf(struct exynos_drm_ipp_buffer *buf)
 static void exynos_drm_ipp_task_free(struct exynos_drm_ipp *ipp,
 				 struct exynos_drm_ipp_task *task)
 {
-	DRM_DEV_DEBUG_DRIVER(task->dev, "Freeing task %p\n", task);
+	DRM_DEV_DEBUG_DRIVER(task->dev, "Freeing task %pK\n", task);
 
 	exynos_drm_ipp_task_release_buf(&task->src);
 	exynos_drm_ipp_task_release_buf(&task->dst);
@@ -559,7 +558,7 @@ static int exynos_drm_ipp_check_format(struct exynos_drm_ipp_task *task,
 					    DRM_EXYNOS_IPP_FORMAT_DESTINATION);
 	if (!fmt) {
 		DRM_DEV_DEBUG_DRIVER(task->dev,
-				     "Task %p: %s format not supported\n",
+				     "Task %pK: %s format not supported\n",
 				     task, buf == src ? "src" : "dst");
 		return -EINVAL;
 	}
@@ -609,7 +608,7 @@ static int exynos_drm_ipp_task_check(struct exynos_drm_ipp_task *task)
 	bool rotate = (rotation != DRM_MODE_ROTATE_0);
 	bool scale = false;
 
-	DRM_DEV_DEBUG_DRIVER(task->dev, "Checking task %p\n", task);
+	DRM_DEV_DEBUG_DRIVER(task->dev, "Checking task %pK\n", task);
 
 	if (src->rect.w == UINT_MAX)
 		src->rect.w = src->buf.width;
@@ -625,7 +624,7 @@ static int exynos_drm_ipp_task_check(struct exynos_drm_ipp_task *task)
 	    dst->rect.x + dst->rect.w > (dst->buf.width) ||
 	    dst->rect.y + dst->rect.h > (dst->buf.height)) {
 		DRM_DEV_DEBUG_DRIVER(task->dev,
-				     "Task %p: defined area is outside provided buffers\n",
+				     "Task %pK: defined area is outside provided buffers\n",
 				     task);
 		return -EINVAL;
 	}
@@ -642,7 +641,7 @@ static int exynos_drm_ipp_task_check(struct exynos_drm_ipp_task *task)
 	    (!(ipp->capabilities & DRM_EXYNOS_IPP_CAP_SCALE) && scale) ||
 	    (!(ipp->capabilities & DRM_EXYNOS_IPP_CAP_CONVERT) &&
 	     src->buf.fourcc != dst->buf.fourcc)) {
-		DRM_DEV_DEBUG_DRIVER(task->dev, "Task %p: hw capabilities exceeded\n",
+		DRM_DEV_DEBUG_DRIVER(task->dev, "Task %pK: hw capabilities exceeded\n",
 				     task);
 		return -EINVAL;
 	}
@@ -655,7 +654,7 @@ static int exynos_drm_ipp_task_check(struct exynos_drm_ipp_task *task)
 	if (ret)
 		return ret;
 
-	DRM_DEV_DEBUG_DRIVER(ipp->dev, "Task %p: all checks done.\n",
+	DRM_DEV_DEBUG_DRIVER(ipp->dev, "Task %pK: all checks done.\n",
 			     task);
 
 	return ret;
@@ -667,25 +666,25 @@ static int exynos_drm_ipp_task_setup_buffers(struct exynos_drm_ipp_task *task,
 	struct exynos_drm_ipp_buffer *src = &task->src, *dst = &task->dst;
 	int ret = 0;
 
-	DRM_DEV_DEBUG_DRIVER(task->dev, "Setting buffer for task %p\n",
+	DRM_DEV_DEBUG_DRIVER(task->dev, "Setting buffer for task %pK\n",
 			     task);
 
 	ret = exynos_drm_ipp_task_setup_buffer(src, filp);
 	if (ret) {
 		DRM_DEV_DEBUG_DRIVER(task->dev,
-				     "Task %p: src buffer setup failed\n",
+				     "Task %pK: src buffer setup failed\n",
 				     task);
 		return ret;
 	}
 	ret = exynos_drm_ipp_task_setup_buffer(dst, filp);
 	if (ret) {
 		DRM_DEV_DEBUG_DRIVER(task->dev,
-				     "Task %p: dst buffer setup failed\n",
+				     "Task %pK: dst buffer setup failed\n",
 				     task);
 		return ret;
 	}
 
-	DRM_DEV_DEBUG_DRIVER(task->dev, "Task %p: buffers prepared.\n",
+	DRM_DEV_DEBUG_DRIVER(task->dev, "Task %pK: buffers prepared.\n",
 			     task);
 
 	return ret;
@@ -764,7 +763,7 @@ void exynos_drm_ipp_task_done(struct exynos_drm_ipp_task *task, int ret)
 	struct exynos_drm_ipp *ipp = task->ipp;
 	unsigned long flags;
 
-	DRM_DEV_DEBUG_DRIVER(task->dev, "ipp: %d, task %p done: %d\n",
+	DRM_DEV_DEBUG_DRIVER(task->dev, "ipp: %d, task %pK done: %d\n",
 			     ipp->id, task, ret);
 
 	spin_lock_irqsave(&ipp->lock, flags);
@@ -807,7 +806,7 @@ static void exynos_drm_ipp_next_task(struct exynos_drm_ipp *ipp)
 	spin_unlock_irqrestore(&ipp->lock, flags);
 
 	DRM_DEV_DEBUG_DRIVER(ipp->dev,
-			     "ipp: %d, selected task %p to run\n", ipp->id,
+			     "ipp: %d, selected task %pK to run\n", ipp->id,
 			     task);
 
 	ret = ipp->funcs->commit(ipp, task);
@@ -917,14 +916,14 @@ int exynos_drm_ipp_commit_ioctl(struct drm_device *dev, void *data,
 	 */
 	if (arg->flags & DRM_EXYNOS_IPP_FLAG_NONBLOCK) {
 		DRM_DEV_DEBUG_DRIVER(ipp->dev,
-				     "ipp: %d, nonblocking processing task %p\n",
+				     "ipp: %d, nonblocking processing task %pK\n",
 				     ipp->id, task);
 
 		task->flags |= DRM_EXYNOS_IPP_TASK_ASYNC;
 		exynos_drm_ipp_schedule_task(task->ipp, task);
 		ret = 0;
 	} else {
-		DRM_DEV_DEBUG_DRIVER(ipp->dev, "ipp: %d, processing task %p\n",
+		DRM_DEV_DEBUG_DRIVER(ipp->dev, "ipp: %d, processing task %pK\n",
 				     ipp->id, task);
 		exynos_drm_ipp_schedule_task(ipp, task);
 		ret = wait_event_interruptible(ipp->done_wq,

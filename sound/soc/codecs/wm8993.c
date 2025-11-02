@@ -470,7 +470,7 @@ static int _wm8993_set_fll(struct snd_soc_component *component, int fll_id, int 
 	struct i2c_client *i2c = to_i2c_client(component->dev);
 	u16 reg1, reg4, reg5;
 	struct _fll_div fll_div;
-	unsigned long time_left;
+	unsigned int timeout;
 	int ret;
 
 	/* Any change? */
@@ -543,19 +543,19 @@ static int _wm8993_set_fll(struct snd_soc_component *component, int fll_id, int 
 
 	/* If we've got an interrupt wired up make sure we get it */
 	if (i2c->irq)
-		time_left = msecs_to_jiffies(20);
+		timeout = msecs_to_jiffies(20);
 	else if (Fref < 1000000)
-		time_left = msecs_to_jiffies(3);
+		timeout = msecs_to_jiffies(3);
 	else
-		time_left = msecs_to_jiffies(1);
+		timeout = msecs_to_jiffies(1);
 
 	try_wait_for_completion(&wm8993->fll_lock);
 
 	/* Enable the FLL */
 	snd_soc_component_write(component, WM8993_FLL_CONTROL_1, reg1 | WM8993_FLL_ENA);
 
-	time_left = wait_for_completion_timeout(&wm8993->fll_lock, time_left);
-	if (i2c->irq && !time_left)
+	timeout = wait_for_completion_timeout(&wm8993->fll_lock, timeout);
+	if (i2c->irq && !timeout)
 		dev_warn(component->dev, "Timed out waiting for FLL\n");
 
 	dev_dbg(component->dev, "FLL enabled at %dHz->%dHz\n", Fref, Fout);
@@ -1098,18 +1098,18 @@ static int wm8993_set_dai_fmt(struct snd_soc_dai *dai,
 	aif4 &= ~WM8993_LRCLK_DIR;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		wm8993->master = 0;
 		break;
-	case SND_SOC_DAIFMT_CBC_CFP:
+	case SND_SOC_DAIFMT_CBS_CFM:
 		aif4 |= WM8993_LRCLK_DIR;
 		wm8993->master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBP_CFC:
+	case SND_SOC_DAIFMT_CBM_CFS:
 		aif1 |= WM8993_BCLK_DIR;
 		wm8993->master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		aif1 |= WM8993_BCLK_DIR;
 		aif4 |= WM8993_LRCLK_DIR;
 		wm8993->master = 1;
@@ -1476,7 +1476,7 @@ static struct snd_soc_dai_driver wm8993_dai = {
 		 .sig_bits = 24,
 	 },
 	.ops = &wm8993_ops,
-	.symmetric_rate = 1,
+	.symmetric_rates = 1,
 };
 
 static int wm8993_probe(struct snd_soc_component *component)
@@ -1536,7 +1536,7 @@ static int wm8993_probe(struct snd_soc_component *component)
 	 * VMID as an output and can disable it.
 	 */
 	if (wm8993->pdata.lineout1_diff && wm8993->pdata.lineout2_diff)
-		dapm->idle_bias = false;
+		dapm->idle_bias_off = 1;
 
 	return 0;
 
@@ -1608,7 +1608,7 @@ static const struct regmap_config wm8993_regmap = {
 	.volatile_reg = wm8993_volatile,
 	.readable_reg = wm8993_readable,
 
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 	.reg_defaults = wm8993_reg_defaults,
 	.num_reg_defaults = ARRAY_SIZE(wm8993_reg_defaults),
 };
@@ -1621,9 +1621,11 @@ static const struct snd_soc_component_driver soc_component_dev_wm8993 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
-static int wm8993_i2c_probe(struct i2c_client *i2c)
+static int wm8993_i2c_probe(struct i2c_client *i2c,
+			    const struct i2c_device_id *id)
 {
 	struct wm8993_priv *wm8993;
 	unsigned int reg;
@@ -1722,17 +1724,19 @@ err_enable:
 	return ret;
 }
 
-static void wm8993_i2c_remove(struct i2c_client *i2c)
+static int wm8993_i2c_remove(struct i2c_client *i2c)
 {
 	struct wm8993_priv *wm8993 = i2c_get_clientdata(i2c);
 
 	if (i2c->irq)
 		free_irq(i2c->irq, wm8993);
 	regulator_bulk_disable(ARRAY_SIZE(wm8993->supplies), wm8993->supplies);
+
+	return 0;
 }
 
 static const struct i2c_device_id wm8993_i2c_id[] = {
-	{ "wm8993" },
+	{ "wm8993", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8993_i2c_id);

@@ -23,6 +23,9 @@
  *
  */
 
+#include <linux/delay.h>
+#include <linux/slab.h>
+
 #include "dm_services.h"
 
 #include "include/gpio_interface.h"
@@ -94,25 +97,23 @@ static enum gpio_result set_config(
 		 * is required for detection of AUX mode */
 		if (hw_gpio->base.en != GPIO_DDC_LINE_VIP_PAD) {
 			if (!ddc_data_pd_en || !ddc_clk_pd_en) {
-				if (hw_gpio->base.en == GPIO_DDC_LINE_DDC_VGA) {
-					// bit 4 of mask has different usage in some cases
-					REG_SET(gpio.MASK_reg, regval, DC_GPIO_DDC1DATA_PD_EN, 1);
-				} else {
-					REG_SET_2(gpio.MASK_reg, regval,
+
+				REG_SET_2(gpio.MASK_reg, regval,
 						DC_GPIO_DDC1DATA_PD_EN, 1,
 						DC_GPIO_DDC1CLK_PD_EN, 1);
-				}
+
 				if (config_data->type ==
 						GPIO_CONFIG_TYPE_I2C_AUX_DUAL_MODE)
 					msleep(3);
 			}
 		} else {
+			uint32_t reg2;
 			uint32_t sda_pd_dis = 0;
 			uint32_t scl_pd_dis = 0;
 
-			REG_GET_2(gpio.MASK_reg,
-				  DC_GPIO_SDA_PD_DIS, &sda_pd_dis,
-				  DC_GPIO_SCL_PD_DIS, &scl_pd_dis);
+			reg2 = REG_GET_2(gpio.MASK_reg,
+					DC_GPIO_SDA_PD_DIS, &sda_pd_dis,
+					DC_GPIO_SCL_PD_DIS, &scl_pd_dis);
 
 			if (sda_pd_dis) {
 				REG_SET(gpio.MASK_reg, regval,
@@ -170,7 +171,8 @@ static enum gpio_result set_config(
 
 		return GPIO_RESULT_OK;
 	case GPIO_DDC_CONFIG_TYPE_POLL_FOR_CONNECT:
-		if (hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA) {
+		if ((hw_gpio->base.en >= GPIO_DDC_LINE_DDC1) &&
+			(hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA)) {
 			REG_UPDATE_3(ddc_setup,
 				DC_I2C_DDC1_ENABLE, 1,
 				DC_I2C_DDC1_EDID_DETECT_ENABLE, 1,
@@ -179,7 +181,8 @@ static enum gpio_result set_config(
 		}
 	break;
 	case GPIO_DDC_CONFIG_TYPE_POLL_FOR_DISCONNECT:
-		if (hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA) {
+		if ((hw_gpio->base.en >= GPIO_DDC_LINE_DDC1) &&
+			(hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA)) {
 			REG_UPDATE_3(ddc_setup,
 				DC_I2C_DDC1_ENABLE, 1,
 				DC_I2C_DDC1_EDID_DETECT_ENABLE, 1,
@@ -188,7 +191,8 @@ static enum gpio_result set_config(
 		}
 	break;
 	case GPIO_DDC_CONFIG_TYPE_DISABLE_POLLING:
-		if (hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA) {
+		if ((hw_gpio->base.en >= GPIO_DDC_LINE_DDC1) &&
+			(hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA)) {
 			REG_UPDATE_2(ddc_setup,
 				DC_I2C_DDC1_ENABLE, 0,
 				DC_I2C_DDC1_EDID_DETECT_ENABLE, 0);
@@ -228,7 +232,7 @@ void dal_hw_ddc_init(
 	enum gpio_id id,
 	uint32_t en)
 {
-	if (en > GPIO_DDC_LINE_MAX) {
+	if ((en < GPIO_DDC_LINE_MIN) || (en > GPIO_DDC_LINE_MAX)) {
 		ASSERT_CRITICAL(false);
 		*hw_ddc = NULL;
 	}

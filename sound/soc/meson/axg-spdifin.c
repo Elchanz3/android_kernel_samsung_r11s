@@ -179,9 +179,9 @@ static int axg_spdifin_sample_mode_config(struct snd_soc_dai *dai,
 			   SPDIFIN_CTRL1_BASE_TIMER,
 			   FIELD_PREP(SPDIFIN_CTRL1_BASE_TIMER, rate / 1000));
 
-	/* Threshold based on the maximum width between two edges */
+	/* Threshold based on the minimum width between two edges */
 	regmap_update_bits(priv->map, SPDIFIN_CTRL0,
-			   SPDIFIN_CTRL0_WIDTH_SEL, 0);
+			   SPDIFIN_CTRL0_WIDTH_SEL, SPDIFIN_CTRL0_WIDTH_SEL);
 
 	/* Calculate the last timer which has no threshold */
 	t_next = axg_spdifin_mode_timer(priv, i, rate);
@@ -199,7 +199,7 @@ static int axg_spdifin_sample_mode_config(struct snd_soc_dai *dai,
 		axg_spdifin_write_timer(priv->map, i, t);
 
 		/* Set the threshold value */
-		axg_spdifin_write_threshold(priv->map, i, 3 * (t + t_next));
+		axg_spdifin_write_threshold(priv->map, i, t + t_next);
 
 		/* Save the current timer for the next threshold calculation */
 		t_next = t;
@@ -254,8 +254,6 @@ static int axg_spdifin_dai_remove(struct snd_soc_dai *dai)
 }
 
 static const struct snd_soc_dai_ops axg_spdifin_ops = {
-	.probe		= axg_spdifin_dai_probe,
-	.remove		= axg_spdifin_dai_remove,
 	.prepare	= axg_spdifin_prepare,
 };
 
@@ -377,7 +375,6 @@ static const struct snd_kcontrol_new axg_spdifin_controls[] = {
 static const struct snd_soc_component_driver axg_spdifin_component_drv = {
 	.controls		= axg_spdifin_controls,
 	.num_controls		= ARRAY_SIZE(axg_spdifin_controls),
-	.legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config axg_spdifin_regmap_cfg = {
@@ -416,6 +413,8 @@ axg_spdifin_get_dai_drv(struct device *dev, struct axg_spdifin *priv)
 
 	drv->name = "SPDIF Input";
 	drv->ops = &axg_spdifin_ops;
+	drv->probe = axg_spdifin_dai_probe;
+	drv->remove = axg_spdifin_dai_remove;
 	drv->capture.stream_name = "Capture";
 	drv->capture.channels_min = 1;
 	drv->capture.channels_max = 2;

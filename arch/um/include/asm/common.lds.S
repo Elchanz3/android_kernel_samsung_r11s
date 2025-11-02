@@ -52,6 +52,10 @@
 	CON_INITCALL
   }
 
+  .kunit_test_suites : {
+	KUNIT_TABLE()
+  }
+
   .exitcall : {
 	__exitcall_begin = .;
 	*(.exitcall.exit)
@@ -83,8 +87,6 @@
   }
   .init_array : {
 	__init_array_start = .;
-	*(.kasan_init)
-	*(.init_array.*)
 	*(.init_array)
 	__init_array_end = .;
   }

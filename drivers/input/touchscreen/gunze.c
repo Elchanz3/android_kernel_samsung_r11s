@@ -7,6 +7,9 @@
  * Gunze AHL-51S touchscreen driver for Linux
  */
 
+/*
+ */
+
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -97,7 +100,7 @@ static int gunze_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	gunze = kzalloc(sizeof(*gunze), GFP_KERNEL);
+	gunze = kzalloc(sizeof(struct gunze), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!gunze || !input_dev) {
 		err = -ENOMEM;

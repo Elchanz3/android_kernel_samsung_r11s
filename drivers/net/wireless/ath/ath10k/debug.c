@@ -3,17 +3,13 @@
  * Copyright (c) 2005-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2018, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022, 2024 Qualcomm Innovation Center, Inc. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/module.h>
 #include <linux/debugfs.h>
-#include <linux/export.h>
 #include <linux/vmalloc.h>
 #include <linux/crc32.h>
 #include <linux/firmware.h>
-#include <linux/kstrtox.h>
 
 #include "core.h"
 #include "debug.h"
@@ -296,8 +292,8 @@ void ath10k_debug_fw_stats_process(struct ath10k *ar, struct sk_buff *skb)
 		goto free;
 	}
 
-	num_peers = list_count_nodes(&ar->debug.fw_stats.peers);
-	num_vdevs = list_count_nodes(&ar->debug.fw_stats.vdevs);
+	num_peers = ath10k_wmi_fw_stats_num_peers(&ar->debug.fw_stats.peers);
+	num_vdevs = ath10k_wmi_fw_stats_num_vdevs(&ar->debug.fw_stats.vdevs);
 	is_start = (list_empty(&ar->debug.fw_stats.pdevs) &&
 		    !list_empty(&stats.pdevs));
 	is_end = (!list_empty(&ar->debug.fw_stats.pdevs) &&
@@ -547,7 +543,7 @@ static ssize_t ath10k_write_simulate_fw_crash(struct file *file,
 					      size_t count, loff_t *ppos)
 {
 	struct ath10k *ar = file->private_data;
-	char buf[32] = {};
+	char buf[32] = {0};
 	ssize_t rc;
 	int ret;
 
@@ -587,7 +583,7 @@ static ssize_t ath10k_write_simulate_fw_crash(struct file *file,
 		ret = ath10k_debug_fw_assert(ar);
 	} else if (!strcmp(buf, "hw-restart")) {
 		ath10k_info(ar, "user requested hw restart\n");
-		ath10k_core_start_recovery(ar);
+		queue_work(ar->workqueue, &ar->restart_work);
 		ret = 0;
 	} else {
 		ret = -EINVAL;
@@ -983,7 +979,7 @@ static ssize_t ath10k_write_htt_max_amsdu_ampdu(struct file *file,
 {
 	struct ath10k *ar = file->private_data;
 	int res;
-	char buf[64] = {};
+	char buf[64] = {0};
 	unsigned int amsdu, ampdu;
 
 	res = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos,
@@ -1039,7 +1035,7 @@ static ssize_t ath10k_write_fw_dbglog(struct file *file,
 {
 	struct ath10k *ar = file->private_data;
 	int ret;
-	char buf[96] = {};
+	char buf[96] = {0};
 	unsigned int log_level;
 	u64 mask;
 
@@ -1085,7 +1081,7 @@ exit:
  * struct available..
  */
 
-/* This generally corresponds to the debugfs fw_stats file */
+/* This generally cooresponds to the debugfs fw_stats file */
 static const char ath10k_gstrings_stats[][ETH_GSTRING_LEN] = {
 	"tx_pkts_nic",
 	"tx_bytes_nic",
@@ -1109,7 +1105,7 @@ static const char ath10k_gstrings_stats[][ETH_GSTRING_LEN] = {
 	"d_tx_ppdu_reaped",
 	"d_tx_fifo_underrun",
 	"d_tx_ppdu_abort",
-	"d_tx_mpdu_requeued",
+	"d_tx_mpdu_requed",
 	"d_tx_excessive_retries",
 	"d_tx_hw_rate",
 	"d_tx_dropped_sw_retries",
@@ -1209,7 +1205,7 @@ void ath10k_debug_get_et_stats(struct ieee80211_hw *hw,
 	data[i++] = pdev_stats->hw_reaped;
 	data[i++] = pdev_stats->underrun;
 	data[i++] = pdev_stats->tx_abort;
-	data[i++] = pdev_stats->mpdus_requeued;
+	data[i++] = pdev_stats->mpdus_requed;
 	data[i++] = pdev_stats->tx_ko;
 	data[i++] = pdev_stats->data_rc;
 	data[i++] = pdev_stats->sw_retry_failure;
@@ -1753,7 +1749,7 @@ void ath10k_debug_stop(struct ath10k *ar)
 
 	/* Must not use _sync to avoid deadlock, we do that in
 	 * ath10k_debug_destroy(). The check for htt_stats_mask is to avoid
-	 * warning from timer_delete().
+	 * warning from del_timer().
 	 */
 	if (ar->debug.htt_stats_mask != 0)
 		cancel_delayed_work(&ar->debug.htt_stats_dwork);
@@ -1768,7 +1764,7 @@ static ssize_t ath10k_write_simulate_radar(struct file *file,
 	struct ath10k *ar = file->private_data;
 	struct ath10k_vif *arvif;
 
-	/* Just check for the first vif alone, as all the vifs will be
+	/* Just check for for the first vif alone, as all the vifs will be
 	 * sharing the same channel and if the channel is disabled, all the
 	 * vifs will share the same 'is_started' state.
 	 */
@@ -1776,7 +1772,7 @@ static ssize_t ath10k_write_simulate_radar(struct file *file,
 	if (!arvif->is_started)
 		return -EINVAL;
 
-	ieee80211_radar_detected(ar->hw, NULL);
+	ieee80211_radar_detected(ar->hw);
 
 	return count;
 }
@@ -1967,13 +1963,20 @@ static ssize_t ath10k_write_btcoex(struct file *file,
 				   size_t count, loff_t *ppos)
 {
 	struct ath10k *ar = file->private_data;
-	ssize_t ret;
+	char buf[32];
+	size_t buf_size;
+	int ret;
 	bool val;
 	u32 pdev_param;
 
-	ret = kstrtobool_from_user(ubuf, count, &val);
-	if (ret)
-		return ret;
+	buf_size = min(count, (sizeof(buf) - 1));
+	if (copy_from_user(buf, ubuf, buf_size))
+		return -EFAULT;
+
+	buf[buf_size] = '\0';
+
+	if (strtobool(buf, &val) != 0)
+		return -EINVAL;
 
 	if (!ar->coex_support)
 		return -EOPNOTSUPP;
@@ -1996,13 +1999,13 @@ static ssize_t ath10k_write_btcoex(struct file *file,
 		     ar->running_fw->fw_file.fw_features)) {
 		ret = ath10k_wmi_pdev_set_param(ar, pdev_param, val);
 		if (ret) {
-			ath10k_warn(ar, "failed to enable btcoex: %zd\n", ret);
+			ath10k_warn(ar, "failed to enable btcoex: %d\n", ret);
 			ret = count;
 			goto exit;
 		}
 	} else {
 		ath10k_info(ar, "restarting firmware due to btcoex change");
-		ath10k_core_start_recovery(ar);
+		queue_work(ar->workqueue, &ar->restart_work);
 	}
 
 	if (val)
@@ -2099,12 +2102,19 @@ static ssize_t ath10k_write_peer_stats(struct file *file,
 				       size_t count, loff_t *ppos)
 {
 	struct ath10k *ar = file->private_data;
-	ssize_t ret;
+	char buf[32];
+	size_t buf_size;
+	int ret;
 	bool val;
 
-	ret = kstrtobool_from_user(ubuf, count, &val);
-	if (ret)
-		return ret;
+	buf_size = min(count, (sizeof(buf) - 1));
+	if (copy_from_user(buf, ubuf, buf_size))
+		return -EFAULT;
+
+	buf[buf_size] = '\0';
+
+	if (strtobool(buf, &val) != 0)
+		return -EINVAL;
 
 	mutex_lock(&ar->conf_mutex);
 
@@ -2126,7 +2136,7 @@ static ssize_t ath10k_write_peer_stats(struct file *file,
 
 	ath10k_info(ar, "restarting firmware due to Peer stats change");
 
-	ath10k_core_start_recovery(ar);
+	queue_work(ar->workqueue, &ar->restart_work);
 	ret = count;
 
 exit:
@@ -2228,16 +2238,21 @@ static ssize_t ath10k_sta_tid_stats_mask_write(struct file *file,
 					       size_t count, loff_t *ppos)
 {
 	struct ath10k *ar = file->private_data;
-	ssize_t ret;
+	char buf[32];
+	ssize_t len;
 	u32 mask;
 
-	ret = kstrtoint_from_user(user_buf, count, 0, &mask);
-	if (ret)
-		return ret;
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, user_buf, len))
+		return -EFAULT;
+
+	buf[len] = '\0';
+	if (kstrtoint(buf, 0, &mask))
+		return -EINVAL;
 
 	ar->sta_tid_stats_mask = mask;
 
-	return count;
+	return len;
 }
 
 static const struct file_operations fops_sta_tid_stats_mask = {

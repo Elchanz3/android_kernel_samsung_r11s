@@ -5,7 +5,7 @@
  *
  * Author : Etienne BASSET  <etienne.basset@ensta.org>
  *
- * All credits to : Stephen Smalley
+ * All credits to : Stephen Smalley, <sds@tycho.nsa.gov>
  * All BUGS to : Etienne BASSET  <etienne.basset@ensta.org>
  */
 #ifndef _LSM_COMMON_LOGGING_
@@ -26,7 +26,7 @@
 
 struct lsm_network_audit {
 	int netif;
-	const struct sock *sk;
+	struct sock *sk;
 	u16 family;
 	__be16 dport;
 	__be16 sport;
@@ -48,13 +48,13 @@ struct lsm_ioctlop_audit {
 };
 
 struct lsm_ibpkey_audit {
-	u64 subnet_prefix;
-	u16 pkey;
+	u64	subnet_prefix;
+	u16	pkey;
 };
 
 struct lsm_ibendport_audit {
-	const char *dev_name;
-	u8 port;
+	char	dev_name[IB_DEVICE_NAME_MAX];
+	u8	port;
 };
 
 /* Auxiliary data to use in generating the audit record. */
@@ -74,10 +74,7 @@ struct common_audit_data {
 #define LSM_AUDIT_DATA_FILE	12
 #define LSM_AUDIT_DATA_IBPKEY	13
 #define LSM_AUDIT_DATA_IBENDPORT 14
-#define LSM_AUDIT_DATA_LOCKDOWN 15
 #define LSM_AUDIT_DATA_NOTIFICATION 16
-#define LSM_AUDIT_DATA_ANONINODE	17
-#define LSM_AUDIT_DATA_NLMSGTYPE	18
 	union 	{
 		struct path path;
 		struct dentry *dentry;
@@ -97,9 +94,6 @@ struct common_audit_data {
 		struct file *file;
 		struct lsm_ibpkey_audit *ibpkey;
 		struct lsm_ibendport_audit *ibendport;
-		int reason;
-		const char *anonclass;
-		u16 nlmsg_type;
 	} u;
 	/* this union contains LSM specific data */
 	union {
@@ -118,36 +112,14 @@ struct common_audit_data {
 #define v4info fam.v4
 #define v6info fam.v6
 
-#ifdef CONFIG_AUDIT
-
 int ipv4_skb_to_auditdata(struct sk_buff *skb,
 		struct common_audit_data *ad, u8 *proto);
 
-#if IS_ENABLED(CONFIG_IPV6)
 int ipv6_skb_to_auditdata(struct sk_buff *skb,
 		struct common_audit_data *ad, u8 *proto);
-#endif /* IS_ENABLED(CONFIG_IPV6) */
 
 void common_lsm_audit(struct common_audit_data *a,
 	void (*pre_audit)(struct audit_buffer *, void *),
 	void (*post_audit)(struct audit_buffer *, void *));
-
-void audit_log_lsm_data(struct audit_buffer *ab,
-			const struct common_audit_data *a);
-
-#else /* CONFIG_AUDIT */
-
-static inline void common_lsm_audit(struct common_audit_data *a,
-	void (*pre_audit)(struct audit_buffer *, void *),
-	void (*post_audit)(struct audit_buffer *, void *))
-{
-}
-
-static inline void audit_log_lsm_data(struct audit_buffer *ab,
-			const struct common_audit_data *a)
-{
-}
-
-#endif /* CONFIG_AUDIT */
 
 #endif

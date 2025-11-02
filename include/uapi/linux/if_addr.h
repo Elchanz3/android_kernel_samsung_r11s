@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-#ifndef _UAPI__LINUX_IF_ADDR_H
-#define _UAPI__LINUX_IF_ADDR_H
+#ifndef __LINUX_IF_ADDR_H
+#define __LINUX_IF_ADDR_H
 
 #include <linux/types.h>
 #include <linux/netlink.h>
@@ -33,9 +33,8 @@ enum {
 	IFA_CACHEINFO,
 	IFA_MULTICAST,
 	IFA_FLAGS,
-	IFA_RT_PRIORITY,	/* u32, priority/metric for prefix route */
+	IFA_RT_PRIORITY,  /* u32, priority/metric for prefix route */
 	IFA_TARGET_NETNSID,
-	IFA_PROTO,		/* u8, address protocol */
 	__IFA_MAX,
 };
 
@@ -69,11 +68,5 @@ struct ifa_cacheinfo {
 #define IFA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ifaddrmsg))))
 #define IFA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ifaddrmsg))
 #endif
-
-/* ifa_proto */
-#define IFAPROT_UNSPEC		0
-#define IFAPROT_KERNEL_LO	1	/* loopback */
-#define IFAPROT_KERNEL_RA	2	/* set by kernel from router announcement */
-#define IFAPROT_KERNEL_LL	3	/* link-local set by kernel */
 
 #endif

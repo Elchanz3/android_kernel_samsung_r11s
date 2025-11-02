@@ -17,11 +17,11 @@
 #include "mm.h"
 
 #ifdef CONFIG_ARM_LPAE
-#define _pgd_alloc(mm)		kmalloc_array(PTRS_PER_PGD, sizeof(pgd_t), GFP_KERNEL | __GFP_ZERO)
-#define _pgd_free(mm, pgd)	kfree(pgd)
+#define __pgd_alloc()	kmalloc_array(PTRS_PER_PGD, sizeof(pgd_t), GFP_KERNEL)
+#define __pgd_free(pgd)	kfree(pgd)
 #else
-#define _pgd_alloc(mm)		__pgd_alloc(mm, 2)
-#define _pgd_free(mm, pgd)	__pgd_free(mm, pgd)
+#define __pgd_alloc()	(pgd_t *)__get_free_pages(GFP_KERNEL, 2)
+#define __pgd_free(pgd)	free_pages((unsigned long)pgd, 2)
 #endif
 
 /*
@@ -35,9 +35,11 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	pmd_t *new_pmd, *init_pmd;
 	pte_t *new_pte, *init_pte;
 
-	new_pgd = _pgd_alloc(mm);
+	new_pgd = __pgd_alloc();
 	if (!new_pgd)
 		goto no_pgd;
+
+	memset(new_pgd, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
 
 	/*
 	 * Copy over the kernel and IO PGD entries
@@ -64,21 +66,7 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	new_pmd = pmd_alloc(mm, new_pud, 0);
 	if (!new_pmd)
 		goto no_pmd;
-#ifdef CONFIG_KASAN
-	/*
-	 * Copy PMD table for KASAN shadow mappings.
-	 */
-	init_pgd = pgd_offset_k(TASK_SIZE);
-	init_p4d = p4d_offset(init_pgd, TASK_SIZE);
-	init_pud = pud_offset(init_p4d, TASK_SIZE);
-	init_pmd = pmd_offset(init_pud, TASK_SIZE);
-	new_pmd = pmd_offset(new_pud, TASK_SIZE);
-	memcpy(new_pmd, init_pmd,
-	       (pmd_index(MODULES_VADDR) - pmd_index(TASK_SIZE))
-	       * sizeof(pmd_t));
-	clean_dcache_area(new_pmd, PTRS_PER_PMD * sizeof(pmd_t));
-#endif /* CONFIG_KASAN */
-#endif /* CONFIG_LPAE */
+#endif
 
 	if (!vectors_high()) {
 		/*
@@ -132,7 +120,7 @@ no_pmd:
 no_pud:
 	p4d_free(mm, new_p4d);
 no_p4d:
-	_pgd_free(mm, new_pgd);
+	__pgd_free(new_pgd);
 no_pgd:
 	return NULL;
 }
@@ -205,5 +193,5 @@ no_pgd:
 		p4d_free(mm, p4d);
 	}
 #endif
-	_pgd_free(mm, pgd_base);
+	__pgd_free(pgd_base);
 }

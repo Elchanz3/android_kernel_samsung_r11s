@@ -111,24 +111,6 @@
 		.off   = 0,					\
 		.imm   = IMM })
 
-/* Short form of movsx, dst_reg = (s8,s16,s32)src_reg */
-
-#define BPF_MOVSX64_REG(DST, SRC, OFF)				\
-	((struct bpf_insn) {					\
-		.code  = BPF_ALU64 | BPF_MOV | BPF_X,		\
-		.dst_reg = DST,					\
-		.src_reg = SRC,					\
-		.off   = OFF,					\
-		.imm   = 0 })
-
-#define BPF_MOVSX32_REG(DST, SRC, OFF)				\
-	((struct bpf_insn) {					\
-		.code  = BPF_ALU | BPF_MOV | BPF_X,		\
-		.dst_reg = DST,					\
-		.src_reg = SRC,					\
-		.off   = OFF,					\
-		.imm   = 0 })
-
 /* Short form of mov based on type,  BPF_X: dst_reg = src_reg, BPF_K: dst_reg = imm32 */
 
 #define BPF_MOV64_RAW(TYPE, DST, SRC, IMM)			\
@@ -187,31 +169,15 @@
 		.off   = OFF,					\
 		.imm   = 0 })
 
-/*
- * Atomic operations:
- *
- *   BPF_ADD                  *(uint *) (dst_reg + off16) += src_reg
- *   BPF_AND                  *(uint *) (dst_reg + off16) &= src_reg
- *   BPF_OR                   *(uint *) (dst_reg + off16) |= src_reg
- *   BPF_XOR                  *(uint *) (dst_reg + off16) ^= src_reg
- *   BPF_ADD | BPF_FETCH      src_reg = atomic_fetch_add(dst_reg + off16, src_reg);
- *   BPF_AND | BPF_FETCH      src_reg = atomic_fetch_and(dst_reg + off16, src_reg);
- *   BPF_OR | BPF_FETCH       src_reg = atomic_fetch_or(dst_reg + off16, src_reg);
- *   BPF_XOR | BPF_FETCH      src_reg = atomic_fetch_xor(dst_reg + off16, src_reg);
- *   BPF_XCHG                 src_reg = atomic_xchg(dst_reg + off16, src_reg)
- *   BPF_CMPXCHG              r0 = atomic_cmpxchg(dst_reg + off16, r0, src_reg)
- */
+/* Atomic memory add, *(uint *)(dst_reg + off16) += src_reg */
 
-#define BPF_ATOMIC_OP(SIZE, OP, DST, SRC, OFF)			\
+#define BPF_STX_XADD(SIZE, DST, SRC, OFF)			\
 	((struct bpf_insn) {					\
-		.code  = BPF_STX | BPF_SIZE(SIZE) | BPF_ATOMIC,	\
+		.code  = BPF_STX | BPF_SIZE(SIZE) | BPF_XADD,	\
 		.dst_reg = DST,					\
 		.src_reg = SRC,					\
 		.off   = OFF,					\
-		.imm   = OP })
-
-/* Legacy alias */
-#define BPF_STX_XADD(SIZE, DST, SRC, OFF) BPF_ATOMIC_OP(SIZE, BPF_ADD, DST, SRC, OFF)
+		.imm   = 0 })
 
 /* Memory store, *(uint *) (dst_reg + off16) = imm32 */
 
@@ -272,16 +238,6 @@
 		.src_reg = 0,					\
 		.off   = OFF,					\
 		.imm   = 0 })
-
-/* Unconditional jumps, gotol pc + imm32 */
-
-#define BPF_JMP32_A(IMM)					\
-	((struct bpf_insn) {					\
-		.code  = BPF_JMP32 | BPF_JA,			\
-		.dst_reg = 0,					\
-		.src_reg = 0,					\
-		.off   = 0,					\
-		.imm   = IMM })
 
 /* Function call */
 

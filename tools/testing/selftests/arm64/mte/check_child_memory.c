@@ -85,10 +85,10 @@ static int check_child_memory_mapping(int mem_type, int mode, int mapping)
 {
 	char *ptr;
 	int run, result;
-	int item = ARRAY_SIZE(sizes);
+	int item = sizeof(sizes)/sizeof(int);
 
-	item = ARRAY_SIZE(sizes);
-	mte_switch_mode(mode, MTE_ALLOW_NON_ZERO_TAG, false);
+	item = sizeof(sizes)/sizeof(int);
+	mte_switch_mode(mode, MTE_ALLOW_NON_ZERO_TAG);
 	for (run = 0; run < item; run++) {
 		ptr = (char *)mte_allocate_memory_tag_range(sizes[run], mem_type, mapping,
 							    UNDERFLOW, OVERFLOW);
@@ -107,9 +107,9 @@ static int check_child_file_mapping(int mem_type, int mode, int mapping)
 {
 	char *ptr, *map_ptr;
 	int run, fd, map_size, result = KSFT_PASS;
-	int total = ARRAY_SIZE(sizes);
+	int total = sizeof(sizes)/sizeof(int);
 
-	mte_switch_mode(mode, MTE_ALLOW_NON_ZERO_TAG, false);
+	mte_switch_mode(mode, MTE_ALLOW_NON_ZERO_TAG);
 	for (run = 0; run < total; run++) {
 		fd = create_temp_file();
 		if (fd == -1)
@@ -144,7 +144,7 @@ static int check_child_file_mapping(int mem_type, int mode, int mapping)
 int main(int argc, char *argv[])
 {
 	int err;
-	int item = ARRAY_SIZE(sizes);
+	int item = sizeof(sizes)/sizeof(int);
 
 	page_size = getpagesize();
 	if (!page_size) {
@@ -160,8 +160,8 @@ int main(int argc, char *argv[])
 		return err;
 
 	/* Register SIGSEGV handler */
-	mte_register_signal(SIGSEGV, mte_default_handler, false);
-	mte_register_signal(SIGBUS, mte_default_handler, false);
+	mte_register_signal(SIGSEGV, mte_default_handler);
+	mte_register_signal(SIGBUS, mte_default_handler);
 
 	/* Set test plan */
 	ksft_set_plan(12);

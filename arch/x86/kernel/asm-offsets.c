@@ -7,7 +7,6 @@
 #define COMPILE_OFFSETS
 
 #include <linux/crypto.h>
-#include <crypto/aria.h>
 #include <linux/sched.h>
 #include <linux/stddef.h>
 #include <linux/hardirq.h>
@@ -19,7 +18,6 @@
 #include <asm/bootparam.h>
 #include <asm/suspend.h>
 #include <asm/tlbflush.h>
-#include <asm/tdx.h>
 
 #ifdef CONFIG_XEN
 #include <xen/interface/xen.h>
@@ -33,19 +31,14 @@
 
 static void __used common(void)
 {
-	OFFSET(CPUINFO_x86, cpuinfo_x86, x86);
-	OFFSET(CPUINFO_x86_vendor, cpuinfo_x86, x86_vendor);
-	OFFSET(CPUINFO_x86_model, cpuinfo_x86, x86_model);
-	OFFSET(CPUINFO_x86_stepping, cpuinfo_x86, x86_stepping);
-	OFFSET(CPUINFO_cpuid_level, cpuinfo_x86, cpuid_level);
-	OFFSET(CPUINFO_x86_capability, cpuinfo_x86, x86_capability);
-	OFFSET(CPUINFO_x86_vendor_id, cpuinfo_x86, x86_vendor_id);
-
 	BLANK();
 	OFFSET(TASK_threadsp, task_struct, thread.sp);
 #ifdef CONFIG_STACKPROTECTOR
 	OFFSET(TASK_stack_canary, task_struct, stack_canary);
 #endif
+
+	BLANK();
+	OFFSET(crypto_tfm_ctx_offset, crypto_tfm, __crt_ctx);
 
 	BLANK();
 	OFFSET(pbe_address, pbe, address);
@@ -68,27 +61,20 @@ static void __used common(void)
 	OFFSET(IA32_RT_SIGFRAME_sigcontext, rt_sigframe_ia32, uc.uc_mcontext);
 #endif
 
+#ifdef CONFIG_PARAVIRT_XXL
+	BLANK();
+	OFFSET(PV_IRQ_irq_disable, paravirt_patch_template, irq.irq_disable);
+	OFFSET(PV_IRQ_irq_enable, paravirt_patch_template, irq.irq_enable);
+	OFFSET(PV_CPU_iret, paravirt_patch_template, cpu.iret);
+	OFFSET(PV_MMU_read_cr2, paravirt_patch_template, mmu.read_cr2);
+#endif
+
 #ifdef CONFIG_XEN
 	BLANK();
 	OFFSET(XEN_vcpu_info_mask, vcpu_info, evtchn_upcall_mask);
 	OFFSET(XEN_vcpu_info_pending, vcpu_info, evtchn_upcall_pending);
 	OFFSET(XEN_vcpu_info_arch_cr2, vcpu_info, arch.cr2);
 #endif
-
-	BLANK();
-	OFFSET(TDX_MODULE_rcx, tdx_module_args, rcx);
-	OFFSET(TDX_MODULE_rdx, tdx_module_args, rdx);
-	OFFSET(TDX_MODULE_r8,  tdx_module_args, r8);
-	OFFSET(TDX_MODULE_r9,  tdx_module_args, r9);
-	OFFSET(TDX_MODULE_r10, tdx_module_args, r10);
-	OFFSET(TDX_MODULE_r11, tdx_module_args, r11);
-	OFFSET(TDX_MODULE_r12, tdx_module_args, r12);
-	OFFSET(TDX_MODULE_r13, tdx_module_args, r13);
-	OFFSET(TDX_MODULE_r14, tdx_module_args, r14);
-	OFFSET(TDX_MODULE_r15, tdx_module_args, r15);
-	OFFSET(TDX_MODULE_rbx, tdx_module_args, rbx);
-	OFFSET(TDX_MODULE_rdi, tdx_module_args, rdi);
-	OFFSET(TDX_MODULE_rsi, tdx_module_args, rsi);
 
 	BLANK();
 	OFFSET(BP_scratch, boot_params, scratch);
@@ -102,7 +88,6 @@ static void __used common(void)
 
 	BLANK();
 	DEFINE(PTREGS_SIZE, sizeof(struct pt_regs));
-	OFFSET(C_PTREGS_SIZE, pt_regs, orig_ax);
 
 	/* TLB state for the entry code */
 	OFFSET(TLB_STATE_user_pcid_flush_mask, tlb_state, user_pcid_flush_mask);
@@ -116,12 +101,4 @@ static void __used common(void)
 	OFFSET(TSS_sp0, tss_struct, x86_tss.sp0);
 	OFFSET(TSS_sp1, tss_struct, x86_tss.sp1);
 	OFFSET(TSS_sp2, tss_struct, x86_tss.sp2);
-#if IS_ENABLED(CONFIG_CRYPTO_ARIA_AESNI_AVX_X86_64)
-	/* Offset for fields in aria_ctx */
-	BLANK();
-	OFFSET(ARIA_CTX_enc_key, aria_ctx, enc_key);
-	OFFSET(ARIA_CTX_dec_key, aria_ctx, dec_key);
-	OFFSET(ARIA_CTX_rounds, aria_ctx, rounds);
-#endif
-
 }

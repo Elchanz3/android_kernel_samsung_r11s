@@ -21,6 +21,8 @@
 #include <linux/module.h>
 #include "ath9k.h"
 
+extern int ath9k_use_msi;
+
 static const struct pci_device_id ath_pci_id_table[] = {
 	{ PCI_VDEVICE(ATHEROS, 0x0023) }, /* PCI   */
 	{ PCI_VDEVICE(ATHEROS, 0x0024) }, /* PCI-E */
@@ -779,7 +781,7 @@ static const struct pci_device_id ath_pci_id_table[] = {
 /* return bus cachesize in 4B word units */
 static void ath_pci_read_cachesize(struct ath_common *common, int *csz)
 {
-	struct ath_softc *sc = common->priv;
+	struct ath_softc *sc = (struct ath_softc *) common->priv;
 	u8 u8tmp;
 
 	pci_read_config_byte(to_pci_dev(sc->dev), PCI_CACHE_LINE_SIZE, &u8tmp);
@@ -797,19 +799,19 @@ static void ath_pci_read_cachesize(struct ath_common *common, int *csz)
 
 static bool ath_pci_eeprom_read(struct ath_common *common, u32 off, u16 *data)
 {
-	struct ath_hw *ah = common->ah;
+	struct ath_hw *ah = (struct ath_hw *) common->ah;
 
 	common->ops->read(ah, AR5416_EEPROM_OFFSET + (off << AR5416_EEPROM_S));
 
 	if (!ath9k_hw_wait(ah,
-				AR_EEPROM_STATUS_DATA(ah),
+				AR_EEPROM_STATUS_DATA,
 				AR_EEPROM_STATUS_DATA_BUSY |
 				AR_EEPROM_STATUS_DATA_PROT_ACCESS, 0,
 				AH_WAIT_TIMEOUT)) {
 		return false;
 	}
 
-	*data = MS(common->ops->read(ah, AR_EEPROM_STATUS_DATA(ah)),
+	*data = MS(common->ops->read(ah, AR_EEPROM_STATUS_DATA),
 			AR_EEPROM_STATUS_DATA_VAL);
 
 	return true;
@@ -818,7 +820,7 @@ static bool ath_pci_eeprom_read(struct ath_common *common, u32 off, u16 *data)
 /* Need to be called after we discover btcoex capabilities */
 static void ath_pci_aspm_init(struct ath_common *common)
 {
-	struct ath_softc *sc = common->priv;
+	struct ath_softc *sc = (struct ath_softc *) common->priv;
 	struct ath_hw *ah = sc->sc_ah;
 	struct pci_dev *pdev = to_pci_dev(sc->dev);
 	struct pci_dev *parent;
@@ -894,9 +896,15 @@ static int ath_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (pcim_enable_device(pdev))
 		return -EIO;
 
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	ret =  pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (ret) {
 		pr_err("32-bit DMA not available\n");
+		return ret;
+	}
+
+	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
+	if (ret) {
+		pr_err("32-bit DMA consistent DMA enable failed\n");
 		return ret;
 	}
 
@@ -1029,7 +1037,7 @@ static int ath_pci_suspend(struct device *device)
 	 */
 	ath9k_stop_btcoex(sc);
 	ath9k_hw_disable(sc->sc_ah);
-	timer_delete_sync(&sc->sleep_timer);
+	del_timer_sync(&sc->sleep_timer);
 	ath9k_hw_setpower(sc->sc_ah, ATH9K_PM_FULL_SLEEP);
 
 	return 0;

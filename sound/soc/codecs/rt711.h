@@ -15,6 +15,7 @@ struct  rt711_priv {
 	struct regmap *sdw_regmap;
 	struct snd_soc_component *component;
 	struct sdw_slave *slave;
+	enum sdw_slave_status status;
 	struct sdw_bus_params params;
 	bool hw_init;
 	bool first_hw_init;
@@ -24,8 +25,10 @@ struct  rt711_priv {
 	struct work_struct calibration_work;
 	struct mutex calibrate_mutex; /* for headset calibration */
 	int jack_type, jd_src;
-	struct mutex disable_irq_lock; /* imp-def irq lock protection */
-	bool disable_irq;
+};
+
+struct sdw_stream_data {
+	struct sdw_stream_runtime *sdw_stream;
 };
 
 /* NID */

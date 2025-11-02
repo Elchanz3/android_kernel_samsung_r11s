@@ -30,16 +30,16 @@
 #include "util.h"
 #include "trace_gfs2.h"
 
-static void gfs2_aspace_write_folio(struct folio *folio,
-		struct writeback_control *wbc)
+static int gfs2_aspace_writepage(struct page *page, struct writeback_control *wbc)
 {
 	struct buffer_head *bh, *head;
 	int nr_underway = 0;
-	blk_opf_t write_flags = REQ_META | REQ_PRIO | wbc_to_write_flags(wbc);
+	int write_flags = REQ_META | REQ_PRIO | wbc_to_write_flags(wbc);
 
-	BUG_ON(!folio_test_locked(folio));
+	BUG_ON(!PageLocked(page));
+	BUG_ON(!page_has_buffers(page));
 
-	head = folio_buffers(folio);
+	head = page_buffers(page);
 	bh = head;
 
 	do {
@@ -55,7 +55,7 @@ static void gfs2_aspace_write_folio(struct folio *folio,
 		if (wbc->sync_mode != WB_SYNC_NONE) {
 			lock_buffer(bh);
 		} else if (!trylock_buffer(bh)) {
-			folio_redirty_for_writepage(wbc, folio);
+			redirty_page_for_writepage(wbc, page);
 			continue;
 		}
 		if (test_clear_buffer_dirty(bh)) {
@@ -66,52 +66,36 @@ static void gfs2_aspace_write_folio(struct folio *folio,
 	} while ((bh = bh->b_this_page) != head);
 
 	/*
-	 * The folio and its buffers are protected from truncation by
-	 * the writeback flag, so we can drop the bh refcounts early.
+	 * The page and its buffers are protected by PageWriteback(), so we can
+	 * drop the bh refcounts early.
 	 */
-	BUG_ON(folio_test_writeback(folio));
-	folio_start_writeback(folio);
+	BUG_ON(PageWriteback(page));
+	set_page_writeback(page);
 
 	do {
 		struct buffer_head *next = bh->b_this_page;
 		if (buffer_async_write(bh)) {
-			submit_bh(REQ_OP_WRITE | write_flags, bh);
+			submit_bh(REQ_OP_WRITE, write_flags, bh);
 			nr_underway++;
 		}
 		bh = next;
 	} while (bh != head);
-	folio_unlock(folio);
+	unlock_page(page);
 
 	if (nr_underway == 0)
-		folio_end_writeback(folio);
-}
+		end_page_writeback(page);
 
-static int gfs2_aspace_writepages(struct address_space *mapping,
-		struct writeback_control *wbc)
-{
-	struct folio *folio = NULL;
-	int error;
-
-	while ((folio = writeback_iter(mapping, wbc, folio, &error)))
-		gfs2_aspace_write_folio(folio, wbc);
-
-	return error;
+	return 0;
 }
 
 const struct address_space_operations gfs2_meta_aops = {
-	.dirty_folio	= block_dirty_folio,
-	.invalidate_folio = block_invalidate_folio,
-	.writepages = gfs2_aspace_writepages,
-	.release_folio = gfs2_release_folio,
-	.migrate_folio = buffer_migrate_folio_norefs,
+	.writepage = gfs2_aspace_writepage,
+	.releasepage = gfs2_releasepage,
 };
 
 const struct address_space_operations gfs2_rgrp_aops = {
-	.dirty_folio	= block_dirty_folio,
-	.invalidate_folio = block_invalidate_folio,
-	.writepages = gfs2_aspace_writepages,
-	.release_folio = gfs2_release_folio,
-	.migrate_folio = buffer_migrate_folio_norefs,
+	.writepage = gfs2_aspace_writepage,
+	.releasepage = gfs2_releasepage,
 };
 
 /**
@@ -127,45 +111,46 @@ struct buffer_head *gfs2_getbuf(struct gfs2_glock *gl, u64 blkno, int create)
 {
 	struct address_space *mapping = gfs2_glock2aspace(gl);
 	struct gfs2_sbd *sdp = gl->gl_name.ln_sbd;
-	struct folio *folio;
+	struct page *page;
 	struct buffer_head *bh;
 	unsigned int shift;
 	unsigned long index;
 	unsigned int bufnum;
 
 	if (mapping == NULL)
-		mapping = gfs2_aspace(sdp);
+		mapping = &sdp->sd_aspace;
 
 	shift = PAGE_SHIFT - sdp->sd_sb.sb_bsize_shift;
 	index = blkno >> shift;             /* convert block to page */
 	bufnum = blkno - (index << shift);  /* block buf index within page */
 
 	if (create) {
-		folio = __filemap_get_folio(mapping, index,
-				FGP_LOCK | FGP_ACCESSED | FGP_CREAT,
-				mapping_gfp_mask(mapping) | __GFP_NOFAIL);
-		bh = folio_buffers(folio);
-		if (!bh)
-			bh = create_empty_buffers(folio,
-				sdp->sd_sb.sb_bsize, 0);
+		for (;;) {
+			page = grab_cache_page(mapping, index);
+			if (page)
+				break;
+			yield();
+		}
 	} else {
-		folio = __filemap_get_folio(mapping, index,
-				FGP_LOCK | FGP_ACCESSED, 0);
-		if (IS_ERR(folio))
+		page = find_get_page_flags(mapping, index,
+						FGP_LOCK|FGP_ACCESSED);
+		if (!page)
 			return NULL;
-		bh = folio_buffers(folio);
 	}
 
-	if (!bh)
-		goto out_unlock;
+	if (!page_has_buffers(page))
+		create_empty_buffers(page, sdp->sd_sb.sb_bsize, 0);
 
-	bh = get_nth_bh(bh, bufnum);
+	/* Locate header for our buffer within our page */
+	for (bh = page_buffers(page); bufnum--; bh = bh->b_this_page)
+		/* Do nothing */;
+	get_bh(bh);
+
 	if (!buffer_mapped(bh))
 		map_bh(bh, sdp->sd_vfs, blkno);
 
-out_unlock:
-	folio_unlock(folio);
-	folio_put(folio);
+	unlock_page(page);
+	put_page(page);
 
 	return bh;
 }
@@ -200,14 +185,15 @@ struct buffer_head *gfs2_meta_new(struct gfs2_glock *gl, u64 blkno)
 
 static void gfs2_meta_read_endio(struct bio *bio)
 {
-	struct folio_iter fi;
+	struct bio_vec *bvec;
+	struct bvec_iter_all iter_all;
 
-	bio_for_each_folio_all(fi, bio) {
-		struct folio *folio = fi.folio;
-		struct buffer_head *bh = folio_buffers(folio);
-		size_t len = fi.length;
+	bio_for_each_segment_all(bvec, bio, iter_all) {
+		struct page *page = bvec->bv_page;
+		struct buffer_head *bh = page_buffers(page);
+		unsigned int len = bvec->bv_len;
 
-		while (bh_offset(bh) < fi.offset)
+		while (bh_offset(bh) < bvec->bv_offset)
 			bh = bh->b_this_page;
 		do {
 			struct buffer_head *next = bh->b_this_page;
@@ -223,17 +209,19 @@ static void gfs2_meta_read_endio(struct bio *bio)
  * Submit several consecutive buffer head I/O requests as a single bio I/O
  * request.  (See submit_bh_wbc.)
  */
-static void gfs2_submit_bhs(blk_opf_t opf, struct buffer_head *bhs[], int num)
+static void gfs2_submit_bhs(int op, int op_flags, struct buffer_head *bhs[],
+			    int num)
 {
 	while (num > 0) {
 		struct buffer_head *bh = *bhs;
 		struct bio *bio;
 
-		bio = bio_alloc(bh->b_bdev, num, opf, GFP_NOIO);
-		bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> SECTOR_SHIFT);
+		bio = bio_alloc(GFP_NOIO, num);
+		bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
+		bio_set_dev(bio, bh->b_bdev);
 		while (num > 0) {
 			bh = *bhs;
-			if (!bio_add_folio(bio, bh->b_folio, bh->b_size, bh_offset(bh))) {
+			if (!bio_add_page(bio, bh->b_page, bh->b_size, bh_offset(bh))) {
 				BUG_ON(bio->bi_iter.bi_size == 0);
 				break;
 			}
@@ -241,6 +229,7 @@ static void gfs2_submit_bhs(blk_opf_t opf, struct buffer_head *bhs[], int num)
 			num--;
 		}
 		bio->bi_end_io = gfs2_meta_read_endio;
+		bio_set_op_attrs(bio, op, op_flags);
 		submit_bio(bio);
 	}
 }
@@ -250,7 +239,6 @@ static void gfs2_submit_bhs(blk_opf_t opf, struct buffer_head *bhs[], int num)
  * @gl: The glock covering the block
  * @blkno: The block number
  * @flags: flags
- * @rahead: Do read-ahead
  * @bhp: the place where the buffer is returned (NULL on failure)
  *
  * Returns: errno
@@ -263,8 +251,8 @@ int gfs2_meta_read(struct gfs2_glock *gl, u64 blkno, int flags,
 	struct buffer_head *bh, *bhs[2];
 	int num = 0;
 
-	if (gfs2_withdrawing_or_withdrawn(sdp) &&
-	    !gfs2_withdraw_in_prog(sdp)) {
+	if (unlikely(gfs2_withdrawn(sdp)) &&
+	    (!sdp->sd_jdesc || gl != sdp->sd_jinode_gl)) {
 		*bhp = NULL;
 		return -EIO;
 	}
@@ -294,7 +282,7 @@ int gfs2_meta_read(struct gfs2_glock *gl, u64 blkno, int flags,
 		}
 	}
 
-	gfs2_submit_bhs(REQ_OP_READ | REQ_META | REQ_PRIO, bhs, num);
+	gfs2_submit_bhs(REQ_OP_READ, REQ_META | REQ_PRIO, bhs, num);
 	if (!(flags & DIO_WAIT))
 		return 0;
 
@@ -322,8 +310,7 @@ int gfs2_meta_read(struct gfs2_glock *gl, u64 blkno, int flags,
 
 int gfs2_meta_wait(struct gfs2_sbd *sdp, struct buffer_head *bh)
 {
-	if (gfs2_withdrawing_or_withdrawn(sdp) &&
-	    !gfs2_withdraw_in_prog(sdp))
+	if (unlikely(gfs2_withdrawn(sdp)))
 		return -EIO;
 
 	wait_on_buffer(bh);
@@ -334,8 +321,7 @@ int gfs2_meta_wait(struct gfs2_sbd *sdp, struct buffer_head *bh)
 			gfs2_io_error_bh_wd(sdp, bh);
 		return -EIO;
 	}
-	if (gfs2_withdrawing_or_withdrawn(sdp) &&
-	    !gfs2_withdraw_in_prog(sdp))
+	if (unlikely(gfs2_withdrawn(sdp)))
 		return -EIO;
 
 	return 0;
@@ -343,7 +329,7 @@ int gfs2_meta_wait(struct gfs2_sbd *sdp, struct buffer_head *bh)
 
 void gfs2_remove_from_journal(struct buffer_head *bh, int meta)
 {
-	struct address_space *mapping = bh->b_folio->mapping;
+	struct address_space *mapping = bh->b_page->mapping;
 	struct gfs2_sbd *sdp = gfs2_mapping2sbd(mapping);
 	struct gfs2_bufdata *bd = bh->b_private;
 	struct gfs2_trans *tr = current->journal_info;
@@ -414,20 +400,26 @@ static struct buffer_head *gfs2_getjdatabuf(struct gfs2_inode *ip, u64 blkno)
 {
 	struct address_space *mapping = ip->i_inode.i_mapping;
 	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
-	struct folio *folio;
+	struct page *page;
 	struct buffer_head *bh;
 	unsigned int shift = PAGE_SHIFT - sdp->sd_sb.sb_bsize_shift;
 	unsigned long index = blkno >> shift; /* convert block to page */
 	unsigned int bufnum = blkno - (index << shift);
 
-	folio = __filemap_get_folio(mapping, index, FGP_LOCK | FGP_ACCESSED, 0);
-	if (IS_ERR(folio))
+	page = find_get_page_flags(mapping, index, FGP_LOCK|FGP_ACCESSED);
+	if (!page)
 		return NULL;
-	bh = folio_buffers(folio);
-	if (bh)
-		bh = get_nth_bh(bh, bufnum);
-	folio_unlock(folio);
-	folio_put(folio);
+	if (!page_has_buffers(page)) {
+		unlock_page(page);
+		put_page(page);
+		return NULL;
+	}
+	/* Locate header for our buffer within our page */
+	for (bh = page_buffers(page); bufnum--; bh = bh->b_this_page)
+		/* Do nothing */;
+	get_bh(bh);
+	unlock_page(page);
+	put_page(page);
 	return bh;
 }
 
@@ -444,10 +436,6 @@ void gfs2_journal_wipe(struct gfs2_inode *ip, u64 bstart, u32 blen)
 	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
 	struct buffer_head *bh;
 	int ty;
-
-	/* This can only happen during incomplete inode creation. */
-	if (!ip->i_gl)
-		return;
 
 	gfs2_ail1_wipe(sdp, bstart, blen);
 	while (blen) {
@@ -474,22 +462,23 @@ void gfs2_journal_wipe(struct gfs2_inode *ip, u64 bstart, u32 blen)
 }
 
 /**
- * gfs2_meta_buffer - Get a metadata buffer
+ * gfs2_meta_indirect_buffer - Get a metadata buffer
  * @ip: The GFS2 inode
- * @mtype: The block type (GFS2_METATYPE_*)
+ * @height: The level of this buf in the metadata (indir addr) tree (if any)
  * @num: The block number (device relative) of the buffer
  * @bhp: the buffer is returned here
  *
  * Returns: errno
  */
 
-int gfs2_meta_buffer(struct gfs2_inode *ip, u32 mtype, u64 num,
-		     struct buffer_head **bhp)
+int gfs2_meta_indirect_buffer(struct gfs2_inode *ip, int height, u64 num,
+			      struct buffer_head **bhp)
 {
 	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
 	struct gfs2_glock *gl = ip->i_gl;
 	struct buffer_head *bh;
 	int ret = 0;
+	u32 mtype = height ? GFS2_METATYPE_IN : GFS2_METATYPE_DI;
 	int rahead = 0;
 
 	if (num == ip->i_no_addr)
@@ -532,7 +521,8 @@ struct buffer_head *gfs2_meta_ra(struct gfs2_glock *gl, u64 dblock, u32 extlen)
 
 	if (buffer_uptodate(first_bh))
 		goto out;
-	bh_read_nowait(first_bh, REQ_META | REQ_PRIO);
+	if (!buffer_locked(first_bh))
+		ll_rw_block(REQ_OP_READ, REQ_META | REQ_PRIO, 1, &first_bh);
 
 	dblock++;
 	extlen--;
@@ -540,7 +530,10 @@ struct buffer_head *gfs2_meta_ra(struct gfs2_glock *gl, u64 dblock, u32 extlen)
 	while (extlen) {
 		bh = gfs2_getbuf(gl, dblock, CREATE);
 
-		bh_readahead(bh, REQ_RAHEAD | REQ_META | REQ_PRIO);
+		if (!buffer_uptodate(bh) && !buffer_locked(bh))
+			ll_rw_block(REQ_OP_READ,
+				    REQ_RAHEAD | REQ_META | REQ_PRIO,
+				    1, &bh);
 		brelse(bh);
 		dblock++;
 		extlen--;

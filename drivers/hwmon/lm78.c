@@ -117,7 +117,7 @@ struct lm78_data {
 	int isa_addr;
 
 	struct mutex update_lock;
-	bool valid;		/* true if following fields are valid */
+	char valid;		/* !=0 if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 
 	u8 in[7];		/* Register value */
@@ -617,7 +617,7 @@ static int lm78_i2c_detect(struct i2c_client *client,
 	if (isa)
 		mutex_unlock(&isa->update_lock);
 
-	strscpy(info->type, client_name, I2C_NAME_SIZE);
+	strlcpy(info->type, client_name, I2C_NAME_SIZE);
 
 	return 0;
 
@@ -626,6 +626,8 @@ static int lm78_i2c_detect(struct i2c_client *client,
 		mutex_unlock(&isa->update_lock);
 	return -ENODEV;
 }
+
+static const struct i2c_device_id lm78_i2c_id[];
 
 static int lm78_i2c_probe(struct i2c_client *client)
 {
@@ -638,7 +640,7 @@ static int lm78_i2c_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	data->client = client;
-	data->type = (uintptr_t)i2c_get_match_data(client);
+	data->type = i2c_match_id(lm78_i2c_id, client)->driver_data;
 
 	/* Initialize the LM78 chip */
 	lm78_init_device(data);
@@ -660,7 +662,7 @@ static struct i2c_driver lm78_driver = {
 	.driver = {
 		.name	= "lm78",
 	},
-	.probe		= lm78_i2c_probe,
+	.probe_new	= lm78_i2c_probe,
 	.id_table	= lm78_i2c_id,
 	.detect		= lm78_i2c_detect,
 	.address_list	= normal_i2c,
@@ -770,7 +772,7 @@ static struct lm78_data *lm78_update_device(struct device *dev)
 		data->alarms = lm78_read_value(data, LM78_REG_ALARM1) +
 		    (lm78_read_value(data, LM78_REG_ALARM2) << 8);
 		data->last_updated = jiffies;
-		data->valid = true;
+		data->valid = 1;
 
 		data->fan_div[2] = 1;
 	}

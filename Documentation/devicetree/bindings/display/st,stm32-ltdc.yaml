@@ -7,15 +7,12 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: STMicroelectronics STM32 lcd-tft display controller
 
 maintainers:
-  - Philippe Cornu <philippe.cornu@foss.st.com>
-  - Yannick Fertre <yannick.fertre@foss.st.com>
+  - Philippe Cornu <philippe.cornu@st.com>
+  - Yannick Fertre <yannick.fertre@st.com>
 
 properties:
   compatible:
-    enum:
-      - st,stm32-ltdc
-      - st,stm32mp251-ltdc
-      - st,stm32mp255-ltdc
+    const: st,stm32-ltdc
 
   reg:
     maxItems: 1
@@ -25,33 +22,28 @@ properties:
       - description: events interrupt line.
       - description: errors interrupt line.
     minItems: 1
+    maxItems: 2
 
   clocks:
-    minItems: 1
-    maxItems: 4
+    maxItems: 1
 
   clock-names:
     items:
       - const: lcd
-      - const: bus
-      - const: ref
-      - const: lvds
-    minItems: 1
 
   resets:
     maxItems: 1
 
-  access-controllers:
-    maxItems: 1
-
   port:
-    $ref: /schemas/graph.yaml#/properties/port
-    description: |
-      Video port for DPI RGB output.
+    type: object
+    description:
+      "Video port for DPI RGB output.
       ltdc has one video port with up to 2 endpoints:
       - for external dpi rgb panel or bridge, using gpios.
       - for internal dpi input of the MIPI DSI host controller.
       Note: These 2 endpoints cannot be activated simultaneously.
+      Please refer to the bindings defined in
+      Documentation/devicetree/bindings/media/video-interfaces.txt."
 
 required:
   - compatible
@@ -61,46 +53,6 @@ required:
   - clock-names
   - resets
   - port
-
-allOf:
-  - if:
-      properties:
-        compatible:
-          contains:
-            enum:
-              - st,stm32-ltdc
-    then:
-      properties:
-        clocks:
-          maxItems: 1
-        clock-names:
-          maxItems: 1
-  - if:
-      properties:
-        compatible:
-          contains:
-            enum:
-              - st,stm32mp251-ltdc
-    then:
-      properties:
-        clocks:
-          minItems: 2
-          maxItems: 2
-        clock-names:
-          minItems: 2
-          maxItems: 2
-  - if:
-      properties:
-        compatible:
-          contains:
-            enum:
-              - st,stm32mp255-ltdc
-    then:
-      properties:
-        clocks:
-          minItems: 4
-        clock-names:
-          minItems: 4
 
 additionalProperties: false
 
@@ -126,3 +78,4 @@ examples:
     };
 
 ...
+

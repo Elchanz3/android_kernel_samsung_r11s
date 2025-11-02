@@ -13,6 +13,7 @@
 #include <linux/irqchip.h>
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
+#include <linux/of_platform.h>
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/bitops.h>
@@ -41,9 +42,11 @@ static inline u32 ab_irqctl_readreg(struct irq_chip_generic *gc, u32 reg)
 static int tb10x_irq_set_type(struct irq_data *data, unsigned int flow_type)
 {
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(data);
-	uint32_t mod, pol, im = data->mask;
+	uint32_t im, mod, pol;
 
-	guard(raw_spinlock)(&gc->lock);
+	im = data->mask;
+
+	irq_gc_lock(gc);
 
 	mod = ab_irqctl_readreg(gc, AB_IRQCTL_SRC_MODE) | im;
 	pol = ab_irqctl_readreg(gc, AB_IRQCTL_SRC_POLARITY) | im;
@@ -57,7 +60,6 @@ static int tb10x_irq_set_type(struct irq_data *data, unsigned int flow_type)
 		break;
 	case IRQ_TYPE_NONE:
 		flow_type = IRQ_TYPE_LEVEL_LOW;
-		fallthrough;
 	case IRQ_TYPE_LEVEL_LOW:
 		mod ^= im;
 		pol ^= im;
@@ -65,7 +67,9 @@ static int tb10x_irq_set_type(struct irq_data *data, unsigned int flow_type)
 	case IRQ_TYPE_EDGE_RISING:
 		break;
 	default:
-		pr_err("%s: Cannot assign multiple trigger modes to IRQ %d.\n",	__func__, data->irq);
+		irq_gc_unlock(gc);
+		pr_err("%s: Cannot assign multiple trigger modes to IRQ %d.\n",
+			__func__, data->irq);
 		return -EBADR;
 	}
 
@@ -75,6 +79,9 @@ static int tb10x_irq_set_type(struct irq_data *data, unsigned int flow_type)
 	ab_irqctl_writereg(gc, AB_IRQCTL_SRC_MODE, mod);
 	ab_irqctl_writereg(gc, AB_IRQCTL_SRC_POLARITY, pol);
 	ab_irqctl_writereg(gc, AB_IRQCTL_INT_STATUS, im);
+
+	irq_gc_unlock(gc);
+
 	return IRQ_SET_MASK_OK;
 }
 
@@ -83,7 +90,7 @@ static void tb10x_irq_cascade(struct irq_desc *desc)
 	struct irq_domain *domain = irq_desc_get_handler_data(desc);
 	unsigned int irq = irq_desc_get_irq(desc);
 
-	generic_handle_domain_irq(domain, irq);
+	generic_handle_irq(irq_find_mapping(domain, irq));
 }
 
 static int __init of_tb10x_init_irq(struct device_node *ictl,
@@ -114,13 +121,13 @@ static int __init of_tb10x_init_irq(struct device_node *ictl,
 		goto ioremap_fail;
 	}
 
-	domain = irq_domain_create_linear(of_fwnode_handle(ictl), AB_IRQCTL_MAXIRQ,
-					  &irq_generic_chip_ops, NULL);
+	domain = irq_domain_add_linear(ictl, AB_IRQCTL_MAXIRQ,
+					&irq_generic_chip_ops, NULL);
 	if (!domain) {
 		ret = -ENOMEM;
 		pr_err("%pOFn: Could not register interrupt domain.\n",
 			ictl);
-		goto irq_domain_create_fail;
+		goto irq_domain_add_fail;
 	}
 
 	ret = irq_alloc_domain_generic_chips(domain, AB_IRQCTL_MAXIRQ,
@@ -143,6 +150,7 @@ static int __init of_tb10x_init_irq(struct device_node *ictl,
 	gc->chip_types[0].regs.mask          = AB_IRQCTL_INT_ENABLE;
 
 	gc->chip_types[1].type               = IRQ_TYPE_EDGE_BOTH;
+	gc->chip_types[1].chip.name          = gc->chip_types[0].chip.name;
 	gc->chip_types[1].chip.irq_ack       = irq_gc_ack_set_bit;
 	gc->chip_types[1].chip.irq_mask      = irq_gc_mask_clr_bit;
 	gc->chip_types[1].chip.irq_unmask    = irq_gc_mask_set_bit;
@@ -167,7 +175,7 @@ static int __init of_tb10x_init_irq(struct device_node *ictl,
 
 gc_alloc_fail:
 	irq_domain_remove(domain);
-irq_domain_create_fail:
+irq_domain_add_fail:
 	iounmap(reg_base);
 ioremap_fail:
 	release_mem_region(mem.start, resource_size(&mem));

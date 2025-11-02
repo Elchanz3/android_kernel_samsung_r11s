@@ -1,6 +1,6 @@
 .. SPDX-License-Identifier: GFDL-1.1-no-invariants-or-later
 
-.. _dvb_introduction:
+.. _dvb_introdution:
 
 ************
 Introduction
@@ -107,7 +107,7 @@ Audio and video decoder
       a Systems on a Chip (SoC) integrated circuit.
 
       It may also not be needed for certain usages (e.g. for data-only
-      uses like "internet over satellite").
+      uses like “internet over satellite”).
 
 :ref:`stb_components` shows a crude schematic of the control and data
 flow between those components.
@@ -125,7 +125,7 @@ demux, CA and IP-over-DVB networking. The video and audio devices
 control the MPEG2 decoder hardware, the frontend device the tuner and
 the Digital TV demodulator. The demux device gives you control over the PES
 and section filters of the hardware. If the hardware does not support
-filtering, these filters can be implemented in software. Finally, the CA
+filtering these filters can be implemented in software. Finally, the CA
 device controls all the conditional access capabilities of the hardware.
 It can depend on the individual security requirements of the platform,
 if and how many of the CA functions are made available to the
@@ -148,9 +148,9 @@ individual devices are called:
 
 -  ``/dev/dvb/adapterN/caM``,
 
-where ``N`` enumerates the Digital TV cards in a system starting from 0, and
+where ``N`` enumerates the Digital TV cards in a system starting from 0, and
 ``M`` enumerates the devices of each type within each adapter, starting
-from 0, too. We will omit the "``/dev/dvb/adapterN/``\ " in the further
+from 0, too. We will omit the “``/dev/dvb/adapterN/``\ ” in the further
 discussion of these devices.
 
 More details about the data structures and function calls of all the

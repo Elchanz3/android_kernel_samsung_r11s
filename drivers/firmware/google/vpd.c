@@ -56,7 +56,7 @@ static struct vpd_section ro_vpd;
 static struct vpd_section rw_vpd;
 
 static ssize_t vpd_attrib_read(struct file *filp, struct kobject *kobp,
-			       const struct bin_attribute *bin_attr, char *buf,
+			       struct bin_attribute *bin_attr, char *buf,
 			       loff_t pos, size_t count)
 {
 	struct vpd_attrib_info *info = bin_attr->private;
@@ -156,7 +156,7 @@ static void vpd_section_attrib_destroy(struct vpd_section *sec)
 }
 
 static ssize_t vpd_section_read(struct file *filp, struct kobject *kobp,
-				const struct bin_attribute *bin_attr, char *buf,
+				struct bin_attribute *bin_attr, char *buf,
 				loff_t pos, size_t count)
 {
 	struct vpd_section *sec = bin_attr->private;
@@ -298,19 +298,15 @@ static int vpd_probe(struct coreboot_device *dev)
 	return 0;
 }
 
-static void vpd_remove(struct coreboot_device *dev)
+static int vpd_remove(struct coreboot_device *dev)
 {
 	vpd_section_destroy(&ro_vpd);
 	vpd_section_destroy(&rw_vpd);
 
 	kobject_put(vpd_kobj);
-}
 
-static const struct coreboot_device_id vpd_ids[] = {
-	{ .tag = CB_TAG_VPD },
-	{ /* sentinel */ }
-};
-MODULE_DEVICE_TABLE(coreboot, vpd_ids);
+	return 0;
+}
 
 static struct coreboot_driver vpd_driver = {
 	.probe = vpd_probe,
@@ -318,10 +314,9 @@ static struct coreboot_driver vpd_driver = {
 	.drv = {
 		.name = "vpd",
 	},
-	.id_table = vpd_ids,
+	.tag = CB_TAG_VPD,
 };
 module_coreboot_driver(vpd_driver);
 
 MODULE_AUTHOR("Google, Inc.");
-MODULE_DESCRIPTION("Driver for exporting Vital Product Data content to sysfs");
 MODULE_LICENSE("GPL");

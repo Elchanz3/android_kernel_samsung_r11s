@@ -80,16 +80,16 @@ static void j1939_jsk_add(struct j1939_priv *priv, struct j1939_sock *jsk)
 	jsk->state |= J1939_SOCK_BOUND;
 	j1939_priv_get(priv);
 
-	write_lock_bh(&priv->j1939_socks_lock);
+	spin_lock_bh(&priv->j1939_socks_lock);
 	list_add_tail(&jsk->list, &priv->j1939_socks);
-	write_unlock_bh(&priv->j1939_socks_lock);
+	spin_unlock_bh(&priv->j1939_socks_lock);
 }
 
 static void j1939_jsk_del(struct j1939_priv *priv, struct j1939_sock *jsk)
 {
-	write_lock_bh(&priv->j1939_socks_lock);
+	spin_lock_bh(&priv->j1939_socks_lock);
 	list_del_init(&jsk->list);
-	write_unlock_bh(&priv->j1939_socks_lock);
+	spin_unlock_bh(&priv->j1939_socks_lock);
 
 	j1939_priv_put(priv);
 	jsk->state &= ~J1939_SOCK_BOUND;
@@ -189,7 +189,7 @@ activate_next:
 		int time_ms = 0;
 
 		if (err)
-			time_ms = 10 + get_random_u32_below(16);
+			time_ms = 10 + prandom_u32_max(16);
 
 		j1939_tp_schedule_txtimer(first, time_ms);
 	}
@@ -311,7 +311,6 @@ static void j1939_sk_recv_one(struct j1939_sock *jsk, struct sk_buff *oskb)
 {
 	const struct j1939_sk_buff_cb *oskcb = j1939_skb_to_cb(oskb);
 	struct j1939_sk_buff_cb *skcb;
-	enum skb_drop_reason reason;
 	struct sk_buff *skb;
 
 	if (oskb->sk == &jsk->sk)
@@ -332,8 +331,8 @@ static void j1939_sk_recv_one(struct j1939_sock *jsk, struct sk_buff *oskb)
 	if (skb->sk)
 		skcb->msg_flags |= MSG_DONTROUTE;
 
-	if (sock_queue_rcv_skb_reason(&jsk->sk, skb, &reason) < 0)
-		sk_skb_reason_drop(&jsk->sk, skb, reason);
+	if (sock_queue_rcv_skb(&jsk->sk, skb) < 0)
+		kfree_skb(skb);
 }
 
 bool j1939_sk_recv_match(struct j1939_priv *priv, struct j1939_sk_buff_cb *skcb)
@@ -341,13 +340,13 @@ bool j1939_sk_recv_match(struct j1939_priv *priv, struct j1939_sk_buff_cb *skcb)
 	struct j1939_sock *jsk;
 	bool match = false;
 
-	read_lock_bh(&priv->j1939_socks_lock);
+	spin_lock_bh(&priv->j1939_socks_lock);
 	list_for_each_entry(jsk, &priv->j1939_socks, list) {
 		match = j1939_sk_recv_match_one(jsk, skcb);
 		if (match)
 			break;
 	}
-	read_unlock_bh(&priv->j1939_socks_lock);
+	spin_unlock_bh(&priv->j1939_socks_lock);
 
 	return match;
 }
@@ -356,18 +355,18 @@ void j1939_sk_recv(struct j1939_priv *priv, struct sk_buff *skb)
 {
 	struct j1939_sock *jsk;
 
-	read_lock_bh(&priv->j1939_socks_lock);
+	spin_lock_bh(&priv->j1939_socks_lock);
 	list_for_each_entry(jsk, &priv->j1939_socks, list) {
 		j1939_sk_recv_one(jsk, skb);
 	}
-	read_unlock_bh(&priv->j1939_socks_lock);
+	spin_unlock_bh(&priv->j1939_socks_lock);
 }
 
 static void j1939_sk_sock_destruct(struct sock *sk)
 {
 	struct j1939_sock *jsk = j1939_sk(sk);
 
-	/* This function will be called by the generic networking code, when
+	/* This function will be call by the generic networking code, when then
 	 * the socket is ultimately closed (sk->sk_destruct).
 	 *
 	 * The race between
@@ -521,9 +520,6 @@ static int j1939_sk_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 	ret = j1939_local_ecu_get(priv, jsk->addr.src_name, jsk->addr.sa);
 	if (ret) {
 		j1939_netdev_stop(priv);
-		jsk->priv = NULL;
-		synchronize_rcu();
-		j1939_priv_put(priv);
 		goto out_release_sock;
 	}
 
@@ -659,7 +655,6 @@ static int j1939_sk_release(struct socket *sock)
 	sock->sk = NULL;
 
 	release_sock(sk);
-	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, -1);
 	sock_put(sk);
 
 	return 0;
@@ -824,7 +819,7 @@ static int j1939_sk_recvmsg(struct socket *sock, struct msghdr *msg,
 		return sock_recv_errqueue(sock->sk, msg, size, SOL_CAN_J1939,
 					  SCM_J1939_ERRQUEUE);
 
-	skb = skb_recv_datagram(sk, flags, &ret);
+	skb = skb_recv_datagram(sk, flags, 0, &ret);
 	if (!skb)
 		return ret;
 
@@ -863,7 +858,7 @@ static int j1939_sk_recvmsg(struct socket *sock, struct msghdr *msg,
 		paddr->can_addr.j1939.pgn = skcb->addr.pgn;
 	}
 
-	sock_recv_cmsgs(msg, sk, skb);
+	sock_recv_ts_and_drops(msg, sk, skb);
 	msg->msg_flags |= skcb->msg_flags;
 	skb_free_datagram(sk, skb);
 
@@ -903,7 +898,7 @@ static struct sk_buff *j1939_sk_alloc_skb(struct net_device *ndev,
 	skcb = j1939_skb_to_cb(skb);
 	memset(skcb, 0, sizeof(*skcb));
 	skcb->addr = jsk->addr;
-	skcb->priority = j1939_prio(READ_ONCE(sk->sk_priority));
+	skcb->priority = j1939_prio(sk->sk_priority);
 
 	if (msg->msg_name) {
 		struct sockaddr_can *addr = msg->msg_name;
@@ -927,33 +922,20 @@ failure:
 	return NULL;
 }
 
-static size_t j1939_sk_opt_stats_get_size(enum j1939_sk_errqueue_type type)
+static size_t j1939_sk_opt_stats_get_size(void)
 {
-	switch (type) {
-	case J1939_ERRQUEUE_RX_RTS:
-		return
-			nla_total_size(sizeof(u32)) + /* J1939_NLA_TOTAL_SIZE */
-			nla_total_size(sizeof(u32)) + /* J1939_NLA_PGN */
-			nla_total_size(sizeof(u64)) + /* J1939_NLA_SRC_NAME */
-			nla_total_size(sizeof(u64)) + /* J1939_NLA_DEST_NAME */
-			nla_total_size(sizeof(u8)) +  /* J1939_NLA_SRC_ADDR */
-			nla_total_size(sizeof(u8)) +  /* J1939_NLA_DEST_ADDR */
-			0;
-	default:
-		return
-			nla_total_size(sizeof(u32)) + /* J1939_NLA_BYTES_ACKED */
-			0;
-	}
+	return
+		nla_total_size(sizeof(u32)) + /* J1939_NLA_BYTES_ACKED */
+		0;
 }
 
 static struct sk_buff *
-j1939_sk_get_timestamping_opt_stats(struct j1939_session *session,
-				    enum j1939_sk_errqueue_type type)
+j1939_sk_get_timestamping_opt_stats(struct j1939_session *session)
 {
 	struct sk_buff *stats;
 	u32 size;
 
-	stats = alloc_skb(j1939_sk_opt_stats_get_size(type), GFP_ATOMIC);
+	stats = alloc_skb(j1939_sk_opt_stats_get_size(), GFP_ATOMIC);
 	if (!stats)
 		return NULL;
 
@@ -963,69 +945,32 @@ j1939_sk_get_timestamping_opt_stats(struct j1939_session *session,
 		size = min(session->pkt.tx_acked * 7,
 			   session->total_message_size);
 
-	switch (type) {
-	case J1939_ERRQUEUE_RX_RTS:
-		nla_put_u32(stats, J1939_NLA_TOTAL_SIZE,
-			    session->total_message_size);
-		nla_put_u32(stats, J1939_NLA_PGN,
-			    session->skcb.addr.pgn);
-		nla_put_u64_64bit(stats, J1939_NLA_SRC_NAME,
-				  session->skcb.addr.src_name, J1939_NLA_PAD);
-		nla_put_u64_64bit(stats, J1939_NLA_DEST_NAME,
-				  session->skcb.addr.dst_name, J1939_NLA_PAD);
-		nla_put_u8(stats, J1939_NLA_SRC_ADDR,
-			   session->skcb.addr.sa);
-		nla_put_u8(stats, J1939_NLA_DEST_ADDR,
-			   session->skcb.addr.da);
-		break;
-	default:
-		nla_put_u32(stats, J1939_NLA_BYTES_ACKED, size);
-	}
+	nla_put_u32(stats, J1939_NLA_BYTES_ACKED, size);
 
 	return stats;
 }
 
-static void __j1939_sk_errqueue(struct j1939_session *session, struct sock *sk,
-				enum j1939_sk_errqueue_type type)
+void j1939_sk_errqueue(struct j1939_session *session,
+		       enum j1939_sk_errqueue_type type)
 {
 	struct j1939_priv *priv = session->priv;
+	struct sock *sk = session->sk;
 	struct j1939_sock *jsk;
 	struct sock_exterr_skb *serr;
 	struct sk_buff *skb;
 	char *state = "UNK";
-	u32 tsflags;
 	int err;
+
+	/* currently we have no sk for the RX session */
+	if (!sk)
+		return;
 
 	jsk = j1939_sk(sk);
 
 	if (!(jsk->state & J1939_SOCK_ERRQUEUE))
 		return;
 
-	tsflags = READ_ONCE(sk->sk_tsflags);
-	switch (type) {
-	case J1939_ERRQUEUE_TX_ACK:
-		if (!(tsflags & SOF_TIMESTAMPING_TX_ACK))
-			return;
-		break;
-	case J1939_ERRQUEUE_TX_SCHED:
-		if (!(tsflags & SOF_TIMESTAMPING_TX_SCHED))
-			return;
-		break;
-	case J1939_ERRQUEUE_TX_ABORT:
-		break;
-	case J1939_ERRQUEUE_RX_RTS:
-		fallthrough;
-	case J1939_ERRQUEUE_RX_DPO:
-		fallthrough;
-	case J1939_ERRQUEUE_RX_ABORT:
-		if (!(tsflags & SOF_TIMESTAMPING_RX_SOFTWARE))
-			return;
-		break;
-	default:
-		netdev_err(priv->ndev, "Unknown errqueue type %i\n", type);
-	}
-
-	skb = j1939_sk_get_timestamping_opt_stats(session, type);
+	skb = j1939_sk_get_timestamping_opt_stats(session);
 	if (!skb)
 		return;
 
@@ -1036,46 +981,40 @@ static void __j1939_sk_errqueue(struct j1939_session *session, struct sock *sk,
 	serr = SKB_EXT_ERR(skb);
 	memset(serr, 0, sizeof(*serr));
 	switch (type) {
-	case J1939_ERRQUEUE_TX_ACK:
+	case J1939_ERRQUEUE_ACK:
+		if (!(sk->sk_tsflags & SOF_TIMESTAMPING_TX_ACK)) {
+			kfree_skb(skb);
+			return;
+		}
+
 		serr->ee.ee_errno = ENOMSG;
 		serr->ee.ee_origin = SO_EE_ORIGIN_TIMESTAMPING;
 		serr->ee.ee_info = SCM_TSTAMP_ACK;
-		state = "TX ACK";
+		state = "ACK";
 		break;
-	case J1939_ERRQUEUE_TX_SCHED:
+	case J1939_ERRQUEUE_SCHED:
+		if (!(sk->sk_tsflags & SOF_TIMESTAMPING_TX_SCHED)) {
+			kfree_skb(skb);
+			return;
+		}
+
 		serr->ee.ee_errno = ENOMSG;
 		serr->ee.ee_origin = SO_EE_ORIGIN_TIMESTAMPING;
 		serr->ee.ee_info = SCM_TSTAMP_SCHED;
-		state = "TX SCH";
+		state = "SCH";
 		break;
-	case J1939_ERRQUEUE_TX_ABORT:
+	case J1939_ERRQUEUE_ABORT:
 		serr->ee.ee_errno = session->err;
 		serr->ee.ee_origin = SO_EE_ORIGIN_LOCAL;
 		serr->ee.ee_info = J1939_EE_INFO_TX_ABORT;
-		state = "TX ABT";
+		state = "ABT";
 		break;
-	case J1939_ERRQUEUE_RX_RTS:
-		serr->ee.ee_errno = ENOMSG;
-		serr->ee.ee_origin = SO_EE_ORIGIN_LOCAL;
-		serr->ee.ee_info = J1939_EE_INFO_RX_RTS;
-		state = "RX RTS";
-		break;
-	case J1939_ERRQUEUE_RX_DPO:
-		serr->ee.ee_errno = ENOMSG;
-		serr->ee.ee_origin = SO_EE_ORIGIN_LOCAL;
-		serr->ee.ee_info = J1939_EE_INFO_RX_DPO;
-		state = "RX DPO";
-		break;
-	case J1939_ERRQUEUE_RX_ABORT:
-		serr->ee.ee_errno = session->err;
-		serr->ee.ee_origin = SO_EE_ORIGIN_LOCAL;
-		serr->ee.ee_info = J1939_EE_INFO_RX_ABORT;
-		state = "RX ABT";
-		break;
+	default:
+		netdev_err(priv->ndev, "Unknown errqueue type %i\n", type);
 	}
 
 	serr->opt_stats = true;
-	if (tsflags & SOF_TIMESTAMPING_OPT_ID)
+	if (sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID)
 		serr->ee.ee_data = session->tskey;
 
 	netdev_dbg(session->priv->ndev, "%s: 0x%p tskey: %i, state: %s\n",
@@ -1084,27 +1023,6 @@ static void __j1939_sk_errqueue(struct j1939_session *session, struct sock *sk,
 
 	if (err)
 		kfree_skb(skb);
-};
-
-void j1939_sk_errqueue(struct j1939_session *session,
-		       enum j1939_sk_errqueue_type type)
-{
-	struct j1939_priv *priv = session->priv;
-	struct j1939_sock *jsk;
-
-	if (session->sk) {
-		/* send TX notifications to the socket of origin  */
-		__j1939_sk_errqueue(session, session->sk, type);
-		return;
-	}
-
-	/* spread RX notifications to all sockets subscribed to this session */
-	read_lock_bh(&priv->j1939_socks_lock);
-	list_for_each_entry(jsk, &priv->j1939_socks, list) {
-		if (j1939_sk_recv_match_one(jsk, &session->skcb))
-			__j1939_sk_errqueue(session, &jsk->sk, type);
-	}
-	read_unlock_bh(&priv->j1939_socks_lock);
 };
 
 void j1939_sk_send_loop_abort(struct sock *sk, int err)
@@ -1116,7 +1034,7 @@ void j1939_sk_send_loop_abort(struct sock *sk, int err)
 
 	sk->sk_err = err;
 
-	sk_error_report(sk);
+	sk->sk_error_report(sk);
 }
 
 static int j1939_sk_send_loop(struct j1939_priv *priv,  struct sock *sk,
@@ -1137,7 +1055,7 @@ static int j1939_sk_send_loop(struct j1939_priv *priv,  struct sock *sk,
 
 	todo_size = size;
 
-	do {
+	while (todo_size) {
 		struct j1939_sk_buff_cb *skcb;
 
 		segment_size = min_t(size_t, J1939_MAX_TP_PACKET_SIZE,
@@ -1182,7 +1100,7 @@ static int j1939_sk_send_loop(struct j1939_priv *priv,  struct sock *sk,
 
 		todo_size -= segment_size;
 		session->total_queued_size += segment_size;
-	} while (todo_size);
+	}
 
 	switch (ret) {
 	case 0: /* OK */
@@ -1292,64 +1210,15 @@ void j1939_sk_netdev_event_netdown(struct j1939_priv *priv)
 	struct j1939_sock *jsk;
 	int error_code = ENETDOWN;
 
-	read_lock_bh(&priv->j1939_socks_lock);
+	spin_lock_bh(&priv->j1939_socks_lock);
 	list_for_each_entry(jsk, &priv->j1939_socks, list) {
 		jsk->sk.sk_err = error_code;
 		if (!sock_flag(&jsk->sk, SOCK_DEAD))
-			sk_error_report(&jsk->sk);
+			jsk->sk.sk_error_report(&jsk->sk);
 
 		j1939_sk_queue_drop_all(priv, jsk, error_code);
 	}
-	read_unlock_bh(&priv->j1939_socks_lock);
-}
-
-void j1939_sk_netdev_event_unregister(struct j1939_priv *priv)
-{
-	struct sock *sk;
-	struct j1939_sock *jsk;
-	bool wait_rcu = false;
-
-rescan: /* The caller is holding a ref on this "priv" via j1939_priv_get_by_ndev(). */
-	read_lock_bh(&priv->j1939_socks_lock);
-	list_for_each_entry(jsk, &priv->j1939_socks, list) {
-		/* Skip if j1939_jsk_add() is not called on this socket. */
-		if (!(jsk->state & J1939_SOCK_BOUND))
-			continue;
-		sk = &jsk->sk;
-		sock_hold(sk);
-		read_unlock_bh(&priv->j1939_socks_lock);
-		/* Check if j1939_jsk_del() is not yet called on this socket after holding
-		 * socket's lock, for both j1939_sk_bind() and j1939_sk_release() call
-		 * j1939_jsk_del() with socket's lock held.
-		 */
-		lock_sock(sk);
-		if (jsk->state & J1939_SOCK_BOUND) {
-			/* Neither j1939_sk_bind() nor j1939_sk_release() called j1939_jsk_del().
-			 * Make this socket no longer bound, by pretending as if j1939_sk_bind()
-			 * dropped old references but did not get new references.
-			 */
-			j1939_jsk_del(priv, jsk);
-			j1939_local_ecu_put(priv, jsk->addr.src_name, jsk->addr.sa);
-			j1939_netdev_stop(priv);
-			/* Call j1939_priv_put() now and prevent j1939_sk_sock_destruct() from
-			 * calling the corresponding j1939_priv_put().
-			 *
-			 * j1939_sk_sock_destruct() is supposed to call j1939_priv_put() after
-			 * an RCU grace period. But since the caller is holding a ref on this
-			 * "priv", we can defer synchronize_rcu() until immediately before
-			 * the caller calls j1939_priv_put().
-			 */
-			j1939_priv_put(priv);
-			jsk->priv = NULL;
-			wait_rcu = true;
-		}
-		release_sock(sk);
-		sock_put(sk);
-		goto rescan;
-	}
-	read_unlock_bh(&priv->j1939_socks_lock);
-	if (wait_rcu)
-		synchronize_rcu();
+	spin_unlock_bh(&priv->j1939_socks_lock);
 }
 
 static int j1939_sk_no_ioctlcmd(struct socket *sock, unsigned int cmd,
@@ -1376,6 +1245,7 @@ static const struct proto_ops j1939_ops = {
 	.sendmsg = j1939_sk_sendmsg,
 	.recvmsg = j1939_sk_recvmsg,
 	.mmap = sock_no_mmap,
+	.sendpage = sock_no_sendpage,
 };
 
 static struct proto j1939_proto __read_mostly = {

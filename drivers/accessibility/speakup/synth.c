@@ -137,14 +137,14 @@ EXPORT_SYMBOL_GPL(spk_do_catch_up_unicode);
 
 void spk_synth_flush(struct spk_synth *synth)
 {
-	synth->io_ops->flush_buffer(synth);
+	synth->io_ops->flush_buffer();
 	synth->io_ops->synth_out(synth, synth->clear);
 }
 EXPORT_SYMBOL_GPL(spk_synth_flush);
 
 unsigned char spk_synth_get_index(struct spk_synth *synth)
 {
-	return synth->io_ops->synth_in_nowait(synth);
+	return synth->io_ops->synth_in_nowait();
 }
 EXPORT_SYMBOL_GPL(spk_synth_get_index);
 
@@ -217,95 +217,10 @@ void synth_write(const char *_buf, size_t count)
 	synth_start();
 }
 
-/* Consume one utf-8 character from buf (that contains up to count bytes),
- * returns the unicode codepoint if valid, -1 otherwise.
- * In all cases, returns the number of consumed bytes in *consumed,
- * and the minimum number of bytes that would be needed for the next character
- * in *want.
- */
-s32 synth_utf8_get(const char *buf, size_t count, size_t *consumed, size_t *want)
-{
-	unsigned char c = buf[0];
-	int nbytes = 8 - fls(c ^ 0xff);
-	u32 value;
-	size_t i;
-
-	switch (nbytes) {
-	case 8: /* 0xff */
-	case 7: /* 0xfe */
-	case 1: /* 0x80 */
-		/* Invalid, drop */
-		*consumed = 1;
-		*want = 1;
-		return -1;
-
-	case 0:
-		/* ASCII, take as such */
-		*consumed = 1;
-		*want = 1;
-		return c;
-
-	default:
-		/* 2..6-byte UTF-8 */
-
-		if (count < nbytes) {
-			/* We don't have it all */
-			*consumed = 0;
-			*want = nbytes;
-			return -1;
-		}
-
-		/* First byte */
-		value = c & ((1u << (7 - nbytes)) - 1);
-
-		/* Other bytes */
-		for (i = 1; i < nbytes; i++) {
-			c = buf[i];
-			if ((c & 0xc0) != 0x80)	{
-				/* Invalid, drop the head */
-				*consumed = i;
-				*want = 1;
-				return -1;
-			}
-			value = (value << 6) | (c & 0x3f);
-		}
-
-		*consumed = nbytes;
-		*want = 1;
-		return value;
-	}
-}
-
-void synth_writeu(const char *buf, size_t count)
-{
-	size_t i, consumed, want;
-
-	/* Convert to u16 */
-	for (i = 0; i < count; i++) {
-		s32 value;
-
-		value = synth_utf8_get(buf + i, count - i, &consumed, &want);
-		if (value == -1) {
-			/* Invalid or incomplete */
-
-			if (want > count - i)
-				/* We don't have it all, stop */
-				count = i;
-
-			continue;
-		}
-
-		if (value < 0x10000)
-			synth_buffer_add(value);
-	}
-
-	synth_start();
-}
-
 void synth_printf(const char *fmt, ...)
 {
 	va_list args;
-	unsigned char buf[160];
+	unsigned char buf[160], *p;
 	int r;
 
 	va_start(args, fmt);
@@ -314,7 +229,10 @@ void synth_printf(const char *fmt, ...)
 	if (r > sizeof(buf) - 1)
 		r = sizeof(buf) - 1;
 
-	synth_writeu(buf, r);
+	p = buf;
+	while (r--)
+		synth_buffer_add(*p++);
+	synth_start();
 }
 EXPORT_SYMBOL_GPL(synth_printf);
 
@@ -432,7 +350,6 @@ struct var_t synth_time_vars[] = {
 	{ TRIGGER, .u.n = {NULL, 20, 10, 2000, 0, 0, NULL } },
 	{ JIFFY, .u.n = {NULL, 50, 20, 200, 0, 0, NULL } },
 	{ FULL, .u.n = {NULL, 400, 200, 60000, 0, 0, NULL } },
-	{ FLUSH, .u.n = {NULL, 4000, 10, 4000, 0, 0, NULL } },
 	V_LAST_VAR
 };
 
@@ -493,8 +410,6 @@ static int do_synth_init(struct spk_synth *in_synth)
 		synth_time_vars[2].u.n.default_val = synth->jiffies;
 	synth_time_vars[3].u.n.value =
 		synth_time_vars[3].u.n.default_val = synth->full;
-	synth_time_vars[4].u.n.value =
-		synth_time_vars[4].u.n.default_val = synth->flush_time;
 	synth_printf("%s", synth->init);
 	for (var = synth->vars;
 		(var->var_id >= 0) && (var->var_id < MAXVARS); var++)
@@ -521,13 +436,13 @@ void synth_release(void)
 	spin_lock_irqsave(&speakup_info.spinlock, flags);
 	pr_info("releasing synth %s\n", synth->name);
 	synth->alive = 0;
-	timer_delete(&thread_timer);
+	del_timer(&thread_timer);
 	spin_unlock_irqrestore(&speakup_info.spinlock, flags);
 	if (synth->attributes.name)
 		sysfs_remove_group(speakup_kobj, &synth->attributes);
 	for (var = synth->vars; var->var_id != MAXVARS; var++)
 		speakup_unregister_var(var->var_id);
-	synth->release(synth);
+	synth->release();
 	synth = NULL;
 }
 

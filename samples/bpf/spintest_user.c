@@ -3,26 +3,34 @@
 #include <unistd.h>
 #include <string.h>
 #include <assert.h>
+#include <sys/resource.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "trace_helpers.h"
 
 int main(int ac, char **argv)
 {
+	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
+	char filename[256], symbol[256];
 	struct bpf_object *obj = NULL;
 	struct bpf_link *links[20];
 	long key, next_key, value;
 	struct bpf_program *prog;
 	int map_fd, i, j = 0;
-	char filename[256];
+	const char *section;
 	struct ksym *sym;
+
+	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
+		perror("setrlimit(RLIMIT_MEMLOCK)");
+		return 1;
+	}
 
 	if (load_kallsyms()) {
 		printf("failed to process /proc/kallsyms\n");
 		return 2;
 	}
 
-	snprintf(filename, sizeof(filename), "%s.bpf.o", argv[0]);
+	snprintf(filename, sizeof(filename), "%s_kern.o", argv[0]);
 	obj = bpf_object__open_file(filename, NULL);
 	if (libbpf_get_error(obj)) {
 		fprintf(stderr, "ERROR: opening BPF object file failed\n");
@@ -43,13 +51,20 @@ int main(int ac, char **argv)
 	}
 
 	bpf_object__for_each_program(prog, obj) {
-		links[j] = bpf_program__attach(prog);
-		if (libbpf_get_error(links[j])) {
-			fprintf(stderr, "bpf_program__attach failed\n");
-			links[j] = NULL;
-			goto cleanup;
+		section = bpf_program__section_name(prog);
+		if (sscanf(section, "kprobe/%s", symbol) != 1)
+			continue;
+
+		/* Attach prog only when symbol exists */
+		if (ksym_get_addr(symbol)) {
+			links[j] = bpf_program__attach(prog);
+			if (libbpf_get_error(links[j])) {
+				fprintf(stderr, "bpf_program__attach failed\n");
+				links[j] = NULL;
+				goto cleanup;
+			}
+			j++;
 		}
-		j++;
 	}
 
 	for (i = 0; i < 5; i++) {

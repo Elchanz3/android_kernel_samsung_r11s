@@ -94,10 +94,9 @@ il4965_rx_queue_reset(struct il_priv *il, struct il_rx_queue *rxq)
 		/* In the reset function, these buffers may have been allocated
 		 * to an SKB, so we need to unmap and free potential storage */
 		if (rxq->pool[i].page != NULL) {
-			dma_unmap_page(&il->pci_dev->dev,
-				       rxq->pool[i].page_dma,
+			pci_unmap_page(il->pci_dev, rxq->pool[i].page_dma,
 				       PAGE_SIZE << il->hw_params.rx_page_order,
-				       DMA_FROM_DEVICE);
+				       PCI_DMA_FROMDEVICE);
 			__il_free_pages(il, rxq->pool[i].page);
 			rxq->pool[i].page = NULL;
 		}
@@ -343,10 +342,11 @@ il4965_rx_allocate(struct il_priv *il, gfp_t priority)
 		}
 
 		/* Get physical address of the RB */
-		page_dma = dma_map_page(&il->pci_dev->dev, page, 0,
-					PAGE_SIZE << il->hw_params.rx_page_order,
-					DMA_FROM_DEVICE);
-		if (unlikely(dma_mapping_error(&il->pci_dev->dev, page_dma))) {
+		page_dma =
+		    pci_map_page(il->pci_dev, page, 0,
+				 PAGE_SIZE << il->hw_params.rx_page_order,
+				 PCI_DMA_FROMDEVICE);
+		if (unlikely(pci_dma_mapping_error(il->pci_dev, page_dma))) {
 			__free_pages(page, il->hw_params.rx_page_order);
 			break;
 		}
@@ -355,9 +355,9 @@ il4965_rx_allocate(struct il_priv *il, gfp_t priority)
 
 		if (list_empty(&rxq->rx_used)) {
 			spin_unlock_irqrestore(&rxq->lock, flags);
-			dma_unmap_page(&il->pci_dev->dev, page_dma,
+			pci_unmap_page(il->pci_dev, page_dma,
 				       PAGE_SIZE << il->hw_params.rx_page_order,
-				       DMA_FROM_DEVICE);
+				       PCI_DMA_FROMDEVICE);
 			__free_pages(page, il->hw_params.rx_page_order);
 			return;
 		}
@@ -409,10 +409,9 @@ il4965_rx_queue_free(struct il_priv *il, struct il_rx_queue *rxq)
 	int i;
 	for (i = 0; i < RX_QUEUE_SIZE + RX_FREE_BUFFERS; i++) {
 		if (rxq->pool[i].page != NULL) {
-			dma_unmap_page(&il->pci_dev->dev,
-				       rxq->pool[i].page_dma,
+			pci_unmap_page(il->pci_dev, rxq->pool[i].page_dma,
 				       PAGE_SIZE << il->hw_params.rx_page_order,
-				       DMA_FROM_DEVICE);
+				       PCI_DMA_FROMDEVICE);
 			__il_free_pages(il, rxq->pool[i].page);
 			rxq->pool[i].page = NULL;
 		}
@@ -1382,7 +1381,7 @@ il4965_hdl_stats(struct il_priv *il, struct il_rx_buf *rxb)
 	 * we get a thermal update even if the uCode doesn't give us one
 	 */
 	mod_timer(&il->stats_periodic,
-		  jiffies + secs_to_jiffies(recalib_seconds));
+		  jiffies + msecs_to_jiffies(recalib_seconds * 1000));
 
 	if (unlikely(!test_bit(S_SCANNING, &il->status)) &&
 	    (pkt->hdr.cmd == N_STATS)) {
@@ -1575,11 +1574,8 @@ il4965_tx_cmd_build_rate(struct il_priv *il,
 	    || rate_idx > RATE_COUNT_LEGACY)
 		rate_idx = rate_lowest_index(&il->bands[info->band], sta);
 	/* For 5 GHZ band, remap mac80211 rate indices into driver indices */
-	if (info->band == NL80211_BAND_5GHZ) {
+	if (info->band == NL80211_BAND_5GHZ)
 		rate_idx += IL_FIRST_OFDM_RATE;
-		if (rate_idx > IL_LAST_OFDM_RATE)
-			rate_idx = IL_LAST_OFDM_RATE;
-	}
 	/* Get PLCP rate for tx_cmd->rate_n_flags */
 	rate_plcp = il_rates[rate_idx].plcp;
 	/* Zero out flags for this packet */
@@ -1772,7 +1768,7 @@ il4965_tx_skb(struct il_priv *il,
 	/* Set up first empty entry in queue's array of Tx/cmd buffers */
 	out_cmd = txq->cmd[q->write_ptr];
 	out_meta = &txq->meta[q->write_ptr];
-	tx_cmd = container_of(&out_cmd->cmd.tx, struct il_tx_cmd, __hdr);
+	tx_cmd = &out_cmd->cmd.tx;
 	memset(&out_cmd->hdr, 0, sizeof(out_cmd->hdr));
 	memset(tx_cmd, 0, sizeof(struct il_tx_cmd));
 
@@ -1819,18 +1815,20 @@ il4965_tx_skb(struct il_priv *il,
 
 	/* Physical address of this Tx command's header (not MAC header!),
 	 * within command buffer array. */
-	txcmd_phys = dma_map_single(&il->pci_dev->dev, &out_cmd->hdr, firstlen,
-				    DMA_BIDIRECTIONAL);
-	if (unlikely(dma_mapping_error(&il->pci_dev->dev, txcmd_phys)))
+	txcmd_phys =
+	    pci_map_single(il->pci_dev, &out_cmd->hdr, firstlen,
+			   PCI_DMA_BIDIRECTIONAL);
+	if (unlikely(pci_dma_mapping_error(il->pci_dev, txcmd_phys)))
 		goto drop_unlock;
 
 	/* Set up TFD's 2nd entry to point directly to remainder of skb,
 	 * if any (802.11 null frames have no payload). */
 	secondlen = skb->len - hdr_len;
 	if (secondlen > 0) {
-		phys_addr = dma_map_single(&il->pci_dev->dev, skb->data + hdr_len,
-					   secondlen, DMA_TO_DEVICE);
-		if (unlikely(dma_mapping_error(&il->pci_dev->dev, phys_addr)))
+		phys_addr =
+		    pci_map_single(il->pci_dev, skb->data + hdr_len, secondlen,
+				   PCI_DMA_TODEVICE);
+		if (unlikely(pci_dma_mapping_error(il->pci_dev, phys_addr)))
 			goto drop_unlock;
 	}
 
@@ -1855,8 +1853,8 @@ il4965_tx_skb(struct il_priv *il,
 	    offsetof(struct il_tx_cmd, scratch);
 
 	/* take back ownership of DMA buffer to enable update */
-	dma_sync_single_for_cpu(&il->pci_dev->dev, txcmd_phys, firstlen,
-				DMA_BIDIRECTIONAL);
+	pci_dma_sync_single_for_cpu(il->pci_dev, txcmd_phys, firstlen,
+				    PCI_DMA_BIDIRECTIONAL);
 	tx_cmd->dram_lsb_ptr = cpu_to_le32(scratch_phys);
 	tx_cmd->dram_msb_ptr = il_get_dma_hi_addr(scratch_phys);
 
@@ -1871,8 +1869,8 @@ il4965_tx_skb(struct il_priv *il,
 	if (info->flags & IEEE80211_TX_CTL_AMPDU)
 		il->ops->txq_update_byte_cnt_tbl(il, txq, le16_to_cpu(tx_cmd->len));
 
-	dma_sync_single_for_device(&il->pci_dev->dev, txcmd_phys, firstlen,
-				   DMA_BIDIRECTIONAL);
+	pci_dma_sync_single_for_device(il->pci_dev, txcmd_phys, firstlen,
+				       PCI_DMA_BIDIRECTIONAL);
 
 	/* Tell device the write idx *just past* this latest filled TFD */
 	q->write_ptr = il_queue_inc_wrap(q->write_ptr, q->n_bd);
@@ -2595,7 +2593,8 @@ out:
 	 */
 	if (ret != IL_INVALID_STATION &&
 	    (!(il->stations[ret].used & IL_STA_UCODE_ACTIVE) ||
-	      (il->stations[ret].used & IL_STA_UCODE_INPROGRESS))) {
+	     ((il->stations[ret].used & IL_STA_UCODE_ACTIVE) &&
+	      (il->stations[ret].used & IL_STA_UCODE_INPROGRESS)))) {
 		IL_ERR("Requested station info for sta %d before ready.\n",
 		       ret);
 		ret = IL_INVALID_STATION;
@@ -2814,10 +2813,8 @@ il4965_hdl_tx(struct il_priv *il, struct il_rx_buf *rxb)
 	spin_lock_irqsave(&il->sta_lock, flags);
 	if (txq->sched_retry) {
 		const u32 scd_ssn = il4965_get_scd_ssn(tx_resp);
-		struct il_ht_agg *agg;
-
-		if (WARN_ON(!qc))
-			goto out;
+		struct il_ht_agg *agg = NULL;
+		WARN_ON(!qc);
 
 		agg = &il->stations[sta_id].tid[tid].agg;
 
@@ -2833,7 +2830,9 @@ il4965_hdl_tx(struct il_priv *il, struct il_rx_buf *rxb)
 			D_TX_REPLY("Retry scheduler reclaim scd_ssn "
 				   "%d idx %d\n", scd_ssn, idx);
 			freed = il4965_tx_queue_reclaim(il, txq_id, idx);
-			il4965_free_tfds_in_queue(il, sta_id, tid, freed);
+			if (qc)
+				il4965_free_tfds_in_queue(il, sta_id, tid,
+							  freed);
 
 			if (il->mac80211_registered &&
 			    il_queue_space(&txq->q) > txq->q.low_mark &&
@@ -2863,7 +2862,6 @@ il4965_hdl_tx(struct il_priv *il, struct il_rx_buf *rxb)
 		    il_queue_space(&txq->q) > txq->q.low_mark)
 			il_wake_queue(il, txq);
 	}
-out:
 	if (qc && likely(sta_id != IL_INVALID_STATION))
 		il4965_txq_check_empty(il, sta_id, tid, txq_id);
 
@@ -3931,15 +3929,15 @@ il4965_hw_txq_free_tfd(struct il_priv *il, struct il_tx_queue *txq)
 
 	/* Unmap tx_cmd */
 	if (num_tbs)
-		dma_unmap_single(&dev->dev,
-				 dma_unmap_addr(&txq->meta[idx], mapping),
+		pci_unmap_single(dev, dma_unmap_addr(&txq->meta[idx], mapping),
 				 dma_unmap_len(&txq->meta[idx], len),
-				 DMA_BIDIRECTIONAL);
+				 PCI_DMA_BIDIRECTIONAL);
 
 	/* Unmap chunks, if any. */
 	for (i = 1; i < num_tbs; i++)
-		dma_unmap_single(&dev->dev, il4965_tfd_tb_get_addr(tfd, i),
-				 il4965_tfd_tb_get_len(tfd, i), DMA_TO_DEVICE);
+		pci_unmap_single(dev, il4965_tfd_tb_get_addr(tfd, i),
+				 il4965_tfd_tb_get_len(tfd, i),
+				 PCI_DMA_TODEVICE);
 
 	/* free SKB */
 	if (txq->skbs) {
@@ -4023,7 +4021,7 @@ il4965_hdl_alive(struct il_priv *il, struct il_rx_buf *rxb)
 
 	if (palive->ver_subtype == INITIALIZE_SUBTYPE) {
 		D_INFO("Initialization Alive received.\n");
-		memcpy(&il->card_alive_init, &pkt->u.raw,
+		memcpy(&il->card_alive_init, &pkt->u.alive_frame,
 		       sizeof(struct il_init_alive_resp));
 		pwork = &il->init_alive_start;
 	} else {
@@ -4054,7 +4052,7 @@ il4965_hdl_alive(struct il_priv *il, struct il_rx_buf *rxb)
 static void
 il4965_bg_stats_periodic(struct timer_list *t)
 {
-	struct il_priv *il = timer_container_of(il, t, stats_periodic);
+	struct il_priv *il = from_timer(il, t, stats_periodic);
 
 	if (test_bit(S_EXIT_PENDING, &il->status))
 		return;
@@ -4234,6 +4232,8 @@ il4965_rx_handle(struct il_priv *il)
 		fill_rx = 1;
 
 	while (i != r) {
+		int len;
+
 		rxb = rxq->queue[i];
 
 		/* If an RXB doesn't have a Rx queue slot associated with it,
@@ -4243,10 +4243,14 @@ il4965_rx_handle(struct il_priv *il)
 
 		rxq->queue[i] = NULL;
 
-		dma_unmap_page(&il->pci_dev->dev, rxb->page_dma,
+		pci_unmap_page(il->pci_dev, rxb->page_dma,
 			       PAGE_SIZE << il->hw_params.rx_page_order,
-			       DMA_FROM_DEVICE);
+			       PCI_DMA_FROMDEVICE);
 		pkt = rxb_addr(rxb);
+
+		len = le32_to_cpu(pkt->len_n_flags) & IL_RX_FRAME_SIZE_MSK;
+		len += sizeof(u32);	/* account for status word */
+
 		reclaim = il_need_reclaim(il, pkt);
 
 		/* Based on type of command response or notification,
@@ -4286,12 +4290,12 @@ il4965_rx_handle(struct il_priv *il)
 		spin_lock_irqsave(&rxq->lock, flags);
 		if (rxb->page != NULL) {
 			rxb->page_dma =
-			    dma_map_page(&il->pci_dev->dev, rxb->page, 0,
-					 PAGE_SIZE << il->hw_params.rx_page_order,
-					 DMA_FROM_DEVICE);
+			    pci_map_page(il->pci_dev, rxb->page, 0,
+					 PAGE_SIZE << il->hw_params.
+					 rx_page_order, PCI_DMA_FROMDEVICE);
 
-			if (unlikely(dma_mapping_error(&il->pci_dev->dev,
-						       rxb->page_dma))) {
+			if (unlikely(pci_dma_mapping_error(il->pci_dev,
+							   rxb->page_dma))) {
 				__il_free_pages(il, rxb->page);
 				rxb->page = NULL;
 				list_add_tail(&rxb->list, &rxq->rx_used);
@@ -5353,7 +5357,7 @@ __il4965_down(struct il_priv *il)
 
 	/* Stop TX queues watchdog. We need to have S_EXIT_PENDING bit set
 	 * to prevent rearm timer */
-	timer_delete_sync(&il->watchdog);
+	del_timer_sync(&il->watchdog);
 
 	il_clear_ucode_stations(il);
 
@@ -5823,7 +5827,7 @@ out:
 }
 
 void
-il4965_mac_stop(struct ieee80211_hw *hw, bool suspend)
+il4965_mac_stop(struct ieee80211_hw *hw)
 {
 	struct il_priv *il = hw->priv;
 
@@ -6119,7 +6123,7 @@ il4965_mac_channel_switch(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	if (il->ops->set_channel_switch(il, ch_switch)) {
 		clear_bit(S_CHANNEL_SWITCH_PENDING, &il->status);
 		il->switch_channel = 0;
-		ieee80211_chswitch_done(il->vif, false, 0);
+		ieee80211_chswitch_done(il->vif, false);
 	}
 
 out:
@@ -6246,7 +6250,7 @@ il4965_cancel_deferred_work(struct il_priv *il)
 
 	il_cancel_scan_deferred_work(il);
 
-	timer_delete_sync(&il->stats_periodic);
+	del_timer_sync(&il->stats_periodic);
 }
 
 static void
@@ -6304,12 +6308,7 @@ il4965_tx_queue_set_status(struct il_priv *il, struct il_tx_queue *txq,
 }
 
 static const struct ieee80211_ops il4965_mac_ops = {
-	.add_chanctx = ieee80211_emulate_add_chanctx,
-	.remove_chanctx = ieee80211_emulate_remove_chanctx,
-	.change_chanctx = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = il4965_mac_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = il4965_mac_start,
 	.stop = il4965_mac_stop,
 	.add_interface = il_mac_add_interface,
@@ -6519,9 +6518,14 @@ il4965_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_master(pdev);
 
-	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
+	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(36));
+	if (!err)
+		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(36));
 	if (err) {
-		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+		if (!err)
+			err =
+			    pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 		/* both attempts failed: */
 		if (err) {
 			IL_WARN("No suitable DMA available.\n");
@@ -6700,7 +6704,7 @@ il4965_pci_remove(struct pci_dev *pdev)
 	sysfs_remove_group(&pdev->dev.kobj, &il_attribute_group);
 
 	/* ieee80211_unregister_hw call wil cause il_mac_stop to
-	 * be called and il4965_down since we are removing the device
+	 * to be called and il4965_down since we are removing the device
 	 * we need to set S_EXIT_PENDING bit.
 	 */
 	set_bit(S_EXIT_PENDING, &il->status);

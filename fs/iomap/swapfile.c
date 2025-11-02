@@ -3,6 +3,9 @@
  * Copyright (C) 2018 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <darrick.wong@oracle.com>
  */
+#include <linux/module.h>
+#include <linux/compiler.h>
+#include <linux/fs.h>
 #include <linux/iomap.h>
 #include <linux/swap.h>
 
@@ -15,7 +18,6 @@ struct iomap_swapfile_info {
 	uint64_t highest_ppage;		/* highest physical addr seen (pages) */
 	unsigned long nr_pages;		/* number of pages collected */
 	int nr_extents;			/* extent count */
-	struct file *file;
 };
 
 /*
@@ -74,26 +76,18 @@ static int iomap_swapfile_add_extent(struct iomap_swapfile_info *isi)
 	return 0;
 }
 
-static int iomap_swapfile_fail(struct iomap_swapfile_info *isi, const char *str)
-{
-	char *buf, *p = ERR_PTR(-ENOMEM);
-
-	buf = kmalloc(PATH_MAX, GFP_KERNEL);
-	if (buf)
-		p = file_path(isi->file, buf, PATH_MAX);
-	pr_err("swapon: file %s %s\n", IS_ERR(p) ? "<unknown>" : p, str);
-	kfree(buf);
-	return -EINVAL;
-}
-
 /*
  * Accumulate iomaps for this swap file.  We have to accumulate iomaps because
  * swap only cares about contiguous page-aligned physical extents and makes no
  * distinction between written and unwritten extents.
  */
-static int iomap_swapfile_iter(struct iomap_iter *iter,
-		struct iomap *iomap, struct iomap_swapfile_info *isi)
+static loff_t iomap_swapfile_activate_actor(struct inode *inode, loff_t pos,
+		loff_t count, void *data, struct iomap *iomap,
+		struct iomap *srcmap)
 {
+	struct iomap_swapfile_info *isi = data;
+	int error;
+
 	switch (iomap->type) {
 	case IOMAP_MAPPED:
 	case IOMAP_UNWRITTEN:
@@ -101,20 +95,28 @@ static int iomap_swapfile_iter(struct iomap_iter *iter,
 		break;
 	case IOMAP_INLINE:
 		/* No inline data. */
-		return iomap_swapfile_fail(isi, "is inline");
+		pr_err("swapon: file is inline\n");
+		return -EINVAL;
 	default:
-		return iomap_swapfile_fail(isi, "has unallocated extents");
+		pr_err("swapon: file has unallocated extents\n");
+		return -EINVAL;
 	}
 
 	/* No uncommitted metadata or shared blocks. */
-	if (iomap->flags & IOMAP_F_DIRTY)
-		return iomap_swapfile_fail(isi, "is not committed");
-	if (iomap->flags & IOMAP_F_SHARED)
-		return iomap_swapfile_fail(isi, "has shared extents");
+	if (iomap->flags & IOMAP_F_DIRTY) {
+		pr_err("swapon: file is not committed\n");
+		return -EINVAL;
+	}
+	if (iomap->flags & IOMAP_F_SHARED) {
+		pr_err("swapon: file has shared extents\n");
+		return -EINVAL;
+	}
 
 	/* Only one bdev per swap file. */
-	if (iomap->bdev != isi->sis->bdev)
-		return iomap_swapfile_fail(isi, "outside the main device");
+	if (iomap->bdev != isi->sis->bdev) {
+		pr_err("swapon: file is on multiple devices\n");
+		return -EINVAL;
+	}
 
 	if (isi->iomap.length == 0) {
 		/* No accumulated extent, so just store it. */
@@ -124,13 +126,12 @@ static int iomap_swapfile_iter(struct iomap_iter *iter,
 		isi->iomap.length += iomap->length;
 	} else {
 		/* Otherwise, add the retained iomap and store this one. */
-		int error = iomap_swapfile_add_extent(isi);
+		error = iomap_swapfile_add_extent(isi);
 		if (error)
 			return error;
 		memcpy(&isi->iomap, iomap, sizeof(isi->iomap));
 	}
-
-	return iomap_iter_advance_full(iter);
+	return count;
 }
 
 /*
@@ -141,19 +142,15 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 		struct file *swap_file, sector_t *pagespan,
 		const struct iomap_ops *ops)
 {
-	struct inode *inode = swap_file->f_mapping->host;
-	struct iomap_iter iter = {
-		.inode	= inode,
-		.pos	= 0,
-		.len	= ALIGN_DOWN(i_size_read(inode), PAGE_SIZE),
-		.flags	= IOMAP_REPORT,
-	};
 	struct iomap_swapfile_info isi = {
 		.sis = sis,
 		.lowest_ppage = (sector_t)-1ULL,
-		.file = swap_file,
 	};
-	int ret;
+	struct address_space *mapping = swap_file->f_mapping;
+	struct inode *inode = mapping->host;
+	loff_t pos = 0;
+	loff_t len = ALIGN_DOWN(i_size_read(inode), PAGE_SIZE);
+	loff_t ret;
 
 	/*
 	 * Persist all file mapping metadata so that we won't have any
@@ -163,10 +160,15 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 	if (ret)
 		return ret;
 
-	while ((ret = iomap_iter(&iter, ops)) > 0)
-		iter.status = iomap_swapfile_iter(&iter, &iter.iomap, &isi);
-	if (ret < 0)
-		return ret;
+	while (len > 0) {
+		ret = iomap_apply(inode, pos, len, IOMAP_REPORT,
+				ops, &isi, iomap_swapfile_activate_actor);
+		if (ret <= 0)
+			return ret;
+
+		pos += ret;
+		len -= ret;
+	}
 
 	if (isi.iomap.length) {
 		ret = iomap_swapfile_add_extent(&isi);
@@ -187,6 +189,7 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 	*pagespan = 1 + isi.highest_ppage - isi.lowest_ppage;
 	sis->max = isi.nr_pages;
 	sis->pages = isi.nr_pages - 1;
+	sis->highest_bit = isi.nr_pages - 1;
 	return isi.nr_extents;
 }
 EXPORT_SYMBOL_GPL(iomap_swapfile_activate);

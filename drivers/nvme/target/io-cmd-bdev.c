@@ -5,16 +5,16 @@
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/blkdev.h>
-#include <linux/blk-integrity.h>
-#include <linux/memremap.h>
 #include <linux/module.h>
 #include "nvmet.h"
 
 void nvmet_bdev_set_limits(struct block_device *bdev, struct nvme_id_ns *id)
 {
+	const struct queue_limits *ql = &bdev_get_queue(bdev)->limits;
+	/* Number of logical blocks per physical block. */
+	const u32 lpp = ql->physical_block_size / ql->logical_block_size;
 	/* Logical blocks per physical block, 0's based. */
-	const __le16 lpp0b = to0based(bdev_physical_block_size(bdev) /
-				      bdev_logical_block_size(bdev));
+	const __le16 lpp0b = to0based(lpp);
 
 	/*
 	 * For NVMe 1.2 and later, bit 1 indicates that the fields NAWUN,
@@ -36,46 +36,30 @@ void nvmet_bdev_set_limits(struct block_device *bdev, struct nvme_id_ns *id)
 	 */
 	id->nsfeat |= 1 << 4;
 	/* NPWG = Namespace Preferred Write Granularity. 0's based */
-	id->npwg = to0based(bdev_io_min(bdev) / bdev_logical_block_size(bdev));
+	id->npwg = lpp0b;
 	/* NPWA = Namespace Preferred Write Alignment. 0's based */
 	id->npwa = id->npwg;
 	/* NPDG = Namespace Preferred Deallocate Granularity. 0's based */
-	id->npdg = to0based(bdev_discard_granularity(bdev) /
-			    bdev_logical_block_size(bdev));
+	id->npdg = to0based(ql->discard_granularity / ql->logical_block_size);
 	/* NPDG = Namespace Preferred Deallocate Alignment */
 	id->npda = id->npdg;
 	/* NOWS = Namespace Optimal Write Size */
-	id->nows = to0based(bdev_io_opt(bdev) / bdev_logical_block_size(bdev));
-
-	/* Set WZDS and DRB if device supports unmapped write zeroes */
-	if (bdev_write_zeroes_unmap_sectors(bdev))
-		id->dlfeat = (1 << 3) | 0x1;
-}
-
-void nvmet_bdev_ns_disable(struct nvmet_ns *ns)
-{
-	if (ns->bdev_file) {
-		fput(ns->bdev_file);
-		ns->bdev = NULL;
-		ns->bdev_file = NULL;
-	}
+	id->nows = to0based(ql->io_opt / ql->logical_block_size);
 }
 
 static void nvmet_bdev_ns_enable_integrity(struct nvmet_ns *ns)
 {
 	struct blk_integrity *bi = bdev_get_integrity(ns->bdev);
 
-	if (!bi)
-		return;
-
-	if (bi->csum_type == BLK_INTEGRITY_CSUM_CRC) {
-		ns->metadata_size = bi->metadata_size;
-		if (bi->flags & BLK_INTEGRITY_REF_TAG)
+	if (bi) {
+		ns->metadata_size = bi->tuple_size;
+		if (bi->profile == &t10_pi_type1_crc)
 			ns->pi_type = NVME_NS_DPS_PI_TYPE1;
-		else
+		else if (bi->profile == &t10_pi_type3_crc)
 			ns->pi_type = NVME_NS_DPS_PI_TYPE3;
-	} else {
-		ns->metadata_size = 0;
+		else
+			/* Unsupported metadata type */
+			ns->metadata_size = 0;
 	}
 }
 
@@ -83,51 +67,42 @@ int nvmet_bdev_ns_enable(struct nvmet_ns *ns)
 {
 	int ret;
 
-	/*
-	 * When buffered_io namespace attribute is enabled that means user want
-	 * this block device to be used as a file, so block device can take
-	 * an advantage of cache.
-	 */
-	if (ns->buffered_io)
-		return -ENOTBLK;
-
-	ns->bdev_file = bdev_file_open_by_path(ns->device_path,
-				BLK_OPEN_READ | BLK_OPEN_WRITE, NULL, NULL);
-	if (IS_ERR(ns->bdev_file)) {
-		ret = PTR_ERR(ns->bdev_file);
+	ns->bdev = blkdev_get_by_path(ns->device_path,
+			FMODE_READ | FMODE_WRITE, NULL);
+	if (IS_ERR(ns->bdev)) {
+		ret = PTR_ERR(ns->bdev);
 		if (ret != -ENOTBLK) {
-			pr_err("failed to open block device %s: (%d)\n",
-					ns->device_path, ret);
+			pr_err("failed to open block device %s: (%ld)\n",
+					ns->device_path, PTR_ERR(ns->bdev));
 		}
-		ns->bdev_file = NULL;
+		ns->bdev = NULL;
 		return ret;
 	}
-	ns->bdev = file_bdev(ns->bdev_file);
-	ns->size = bdev_nr_bytes(ns->bdev);
+	ns->size = i_size_read(ns->bdev->bd_inode);
 	ns->blksize_shift = blksize_bits(bdev_logical_block_size(ns->bdev));
 
 	ns->pi_type = 0;
 	ns->metadata_size = 0;
-	if (IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY))
+	if (IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY_T10))
 		nvmet_bdev_ns_enable_integrity(ns);
-
-	if (bdev_is_zoned(ns->bdev)) {
-		if (!nvmet_bdev_zns_enable(ns)) {
-			nvmet_bdev_ns_disable(ns);
-			return -EINVAL;
-		}
-		ns->csi = NVME_CSI_ZNS;
-	}
 
 	return 0;
 }
 
-void nvmet_bdev_ns_revalidate(struct nvmet_ns *ns)
+void nvmet_bdev_ns_disable(struct nvmet_ns *ns)
 {
-	ns->size = bdev_nr_bytes(ns->bdev);
+	if (ns->bdev) {
+		blkdev_put(ns->bdev, FMODE_WRITE | FMODE_READ);
+		ns->bdev = NULL;
+	}
 }
 
-u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
+void nvmet_bdev_ns_revalidate(struct nvmet_ns *ns)
+{
+	ns->size = i_size_read(ns->bdev->bd_inode);
+}
+
+static u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 {
 	u16 status = NVME_SC_SUCCESS;
 
@@ -137,20 +112,27 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 	 * Right now there exists M : 1 mapping between block layer error
 	 * to the NVMe status code (see nvme_error_status()). For consistency,
 	 * when we reverse map we use most appropriate NVMe Status code from
-	 * the group of the NVMe status codes used in the nvme_error_status().
+	 * the group of the NVMe staus codes used in the nvme_error_status().
 	 */
 	switch (blk_sts) {
 	case BLK_STS_NOSPC:
-		status = NVME_SC_CAP_EXCEEDED | NVME_STATUS_DNR;
+		status = NVME_SC_CAP_EXCEEDED | NVME_SC_DNR;
 		req->error_loc = offsetof(struct nvme_rw_command, length);
 		break;
 	case BLK_STS_TARGET:
-		status = NVME_SC_LBA_RANGE | NVME_STATUS_DNR;
+		status = NVME_SC_LBA_RANGE | NVME_SC_DNR;
 		req->error_loc = offsetof(struct nvme_rw_command, slba);
 		break;
 	case BLK_STS_NOTSUPP:
-		status = NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_common_command, opcode);
+		switch (req->cmd->common.opcode) {
+		case nvme_cmd_dsm:
+		case nvme_cmd_write_zeroes:
+			status = NVME_SC_ONCS_NOT_SUPPORTED | NVME_SC_DNR;
+			break;
+		default:
+			status = NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+		}
 		break;
 	case BLK_STS_MEDIUM:
 		status = NVME_SC_ACCESS_DENIED;
@@ -158,7 +140,7 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 		break;
 	case BLK_STS_IOERR:
 	default:
-		status = NVME_SC_INTERNAL | NVME_STATUS_DNR;
+		status = NVME_SC_INTERNAL | NVME_SC_DNR;
 		req->error_loc = offsetof(struct nvme_common_command, opcode);
 	}
 
@@ -182,7 +164,8 @@ static void nvmet_bio_done(struct bio *bio)
 	struct nvmet_req *req = bio->bi_private;
 
 	nvmet_req_complete(req, blk_to_nvme_status(req, bio->bi_status));
-	nvmet_req_bio_put(req, bio);
+	if (bio != &req->b.inline_bio)
+		bio_put(bio);
 }
 
 #ifdef CONFIG_BLK_DEV_INTEGRITY
@@ -191,27 +174,29 @@ static int nvmet_bdev_alloc_bip(struct nvmet_req *req, struct bio *bio,
 {
 	struct blk_integrity *bi;
 	struct bio_integrity_payload *bip;
+	struct block_device *bdev = req->ns->bdev;
 	int rc;
 	size_t resid, len;
 
-	bi = bdev_get_integrity(req->ns->bdev);
+	bi = bdev_get_integrity(bdev);
 	if (unlikely(!bi)) {
 		pr_err("Unable to locate bio_integrity\n");
 		return -ENODEV;
 	}
 
 	bip = bio_integrity_alloc(bio, GFP_NOIO,
-					bio_max_segs(req->metadata_sg_cnt));
+		min_t(unsigned int, req->metadata_sg_cnt, BIO_MAX_PAGES));
 	if (IS_ERR(bip)) {
 		pr_err("Unable to allocate bio_integrity_payload\n");
 		return PTR_ERR(bip);
 	}
 
+	bip->bip_iter.bi_size = bio_integrity_bytes(bi, bio_sectors(bio));
 	/* virtual start sector must be in integrity interval units */
 	bip_set_seed(bip, bio->bi_iter.bi_sector >>
 		     (bi->interval_exp - SECTOR_SHIFT));
 
-	resid = bio_integrity_bytes(bi, bio_sectors(bio));
+	resid = bip->bip_iter.bi_size;
 	while (resid > 0 && sg_miter_next(miter)) {
 		len = min_t(size_t, miter->length, resid);
 		rc = bio_integrity_add_page(bio, miter->page, len,
@@ -240,13 +225,12 @@ static int nvmet_bdev_alloc_bip(struct nvmet_req *req, struct bio *bio,
 
 static void nvmet_bdev_execute_rw(struct nvmet_req *req)
 {
-	unsigned int sg_cnt = req->sg_cnt;
+	int sg_cnt = req->sg_cnt;
 	struct bio *bio;
 	struct scatterlist *sg;
 	struct blk_plug plug;
 	sector_t sector;
-	blk_opf_t opf;
-	int i, rc;
+	int op, i, rc;
 	struct sg_mapping_iter prot_miter;
 	unsigned int iter_flags;
 	unsigned int total_len = nvmet_rw_data_len(req) + req->metadata_len;
@@ -260,34 +244,31 @@ static void nvmet_bdev_execute_rw(struct nvmet_req *req)
 	}
 
 	if (req->cmd->rw.opcode == nvme_cmd_write) {
-		opf = REQ_OP_WRITE | REQ_SYNC | REQ_IDLE;
+		op = REQ_OP_WRITE | REQ_SYNC | REQ_IDLE;
 		if (req->cmd->rw.control & cpu_to_le16(NVME_RW_FUA))
-			opf |= REQ_FUA;
+			op |= REQ_FUA;
 		iter_flags = SG_MITER_TO_SG;
 	} else {
-		opf = REQ_OP_READ;
+		op = REQ_OP_READ;
 		iter_flags = SG_MITER_FROM_SG;
 	}
 
-	if (req->cmd->rw.control & cpu_to_le16(NVME_RW_LR))
-		opf |= REQ_FAILFAST_DEV;
-
 	if (is_pci_p2pdma_page(sg_page(req->sg)))
-		opf |= REQ_NOMERGE;
+		op |= REQ_NOMERGE;
 
 	sector = nvmet_lba_to_sect(req->ns, req->cmd->rw.slba);
 
 	if (nvmet_use_inline_bvec(req)) {
 		bio = &req->b.inline_bio;
-		bio_init(bio, req->ns->bdev, req->inline_bvec,
-			 ARRAY_SIZE(req->inline_bvec), opf);
+		bio_init(bio, req->inline_bvec, ARRAY_SIZE(req->inline_bvec));
 	} else {
-		bio = bio_alloc(req->ns->bdev, bio_max_segs(sg_cnt), opf,
-				GFP_KERNEL);
+		bio = bio_alloc(GFP_KERNEL, min(sg_cnt, BIO_MAX_PAGES));
 	}
+	bio_set_dev(bio, req->ns->bdev);
 	bio->bi_iter.bi_sector = sector;
 	bio->bi_private = req;
 	bio->bi_end_io = nvmet_bio_done;
+	bio->bi_opf = op;
 
 	blk_start_plug(&plug);
 	if (req->metadata_len)
@@ -308,9 +289,10 @@ static void nvmet_bdev_execute_rw(struct nvmet_req *req)
 				}
 			}
 
-			bio = bio_alloc(req->ns->bdev, bio_max_segs(sg_cnt),
-					opf, GFP_KERNEL);
+			bio = bio_alloc(GFP_KERNEL, min(sg_cnt, BIO_MAX_PAGES));
+			bio_set_dev(bio, req->ns->bdev);
 			bio->bi_iter.bi_sector = sector;
+			bio->bi_opf = op;
 
 			bio_chain(bio, prev);
 			submit_bio(prev);
@@ -336,29 +318,22 @@ static void nvmet_bdev_execute_flush(struct nvmet_req *req)
 {
 	struct bio *bio = &req->b.inline_bio;
 
-	if (!bdev_write_cache(req->ns->bdev)) {
-		nvmet_req_complete(req, NVME_SC_SUCCESS);
-		return;
-	}
-
 	if (!nvmet_check_transfer_len(req, 0))
 		return;
 
-	bio_init(bio, req->ns->bdev, req->inline_bvec,
-		 ARRAY_SIZE(req->inline_bvec), REQ_OP_WRITE | REQ_PREFLUSH);
+	bio_init(bio, req->inline_bvec, ARRAY_SIZE(req->inline_bvec));
+	bio_set_dev(bio, req->ns->bdev);
 	bio->bi_private = req;
 	bio->bi_end_io = nvmet_bio_done;
+	bio->bi_opf = REQ_OP_WRITE | REQ_PREFLUSH;
 
 	submit_bio(bio);
 }
 
 u16 nvmet_bdev_flush(struct nvmet_req *req)
 {
-	if (!bdev_write_cache(req->ns->bdev))
-		return 0;
-
-	if (blkdev_issue_flush(req->ns->bdev))
-		return NVME_SC_INTERNAL | NVME_STATUS_DNR;
+	if (blkdev_issue_flush(req->ns->bdev, GFP_KERNEL))
+		return NVME_SC_INTERNAL | NVME_SC_DNR;
 	return 0;
 }
 
@@ -371,7 +346,7 @@ static u16 nvmet_bdev_discard_range(struct nvmet_req *req,
 	ret = __blkdev_issue_discard(ns->bdev,
 			nvmet_lba_to_sect(ns, range->slba),
 			le32_to_cpu(range->nlb) << (ns->blksize_shift - 9),
-			GFP_KERNEL, bio);
+			GFP_KERNEL, 0, bio);
 	if (ret && ret != -EOPNOTSUPP) {
 		req->error_slba = le64_to_cpu(range->slba);
 		return errno_to_nvme_status(req, ret);
@@ -455,7 +430,9 @@ static void nvmet_bdev_execute_write_zeroes(struct nvmet_req *req)
 
 u16 nvmet_bdev_parse_io_cmd(struct nvmet_req *req)
 {
-	switch (req->cmd->common.opcode) {
+	struct nvme_command *cmd = req->cmd;
+
+	switch (cmd->common.opcode) {
 	case nvme_cmd_read:
 	case nvme_cmd_write:
 		req->execute = nvmet_bdev_execute_rw;
@@ -472,6 +449,9 @@ u16 nvmet_bdev_parse_io_cmd(struct nvmet_req *req)
 		req->execute = nvmet_bdev_execute_write_zeroes;
 		return 0;
 	default:
-		return nvmet_report_invalid_opcode(req);
+		pr_err("unhandled cmd %d on qid %d\n", cmd->common.opcode,
+		       req->sq->qid);
+		req->error_loc = offsetof(struct nvme_common_command, opcode);
+		return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
 	}
 }

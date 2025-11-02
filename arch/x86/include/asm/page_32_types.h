@@ -11,8 +11,8 @@
  * a virtual address space of one gigabyte, which limits the
  * amount of physical memory you can use to about 950MB.
  *
- * If you want more physical memory than this then see the CONFIG_VMSPLIT_2G
- * and CONFIG_HIGHMEM4G options in the kernel configuration.
+ * If you want more physical memory than this then see the CONFIG_HIGHMEM4G
+ * and CONFIG_HIGHMEM64G options in the kernel configuration.
  */
 #define __PAGE_OFFSET_BASE	_AC(CONFIG_PAGE_OFFSET, UL)
 #define __PAGE_OFFSET		__PAGE_OFFSET_BASE
@@ -53,17 +53,11 @@
 #define STACK_TOP_MAX		STACK_TOP
 
 /*
- * In spite of the name, KERNEL_IMAGE_SIZE is a limit on the maximum virtual
- * address for the kernel image, rather than the limit on the size itself. On
- * 32-bit, this is not a strict limit, but this value is used to limit the
- * link-time virtual address range of the kernel, and by KASLR to limit the
- * randomized address from which the kernel is executed. A relocatable kernel
- * can be loaded somewhat higher than KERNEL_IMAGE_SIZE as long as enough space
- * remains for the vmalloc area.
+ * Kernel image size is limited to 512 MB (see in arch/x86/kernel/head_32.S)
  */
 #define KERNEL_IMAGE_SIZE	(512 * 1024 * 1024)
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 /*
  * This much address space is reserved for vmalloc() and iomap()
@@ -73,7 +67,8 @@ extern unsigned int __VMALLOC_RESERVE;
 extern int sysctl_legacy_va_layout;
 
 extern void find_low_pfn_range(void);
+extern void setup_bootmem_allocator(void);
 
-#endif	/* !__ASSEMBLER__ */
+#endif	/* !__ASSEMBLY__ */
 
 #endif /* _ASM_X86_PAGE_32_DEFS_H */

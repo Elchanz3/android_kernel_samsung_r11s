@@ -43,12 +43,12 @@ static int hilscher_pci_probe(struct pci_dev *dev,
 {
 	struct uio_info *info;
 
-	info = devm_kzalloc(&dev->dev, sizeof(struct uio_info), GFP_KERNEL);
+	info = kzalloc(sizeof(struct uio_info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
 	if (pci_enable_device(dev))
-		return -ENODEV;
+		goto out_free;
 
 	if (pci_request_regions(dev, "hilscher"))
 		goto out_disable;
@@ -92,6 +92,8 @@ out_release:
 	pci_release_regions(dev);
 out_disable:
 	pci_disable_device(dev);
+out_free:
+	kfree (info);
 	return -ENODEV;
 }
 
@@ -103,9 +105,11 @@ static void hilscher_pci_remove(struct pci_dev *dev)
 	pci_release_regions(dev);
 	pci_disable_device(dev);
 	iounmap(info->mem[0].internal_addr);
+
+	kfree (info);
 }
 
-static const struct pci_device_id hilscher_pci_ids[] = {
+static struct pci_device_id hilscher_pci_ids[] = {
 	{
 		.vendor =	PCI_VENDOR_ID_PLX,
 		.device =	PCI_DEVICE_ID_PLX_9030,
@@ -130,6 +134,5 @@ static struct pci_driver hilscher_pci_driver = {
 
 module_pci_driver(hilscher_pci_driver);
 MODULE_DEVICE_TABLE(pci, hilscher_pci_ids);
-MODULE_DESCRIPTION("UIO Hilscher CIF card driver");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Hans J. Koch, Benedikt Spranger");

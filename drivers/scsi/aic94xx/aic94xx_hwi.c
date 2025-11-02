@@ -28,7 +28,7 @@ static int asd_get_user_sas_addr(struct asd_ha_struct *asd_ha)
 	if (asd_ha->hw_prof.sas_addr[0])
 		return 0;
 
-	return sas_request_addr(asd_ha->sas_ha.shost,
+	return sas_request_addr(asd_ha->sas_ha.core.shost,
 				asd_ha->hw_prof.sas_addr);
 }
 
@@ -72,8 +72,10 @@ static int asd_init_phy(struct asd_phy *phy)
 	struct asd_sas_phy *sas_phy = &phy->sas_phy;
 
 	sas_phy->enabled = 1;
+	sas_phy->class = SAS;
 	sas_phy->iproto = SAS_PROTOCOL_ALL;
 	sas_phy->tproto = 0;
+	sas_phy->type = PHY_TYPE_PHYSICAL;
 	sas_phy->role = PHY_ROLE_INITIATOR;
 	sas_phy->oob_mode = OOB_NOT_CONNECTED;
 	sas_phy->linkrate = SAS_LINK_RATE_UNKNOWN;
@@ -731,7 +733,7 @@ static void asd_dl_tasklet_handler(unsigned long data)
 			goto next_1;
 		} else if (ascb->scb->header.opcode == EMPTY_SCB) {
 			goto out;
-		} else if (!ascb->uldd_timer && !timer_delete(&ascb->timer)) {
+		} else if (!ascb->uldd_timer && !del_timer(&ascb->timer)) {
 			goto next_1;
 		}
 		spin_lock_irqsave(&seq->pend_q_lock, flags);
@@ -901,7 +903,7 @@ static void asd_dch_sas_isr(struct asd_ha_struct *asd_ha)
 }
 
 /**
- * asd_rbi_exsi_isr -- process external system interface interrupt (INITERR)
+ * ads_rbi_exsi_isr -- process external system interface interrupt (INITERR)
  * @asd_ha: pointer to host adapter structure
  */
 static void asd_rbi_exsi_isr(struct asd_ha_struct *asd_ha)
@@ -1142,7 +1144,7 @@ static void asd_swap_head_scb(struct asd_ha_struct *asd_ha,
 }
 
 /**
- * asd_start_scb_timers -- (add and) start timers of SCBs
+ * asd_start_timers -- (add and) start timers of SCBs
  * @list: pointer to struct list_head of the scbs
  *
  * If an SCB in the @list has no timer function, assign the default

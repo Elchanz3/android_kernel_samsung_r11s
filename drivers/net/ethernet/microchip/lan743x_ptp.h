@@ -18,10 +18,6 @@
  */
 #define LAN743X_PTP_N_EVENT_CHAN	2
 #define LAN743X_PTP_N_PEROUT		LAN743X_PTP_N_EVENT_CHAN
-#define PCI11X1X_PTP_IO_MAX_CHANNELS	8
-#define LAN743X_PTP_N_EXTTS		PCI11X1X_PTP_IO_MAX_CHANNELS
-#define LAN743X_PTP_N_PPS		0
-#define PTP_CMD_CTL_TIMEOUT_CNT		50
 
 struct lan743x_adapter;
 
@@ -51,11 +47,8 @@ int lan743x_ptp_open(struct lan743x_adapter *adapter);
 void lan743x_ptp_close(struct lan743x_adapter *adapter);
 void lan743x_ptp_update_latency(struct lan743x_adapter *adapter,
 				u32 link_speed);
-int lan743x_ptp_hwtstamp_get(struct net_device *netdev,
-			     struct kernel_hwtstamp_config *config);
-int lan743x_ptp_hwtstamp_set(struct net_device *netdev,
-			     struct kernel_hwtstamp_config *config,
-			     struct netlink_ext_ack *extack);
+
+int lan743x_ptp_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd);
 
 #define LAN743X_PTP_NUMBER_OF_TX_TIMESTAMPS (4)
 
@@ -65,11 +58,6 @@ int lan743x_ptp_hwtstamp_set(struct net_device *netdev,
 struct lan743x_ptp_perout {
 	int  event_ch;	/* PTP event channel (0=channel A, 1=channel B) */
 	int  gpio_pin;	/* GPIO pin where output appears */
-};
-
-struct lan743x_extts {
-	int flags;
-	struct timespec64 ts;
 };
 
 struct lan743x_ptp {
@@ -84,8 +72,6 @@ struct lan743x_ptp {
 
 	unsigned long used_event_ch;
 	struct lan743x_ptp_perout perout[LAN743X_PTP_N_PEROUT];
-	int ptp_io_perout[LAN743X_PTP_N_PEROUT]; /* PTP event channel (0=channel A, 1=channel B) */
-	struct lan743x_extts extts[LAN743X_PTP_N_EXTTS];
 
 	bool leds_multiplexed;
 	bool led_enabled[LAN7430_N_LED];

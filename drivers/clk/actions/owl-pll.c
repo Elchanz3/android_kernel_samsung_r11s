@@ -25,7 +25,7 @@ static u32 owl_pll_calculate_mul(struct owl_pll_hw *pll_hw, unsigned long rate)
 	else if (mul > pll_hw->max_mul)
 		mul = pll_hw->max_mul;
 
-	return mul & mul_mask(pll_hw);
+	return mul &= mul_mask(pll_hw);
 }
 
 static unsigned long _get_table_rate(const struct clk_pll_table *table,
@@ -56,8 +56,8 @@ static const struct clk_pll_table *_get_pll_table(
 	return table;
 }
 
-static int owl_pll_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long owl_pll_round_rate(struct clk_hw *hw, unsigned long rate,
+		unsigned long *parent_rate)
 {
 	struct owl_pll *pll = hw_to_owl_pll(hw);
 	struct owl_pll_hw *pll_hw = &pll->pll_hw;
@@ -65,24 +65,17 @@ static int owl_pll_determine_rate(struct clk_hw *hw,
 	u32 mul;
 
 	if (pll_hw->table) {
-		clkt = _get_pll_table(pll_hw->table, req->rate);
-		req->rate = clkt->rate;
-
-		return 0;
+		clkt = _get_pll_table(pll_hw->table, rate);
+		return clkt->rate;
 	}
 
 	/* fixed frequency */
-	if (pll_hw->width == 0) {
-		req->rate = pll_hw->bfreq;
+	if (pll_hw->width == 0)
+		return pll_hw->bfreq;
 
-		return 0;
-	}
+	mul = owl_pll_calculate_mul(pll_hw, rate);
 
-	mul = owl_pll_calculate_mul(pll_hw, req->rate);
-
-	req->rate = pll_hw->bfreq * mul;
-
-	return 0;
+	return pll_hw->bfreq * mul;
 }
 
 static unsigned long owl_pll_recalc_rate(struct clk_hw *hw,
@@ -195,7 +188,7 @@ const struct clk_ops owl_pll_ops = {
 	.enable = owl_pll_enable,
 	.disable = owl_pll_disable,
 	.is_enabled = owl_pll_is_enabled,
-	.determine_rate = owl_pll_determine_rate,
+	.round_rate = owl_pll_round_rate,
 	.recalc_rate = owl_pll_recalc_rate,
 	.set_rate = owl_pll_set_rate,
 };

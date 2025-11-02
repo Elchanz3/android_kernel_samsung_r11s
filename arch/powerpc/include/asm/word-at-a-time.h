@@ -4,10 +4,10 @@
 /*
  * Word-at-a-time interfaces for PowerPC.
  */
-#include <linux/bitops.h>
-#include <linux/wordpart.h>
+
+#include <linux/kernel.h>
 #include <asm/asm-compat.h>
-#include <asm/extable.h>
+#include <asm/ppc_asm.h>
 
 #ifdef __BIG_ENDIAN__
 

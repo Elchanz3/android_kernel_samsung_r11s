@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 /******************************************************************************
  * arch-x86/mca.h
  * Guest OS machine check interface to x86 Xen.
@@ -372,7 +371,7 @@ struct xen_mce {
 #define XEN_MCE_LOG_LEN 32
 
 struct xen_mce_log {
-	char signature[12] __nonstring; /* "MACHINECHECK" */
+	char signature[12]; /* "MACHINECHECK" */
 	unsigned len;	    /* = XEN_MCE_LOG_LEN */
 	unsigned next;
 	unsigned flags;

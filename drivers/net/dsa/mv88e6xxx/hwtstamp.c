@@ -64,7 +64,7 @@ static int mv88e6xxx_ptp_read(struct mv88e6xxx_chip *chip, int addr,
 #define TX_TSTAMP_TIMEOUT	msecs_to_jiffies(40)
 
 int mv88e6xxx_get_ts_info(struct dsa_switch *ds, int port,
-			  struct kernel_ethtool_ts_info *info)
+			  struct ethtool_ts_info *info)
 {
 	const struct mv88e6xxx_ptp_ops *ptp_ops;
 	struct mv88e6xxx_chip *chip;
@@ -89,7 +89,7 @@ int mv88e6xxx_get_ts_info(struct dsa_switch *ds, int port,
 }
 
 static int mv88e6xxx_set_hwtstamp_config(struct mv88e6xxx_chip *chip, int port,
-					 struct kernel_hwtstamp_config *config)
+					 struct hwtstamp_config *config)
 {
 	const struct mv88e6xxx_ptp_ops *ptp_ops = chip->info->ops->ptp_ops;
 	struct mv88e6xxx_port_hwtstamp *ps = &chip->port_hwtstamp[port];
@@ -99,6 +99,10 @@ static int mv88e6xxx_set_hwtstamp_config(struct mv88e6xxx_chip *chip, int port,
 	 * timestamp hardware while we reconfigure it.
 	 */
 	clear_bit_unlock(MV88E6XXX_HWTSTAMP_ENABLED, &ps->state);
+
+	/* reserved for future extensions */
+	if (config->flags)
+		return -EINVAL;
 
 	switch (config->tx_type) {
 	case HWTSTAMP_TX_OFF:
@@ -169,38 +173,42 @@ static int mv88e6xxx_set_hwtstamp_config(struct mv88e6xxx_chip *chip, int port,
 }
 
 int mv88e6xxx_port_hwtstamp_set(struct dsa_switch *ds, int port,
-				struct kernel_hwtstamp_config *config,
-				struct netlink_ext_ack *extack)
+				struct ifreq *ifr)
 {
 	struct mv88e6xxx_chip *chip = ds->priv;
 	struct mv88e6xxx_port_hwtstamp *ps = &chip->port_hwtstamp[port];
+	struct hwtstamp_config config;
 	int err;
 
 	if (!chip->info->ptp_support)
 		return -EOPNOTSUPP;
 
-	err = mv88e6xxx_set_hwtstamp_config(chip, port, config);
+	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
+		return -EFAULT;
+
+	err = mv88e6xxx_set_hwtstamp_config(chip, port, &config);
 	if (err)
 		return err;
 
 	/* Save the chosen configuration to be returned later. */
-	ps->tstamp_config = *config;
+	memcpy(&ps->tstamp_config, &config, sizeof(config));
 
-	return 0;
+	return copy_to_user(ifr->ifr_data, &config, sizeof(config)) ?
+		-EFAULT : 0;
 }
 
 int mv88e6xxx_port_hwtstamp_get(struct dsa_switch *ds, int port,
-				struct kernel_hwtstamp_config *config)
+				struct ifreq *ifr)
 {
 	struct mv88e6xxx_chip *chip = ds->priv;
 	struct mv88e6xxx_port_hwtstamp *ps = &chip->port_hwtstamp[port];
+	struct hwtstamp_config *config = &ps->tstamp_config;
 
 	if (!chip->info->ptp_support)
 		return -EOPNOTSUPP;
 
-	*config = ps->tstamp_config;
-
-	return 0;
+	return copy_to_user(ifr->ifr_data, config, sizeof(*config)) ?
+		-EFAULT : 0;
 }
 
 /* Returns a pointer to the PTP header if the caller should time stamp,
@@ -297,7 +305,7 @@ static void mv88e6xxx_get_rxts(struct mv88e6xxx_chip *chip,
 			shwt->hwtstamp = ns_to_ktime(ns);
 			status &= ~MV88E6XXX_PTP_TS_VALID;
 		}
-		netif_rx(skb);
+		netif_rx_ni(skb);
 	}
 }
 
@@ -460,38 +468,30 @@ long mv88e6xxx_hwtstamp_work(struct ptp_clock_info *ptp)
 	return restart ? 1 : -1;
 }
 
-void mv88e6xxx_port_txtstamp(struct dsa_switch *ds, int port,
-			     struct sk_buff *skb)
+bool mv88e6xxx_port_txtstamp(struct dsa_switch *ds, int port,
+			     struct sk_buff *clone, unsigned int type)
 {
 	struct mv88e6xxx_chip *chip = ds->priv;
 	struct mv88e6xxx_port_hwtstamp *ps = &chip->port_hwtstamp[port];
 	struct ptp_header *hdr;
-	struct sk_buff *clone;
-	unsigned int type;
 
-	type = ptp_classify_raw(skb);
-	if (type == PTP_CLASS_NONE)
-		return;
+	if (!(skb_shinfo(clone)->tx_flags & SKBTX_HW_TSTAMP))
+		return false;
 
-	hdr = mv88e6xxx_should_tstamp(chip, port, skb, type);
+	hdr = mv88e6xxx_should_tstamp(chip, port, clone, type);
 	if (!hdr)
-		return;
-
-	clone = skb_clone_sk(skb);
-	if (!clone)
-		return;
+		return false;
 
 	if (test_and_set_bit_lock(MV88E6XXX_HWTSTAMP_TX_IN_PROGRESS,
-				  &ps->state)) {
-		kfree_skb(clone);
-		return;
-	}
+				  &ps->state))
+		return false;
 
 	ps->tx_skb = clone;
 	ps->tx_tstamp_start = jiffies;
 	ps->tx_seq_id = be16_to_cpu(hdr->sequence_id);
 
 	ptp_schedule_worker(chip->ptp_clock, 0);
+	return true;
 }
 
 int mv88e6165_global_disable(struct mv88e6xxx_chip *chip)
@@ -570,7 +570,7 @@ int mv88e6xxx_hwtstamp_setup(struct mv88e6xxx_chip *chip)
 	}
 
 	/* Set the ethertype of L2 PTP messages */
-	err = mv88e6xxx_ptp_write(chip, MV88E6XXX_PTP_ETHERTYPE, ETH_P_1588);
+	err = mv88e6xxx_ptp_write(chip, MV88E6XXX_PTP_GC_ETYPE, ETH_P_1588);
 	if (err)
 		return err;
 

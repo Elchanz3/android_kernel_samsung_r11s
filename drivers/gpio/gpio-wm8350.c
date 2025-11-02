@@ -8,12 +8,13 @@
  *
  */
 
-#include <linux/gpio/driver.h>
 #include <linux/kernel.h>
-#include <linux/mfd/core.h>
-#include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/module.h>
+#include <linux/gpio/driver.h>
+#include <linux/mfd/core.h>
+#include <linux/platform_device.h>
+#include <linux/seq_file.h>
 
 #include <linux/mfd/wm8350/core.h>
 #include <linux/mfd/wm8350/gpio.h>
@@ -48,16 +49,15 @@ static int wm8350_gpio_get(struct gpio_chip *chip, unsigned offset)
 		return 0;
 }
 
-static int wm8350_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			   int value)
+static void wm8350_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 {
 	struct wm8350_gpio_data *wm8350_gpio = gpiochip_get_data(chip);
 	struct wm8350 *wm8350 = wm8350_gpio->wm8350;
 
 	if (value)
-		return wm8350_set_bits(wm8350, WM8350_GPIO_LEVEL, 1 << offset);
-
-	return wm8350_clear_bits(wm8350, WM8350_GPIO_LEVEL, 1 << offset);
+		wm8350_set_bits(wm8350, WM8350_GPIO_LEVEL, 1 << offset);
+	else
+		wm8350_clear_bits(wm8350, WM8350_GPIO_LEVEL, 1 << offset);
 }
 
 static int wm8350_gpio_direction_out(struct gpio_chip *chip,
@@ -73,7 +73,9 @@ static int wm8350_gpio_direction_out(struct gpio_chip *chip,
 		return ret;
 
 	/* Don't have an atomic direction/value setup */
-	return wm8350_gpio_set(chip, offset, value);
+	wm8350_gpio_set(chip, offset, value);
+
+	return 0;
 }
 
 static int wm8350_gpio_to_irq(struct gpio_chip *chip, unsigned offset)
@@ -103,6 +105,7 @@ static int wm8350_gpio_probe(struct platform_device *pdev)
 	struct wm8350 *wm8350 = dev_get_drvdata(pdev->dev.parent);
 	struct wm8350_platform_data *pdata = dev_get_platdata(wm8350->dev);
 	struct wm8350_gpio_data *wm8350_gpio;
+	int ret;
 
 	wm8350_gpio = devm_kzalloc(&pdev->dev, sizeof(*wm8350_gpio),
 				   GFP_KERNEL);
@@ -118,7 +121,16 @@ static int wm8350_gpio_probe(struct platform_device *pdev)
 	else
 		wm8350_gpio->gpio_chip.base = -1;
 
-	return devm_gpiochip_add_data(&pdev->dev, &wm8350_gpio->gpio_chip, wm8350_gpio);
+	ret = devm_gpiochip_add_data(&pdev->dev, &wm8350_gpio->gpio_chip,
+				     wm8350_gpio);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Could not register gpiochip, %d\n", ret);
+		return ret;
+	}
+
+	platform_set_drvdata(pdev, wm8350_gpio);
+
+	return ret;
 }
 
 static struct platform_driver wm8350_gpio_driver = {

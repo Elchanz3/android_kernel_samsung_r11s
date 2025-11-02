@@ -11,31 +11,19 @@ maintainers:
   - Thierry Reding <thierry.reding@gmail.com>
 
 allOf:
-  - $ref: panel-common.yaml#
-  - $ref: /schemas/display/lvds.yaml#
-
-select:
-  properties:
-    compatible:
-      contains:
-        const: mitsubishi,aa104xd12
-
-  required:
-    - compatible
+  - $ref: lvds.yaml#
 
 properties:
   compatible:
     items:
       - const: mitsubishi,aa104xd12
-      - const: panel-lvds
+      - {} # panel-lvds, but not listed here to avoid false select
 
   vcc-supply:
     description: Reference to the regulator powering the panel VCC pins.
 
   data-mapping:
-    enum:
-      - jeida-18
-      - jeida-24
+    const: jeida-24
 
   width-mm:
     const: 210
@@ -43,7 +31,6 @@ properties:
   height-mm:
     const: 158
 
-  backlight: true
   panel-timing: true
   port: true
 
@@ -51,11 +38,7 @@ additionalProperties: false
 
 required:
   - compatible
-  - data-mapping
-  - width-mm
-  - height-mm
-  - panel-timing
-  - port
+  - vcc-supply
 
 examples:
   - |+

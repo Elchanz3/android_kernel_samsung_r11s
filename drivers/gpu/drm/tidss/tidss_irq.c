@@ -4,9 +4,6 @@
  * Author: Tomi Valkeinen <tomi.valkeinen@ti.com>
  */
 
-#include <linux/platform_device.h>
-
-#include <drm/drm_drv.h>
 #include <drm/drm_print.h>
 
 #include "tidss_crtc.h"
@@ -15,9 +12,10 @@
 #include "tidss_irq.h"
 #include "tidss_plane.h"
 
+/* call with wait_lock and dispc runtime held */
 static void tidss_irq_update(struct tidss_device *tidss)
 {
-	assert_spin_locked(&tidss->irq_lock);
+	assert_spin_locked(&tidss->wait_lock);
 
 	dispc_set_irqenable(tidss->dispc, tidss->irq_mask);
 }
@@ -30,11 +28,11 @@ void tidss_irq_enable_vblank(struct drm_crtc *crtc)
 	u32 hw_videoport = tcrtc->hw_videoport;
 	unsigned long flags;
 
-	spin_lock_irqsave(&tidss->irq_lock, flags);
+	spin_lock_irqsave(&tidss->wait_lock, flags);
 	tidss->irq_mask |= DSS_IRQ_VP_VSYNC_EVEN(hw_videoport) |
 			   DSS_IRQ_VP_VSYNC_ODD(hw_videoport);
 	tidss_irq_update(tidss);
-	spin_unlock_irqrestore(&tidss->irq_lock, flags);
+	spin_unlock_irqrestore(&tidss->wait_lock, flags);
 }
 
 void tidss_irq_disable_vblank(struct drm_crtc *crtc)
@@ -45,23 +43,24 @@ void tidss_irq_disable_vblank(struct drm_crtc *crtc)
 	u32 hw_videoport = tcrtc->hw_videoport;
 	unsigned long flags;
 
-	spin_lock_irqsave(&tidss->irq_lock, flags);
+	spin_lock_irqsave(&tidss->wait_lock, flags);
 	tidss->irq_mask &= ~(DSS_IRQ_VP_VSYNC_EVEN(hw_videoport) |
 			     DSS_IRQ_VP_VSYNC_ODD(hw_videoport));
 	tidss_irq_update(tidss);
-	spin_unlock_irqrestore(&tidss->irq_lock, flags);
+	spin_unlock_irqrestore(&tidss->wait_lock, flags);
 }
 
-static irqreturn_t tidss_irq_handler(int irq, void *arg)
+irqreturn_t tidss_irq_handler(int irq, void *arg)
 {
 	struct drm_device *ddev = (struct drm_device *)arg;
 	struct tidss_device *tidss = to_tidss(ddev);
 	unsigned int id;
 	dispc_irq_t irqstatus;
 
-	spin_lock(&tidss->irq_lock);
+	if (WARN_ON(!ddev->irq_enabled))
+		return IRQ_NONE;
+
 	irqstatus = dispc_read_and_clear_irqstatus(tidss->dispc);
-	spin_unlock(&tidss->irq_lock);
 
 	for (id = 0; id < tidss->num_crtcs; id++) {
 		struct drm_crtc *crtc = tidss->crtcs[id];
@@ -79,13 +78,8 @@ static irqreturn_t tidss_irq_handler(int irq, void *arg)
 			tidss_crtc_error_irq(crtc, irqstatus);
 	}
 
-	for (unsigned int i = 0; i < tidss->num_planes; ++i) {
-		struct drm_plane *plane = tidss->planes[i];
-		struct tidss_plane *tplane = to_tidss_plane(plane);
-
-		if (irqstatus & DSS_IRQ_PLANE_FIFO_UNDERFLOW(tplane->hw_plane_id))
-			tidss_plane_error_irq(plane, irqstatus);
-	}
+	if (irqstatus & DSS_IRQ_DEVICE_OCP_ERR)
+		dev_err_ratelimited(tidss->dev, "OCP error\n");
 
 	return IRQ_HANDLED;
 }
@@ -94,26 +88,38 @@ void tidss_irq_resume(struct tidss_device *tidss)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&tidss->irq_lock, flags);
+	spin_lock_irqsave(&tidss->wait_lock, flags);
 	tidss_irq_update(tidss);
-	spin_unlock_irqrestore(&tidss->irq_lock, flags);
+	spin_unlock_irqrestore(&tidss->wait_lock, flags);
 }
 
-int tidss_irq_install(struct drm_device *ddev, unsigned int irq)
+void tidss_irq_preinstall(struct drm_device *ddev)
 {
 	struct tidss_device *tidss = to_tidss(ddev);
-	int ret;
 
-	if (irq == IRQ_NOTCONNECTED)
-		return -ENOTCONN;
+	spin_lock_init(&tidss->wait_lock);
 
-	ret = request_irq(irq, tidss_irq_handler, 0, ddev->driver->name, ddev);
-	if (ret)
-		return ret;
+	tidss_runtime_get(tidss);
 
-	tidss->irq_mask = 0;
+	dispc_set_irqenable(tidss->dispc, 0);
+	dispc_read_and_clear_irqstatus(tidss->dispc);
 
-	for (unsigned int i = 0; i < tidss->num_crtcs; ++i) {
+	tidss_runtime_put(tidss);
+}
+
+int tidss_irq_postinstall(struct drm_device *ddev)
+{
+	struct tidss_device *tidss = to_tidss(ddev);
+	unsigned long flags;
+	unsigned int i;
+
+	tidss_runtime_get(tidss);
+
+	spin_lock_irqsave(&tidss->wait_lock, flags);
+
+	tidss->irq_mask = DSS_IRQ_DEVICE_OCP_ERR;
+
+	for (i = 0; i < tidss->num_crtcs; ++i) {
 		struct tidss_crtc *tcrtc = to_tidss_crtc(tidss->crtcs[i]);
 
 		tidss->irq_mask |= DSS_IRQ_VP_SYNC_LOST(tcrtc->hw_videoport);
@@ -121,11 +127,11 @@ int tidss_irq_install(struct drm_device *ddev, unsigned int irq)
 		tidss->irq_mask |= DSS_IRQ_VP_FRAME_DONE(tcrtc->hw_videoport);
 	}
 
-	for (unsigned int i = 0; i < tidss->num_planes; ++i) {
-		struct tidss_plane *tplane = to_tidss_plane(tidss->planes[i]);
+	tidss_irq_update(tidss);
 
-		tidss->irq_mask |= DSS_IRQ_PLANE_FIFO_UNDERFLOW(tplane->hw_plane_id);
-	}
+	spin_unlock_irqrestore(&tidss->wait_lock, flags);
+
+	tidss_runtime_put(tidss);
 
 	return 0;
 }
@@ -134,5 +140,7 @@ void tidss_irq_uninstall(struct drm_device *ddev)
 {
 	struct tidss_device *tidss = to_tidss(ddev);
 
-	free_irq(tidss->irq, ddev);
+	tidss_runtime_get(tidss);
+	dispc_set_irqenable(tidss->dispc, 0);
+	tidss_runtime_put(tidss);
 }

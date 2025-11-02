@@ -54,7 +54,6 @@
 #include "vmwgfx_drv.h"
 #include "vmwgfx_binding.h"
 #include "device_include/svga3d_reg.h"
-#include <linux/vmalloc.h>
 
 #define VMW_BINDING_RT_BIT     0
 #define VMW_BINDING_PS_BIT     1
@@ -331,8 +330,6 @@ static void vmw_binding_drop(struct vmw_ctx_bindinfo *bi)
  *
  * @cbs: Pointer to the context binding state tracker.
  * @bi: Information about the binding to track.
- * @shader_slot: The shader slot of the binding.
- * @slot: The slot of the binding.
  *
  * Starts tracking the binding in the context binding
  * state structure @cbs.
@@ -355,27 +352,6 @@ void vmw_binding_add(struct vmw_ctx_binding_state *cbs,
 }
 
 /**
- * vmw_binding_cb_offset_update: Update the offset of a cb binding
- *
- * @cbs: Pointer to the context binding state tracker.
- * @shader_slot: The shader slot of the binding.
- * @slot: The slot of the binding.
- * @offsetInBytes: The new offset of the binding.
- *
- * Updates the offset of an existing cb binding in the context binding
- * state structure @cbs.
- */
-void vmw_binding_cb_offset_update(struct vmw_ctx_binding_state *cbs,
-				  u32 shader_slot, u32 slot, u32 offsetInBytes)
-{
-	struct vmw_ctx_bindinfo *loc =
-		vmw_binding_loc(cbs, vmw_ctx_binding_cb, shader_slot, slot);
-	struct vmw_ctx_bindinfo_cb *loc_cb =
-		(struct vmw_ctx_bindinfo_cb *)((u8 *) loc);
-	loc_cb->offset = offsetInBytes;
-}
-
-/**
  * vmw_binding_add_uav_index - Add UAV index for tracking.
  * @cbs: Pointer to the context binding state tracker.
  * @slot: UAV type to which bind this index.
@@ -391,7 +367,6 @@ void vmw_binding_add_uav_index(struct vmw_ctx_binding_state *cbs, uint32 slot,
  * vmw_binding_transfer: Transfer a context binding tracking entry.
  *
  * @cbs: Pointer to the persistent context binding state tracker.
- * @from: Staged binding info built during execbuf
  * @bi: Information about the binding to track.
  *
  */
@@ -509,8 +484,9 @@ void vmw_binding_res_list_scrub(struct list_head *head)
 /**
  * vmw_binding_state_commit - Commit staged binding info
  *
- * @to:   Staged binding info area to copy into to.
+ * @ctx: Pointer to context to commit the staged binding info to.
  * @from: Staged binding info built during execbuf.
+ * @scrubbed: Transfer only scrubbed bindings.
  *
  * Transfers binding info from a temporary structure
  * (typically used by execbuf) to the persistent
@@ -535,7 +511,7 @@ void vmw_binding_state_commit(struct vmw_ctx_binding_state *to,
 /**
  * vmw_binding_rebind_all - Rebind all scrubbed bindings of a context
  *
- * @cbs: Pointer to the context binding state tracker.
+ * @ctx: The context resource
  *
  * Walks through the context binding list and rebinds all scrubbed
  * resources.
@@ -579,7 +555,7 @@ static int vmw_binding_scrub_shader(struct vmw_ctx_bindinfo *bi, bool rebind)
 		SVGA3dCmdSetShader body;
 	} *cmd;
 
-	cmd = VMW_CMD_RESERVE(dev_priv, sizeof(*cmd));
+	cmd = VMW_FIFO_RESERVE(dev_priv, sizeof(*cmd));
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -588,7 +564,7 @@ static int vmw_binding_scrub_shader(struct vmw_ctx_bindinfo *bi, bool rebind)
 	cmd->body.cid = bi->ctx->id;
 	cmd->body.type = binding->shader_slot + SVGA3D_SHADERTYPE_MIN;
 	cmd->body.shid = ((rebind) ? bi->res->id : SVGA3D_INVALID_ID);
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
@@ -611,7 +587,7 @@ static int vmw_binding_scrub_render_target(struct vmw_ctx_bindinfo *bi,
 		SVGA3dCmdSetRenderTarget body;
 	} *cmd;
 
-	cmd = VMW_CMD_RESERVE(dev_priv, sizeof(*cmd));
+	cmd = VMW_FIFO_RESERVE(dev_priv, sizeof(*cmd));
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -622,7 +598,7 @@ static int vmw_binding_scrub_render_target(struct vmw_ctx_bindinfo *bi,
 	cmd->body.target.sid = ((rebind) ? bi->res->id : SVGA3D_INVALID_ID);
 	cmd->body.target.face = 0;
 	cmd->body.target.mipmap = 0;
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
@@ -650,7 +626,7 @@ static int vmw_binding_scrub_texture(struct vmw_ctx_bindinfo *bi,
 		} body;
 	} *cmd;
 
-	cmd = VMW_CMD_RESERVE(dev_priv, sizeof(*cmd));
+	cmd = VMW_FIFO_RESERVE(dev_priv, sizeof(*cmd));
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -660,7 +636,7 @@ static int vmw_binding_scrub_texture(struct vmw_ctx_bindinfo *bi,
 	cmd->body.s1.stage = binding->texture_stage;
 	cmd->body.s1.name = SVGA3D_TS_BIND_TEXTURE;
 	cmd->body.s1.value = ((rebind) ? bi->res->id : SVGA3D_INVALID_ID);
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
@@ -681,7 +657,7 @@ static int vmw_binding_scrub_dx_shader(struct vmw_ctx_bindinfo *bi, bool rebind)
 		SVGA3dCmdDXSetShader body;
 	} *cmd;
 
-	cmd = VMW_CMD_CTX_RESERVE(dev_priv, sizeof(*cmd), bi->ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(dev_priv, sizeof(*cmd), bi->ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -689,7 +665,7 @@ static int vmw_binding_scrub_dx_shader(struct vmw_ctx_bindinfo *bi, bool rebind)
 	cmd->header.size = sizeof(cmd->body);
 	cmd->body.type = binding->shader_slot + SVGA3D_SHADERTYPE_MIN;
 	cmd->body.shaderId = ((rebind) ? bi->res->id : SVGA3D_INVALID_ID);
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
@@ -710,7 +686,7 @@ static int vmw_binding_scrub_cb(struct vmw_ctx_bindinfo *bi, bool rebind)
 		SVGA3dCmdDXSetSingleConstantBuffer body;
 	} *cmd;
 
-	cmd = VMW_CMD_CTX_RESERVE(dev_priv, sizeof(*cmd), bi->ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(dev_priv, sizeof(*cmd), bi->ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -727,7 +703,7 @@ static int vmw_binding_scrub_cb(struct vmw_ctx_bindinfo *bi, bool rebind)
 		cmd->body.sizeInBytes = 0;
 		cmd->body.sid = SVGA3D_INVALID_ID;
 	}
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
@@ -808,10 +784,9 @@ static void vmw_collect_dirty_view_ids(struct vmw_ctx_binding_state *cbs,
 }
 
 /**
- * vmw_emit_set_sr - Issue delayed DX shader resource binding commands
+ * vmw_binding_emit_set_sr - Issue delayed DX shader resource binding commands
  *
  * @cbs: Pointer to the context's struct vmw_ctx_binding_state
- * @shader_slot: The shader slot of the binding.
  */
 static int vmw_emit_set_sr(struct vmw_ctx_binding_state *cbs,
 			   int shader_slot)
@@ -833,7 +808,7 @@ static int vmw_emit_set_sr(struct vmw_ctx_binding_state *cbs,
 
 	view_id_size = cbs->bind_cmd_count*sizeof(uint32);
 	cmd_size = sizeof(*cmd) + view_id_size;
-	cmd = VMW_CMD_CTX_RESERVE(ctx->dev_priv, cmd_size, ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(ctx->dev_priv, cmd_size, ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -844,7 +819,7 @@ static int vmw_emit_set_sr(struct vmw_ctx_binding_state *cbs,
 
 	memcpy(&cmd[1], cbs->bind_cmd_buffer, view_id_size);
 
-	vmw_cmd_commit(ctx->dev_priv, cmd_size);
+	vmw_fifo_commit(ctx->dev_priv, cmd_size);
 	bitmap_clear(cbs->per_shader[shader_slot].dirty_sr,
 		     cbs->bind_first_slot, cbs->bind_cmd_count);
 
@@ -852,7 +827,7 @@ static int vmw_emit_set_sr(struct vmw_ctx_binding_state *cbs,
 }
 
 /**
- * vmw_emit_set_rt - Issue delayed DX rendertarget binding commands
+ * vmw_binding_emit_set_rt - Issue delayed DX rendertarget binding commands
  *
  * @cbs: Pointer to the context's struct vmw_ctx_binding_state
  */
@@ -866,10 +841,10 @@ static int vmw_emit_set_rt(struct vmw_ctx_binding_state *cbs)
 	size_t cmd_size, view_id_size;
 	const struct vmw_resource *ctx = vmw_cbs_context(cbs);
 
-	vmw_collect_view_ids(cbs, loc, SVGA3D_DX_MAX_RENDER_TARGETS);
+	vmw_collect_view_ids(cbs, loc, SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS);
 	view_id_size = cbs->bind_cmd_count*sizeof(uint32);
 	cmd_size = sizeof(*cmd) + view_id_size;
-	cmd = VMW_CMD_CTX_RESERVE(ctx->dev_priv, cmd_size, ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(ctx->dev_priv, cmd_size, ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -883,7 +858,7 @@ static int vmw_emit_set_rt(struct vmw_ctx_binding_state *cbs)
 
 	memcpy(&cmd[1], cbs->bind_cmd_buffer, view_id_size);
 
-	vmw_cmd_commit(ctx->dev_priv, cmd_size);
+	vmw_fifo_commit(ctx->dev_priv, cmd_size);
 
 	return 0;
 
@@ -951,7 +926,7 @@ static int vmw_emit_set_so_target(struct vmw_ctx_binding_state *cbs)
 
 	so_target_size = cbs->bind_cmd_count*sizeof(SVGA3dSoTarget);
 	cmd_size = sizeof(*cmd) + so_target_size;
-	cmd = VMW_CMD_CTX_RESERVE(ctx->dev_priv, cmd_size, ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(ctx->dev_priv, cmd_size, ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -959,7 +934,7 @@ static int vmw_emit_set_so_target(struct vmw_ctx_binding_state *cbs)
 	cmd->header.size = sizeof(cmd->body) + so_target_size;
 	memcpy(&cmd[1], cbs->bind_cmd_buffer, so_target_size);
 
-	vmw_cmd_commit(ctx->dev_priv, cmd_size);
+	vmw_fifo_commit(ctx->dev_priv, cmd_size);
 
 	return 0;
 
@@ -1042,7 +1017,7 @@ static void vmw_collect_dirty_vbs(struct vmw_ctx_binding_state *cbs,
 }
 
 /**
- * vmw_emit_set_vb - Issue delayed vertex buffer binding commands
+ * vmw_binding_emit_set_vb - Issue delayed vertex buffer binding commands
  *
  * @cbs: Pointer to the context's struct vmw_ctx_binding_state
  *
@@ -1065,7 +1040,7 @@ static int vmw_emit_set_vb(struct vmw_ctx_binding_state *cbs)
 
 	set_vb_size = cbs->bind_cmd_count*sizeof(SVGA3dVertexBuffer);
 	cmd_size = sizeof(*cmd) + set_vb_size;
-	cmd = VMW_CMD_CTX_RESERVE(ctx->dev_priv, cmd_size, ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(ctx->dev_priv, cmd_size, ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -1075,7 +1050,7 @@ static int vmw_emit_set_vb(struct vmw_ctx_binding_state *cbs)
 
 	memcpy(&cmd[1], cbs->bind_cmd_buffer, set_vb_size);
 
-	vmw_cmd_commit(ctx->dev_priv, cmd_size);
+	vmw_fifo_commit(ctx->dev_priv, cmd_size);
 	bitmap_clear(cbs->dirty_vb,
 		     cbs->bind_first_slot, cbs->bind_cmd_count);
 
@@ -1092,10 +1067,10 @@ static int vmw_emit_set_uav(struct vmw_ctx_binding_state *cbs)
 	size_t cmd_size, view_id_size;
 	const struct vmw_resource *ctx = vmw_cbs_context(cbs);
 
-	vmw_collect_view_ids(cbs, loc, vmw_max_num_uavs(cbs->dev_priv));
+	vmw_collect_view_ids(cbs, loc, SVGA3D_MAX_UAVIEWS);
 	view_id_size = cbs->bind_cmd_count*sizeof(uint32);
 	cmd_size = sizeof(*cmd) + view_id_size;
-	cmd = VMW_CMD_CTX_RESERVE(ctx->dev_priv, cmd_size, ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(ctx->dev_priv, cmd_size, ctx->id);
 	if (!cmd)
 		return -ENOMEM;
 
@@ -1107,7 +1082,7 @@ static int vmw_emit_set_uav(struct vmw_ctx_binding_state *cbs)
 
 	memcpy(&cmd[1], cbs->bind_cmd_buffer, view_id_size);
 
-	vmw_cmd_commit(ctx->dev_priv, cmd_size);
+	vmw_fifo_commit(ctx->dev_priv, cmd_size);
 
 	return 0;
 }
@@ -1122,10 +1097,10 @@ static int vmw_emit_set_cs_uav(struct vmw_ctx_binding_state *cbs)
 	size_t cmd_size, view_id_size;
 	const struct vmw_resource *ctx = vmw_cbs_context(cbs);
 
-	vmw_collect_view_ids(cbs, loc, vmw_max_num_uavs(cbs->dev_priv));
+	vmw_collect_view_ids(cbs, loc, SVGA3D_MAX_UAVIEWS);
 	view_id_size = cbs->bind_cmd_count*sizeof(uint32);
 	cmd_size = sizeof(*cmd) + view_id_size;
-	cmd = VMW_CMD_CTX_RESERVE(ctx->dev_priv, cmd_size, ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(ctx->dev_priv, cmd_size, ctx->id);
 	if (!cmd)
 		return -ENOMEM;
 
@@ -1137,7 +1112,7 @@ static int vmw_emit_set_cs_uav(struct vmw_ctx_binding_state *cbs)
 
 	memcpy(&cmd[1], cbs->bind_cmd_buffer, view_id_size);
 
-	vmw_cmd_commit(ctx->dev_priv, cmd_size);
+	vmw_fifo_commit(ctx->dev_priv, cmd_size);
 
 	return 0;
 }
@@ -1284,7 +1259,7 @@ static int vmw_binding_scrub_ib(struct vmw_ctx_bindinfo *bi, bool rebind)
 		SVGA3dCmdDXSetIndexBuffer body;
 	} *cmd;
 
-	cmd = VMW_CMD_CTX_RESERVE(dev_priv, sizeof(*cmd), bi->ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(dev_priv, sizeof(*cmd), bi->ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -1300,7 +1275,7 @@ static int vmw_binding_scrub_ib(struct vmw_ctx_bindinfo *bi, bool rebind)
 		cmd->body.offset = 0;
 	}
 
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
@@ -1336,20 +1311,21 @@ static int vmw_binding_scrub_so(struct vmw_ctx_bindinfo *bi, bool rebind)
 		SVGA3dCmdDXSetStreamOutput body;
 	} *cmd;
 
-	cmd = VMW_CMD_CTX_RESERVE(dev_priv, sizeof(*cmd), bi->ctx->id);
+	cmd = VMW_FIFO_RESERVE_DX(dev_priv, sizeof(*cmd), bi->ctx->id);
 	if (!cmd)
 		return -ENOMEM;
 
 	cmd->header.id = SVGA_3D_CMD_DX_SET_STREAMOUTPUT;
 	cmd->header.size = sizeof(cmd->body);
 	cmd->body.soid = rebind ? bi->res->id : SVGA3D_INVALID_ID;
-	vmw_cmd_commit(dev_priv, sizeof(*cmd));
+	vmw_fifo_commit(dev_priv, sizeof(*cmd));
 
 	return 0;
 }
 
 /**
- * vmw_binding_state_alloc - Allocate a struct vmw_ctx_binding_state.
+ * vmw_binding_state_alloc - Allocate a struct vmw_ctx_binding_state with
+ * memory accounting.
  *
  * @dev_priv: Pointer to a device private structure.
  *
@@ -1359,9 +1335,20 @@ struct vmw_ctx_binding_state *
 vmw_binding_state_alloc(struct vmw_private *dev_priv)
 {
 	struct vmw_ctx_binding_state *cbs;
+	struct ttm_operation_ctx ctx = {
+		.interruptible = false,
+		.no_wait_gpu = false
+	};
+	int ret;
+
+	ret = ttm_mem_global_alloc(vmw_mem_glob(dev_priv), sizeof(*cbs),
+				&ctx);
+	if (ret)
+		return ERR_PTR(ret);
 
 	cbs = vzalloc(sizeof(*cbs));
 	if (!cbs) {
+		ttm_mem_global_free(vmw_mem_glob(dev_priv), sizeof(*cbs));
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -1372,13 +1359,17 @@ vmw_binding_state_alloc(struct vmw_private *dev_priv)
 }
 
 /**
- * vmw_binding_state_free - Free a struct vmw_ctx_binding_state.
+ * vmw_binding_state_free - Free a struct vmw_ctx_binding_state and its
+ * memory accounting info.
  *
  * @cbs: Pointer to the struct vmw_ctx_binding_state to be freed.
  */
 void vmw_binding_state_free(struct vmw_ctx_binding_state *cbs)
 {
+	struct vmw_private *dev_priv = cbs->dev_priv;
+
 	vfree(cbs);
+	ttm_mem_global_free(vmw_mem_glob(dev_priv), sizeof(*cbs));
 }
 
 /**
@@ -1396,7 +1387,7 @@ struct list_head *vmw_binding_state_list(struct vmw_ctx_binding_state *cbs)
 }
 
 /**
- * vmw_binding_state_reset - clear a struct vmw_ctx_binding_state
+ * vmwgfx_binding_state_reset - clear a struct vmw_ctx_binding_state
  *
  * @cbs: Pointer to the struct vmw_ctx_binding_state to be cleared
  *
@@ -1446,7 +1437,7 @@ u32 vmw_binding_dirtying(enum vmw_ctx_binding_type binding_type)
 static void vmw_binding_build_asserts(void)
 {
 	BUILD_BUG_ON(SVGA3D_NUM_SHADERTYPE_DX10 != 3);
-	BUILD_BUG_ON(SVGA3D_DX_MAX_RENDER_TARGETS > SVGA3D_RT_MAX);
+	BUILD_BUG_ON(SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS > SVGA3D_RT_MAX);
 	BUILD_BUG_ON(sizeof(uint32) != sizeof(u32));
 
 	/*

@@ -11,6 +11,16 @@
 //
 //	Some parts based on SN9C10x PC Camera Controllers GPL driver made
 //		by Luca Risolia <luca.risolia@studio.unibo.it>
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
 
 #include "em28xx.h"
 
@@ -264,7 +274,7 @@ static void em28xx_capture_area_set(struct em28xx *dev, u8 hstart, u8 vstart,
 	u8 overflow = (height >> 9 & 0x02) | (width >> 10 & 0x01);
 	/* NOTE: size limit: 2047x1023 = 2MPix */
 
-	em28xx_videodbg("capture area set to (%u,%u)/%ux%u\n",
+	em28xx_videodbg("capture area set to (%d,%d): %dx%d\n",
 			hstart, vstart,
 		       ((overflow & 2) << 9 | cwidth << 2),
 		       ((overflow & 1) << 10 | cheight << 2));
@@ -440,7 +450,7 @@ static inline void finish_buffer(struct em28xx *dev,
 }
 
 /*
- * Copy picture data from USB buffer to video buffer
+ * Copy picture data from USB buffer to videobuf buffer
  */
 static void em28xx_copy_video(struct em28xx *dev,
 			      struct em28xx_buffer *buf,
@@ -521,7 +531,7 @@ static void em28xx_copy_video(struct em28xx *dev,
 }
 
 /*
- * Copy VBI data from USB buffer to video buffer
+ * Copy VBI data from USB buffer to videobuf buffer
  */
 static void em28xx_copy_vbi(struct em28xx *dev,
 			    struct em28xx_buffer *buf,
@@ -1229,6 +1239,8 @@ static const struct vb2_ops em28xx_video_qops = {
 	.buf_queue      = buffer_queue,
 	.start_streaming = em28xx_start_analog_streaming,
 	.stop_streaming = em28xx_stop_streaming,
+	.wait_prepare   = vb2_ops_wait_prepare,
+	.wait_finish    = vb2_ops_wait_finish,
 };
 
 static int em28xx_vb2_setup(struct em28xx *dev)
@@ -1605,8 +1617,7 @@ static int vidioc_g_parm(struct file *file, void *priv,
 	p->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
 	if (dev->is_webcam) {
 		rc = v4l2_device_call_until_err(&v4l2->v4l2_dev, 0,
-						pad, get_frame_interval, NULL,
-						&ival);
+						video, g_frame_interval, &ival);
 		if (!rc)
 			p->parm.capture.timeperframe = ival.interval;
 	} else {
@@ -1638,8 +1649,7 @@ static int vidioc_s_parm(struct file *file, void *priv,
 	p->parm.capture.readbuffers = EM28XX_MIN_BUF;
 	p->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
 	rc = v4l2_device_call_until_err(&dev->v4l2->v4l2_dev, 0,
-					pad, set_frame_interval, NULL,
-					&ival);
+					video, s_frame_interval, &ival);
 	if (!rc)
 		p->parm.capture.timeperframe = ival.interval;
 	return rc;

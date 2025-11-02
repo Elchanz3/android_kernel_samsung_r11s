@@ -8,7 +8,6 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/security.h>
-#include <linux/string_helpers.h>
 #include "common.h"
 
 /* String table for operation mode. */
@@ -176,6 +175,16 @@ static bool tomoyo_manage_by_non_root;
 /* Utility functions. */
 
 /**
+ * tomoyo_yesno - Return "yes" or "no".
+ *
+ * @value: Bool value.
+ */
+const char *tomoyo_yesno(const unsigned int value)
+{
+	return value ? "yes" : "no";
+}
+
+/**
  * tomoyo_addprintf - strncat()-like-snprintf().
  *
  * @buffer: Buffer to write to. Must be '\0'-terminated.
@@ -184,7 +193,6 @@ static bool tomoyo_manage_by_non_root;
  *
  * Returns nothing.
  */
-__printf(3, 4)
 static void tomoyo_addprintf(char *buffer, int len, const char *fmt, ...)
 {
 	va_list args;
@@ -490,7 +498,7 @@ static struct tomoyo_profile *tomoyo_assign_profile
 	ptr = ns->profile_ptr[profile];
 	if (ptr)
 		return ptr;
-	entry = kzalloc(sizeof(*entry), GFP_NOFS | __GFP_NOWARN);
+	entry = kzalloc(sizeof(*entry), GFP_NOFS);
 	if (mutex_lock_interruptible(&tomoyo_policy_lock))
 		goto out;
 	ptr = ns->profile_ptr[profile];
@@ -627,7 +635,7 @@ static int tomoyo_set_mode(char *name, const char *value,
 			if (strstr(value, tomoyo_mode[mode]))
 				/*
 				 * Update lower 3 bits in order to distinguish
-				 * 'config' from 'TOMOYO_CONFIG_USE_DEFAULT'.
+				 * 'config' from 'TOMOYO_CONFIG_USE_DEAFULT'.
 				 */
 				config = (config & ~7) | mode;
 		if (config != TOMOYO_CONFIG_USE_DEFAULT) {
@@ -722,8 +730,8 @@ static void tomoyo_print_config(struct tomoyo_io_buffer *head, const u8 config)
 {
 	tomoyo_io_printf(head, "={ mode=%s grant_log=%s reject_log=%s }\n",
 			 tomoyo_mode[config & 3],
-			 str_yes_no(config & TOMOYO_CONFIG_WANT_GRANT_LOG),
-			 str_yes_no(config & TOMOYO_CONFIG_WANT_REJECT_LOG));
+			 tomoyo_yesno(config & TOMOYO_CONFIG_WANT_GRANT_LOG),
+			 tomoyo_yesno(config & TOMOYO_CONFIG_WANT_REJECT_LOG));
 }
 
 /**
@@ -1346,8 +1354,8 @@ static bool tomoyo_print_condition(struct tomoyo_io_buffer *head,
 	case 3:
 		if (cond->grant_log != TOMOYO_GRANTLOG_AUTO)
 			tomoyo_io_printf(head, " grant_log=%s",
-					 str_yes_no(cond->grant_log ==
-						    TOMOYO_GRANTLOG_YES));
+					 tomoyo_yesno(cond->grant_log ==
+						      TOMOYO_GRANTLOG_YES));
 		tomoyo_set_lf(head);
 		return true;
 	}
@@ -1981,114 +1989,6 @@ static int tomoyo_truncate(char *str)
 }
 
 /**
- * tomoyo_numscan - sscanf() which stores the length of a decimal integer value.
- *
- * @str:   String to scan.
- * @head:  Leading string that must start with.
- * @width: Pointer to "int" for storing length of a decimal integer value after @head.
- * @tail:  Optional character that must match after a decimal integer value.
- *
- * Returns whether @str starts with @head and a decimal value follows @head.
- */
-static bool tomoyo_numscan(const char *str, const char *head, int *width, const char tail)
-{
-	const char *cp;
-	const int n = strlen(head);
-
-	if (!strncmp(str, head, n)) {
-		cp = str + n;
-		while (*cp && *cp >= '0' && *cp <= '9')
-			cp++;
-		if (*cp == tail || !tail) {
-			*width = cp - (str + n);
-			return *width != 0;
-		}
-	}
-	*width = 0;
-	return 0;
-}
-
-/**
- * tomoyo_patternize_path - Make patterns for file path. Used by learning mode.
- *
- * @buffer: Destination buffer.
- * @len:    Size of @buffer.
- * @entry:  Original line.
- *
- * Returns nothing.
- */
-static void tomoyo_patternize_path(char *buffer, const int len, char *entry)
-{
-	int width;
-	char *cp = entry;
-
-	/* Nothing to do if this line is not for "file" related entry. */
-	if (strncmp(entry, "file ", 5))
-		goto flush;
-	/*
-	 * Nothing to do if there is no colon in this line, for this rewriting
-	 * applies to only filesystems where numeric values in the path are volatile.
-	 */
-	cp = strchr(entry + 5, ':');
-	if (!cp) {
-		cp = entry;
-		goto flush;
-	}
-	/* Flush e.g. "file ioctl" part. */
-	while (*cp != ' ')
-		cp--;
-	*cp++ = '\0';
-	tomoyo_addprintf(buffer, len, "%s ", entry);
-	/* e.g. file ioctl pipe:[$INO] $CMD */
-	if (tomoyo_numscan(cp, "pipe:[", &width, ']')) {
-		cp += width + 7;
-		tomoyo_addprintf(buffer, len, "pipe:[\\$]");
-		goto flush;
-	}
-	/* e.g. file ioctl socket:[$INO] $CMD */
-	if (tomoyo_numscan(cp, "socket:[", &width, ']')) {
-		cp += width + 9;
-		tomoyo_addprintf(buffer, len, "socket:[\\$]");
-		goto flush;
-	}
-	if (!strncmp(cp, "proc:/self", 10)) {
-		/* e.g. file read proc:/self/task/$TID/fdinfo/$FD */
-		cp += 10;
-		tomoyo_addprintf(buffer, len, "proc:/self");
-	} else if (tomoyo_numscan(cp, "proc:/", &width, 0)) {
-		/* e.g. file read proc:/$PID/task/$TID/fdinfo/$FD */
-		/*
-		 * Don't patternize $PID part if $PID == 1, for several
-		 * programs access only files in /proc/1/ directory.
-		 */
-		cp += width + 6;
-		if (width == 1 && *(cp - 1) == '1')
-			tomoyo_addprintf(buffer, len, "proc:/1");
-		else
-			tomoyo_addprintf(buffer, len, "proc:/\\$");
-	} else {
-		goto flush;
-	}
-	/* Patternize $TID part if "/task/" follows. */
-	if (tomoyo_numscan(cp, "/task/", &width, 0)) {
-		cp += width + 6;
-		tomoyo_addprintf(buffer, len, "/task/\\$");
-	}
-	/* Patternize $FD part if "/fd/" or "/fdinfo/" follows. */
-	if (tomoyo_numscan(cp, "/fd/", &width, 0)) {
-		cp += width + 4;
-		tomoyo_addprintf(buffer, len, "/fd/\\$");
-	} else if (tomoyo_numscan(cp, "/fdinfo/", &width, 0)) {
-		cp += width + 8;
-		tomoyo_addprintf(buffer, len, "/fdinfo/\\$");
-	}
-flush:
-	/* Flush remaining part if any. */
-	if (*cp)
-		tomoyo_addprintf(buffer, len, "%s", cp);
-}
-
-/**
  * tomoyo_add_entry - Add an ACL to current thread's domain. Used by learning mode.
  *
  * @domain: Pointer to "struct tomoyo_domain_info".
@@ -2111,8 +2011,7 @@ static void tomoyo_add_entry(struct tomoyo_domain_info *domain, char *header)
 	if (!cp)
 		return;
 	*cp++ = '\0';
-	/* Reserve some space for potentially using patterns. */
-	len = strlen(cp) + 16;
+	len = strlen(cp) + 1;
 	/* strstr() will return NULL if ordering is wrong. */
 	if (*cp == 'f') {
 		argv0 = strstr(header, " argv[]={ \"");
@@ -2129,10 +2028,10 @@ static void tomoyo_add_entry(struct tomoyo_domain_info *domain, char *header)
 		if (symlink)
 			len += tomoyo_truncate(symlink + 1) + 1;
 	}
-	buffer = kmalloc(len, GFP_NOFS | __GFP_ZERO);
+	buffer = kmalloc(len, GFP_NOFS);
 	if (!buffer)
 		return;
-	tomoyo_patternize_path(buffer, len, cp);
+	snprintf(buffer, len - 1, "%s", cp);
 	if (realpath)
 		tomoyo_addprintf(buffer, len, " exec.%s", realpath);
 	if (argv0)
@@ -2167,7 +2066,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 	bool quota_exceeded = false;
 
 	va_start(args, fmt);
-	len = vsnprintf(NULL, 0, fmt, args) + 1;
+	len = vsnprintf((char *) &len, 1, fmt, args) + 1;
 	va_end(args);
 	/* Write /sys/kernel/security/tomoyo/audit. */
 	va_start(args, fmt);
@@ -2204,7 +2103,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 		tomoyo_add_entry(r->domain, entry.query);
 		goto out;
 	}
-	len = kmalloc_size_roundup(entry.query_len);
+	len = tomoyo_round2(entry.query_len);
 	entry.domain = r->domain;
 	spin_lock(&tomoyo_query_list_lock);
 	if (tomoyo_memory_quota[TOMOYO_MEMORY_QUERY] &&
@@ -2675,7 +2574,7 @@ static inline bool tomoyo_has_more_namespace(struct tomoyo_io_buffer *head)
  * tomoyo_read_control - read() for /sys/kernel/security/tomoyo/ interface.
  *
  * @head:       Pointer to "struct tomoyo_io_buffer".
- * @buffer:     Pointer to buffer to write to.
+ * @buffer:     Poiner to buffer to write to.
  * @buffer_len: Size of @buffer.
  *
  * Returns bytes read on success, negative value otherwise.
@@ -2709,7 +2608,7 @@ ssize_t tomoyo_read_control(struct tomoyo_io_buffer *head, char __user *buffer,
 /**
  * tomoyo_parse_policy - Parse a policy line.
  *
- * @head: Pointer to "struct tomoyo_io_buffer".
+ * @head: Poiter to "struct tomoyo_io_buffer".
  * @line: Line to parse.
  *
  * Returns 0 on success, negative value otherwise.
@@ -2774,7 +2673,7 @@ ssize_t tomoyo_write_control(struct tomoyo_io_buffer *head,
 
 		if (head->w.avail >= head->writebuf_size - 1) {
 			const int len = head->writebuf_size * 2;
-			char *cp = kzalloc(len, GFP_NOFS | __GFP_NOWARN);
+			char *cp = kzalloc(len, GFP_NOFS);
 
 			if (!cp) {
 				error = -ENOMEM;
@@ -2896,7 +2795,7 @@ void tomoyo_check_profile(void)
 		else
 			continue;
 		pr_err("Userland tools for TOMOYO 2.6 must be installed and policy must be initialized.\n");
-		pr_err("Please see https://tomoyo.sourceforge.net/2.6/ for more information.\n");
+		pr_err("Please see https://tomoyo.osdn.jp/2.6/ for more information.\n");
 		panic("STOP!");
 	}
 	tomoyo_read_unlock(idx);

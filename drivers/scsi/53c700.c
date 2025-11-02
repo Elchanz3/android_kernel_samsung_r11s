@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* -*- mode: c; c-basic-offset: 8 -*- */
 
 /* NCR (or Symbios) 53c700 and 53c700-66 Driver
  *
@@ -158,13 +159,12 @@ STATIC int NCR_700_abort(struct scsi_cmnd * SCpnt);
 STATIC int NCR_700_host_reset(struct scsi_cmnd * SCpnt);
 STATIC void NCR_700_chip_setup(struct Scsi_Host *host);
 STATIC void NCR_700_chip_reset(struct Scsi_Host *host);
-STATIC int NCR_700_sdev_init(struct scsi_device *SDpnt);
-STATIC int NCR_700_sdev_configure(struct scsi_device *SDpnt,
-				  struct queue_limits *lim);
-STATIC void NCR_700_sdev_destroy(struct scsi_device *SDpnt);
+STATIC int NCR_700_slave_alloc(struct scsi_device *SDpnt);
+STATIC int NCR_700_slave_configure(struct scsi_device *SDpnt);
+STATIC void NCR_700_slave_destroy(struct scsi_device *SDpnt);
 static int NCR_700_change_queue_depth(struct scsi_device *SDpnt, int depth);
 
-STATIC const struct attribute_group *NCR_700_dev_groups[];
+STATIC struct device_attribute *NCR_700_dev_attrs[];
 
 STATIC struct scsi_transport_template *NCR_700_transport_template = NULL;
 
@@ -301,8 +301,8 @@ NCR_700_detect(struct scsi_host_template *tpnt,
 	static int banner = 0;
 	int j;
 
-	if (tpnt->sdev_groups == NULL)
-		tpnt->sdev_groups = NCR_700_dev_groups;
+	if(tpnt->sdev_attrs == NULL)
+		tpnt->sdev_attrs = NCR_700_dev_attrs;
 
 	memory = dma_alloc_coherent(dev, TOTAL_MEM_SIZE, &pScript, GFP_KERNEL);
 	if (!memory) {
@@ -331,9 +331,9 @@ NCR_700_detect(struct scsi_host_template *tpnt,
 	tpnt->can_queue = NCR_700_COMMAND_SLOTS_PER_HOST;
 	tpnt->sg_tablesize = NCR_700_SG_SEGMENTS;
 	tpnt->cmd_per_lun = NCR_700_CMD_PER_LUN;
-	tpnt->sdev_configure = NCR_700_sdev_configure;
-	tpnt->sdev_destroy = NCR_700_sdev_destroy;
-	tpnt->sdev_init = NCR_700_sdev_init;
+	tpnt->slave_configure = NCR_700_slave_configure;
+	tpnt->slave_destroy = NCR_700_slave_destroy;
+	tpnt->slave_alloc = NCR_700_slave_alloc;
 	tpnt->change_queue_depth = NCR_700_change_queue_depth;
 
 	if(tpnt->name == NULL)
@@ -635,7 +635,7 @@ NCR_700_scsi_done(struct NCR_700_Host_Parameters *hostdata,
 
 		SCp->host_scribble = NULL;
 		SCp->result = result;
-		scsi_done(SCp);
+		SCp->scsi_done(SCp);
 	} else {
 		printk(KERN_ERR "53c700: SCSI DONE HAS NULL SCp\n");
 	}
@@ -979,10 +979,10 @@ process_script_interrupt(__u32 dsps, __u32 dsp, struct scsi_cmnd *SCp,
 		if (NCR_700_get_tag_neg_state(SCp->device) == NCR_700_DURING_TAG_NEGOTIATION)
 			NCR_700_set_tag_neg_state(SCp->device,
 						  NCR_700_FINISHED_TAG_NEGOTIATION);
-
-		/* check for contingent allegiance conditions */
-		if (hostdata->status[0] == SAM_STAT_CHECK_CONDITION ||
-		    hostdata->status[0] == SAM_STAT_COMMAND_TERMINATED) {
+			
+		/* check for contingent allegiance contitions */
+		if(status_byte(hostdata->status[0]) == CHECK_CONDITION ||
+		   status_byte(hostdata->status[0]) == COMMAND_TERMINATED) {
 			struct NCR_700_command_slot *slot =
 				(struct NCR_700_command_slot *)SCp->host_scribble;
 			if(slot->flags == NCR_700_FLAG_AUTOSENSE) {
@@ -1508,6 +1508,7 @@ NCR_700_intr(int irq, void *dev_id)
 		struct scsi_cmnd *SCp = hostdata->cmd;
 
 		handled = 1;
+		SCp = hostdata->cmd;
 
 		if(istat & SCSI_INT_PENDING) {
 			udelay(10);
@@ -1571,7 +1572,7 @@ NCR_700_intr(int irq, void *dev_id)
 				 * deadlock on the
 				 * hostdata->state_lock */
 				SCp->result = DID_RESET << 16;
-				scsi_done(SCp);
+				SCp->scsi_done(SCp);
 			}
 			mdelay(25);
 			NCR_700_chip_setup(host);
@@ -1751,7 +1752,8 @@ NCR_700_intr(int irq, void *dev_id)
 	return IRQ_RETVAL(handled);
 }
 
-static int NCR_700_queuecommand_lck(struct scsi_cmnd *SCp)
+static int
+NCR_700_queuecommand_lck(struct scsi_cmnd *SCp, void (*done)(struct scsi_cmnd *))
 {
 	struct NCR_700_Host_Parameters *hostdata = 
 		(struct NCR_700_Host_Parameters *)SCp->device->host->hostdata[0];
@@ -1791,7 +1793,10 @@ static int NCR_700_queuecommand_lck(struct scsi_cmnd *SCp)
 
 	slot->cmnd = SCp;
 
+	SCp->scsi_done = done;
 	SCp->host_scribble = (unsigned char *)slot;
+	SCp->SCp.ptr = NULL;
+	SCp->SCp.buffer = NULL;
 
 #ifdef NCR_700_DEBUG
 	printk("53c700: scsi%d, command ", SCp->device->host->host_no);
@@ -1819,7 +1824,7 @@ static int NCR_700_queuecommand_lck(struct scsi_cmnd *SCp)
 
 	if ((hostdata->tag_negotiated & (1<<scmd_id(SCp))) &&
 	    SCp->device->simple_tags) {
-		slot->tag = scsi_cmd_to_rq(SCp)->tag;
+		slot->tag = SCp->request->tag;
 		CDEBUG(KERN_DEBUG, SCp, "sending out tag %d, slot %p\n",
 		       slot->tag, slot);
 	} else {
@@ -2018,7 +2023,7 @@ NCR_700_set_offset(struct scsi_target *STp, int offset)
 }
 
 STATIC int
-NCR_700_sdev_init(struct scsi_device *SDp)
+NCR_700_slave_alloc(struct scsi_device *SDp)
 {
 	SDp->hostdata = kzalloc(sizeof(struct NCR_700_Device_Parameters),
 				GFP_KERNEL);
@@ -2030,7 +2035,7 @@ NCR_700_sdev_init(struct scsi_device *SDp)
 }
 
 STATIC int
-NCR_700_sdev_configure(struct scsi_device *SDp, struct queue_limits *lim)
+NCR_700_slave_configure(struct scsi_device *SDp)
 {
 	struct NCR_700_Host_Parameters *hostdata = 
 		(struct NCR_700_Host_Parameters *)SDp->host->hostdata[0];
@@ -2053,7 +2058,7 @@ NCR_700_sdev_configure(struct scsi_device *SDp, struct queue_limits *lim)
 }
 
 STATIC void
-NCR_700_sdev_destroy(struct scsi_device *SDp)
+NCR_700_slave_destroy(struct scsi_device *SDp)
 {
 	kfree(SDp->hostdata);
 	SDp->hostdata = NULL;
@@ -2072,7 +2077,7 @@ NCR_700_show_active_tags(struct device *dev, struct device_attribute *attr, char
 {
 	struct scsi_device *SDp = to_scsi_device(dev);
 
-	return sysfs_emit(buf, "%d\n", NCR_700_get_depth(SDp));
+	return snprintf(buf, 20, "%d\n", NCR_700_get_depth(SDp));
 }
 
 static struct device_attribute NCR_700_active_tags_attr = {
@@ -2083,12 +2088,10 @@ static struct device_attribute NCR_700_active_tags_attr = {
 	.show = NCR_700_show_active_tags,
 };
 
-STATIC struct attribute *NCR_700_dev_attrs[] = {
-	&NCR_700_active_tags_attr.attr,
+STATIC struct device_attribute *NCR_700_dev_attrs[] = {
+	&NCR_700_active_tags_attr,
 	NULL,
 };
-
-ATTRIBUTE_GROUPS(NCR_700_dev);
 
 EXPORT_SYMBOL(NCR_700_detect);
 EXPORT_SYMBOL(NCR_700_release);

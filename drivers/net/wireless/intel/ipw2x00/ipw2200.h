@@ -31,6 +31,8 @@
 #include <linux/wireless.h>
 #include <linux/jiffies.h>
 #include <asm/io.h>
+
+#include <net/lib80211.h>
 #include <net/ieee80211_radiotap.h>
 
 #define DRV_NAME	"ipw2200"
@@ -649,7 +651,7 @@ struct ipw_rx_notification {
 		struct notif_link_deterioration link_deterioration;
 		struct notif_calibration calibration;
 		struct notif_noise noise;
-		DECLARE_FLEX_ARRAY(u8, raw);
+		u8 raw[0];
 	} u;
 } __packed;
 
@@ -1104,8 +1106,9 @@ struct ipw_fw_error {	 /* XXX */
 	u32 config;
 	u32 elem_len;
 	u32 log_len;
+	struct ipw_error_elem *elem;
 	struct ipw_event *log;
-	struct ipw_error_elem elem[];
+	u8 payload[];
 } __packed;
 
 #ifdef CONFIG_IPW2200_PROMISCUOUS
@@ -1141,7 +1144,7 @@ struct ipw_prom_priv {
  * structure is provided regardless of any bits unset.
  */
 struct ipw_rt_hdr {
-	struct ieee80211_radiotap_header_fixed rt_hdr;
+	struct ieee80211_radiotap_header rt_hdr;
 	u64 rt_tsf;      /* TSF */	/* XXX */
 	u8 rt_flags;	/* radiotap packet flags */
 	u8 rt_rate;	/* rate in 500kb/s */
@@ -1273,6 +1276,8 @@ struct ipw_priv {
 	int eeprom_delay;
 
 	struct iw_statistics wstats;
+
+	struct iw_public_data wireless_data;
 
 	int user_requested_scan;
 	u8 direct_scan_ssid[IW_ESSID_MAX_SIZE];
@@ -1940,7 +1945,7 @@ struct host_cmd {
 	u8 cmd;
 	u8 len;
 	u16 reserved;
-	const u32 *param;
+	u32 *param;
 } __packed;	/* XXX */
 
 struct cmdlog_host_cmd {

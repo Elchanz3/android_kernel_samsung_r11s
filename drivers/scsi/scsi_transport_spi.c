@@ -105,33 +105,33 @@ static int sprint_frac(char *dest, int value, int denom)
 }
 
 static int spi_execute(struct scsi_device *sdev, const void *cmd,
-		       enum req_op op, void *buffer, unsigned int bufflen,
+		       enum dma_data_direction dir,
+		       void *buffer, unsigned bufflen,
 		       struct scsi_sense_hdr *sshdr)
 {
-	blk_opf_t opf = op | REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT |
-			REQ_FAILFAST_DRIVER;
-	struct scsi_failure failure_defs[] = {
-		{
-			.sense = UNIT_ATTENTION,
-			.asc = SCMD_FAILURE_ASC_ANY,
-			.ascq = SCMD_FAILURE_ASCQ_ANY,
-			.allowed = DV_RETRIES,
-			.result = SAM_STAT_CHECK_CONDITION,
-		},
-		{}
-	};
-	struct scsi_failures failures = {
-		.failure_definitions = failure_defs,
-	};
-	const struct scsi_exec_args exec_args = {
-		/* bypass the SDEV_QUIESCE state with BLK_MQ_REQ_PM */
-		.req_flags = BLK_MQ_REQ_PM,
-		.sshdr = sshdr,
-		.failures = &failures,
-	};
+	int i, result;
+	unsigned char sense[SCSI_SENSE_BUFFERSIZE];
+	struct scsi_sense_hdr sshdr_tmp;
 
-	return scsi_execute_cmd(sdev, cmd, opf, buffer, bufflen, DV_TIMEOUT, 1,
-				&exec_args);
+	if (!sshdr)
+		sshdr = &sshdr_tmp;
+
+	for(i = 0; i < DV_RETRIES; i++) {
+		/*
+		 * The purpose of the RQF_PM flag below is to bypass the
+		 * SDEV_QUIESCE state.
+		 */
+		result = scsi_execute(sdev, cmd, dir, buffer, bufflen, sense,
+				      sshdr, DV_TIMEOUT, /* retries */ 1,
+				      REQ_FAILFAST_DEV |
+				      REQ_FAILFAST_TRANSPORT |
+				      REQ_FAILFAST_DRIVER,
+				      RQF_PM, NULL);
+		if (driver_byte(result) != DRIVER_SENSE ||
+		    sshdr->sense_key != UNIT_ATTENTION)
+			break;
+	}
+	return result;
 }
 
 static struct {
@@ -675,12 +675,12 @@ spi_dv_device_echo_buffer(struct scsi_device *sdev, u8 *buffer,
 	}
 
 	for (r = 0; r < retries; r++) {
-		result = spi_execute(sdev, spi_write_buffer, REQ_OP_DRV_OUT,
+		result = spi_execute(sdev, spi_write_buffer, DMA_TO_DEVICE,
 				     buffer, len, &sshdr);
-		if (result || !scsi_device_online(sdev)) {
+		if(result || !scsi_device_online(sdev)) {
 
 			scsi_device_set_state(sdev, SDEV_QUIESCE);
-			if (result > 0 && scsi_sense_valid(&sshdr)
+			if (scsi_sense_valid(&sshdr)
 			    && sshdr.sense_key == ILLEGAL_REQUEST
 			    /* INVALID FIELD IN CDB */
 			    && sshdr.asc == 0x24 && sshdr.ascq == 0x00)
@@ -697,7 +697,7 @@ spi_dv_device_echo_buffer(struct scsi_device *sdev, u8 *buffer,
 		}
 
 		memset(ptr, 0, len);
-		spi_execute(sdev, spi_read_buffer, REQ_OP_DRV_IN,
+		spi_execute(sdev, spi_read_buffer, DMA_FROM_DEVICE,
 			    ptr, len, NULL);
 		scsi_device_set_state(sdev, SDEV_QUIESCE);
 
@@ -722,7 +722,7 @@ spi_dv_device_compare_inquiry(struct scsi_device *sdev, u8 *buffer,
 	for (r = 0; r < retries; r++) {
 		memset(ptr, 0, len);
 
-		result = spi_execute(sdev, spi_inquiry, REQ_OP_DRV_IN,
+		result = spi_execute(sdev, spi_inquiry, DMA_FROM_DEVICE,
 				     ptr, len, NULL);
 		
 		if(result || !scsi_device_online(sdev)) {
@@ -828,7 +828,7 @@ spi_dv_device_get_echo_buffer(struct scsi_device *sdev, u8 *buffer)
 	 * (reservation conflict, device not ready, etc) just
 	 * skip the write tests */
 	for (l = 0; ; l++) {
-		result = spi_execute(sdev, spi_test_unit_ready, REQ_OP_DRV_IN,
+		result = spi_execute(sdev, spi_test_unit_ready, DMA_NONE, 
 				     NULL, 0, NULL);
 
 		if(result) {
@@ -841,7 +841,7 @@ spi_dv_device_get_echo_buffer(struct scsi_device *sdev, u8 *buffer)
 	}
 
 	result = spi_execute(sdev, spi_read_buffer_descriptor, 
-			     REQ_OP_DRV_IN, buffer, 4, NULL);
+			     DMA_FROM_DEVICE, buffer, 4, NULL);
 
 	if (result)
 		/* Device has no echo buffer */
@@ -985,8 +985,7 @@ spi_dv_device_internal(struct scsi_device *sdev, u8 *buffer)
 }
 
 
-/**
- *	spi_dv_device - Do Domain Validation on the device
+/**	spi_dv_device - Do Domain Validation on the device
  *	@sdev:		scsi device to validate
  *
  *	Performs the domain validation on the given device in the
@@ -999,9 +998,8 @@ void
 spi_dv_device(struct scsi_device *sdev)
 {
 	struct scsi_target *starget = sdev->sdev_target;
-	const int len = SPI_MAX_ECHO_BUFFER_SIZE*2;
-	unsigned int sleep_flags;
 	u8 *buffer;
+	const int len = SPI_MAX_ECHO_BUFFER_SIZE*2;
 
 	/*
 	 * Because this function and the power management code both call
@@ -1009,7 +1007,7 @@ spi_dv_device(struct scsi_device *sdev)
 	 * while suspend or resume is in progress. Hence the
 	 * lock/unlock_system_sleep() calls.
 	 */
-	sleep_flags = lock_system_sleep();
+	lock_system_sleep();
 
 	if (scsi_autopm_get_device(sdev))
 		goto unlock_system_sleep;
@@ -1060,7 +1058,7 @@ put_autopm:
 	scsi_autopm_put_device(sdev);
 
 unlock_system_sleep:
-	unlock_system_sleep(sleep_flags);
+	unlock_system_sleep();
 }
 EXPORT_SYMBOL(spi_dv_device);
 
@@ -1232,7 +1230,7 @@ int spi_populate_tag_msg(unsigned char *msg, struct scsi_cmnd *cmd)
 {
         if (cmd->flags & SCMD_TAGGED) {
 		*msg++ = SIMPLE_QUEUE_TAG;
-		*msg++ = scsi_cmd_to_rq(cmd)->tag;
+        	*msg++ = cmd->request->tag;
         	return 2;
 	}
 

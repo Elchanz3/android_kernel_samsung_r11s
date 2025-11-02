@@ -34,13 +34,14 @@
  * would need to validate the whole pagetable before going on.
  * Naturally, this is quite slow.  The solution is to "pin" a
  * pagetable, which enforces all the constraints on the pagetable even
- * when it is not actively in use.  This means that Xen can be assured
+ * when it is not actively in use.  This menas that Xen can be assured
  * that it is still valid when you do load it into %cr3, and doesn't
  * need to revalidate it.
  *
  * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
  */
 #include <linux/sched/mm.h>
+#include <linux/highmem.h>
 #include <linux/debugfs.h>
 #include <linux/bug.h>
 #include <linux/vmalloc.h>
@@ -80,81 +81,19 @@
 #include <xen/interface/version.h>
 #include <xen/interface/memory.h>
 #include <xen/hvc-console.h>
-#include <xen/swiotlb-xen.h>
 
-#include "xen-ops.h"
+#include "multicalls.h"
+#include "mmu.h"
+#include "debugfs.h"
 
-/*
- * Prototypes for functions called via PV_CALLEE_SAVE_REGS_THUNK() in order
- * to avoid warnings with "-Wmissing-prototypes".
- */
-pteval_t xen_pte_val(pte_t pte);
-pgdval_t xen_pgd_val(pgd_t pgd);
-pmdval_t xen_pmd_val(pmd_t pmd);
-pudval_t xen_pud_val(pud_t pud);
-p4dval_t xen_p4d_val(p4d_t p4d);
-pte_t xen_make_pte(pteval_t pte);
-pgd_t xen_make_pgd(pgdval_t pgd);
-pmd_t xen_make_pmd(pmdval_t pmd);
-pud_t xen_make_pud(pudval_t pud);
-p4d_t xen_make_p4d(p4dval_t p4d);
-pte_t xen_make_pte_init(pteval_t pte);
-
-#ifdef CONFIG_X86_VSYSCALL_EMULATION
 /* l3 pud for userspace vsyscall mapping */
 static pud_t level3_user_vsyscall[PTRS_PER_PUD] __page_aligned_bss;
-#endif
 
 /*
  * Protects atomic reservation decrease/increase against concurrent increases.
  * Also protects non-atomic updates of current_pages and balloon lists.
  */
 static DEFINE_SPINLOCK(xen_reservation_lock);
-
-/* Protected by xen_reservation_lock. */
-#define MIN_CONTIG_ORDER 9 /* 2MB */
-static unsigned int discontig_frames_order = MIN_CONTIG_ORDER;
-static unsigned long discontig_frames_early[1UL << MIN_CONTIG_ORDER] __initdata;
-static unsigned long *discontig_frames __refdata = discontig_frames_early;
-static bool discontig_frames_dyn;
-
-static int alloc_discontig_frames(unsigned int order)
-{
-	unsigned long *new_array, *old_array;
-	unsigned int old_order;
-	unsigned long flags;
-
-	BUG_ON(order < MIN_CONTIG_ORDER);
-	BUILD_BUG_ON(sizeof(discontig_frames_early) != PAGE_SIZE);
-
-	new_array = (unsigned long *)__get_free_pages(GFP_KERNEL,
-						      order - MIN_CONTIG_ORDER);
-	if (!new_array)
-		return -ENOMEM;
-
-	spin_lock_irqsave(&xen_reservation_lock, flags);
-
-	old_order = discontig_frames_order;
-
-	if (order > discontig_frames_order || !discontig_frames_dyn) {
-		if (!discontig_frames_dyn)
-			old_array = NULL;
-		else
-			old_array = discontig_frames;
-
-		discontig_frames = new_array;
-		discontig_frames_order = order;
-		discontig_frames_dyn = true;
-	} else {
-		old_array = new_array;
-	}
-
-	spin_unlock_irqrestore(&xen_reservation_lock, flags);
-
-	free_pages((unsigned long)old_array, old_order - MIN_CONTIG_ORDER);
-
-	return 0;
-}
 
 /*
  * Note about cr3 (pagetable base) values:
@@ -171,7 +110,7 @@ static int alloc_discontig_frames(unsigned int order)
  * looking at another vcpu's cr3 value, it should use this variable.
  */
 DEFINE_PER_CPU(unsigned long, xen_cr3);	 /* cr3 stored as physaddr */
-static DEFINE_PER_CPU(unsigned long, xen_current_cr3);	/* actual vcpu cr3 */
+DEFINE_PER_CPU(unsigned long, xen_current_cr3);	 /* actual vcpu cr3 */
 
 static phys_addr_t xen_pt_base, xen_pt_size __initdata;
 
@@ -209,7 +148,7 @@ void make_lowmem_page_readwrite(void *vaddr)
 	if (pte == NULL)
 		return;		/* vaddr missing */
 
-	ptev = pte_mkwrite_novma(*pte);
+	ptev = pte_mkwrite(*pte);
 
 	if (HYPERVISOR_update_va_mapping(address, ptev, 0))
 		BUG();
@@ -279,7 +218,7 @@ static void xen_set_pmd_hyper(pmd_t *ptr, pmd_t val)
 	u.val = pmd_val_ma(val);
 	xen_extend_mmu_update(&u);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	preempt_enable();
 }
@@ -302,18 +241,16 @@ static void xen_set_pmd(pmd_t *ptr, pmd_t val)
  * Associate a virtual page frame with a given physical page frame
  * and protection flags for that frame.
  */
-void __init set_pte_mfn(unsigned long vaddr, unsigned long mfn, pgprot_t flags)
+void set_pte_mfn(unsigned long vaddr, unsigned long mfn, pgprot_t flags)
 {
-	if (HYPERVISOR_update_va_mapping(vaddr, mfn_pte(mfn, flags),
-					 UVMF_INVLPG))
-		BUG();
+	set_pte_vaddr(vaddr, mfn_pte(mfn, flags));
 }
 
 static bool xen_batched_set_pte(pte_t *ptep, pte_t pteval)
 {
 	struct mmu_update u;
 
-	if (xen_get_lazy_mode() != XEN_LAZY_MMU)
+	if (paravirt_get_lazy_mode() != PARAVIRT_LAZY_MMU)
 		return false;
 
 	xen_mc_batch();
@@ -322,7 +259,7 @@ static bool xen_batched_set_pte(pte_t *ptep, pte_t pteval)
 	u.val = pte_val_ma(pteval);
 	xen_extend_mmu_update(&u);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	return true;
 }
@@ -348,17 +285,16 @@ static void xen_set_pte(pte_t *ptep, pte_t pteval)
 	__xen_set_pte(ptep, pteval);
 }
 
-static pte_t xen_ptep_modify_prot_start(struct vm_area_struct *vma,
-					unsigned long addr, pte_t *ptep)
+pte_t xen_ptep_modify_prot_start(struct vm_area_struct *vma,
+				 unsigned long addr, pte_t *ptep)
 {
 	/* Just return the pte as-is.  We preserve the bits on commit */
 	trace_xen_mmu_ptep_modify_prot_start(vma->vm_mm, addr, ptep, *ptep);
 	return *ptep;
 }
 
-static void xen_ptep_modify_prot_commit(struct vm_area_struct *vma,
-					unsigned long addr,
-					pte_t *ptep, pte_t pte)
+void xen_ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
+				 pte_t *ptep, pte_t pte)
 {
 	struct mmu_update u;
 
@@ -369,7 +305,7 @@ static void xen_ptep_modify_prot_commit(struct vm_area_struct *vma,
 	u.val = pte_val_ma(pte);
 	xen_extend_mmu_update(&u);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 }
 
 /* Assume pteval_t is equivalent to all the other *val_t types. */
@@ -463,7 +399,7 @@ static void xen_set_pud_hyper(pud_t *ptr, pud_t val)
 	u.val = pud_val_ma(val);
 	xen_extend_mmu_update(&u);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	preempt_enable();
 }
@@ -543,7 +479,7 @@ static void __init xen_set_p4d_hyper(p4d_t *ptr, p4d_t val)
 
 	__xen_set_p4d_hyper(ptr, val);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	preempt_enable();
 }
@@ -575,9 +511,10 @@ static void xen_set_p4d(p4d_t *ptr, p4d_t val)
 	if (user_ptr)
 		__xen_set_p4d_hyper((p4d_t *)user_ptr, val);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 }
 
+#if CONFIG_PGTABLE_LEVELS >= 5
 __visible p4dval_t xen_p4d_val(p4d_t p4d)
 {
 	return pte_mfn_to_pfn(p4d.p4d);
@@ -591,6 +528,7 @@ __visible p4d_t xen_make_p4d(p4dval_t p4d)
 	return native_make_p4d(p4d);
 }
 PV_CALLEE_SAVE_REGS_THUNK(xen_make_p4d);
+#endif  /* CONFIG_PGTABLE_LEVELS >= 5 */
 
 static void xen_pmd_walk(struct mm_struct *mm, pmd_t *pmd,
 			 void (*func)(struct mm_struct *mm, struct page *,
@@ -708,8 +646,8 @@ static spinlock_t *xen_pte_lock(struct page *page, struct mm_struct *mm)
 {
 	spinlock_t *ptl = NULL;
 
-#if defined(CONFIG_SPLIT_PTE_PTLOCKS)
-	ptl = ptlock_ptr(page_ptdesc(page));
+#if USE_SPLIT_PTE_PTLOCKS
+	ptl = ptlock_ptr(page);
 	spin_lock_nest_lock(ptl, &mm->page_table_lock);
 #endif
 
@@ -824,7 +762,6 @@ void xen_mm_pin_all(void)
 {
 	struct page *page;
 
-	spin_lock(&init_mm.page_table_lock);
 	spin_lock(&pgd_lock);
 
 	list_for_each_entry(page, &pgd_list, lru) {
@@ -835,7 +772,6 @@ void xen_mm_pin_all(void)
 	}
 
 	spin_unlock(&pgd_lock);
-	spin_unlock(&init_mm.page_table_lock);
 }
 
 static void __init xen_mark_pinned(struct mm_struct *mm, struct page *page,
@@ -853,13 +789,8 @@ static void __init xen_mark_pinned(struct mm_struct *mm, struct page *page,
 static void __init xen_after_bootmem(void)
 {
 	static_branch_enable(&xen_struct_pages_ready);
-#ifdef CONFIG_X86_VSYSCALL_EMULATION
 	SetPagePinned(virt_to_page(level3_user_vsyscall));
-#endif
 	xen_pgd_walk(&init_mm, xen_mark_pinned, FIXADDR_TOP);
-
-	if (alloc_discontig_frames(MIN_CONTIG_ORDER))
-		BUG();
 }
 
 static void xen_unpin_page(struct mm_struct *mm, struct page *page,
@@ -935,7 +866,6 @@ void xen_mm_unpin_all(void)
 {
 	struct page *page;
 
-	spin_lock(&init_mm.page_table_lock);
 	spin_lock(&pgd_lock);
 
 	list_for_each_entry(page, &pgd_list, lru) {
@@ -947,10 +877,16 @@ void xen_mm_unpin_all(void)
 	}
 
 	spin_unlock(&pgd_lock);
-	spin_unlock(&init_mm.page_table_lock);
 }
 
-static void xen_enter_mmap(struct mm_struct *mm)
+static void xen_activate_mm(struct mm_struct *prev, struct mm_struct *next)
+{
+	spin_lock(&next->page_table_lock);
+	xen_pgd_pin(next);
+	spin_unlock(&next->page_table_lock);
+}
+
+static void xen_dup_mmap(struct mm_struct *oldmm, struct mm_struct *mm)
 {
 	spin_lock(&mm->page_table_lock);
 	xen_pgd_pin(mm);
@@ -962,7 +898,7 @@ static void drop_mm_ref_this_cpu(void *info)
 	struct mm_struct *mm = info;
 
 	if (this_cpu_read(cpu_tlbstate.loaded_mm) == mm)
-		leave_mm();
+		leave_mm(smp_processor_id());
 
 	/*
 	 * If this cpu still has a stale cr3 reference, then make sure
@@ -1089,7 +1025,7 @@ static void __init xen_free_ro_pages(unsigned long paddr, unsigned long size)
 	for (; vaddr < vaddr_end; vaddr += PAGE_SIZE)
 		make_lowmem_page_readwrite(vaddr);
 
-	memblock_phys_free(paddr, size);
+	memblock_free(paddr, size);
 }
 
 static void __init xen_cleanmfnmap_free_pgtbl(void *pgtbl, bool unpin)
@@ -1108,7 +1044,7 @@ static void __init xen_cleanmfnmap_pmd(pmd_t *pmd, bool unpin)
 	pte_t *pte_tbl;
 	int i;
 
-	if (pmd_leaf(*pmd)) {
+	if (pmd_large(*pmd)) {
 		pa = pmd_val(*pmd) & PHYSICAL_PAGE_MASK;
 		xen_free_ro_pages(pa, PMD_SIZE);
 		return;
@@ -1131,7 +1067,7 @@ static void __init xen_cleanmfnmap_pud(pud_t *pud, bool unpin)
 	pmd_t *pmd_tbl;
 	int i;
 
-	if (pud_leaf(*pud)) {
+	if (pud_large(*pud)) {
 		pa = pud_val(*pud) & PHYSICAL_PAGE_MASK;
 		xen_free_ro_pages(pa, PUD_SIZE);
 		return;
@@ -1153,7 +1089,7 @@ static void __init xen_cleanmfnmap_p4d(p4d_t *p4d, bool unpin)
 	pud_t *pud_tbl;
 	int i;
 
-	if (p4d_leaf(*p4d)) {
+	if (p4d_large(*p4d)) {
 		pa = p4d_val(*p4d) & PHYSICAL_PAGE_MASK;
 		xen_free_ro_pages(pa, P4D_SIZE);
 		return;
@@ -1215,7 +1151,7 @@ static void __init xen_pagetable_p2m_free(void)
 		xen_cleanhighmap(addr, addr + size);
 		size = PAGE_ALIGN(xen_start_info->nr_pages *
 				  sizeof(unsigned long));
-		memblock_free((void *)addr, size);
+		memblock_free(__pa(addr), size);
 	} else {
 		xen_cleanmfnmap(addr);
 	}
@@ -1256,13 +1192,6 @@ static void __init xen_pagetable_p2m_setup(void)
 
 static void __init xen_pagetable_init(void)
 {
-	/*
-	 * The majority of further PTE writes is to pagetables already
-	 * announced as such to Xen. Hence it is more efficient to use
-	 * hypercalls for these updates.
-	 */
-	pv_ops.mmu.set_pte = __xen_set_pte;
-
 	paging_init();
 	xen_post_allocator_init();
 
@@ -1275,8 +1204,7 @@ static void __init xen_pagetable_init(void)
 	xen_remap_memory();
 	xen_setup_mfn_list_list();
 }
-
-static noinstr void xen_write_cr2(unsigned long cr2)
+static void xen_write_cr2(unsigned long cr2)
 {
 	this_cpu_read(xen_vcpu)->arch.cr2 = cr2;
 }
@@ -1294,7 +1222,7 @@ static noinline void xen_flush_tlb(void)
 	op->cmd = MMUEXT_TLB_FLUSH_LOCAL;
 	MULTI_mmuext_op(mcs.mc, op, 1, NULL, DOMID_SELF);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	preempt_enable();
 }
@@ -1314,13 +1242,13 @@ static void xen_flush_tlb_one_user(unsigned long addr)
 	op->arg1.linear_addr = addr & PAGE_MASK;
 	MULTI_mmuext_op(mcs.mc, op, 1, NULL, DOMID_SELF);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	preempt_enable();
 }
 
-static void xen_flush_tlb_multi(const struct cpumask *cpus,
-				const struct flush_tlb_info *info)
+static void xen_flush_tlb_others(const struct cpumask *cpus,
+				 const struct flush_tlb_info *info)
 {
 	struct {
 		struct mmuext_op op;
@@ -1330,7 +1258,7 @@ static void xen_flush_tlb_multi(const struct cpumask *cpus,
 	const size_t mc_entry_size = sizeof(args->op) +
 		sizeof(args->mask[0]) * BITS_TO_LONGS(num_possible_cpus());
 
-	trace_xen_mmu_flush_tlb_multi(cpus, info->mm, info->start, info->end);
+	trace_xen_mmu_flush_tlb_others(cpus, info->mm, info->start, info->end);
 
 	if (cpumask_empty(cpus))
 		return;		/* nothing to do */
@@ -1339,8 +1267,9 @@ static void xen_flush_tlb_multi(const struct cpumask *cpus,
 	args = mcs.args;
 	args->op.arg2.vcpumask = to_cpumask(args->mask);
 
-	/* Remove any offline CPUs */
+	/* Remove us, and any offline CPUS. */
 	cpumask_and(to_cpumask(args->mask), cpus, cpu_online_mask);
+	cpumask_clear_cpu(smp_processor_id(), to_cpumask(args->mask));
 
 	args->op.cmd = MMUEXT_TLB_FLUSH_MULTI;
 	if (info->end != TLB_FLUSH_ALL &&
@@ -1351,7 +1280,7 @@ static void xen_flush_tlb_multi(const struct cpumask *cpus,
 
 	MULTI_mmuext_op(mcs.mc, &args->op, 1, NULL, DOMID_SELF);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 }
 
 static unsigned long xen_read_cr3(void)
@@ -1410,7 +1339,7 @@ static void xen_write_cr3(unsigned long cr3)
 	else
 		__xen_write_cr3(false, 0);
 
-	xen_mc_issue(XEN_LAZY_CPU);  /* interrupts restored */
+	xen_mc_issue(PARAVIRT_LAZY_CPU);  /* interrupts restored */
 }
 
 /*
@@ -1445,7 +1374,7 @@ static void __init xen_write_cr3_init(unsigned long cr3)
 
 	__xen_write_cr3(true, cr3);
 
-	xen_mc_issue(XEN_LAZY_CPU);  /* interrupts restored */
+	xen_mc_issue(PARAVIRT_LAZY_CPU);  /* interrupts restored */
 }
 
 static int xen_pgd_alloc(struct mm_struct *mm)
@@ -1492,18 +1421,10 @@ static void xen_pgd_free(struct mm_struct *mm, pgd_t *pgd)
  *
  * Many of these PTE updates are done on unpinned and writable pages
  * and doing a hypercall for these is unnecessary and expensive.  At
- * this point it is rarely possible to tell if a page is pinned, so
- * mostly write the PTE directly and rely on Xen trapping and
+ * this point it is not possible to tell if a page is pinned or not,
+ * so always write the PTE directly and rely on Xen trapping and
  * emulating any updates as necessary.
  */
-static void __init xen_set_pte_init(pte_t *ptep, pte_t pte)
-{
-	if (unlikely(is_early_ioremap_ptep(ptep)))
-		__xen_set_pte(ptep, pte);
-	else
-		native_set_pte(ptep, pte);
-}
-
 __visible pte_t xen_make_pte_init(pteval_t pte)
 {
 	unsigned long pfn;
@@ -1524,6 +1445,11 @@ __visible pte_t xen_make_pte_init(pteval_t pte)
 	return native_make_pte(pte);
 }
 PV_CALLEE_SAVE_REGS_THUNK(xen_make_pte_init);
+
+static void __init xen_set_pte_init(pte_t *ptep, pte_t pte)
+{
+	__xen_set_pte(ptep, pte);
+}
 
 /* Early in boot, while setting up the initial pagetable, assume
    everything is pinned. */
@@ -1593,21 +1519,17 @@ static inline void xen_alloc_ptpage(struct mm_struct *mm, unsigned long pfn,
 	if (pinned) {
 		struct page *page = pfn_to_page(pfn);
 
-		pinned = false;
-		if (static_branch_likely(&xen_struct_pages_ready)) {
-			pinned = PagePinned(page);
+		if (static_branch_likely(&xen_struct_pages_ready))
 			SetPagePinned(page);
-		}
 
 		xen_mc_batch();
 
 		__set_pfn_prot(pfn, PAGE_KERNEL_RO);
 
-		if (level == PT_PTE && IS_ENABLED(CONFIG_SPLIT_PTE_PTLOCKS) &&
-		    !pinned)
+		if (level == PT_PTE && USE_SPLIT_PTE_PTLOCKS)
 			__pin_pagetable_pfn(MMUEXT_PIN_L1_TABLE, pfn);
 
-		xen_mc_issue(XEN_LAZY_MMU);
+		xen_mc_issue(PARAVIRT_LAZY_MMU);
 	}
 }
 
@@ -1632,12 +1554,12 @@ static inline void xen_release_ptpage(unsigned long pfn, unsigned level)
 	if (pinned) {
 		xen_mc_batch();
 
-		if (level == PT_PTE && IS_ENABLED(CONFIG_SPLIT_PTE_PTLOCKS))
+		if (level == PT_PTE && USE_SPLIT_PTE_PTLOCKS)
 			__pin_pagetable_pfn(MMUEXT_UNPIN_TABLE, pfn);
 
 		__set_pfn_prot(pfn, PAGE_KERNEL);
 
-		xen_mc_issue(XEN_LAZY_MMU);
+		xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 		ClearPagePinned(page);
 	}
@@ -1825,6 +1747,7 @@ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
 	set_page_prot(init_top_pgt, PAGE_KERNEL_RO);
 	set_page_prot(level3_ident_pgt, PAGE_KERNEL_RO);
 	set_page_prot(level3_kernel_pgt, PAGE_KERNEL_RO);
+	set_page_prot(level3_user_vsyscall, PAGE_KERNEL_RO);
 	set_page_prot(level2_ident_pgt, PAGE_KERNEL_RO);
 	set_page_prot(level2_kernel_pgt, PAGE_KERNEL_RO);
 	set_page_prot(level2_fixmap_pgt, PAGE_KERNEL_RO);
@@ -1841,20 +1764,13 @@ void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
 	/* Unpin Xen-provided one */
 	pin_pagetable_pfn(MMUEXT_UNPIN_TABLE, PFN_DOWN(__pa(pgd)));
 
-#ifdef CONFIG_X86_VSYSCALL_EMULATION
-	/* Pin user vsyscall L3 */
-	set_page_prot(level3_user_vsyscall, PAGE_KERNEL_RO);
-	pin_pagetable_pfn(MMUEXT_PIN_L3_TABLE,
-			  PFN_DOWN(__pa_symbol(level3_user_vsyscall)));
-#endif
-
 	/*
 	 * At this stage there can be no user pgd, and no page structure to
 	 * attach it to, so make sure we just set kernel pgd.
 	 */
 	xen_mc_batch();
 	__xen_write_cr3(true, __pa(init_top_pgt));
-	xen_mc_issue(XEN_LAZY_CPU);
+	xen_mc_issue(PARAVIRT_LAZY_CPU);
 
 	/* We can't that easily rip out L3 and L2, as the Xen pagetables are
 	 * set out this way: [L4], [L1], [L2], [L3], [L1], [L1] ...  for
@@ -1913,7 +1829,7 @@ static phys_addr_t __init xen_early_virt_to_phys(unsigned long vaddr)
 	if (!pud_present(pud))
 		return 0;
 	pa = pud_val(pud) & PTE_PFN_MASK;
-	if (pud_leaf(pud))
+	if (pud_large(pud))
 		return pa + (vaddr & ~PUD_MASK);
 
 	pmd = native_make_pmd(xen_read_phys_ulong(pa + pmd_index(vaddr) *
@@ -1921,7 +1837,7 @@ static phys_addr_t __init xen_early_virt_to_phys(unsigned long vaddr)
 	if (!pmd_present(pmd))
 		return 0;
 	pa = pmd_val(pmd) & PTE_PFN_MASK;
-	if (pmd_leaf(pmd))
+	if (pmd_large(pmd))
 		return pa + (vaddr & ~PMD_MASK);
 
 	pte = native_make_pte(xen_read_phys_ulong(pa + pte_index(vaddr) *
@@ -2037,7 +1953,7 @@ void __init xen_relocate_p2m(void)
 		pfn_end = p2m_pfn_end;
 	}
 
-	memblock_phys_free(PFN_PHYS(pfn), PAGE_SIZE * (pfn_end - pfn));
+	memblock_free(PFN_PHYS(pfn), PAGE_SIZE * (pfn_end - pfn));
 	while (pfn < pfn_end) {
 		if (pfn == p2m_pfn) {
 			pfn = p2m_pfn_end;
@@ -2069,7 +1985,10 @@ void __init xen_reserve_special_pages(void)
 
 void __init xen_pt_check_e820(void)
 {
-	xen_chk_is_e820_usable(xen_pt_base, xen_pt_size, "page table");
+	if (xen_is_e820_reserved(xen_pt_base, xen_pt_size)) {
+		xen_raw_console_write("Xen hypervisor allocated page table memory conflicts with E820 map\n");
+		BUG();
+	}
 }
 
 static unsigned char dummy_mapping[PAGE_SIZE] __page_aligned_bss;
@@ -2077,7 +1996,6 @@ static unsigned char dummy_mapping[PAGE_SIZE] __page_aligned_bss;
 static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
 {
 	pte_t pte;
-	unsigned long vaddr;
 
 	phys >>= PAGE_SHIFT;
 
@@ -2118,33 +2036,16 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
 		break;
 	}
 
-	vaddr = __fix_to_virt(idx);
-	if (HYPERVISOR_update_va_mapping(vaddr, pte, UVMF_INVLPG))
-		BUG();
+	__native_set_fixmap(idx, pte);
 
 #ifdef CONFIG_X86_VSYSCALL_EMULATION
 	/* Replicate changes to map the vsyscall page into the user
 	   pagetable vsyscall mapping. */
-	if (idx == VSYSCALL_PAGE)
+	if (idx == VSYSCALL_PAGE) {
+		unsigned long vaddr = __fix_to_virt(idx);
 		set_pte_vaddr_pud(level3_user_vsyscall, vaddr, pte);
-#endif
-}
-
-static void xen_enter_lazy_mmu(void)
-{
-	enter_lazy(XEN_LAZY_MMU);
-}
-
-static void xen_flush_lazy_mmu(void)
-{
-	preempt_disable();
-
-	if (xen_get_lazy_mode() == XEN_LAZY_MMU) {
-		arch_leave_lazy_mmu_mode();
-		arch_enter_lazy_mmu_mode();
 	}
-
-	preempt_enable();
+#endif
 }
 
 static void __init xen_post_allocator_init(void)
@@ -2171,69 +2072,71 @@ static void xen_leave_lazy_mmu(void)
 {
 	preempt_disable();
 	xen_mc_flush();
-	leave_lazy(XEN_LAZY_MMU);
+	paravirt_leave_lazy_mmu();
 	preempt_enable();
 }
 
-static const typeof(pv_ops) xen_mmu_ops __initconst = {
-	.mmu = {
-		.read_cr2 = __PV_IS_CALLEE_SAVE(xen_read_cr2),
-		.write_cr2 = xen_write_cr2,
+static const struct pv_mmu_ops xen_mmu_ops __initconst = {
+	.read_cr2 = __PV_IS_CALLEE_SAVE(xen_read_cr2),
+	.write_cr2 = xen_write_cr2,
 
-		.read_cr3 = xen_read_cr3,
-		.write_cr3 = xen_write_cr3_init,
+	.read_cr3 = xen_read_cr3,
+	.write_cr3 = xen_write_cr3_init,
 
-		.flush_tlb_user = xen_flush_tlb,
-		.flush_tlb_kernel = xen_flush_tlb,
-		.flush_tlb_one_user = xen_flush_tlb_one_user,
-		.flush_tlb_multi = xen_flush_tlb_multi,
+	.flush_tlb_user = xen_flush_tlb,
+	.flush_tlb_kernel = xen_flush_tlb,
+	.flush_tlb_one_user = xen_flush_tlb_one_user,
+	.flush_tlb_others = xen_flush_tlb_others,
+	.tlb_remove_table = tlb_remove_table,
 
-		.pgd_alloc = xen_pgd_alloc,
-		.pgd_free = xen_pgd_free,
+	.pgd_alloc = xen_pgd_alloc,
+	.pgd_free = xen_pgd_free,
 
-		.alloc_pte = xen_alloc_pte_init,
-		.release_pte = xen_release_pte_init,
-		.alloc_pmd = xen_alloc_pmd_init,
-		.release_pmd = xen_release_pmd_init,
+	.alloc_pte = xen_alloc_pte_init,
+	.release_pte = xen_release_pte_init,
+	.alloc_pmd = xen_alloc_pmd_init,
+	.release_pmd = xen_release_pmd_init,
 
-		.set_pte = xen_set_pte_init,
-		.set_pmd = xen_set_pmd_hyper,
+	.set_pte = xen_set_pte_init,
+	.set_pmd = xen_set_pmd_hyper,
 
-		.ptep_modify_prot_start = xen_ptep_modify_prot_start,
-		.ptep_modify_prot_commit = xen_ptep_modify_prot_commit,
+	.ptep_modify_prot_start = __ptep_modify_prot_start,
+	.ptep_modify_prot_commit = __ptep_modify_prot_commit,
 
-		.pte_val = PV_CALLEE_SAVE(xen_pte_val),
-		.pgd_val = PV_CALLEE_SAVE(xen_pgd_val),
+	.pte_val = PV_CALLEE_SAVE(xen_pte_val),
+	.pgd_val = PV_CALLEE_SAVE(xen_pgd_val),
 
-		.make_pte = PV_CALLEE_SAVE(xen_make_pte_init),
-		.make_pgd = PV_CALLEE_SAVE(xen_make_pgd),
+	.make_pte = PV_CALLEE_SAVE(xen_make_pte_init),
+	.make_pgd = PV_CALLEE_SAVE(xen_make_pgd),
 
-		.set_pud = xen_set_pud_hyper,
+	.set_pud = xen_set_pud_hyper,
 
-		.make_pmd = PV_CALLEE_SAVE(xen_make_pmd),
-		.pmd_val = PV_CALLEE_SAVE(xen_pmd_val),
+	.make_pmd = PV_CALLEE_SAVE(xen_make_pmd),
+	.pmd_val = PV_CALLEE_SAVE(xen_pmd_val),
 
-		.pud_val = PV_CALLEE_SAVE(xen_pud_val),
-		.make_pud = PV_CALLEE_SAVE(xen_make_pud),
-		.set_p4d = xen_set_p4d_hyper,
+	.pud_val = PV_CALLEE_SAVE(xen_pud_val),
+	.make_pud = PV_CALLEE_SAVE(xen_make_pud),
+	.set_p4d = xen_set_p4d_hyper,
 
-		.alloc_pud = xen_alloc_pmd_init,
-		.release_pud = xen_release_pmd_init,
+	.alloc_pud = xen_alloc_pmd_init,
+	.release_pud = xen_release_pmd_init,
 
-		.p4d_val = PV_CALLEE_SAVE(xen_p4d_val),
-		.make_p4d = PV_CALLEE_SAVE(xen_make_p4d),
+#if CONFIG_PGTABLE_LEVELS >= 5
+	.p4d_val = PV_CALLEE_SAVE(xen_p4d_val),
+	.make_p4d = PV_CALLEE_SAVE(xen_make_p4d),
+#endif
 
-		.enter_mmap = xen_enter_mmap,
-		.exit_mmap = xen_exit_mmap,
+	.activate_mm = xen_activate_mm,
+	.dup_mmap = xen_dup_mmap,
+	.exit_mmap = xen_exit_mmap,
 
-		.lazy_mode = {
-			.enter = xen_enter_lazy_mmu,
-			.leave = xen_leave_lazy_mmu,
-			.flush = xen_flush_lazy_mmu,
-		},
-
-		.set_fixmap = xen_set_fixmap,
+	.lazy_mode = {
+		.enter = paravirt_enter_lazy_mmu,
+		.leave = xen_leave_lazy_mmu,
+		.flush = paravirt_flush_lazy_mmu,
 	},
+
+	.set_fixmap = xen_set_fixmap,
 };
 
 void __init xen_init_mmu_ops(void)
@@ -2241,10 +2144,14 @@ void __init xen_init_mmu_ops(void)
 	x86_init.paging.pagetable_init = xen_pagetable_init;
 	x86_init.hyper.init_after_bootmem = xen_after_bootmem;
 
-	pv_ops.mmu = xen_mmu_ops.mmu;
+	pv_ops.mmu = xen_mmu_ops;
 
 	memset(dummy_mapping, 0xff, PAGE_SIZE);
 }
+
+/* Protected by xen_reservation_lock. */
+#define MAX_CONTIG_ORDER 9 /* 2MB */
+static unsigned long discontig_frames[1<<MAX_CONTIG_ORDER];
 
 #define VOID_PTE (mfn_pte(0, __pgprot(0)))
 static void xen_zap_pfn_range(unsigned long vaddr, unsigned int order,
@@ -2259,13 +2166,13 @@ static void xen_zap_pfn_range(unsigned long vaddr, unsigned int order,
 		mcs = __xen_mc_entry(0);
 
 		if (in_frames)
-			in_frames[i] = virt_to_mfn((void *)vaddr);
+			in_frames[i] = virt_to_mfn(vaddr);
 
 		MULTI_update_va_mapping(mcs.mc, vaddr, VOID_PTE, 0);
-		__set_phys_to_machine(virt_to_pfn((void *)vaddr), INVALID_P2M_ENTRY);
+		__set_phys_to_machine(virt_to_pfn(vaddr), INVALID_P2M_ENTRY);
 
 		if (out_frames)
-			out_frames[i] = virt_to_pfn((void *)vaddr);
+			out_frames[i] = virt_to_pfn(vaddr);
 	}
 	xen_mc_issue(0);
 }
@@ -2307,7 +2214,7 @@ static void xen_remap_exchanged_ptes(unsigned long vaddr, int order,
 		MULTI_update_va_mapping(mcs.mc, vaddr,
 				mfn_pte(mfn, PAGE_KERNEL), flags);
 
-		set_phys_to_machine(virt_to_pfn((void *)vaddr), mfn);
+		set_phys_to_machine(virt_to_pfn(vaddr), mfn);
 	}
 
 	xen_mc_issue(0);
@@ -2362,30 +2269,29 @@ int xen_create_contiguous_region(phys_addr_t pstart, unsigned int order,
 				 unsigned int address_bits,
 				 dma_addr_t *dma_handle)
 {
-	unsigned long *in_frames, out_frame;
+	unsigned long *in_frames = discontig_frames, out_frame;
 	unsigned long  flags;
 	int            success;
 	unsigned long vstart = (unsigned long)phys_to_virt(pstart);
 
-	if (unlikely(order > discontig_frames_order)) {
-		if (!discontig_frames_dyn)
-			return -ENOMEM;
+	/*
+	 * Currently an auto-translated guest will not perform I/O, nor will
+	 * it require PAE page directories below 4GB. Therefore any calls to
+	 * this function are redundant and can be ignored.
+	 */
 
-		if (alloc_discontig_frames(order))
-			return -ENOMEM;
-	}
+	if (unlikely(order > MAX_CONTIG_ORDER))
+		return -ENOMEM;
 
 	memset((void *) vstart, 0, PAGE_SIZE << order);
 
 	spin_lock_irqsave(&xen_reservation_lock, flags);
 
-	in_frames = discontig_frames;
-
 	/* 1. Zap current PTEs, remembering MFNs. */
 	xen_zap_pfn_range(vstart, order, in_frames, NULL);
 
 	/* 2. Get a new contiguous memory extent. */
-	out_frame = virt_to_pfn((void *)vstart);
+	out_frame = virt_to_pfn(vstart);
 	success = xen_exchange_memory(1UL << order, 0, in_frames,
 				      1, order, &out_frame,
 				      address_bits);
@@ -2404,12 +2310,12 @@ int xen_create_contiguous_region(phys_addr_t pstart, unsigned int order,
 
 void xen_destroy_contiguous_region(phys_addr_t pstart, unsigned int order)
 {
-	unsigned long *out_frames, in_frame;
+	unsigned long *out_frames = discontig_frames, in_frame;
 	unsigned long  flags;
 	int success;
 	unsigned long vstart;
 
-	if (unlikely(order > discontig_frames_order))
+	if (unlikely(order > MAX_CONTIG_ORDER))
 		return;
 
 	vstart = (unsigned long)phys_to_virt(pstart);
@@ -2417,10 +2323,8 @@ void xen_destroy_contiguous_region(phys_addr_t pstart, unsigned int order)
 
 	spin_lock_irqsave(&xen_reservation_lock, flags);
 
-	out_frames = discontig_frames;
-
 	/* 1. Find start MFN of contiguous extent. */
-	in_frame = virt_to_mfn((void *)vstart);
+	in_frame = virt_to_mfn(vstart);
 
 	/* 2. Zap current PTEs. */
 	xen_zap_pfn_range(vstart, order, NULL, out_frames);
@@ -2451,7 +2355,7 @@ static noinline void xen_flush_tlb_all(void)
 	op->cmd = MMUEXT_TLB_FLUSH_ALL;
 	MULTI_mmuext_op(mcs.mc, op, 1, NULL, DOMID_SELF);
 
-	xen_mc_issue(XEN_LAZY_MMU);
+	xen_mc_issue(PARAVIRT_LAZY_MMU);
 
 	preempt_enable();
 }
@@ -2492,7 +2396,7 @@ static int remap_area_pfn_pte_fn(pte_t *ptep, unsigned long addr, void *data)
 
 int xen_remap_pfn(struct vm_area_struct *vma, unsigned long addr,
 		  xen_pfn_t *pfn, int nr, int *err_ptr, pgprot_t prot,
-		  unsigned int domid, bool no_translate)
+		  unsigned int domid, bool no_translate, struct page **pages)
 {
 	int err = 0;
 	struct remap_data rmd;
@@ -2506,7 +2410,7 @@ int xen_remap_pfn(struct vm_area_struct *vma, unsigned long addr,
 	rmd.prot = prot;
 	/*
 	 * We use the err_ptr to indicate if there we are doing a contiguous
-	 * mapping or a discontiguous mapping.
+	 * mapping or a discontigious mapping.
 	 */
 	rmd.contiguous = !err_ptr;
 	rmd.no_translate = no_translate;
@@ -2569,7 +2473,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(xen_remap_pfn);
 
-#ifdef CONFIG_VMCORE_INFO
+#ifdef CONFIG_KEXEC_CORE
 phys_addr_t paddr_vmcoreinfo_note(void)
 {
 	if (xen_pv_domain())

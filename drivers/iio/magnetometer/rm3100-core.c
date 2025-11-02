@@ -22,7 +22,7 @@
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/trigger_consumer.h>
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #include "rm3100.h"
 
@@ -100,7 +100,7 @@ const struct regmap_access_table rm3100_readable_table = {
 	.yes_ranges = rm3100_readable_ranges,
 	.n_yes_ranges = ARRAY_SIZE(rm3100_readable_ranges),
 };
-EXPORT_SYMBOL_NS_GPL(rm3100_readable_table, "IIO_RM3100");
+EXPORT_SYMBOL_GPL(rm3100_readable_table);
 
 static const struct regmap_range rm3100_writable_ranges[] = {
 	regmap_reg_range(RM3100_W_REG_START, RM3100_W_REG_END),
@@ -110,7 +110,7 @@ const struct regmap_access_table rm3100_writable_table = {
 	.yes_ranges = rm3100_writable_ranges,
 	.n_yes_ranges = ARRAY_SIZE(rm3100_writable_ranges),
 };
-EXPORT_SYMBOL_NS_GPL(rm3100_writable_table, "IIO_RM3100");
+EXPORT_SYMBOL_GPL(rm3100_writable_table);
 
 static const struct regmap_range rm3100_volatile_ranges[] = {
 	regmap_reg_range(RM3100_V_REG_START, RM3100_V_REG_END),
@@ -120,7 +120,7 @@ const struct regmap_access_table rm3100_volatile_table = {
 	.yes_ranges = rm3100_volatile_ranges,
 	.n_yes_ranges = ARRAY_SIZE(rm3100_volatile_ranges),
 };
-EXPORT_SYMBOL_NS_GPL(rm3100_volatile_table, "IIO_RM3100");
+EXPORT_SYMBOL_GPL(rm3100_volatile_table);
 
 static irqreturn_t rm3100_thread_fn(int irq, void *d)
 {
@@ -141,10 +141,18 @@ static irqreturn_t rm3100_irq_handler(int irq, void *d)
 	struct iio_dev *indio_dev = d;
 	struct rm3100_data *data = iio_priv(indio_dev);
 
-	if (!iio_buffer_enabled(indio_dev))
+	switch (indio_dev->currentmode) {
+	case INDIO_DIRECT_MODE:
 		complete(&data->measuring_done);
-	else
+		break;
+	case INDIO_BUFFER_TRIGGERED:
 		iio_trigger_poll(data->drdy_trig);
+		break;
+	default:
+		dev_err(indio_dev->dev.parent,
+			"device mode out of control, current mode: %d",
+			indio_dev->currentmode);
+	}
 
 	return IRQ_WAKE_THREAD;
 }
@@ -369,7 +377,7 @@ static int rm3100_set_samp_freq(struct iio_dev *indio_dev, int val, int val2)
 			goto unlock_return;
 	}
 
-	if (iio_buffer_enabled(indio_dev)) {
+	if (indio_dev->currentmode == INDIO_BUFFER_TRIGGERED) {
 		/* Writing TMRC registers requires CMM reset. */
 		ret = regmap_write(regmap, RM3100_REG_CMM, 0);
 		if (ret < 0)
@@ -399,11 +407,12 @@ static int rm3100_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret < 0)
+			return ret;
 
 		ret = rm3100_read_mag(data, chan->scan_index, val);
-		iio_device_release_direct(indio_dev);
+		iio_device_release_direct_mode(indio_dev);
 
 		return ret;
 	case IIO_CHAN_INFO_SCALE:
@@ -463,7 +472,7 @@ static irqreturn_t rm3100_trigger_handler(int irq, void *p)
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	unsigned long scan_mask = *indio_dev->active_scan_mask;
-	unsigned int mask_len = iio_get_masklength(indio_dev);
+	unsigned int mask_len = indio_dev->masklength;
 	struct rm3100_data *data = iio_priv(indio_dev);
 	struct regmap *regmap = data->regmap;
 	int ret, i, bit;
@@ -515,8 +524,8 @@ static irqreturn_t rm3100_trigger_handler(int irq, void *p)
 	 * Always using the same buffer so that we wouldn't need to set the
 	 * paddings to 0 in case of leaking any data.
 	 */
-	iio_push_to_buffers_with_ts(indio_dev, data->buffer, sizeof(data->buffer),
-				    pf->timestamp);
+	iio_push_to_buffers_with_timestamp(indio_dev, data->buffer,
+					   pf->timestamp);
 done:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -544,7 +553,8 @@ int rm3100_common_probe(struct device *dev, struct regmap *regmap, int irq)
 	indio_dev->info = &rm3100_info;
 	indio_dev->channels = rm3100_channels;
 	indio_dev->num_channels = ARRAY_SIZE(rm3100_channels);
-	indio_dev->modes = INDIO_DIRECT_MODE;
+	indio_dev->modes = INDIO_DIRECT_MODE | INDIO_BUFFER_TRIGGERED;
+	indio_dev->currentmode = INDIO_DIRECT_MODE;
 
 	if (!irq)
 		data->use_interrupt = false;
@@ -567,10 +577,11 @@ int rm3100_common_probe(struct device *dev, struct regmap *regmap, int irq)
 
 		data->drdy_trig = devm_iio_trigger_alloc(dev, "%s-drdy%d",
 							 indio_dev->name,
-							 iio_device_id(indio_dev));
+							 indio_dev->id);
 		if (!data->drdy_trig)
 			return -ENOMEM;
 
+		data->drdy_trig->dev.parent = dev;
 		ret = devm_iio_trigger_register(dev, data->drdy_trig);
 		if (ret < 0)
 			return ret;
@@ -603,7 +614,7 @@ int rm3100_common_probe(struct device *dev, struct regmap *regmap, int irq)
 
 	return devm_iio_device_register(dev, indio_dev);
 }
-EXPORT_SYMBOL_NS_GPL(rm3100_common_probe, "IIO_RM3100");
+EXPORT_SYMBOL_GPL(rm3100_common_probe);
 
 MODULE_AUTHOR("Song Qiang <songqiang1304521@gmail.com>");
 MODULE_DESCRIPTION("PNI RM3100 3-axis magnetometer i2c driver");

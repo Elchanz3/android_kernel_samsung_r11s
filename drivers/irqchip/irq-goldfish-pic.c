@@ -34,14 +34,15 @@ static void goldfish_pic_cascade(struct irq_desc *desc)
 {
 	struct goldfish_pic_data *gfpic = irq_desc_get_handler_data(desc);
 	struct irq_chip *host_chip = irq_desc_get_chip(desc);
-	u32 pending, hwirq;
+	u32 pending, hwirq, virq;
 
 	chained_irq_enter(host_chip, desc);
 
 	pending = readl(gfpic->base + GFPIC_REG_IRQ_PENDING);
 	while (pending) {
 		hwirq = __fls(pending);
-		generic_handle_domain_irq(gfpic->irq_domain, hwirq);
+		virq = irq_linear_revmap(gfpic->irq_domain, hwirq);
+		generic_handle_irq(virq);
 		pending &= ~(1 << hwirq);
 	}
 
@@ -101,9 +102,10 @@ static int __init goldfish_pic_of_init(struct device_node *of_node,
 	irq_setup_generic_chip(gc, IRQ_MSK(GFPIC_NR_IRQS), 0,
 			       IRQ_NOPROBE | IRQ_LEVEL, 0);
 
-	gfpic->irq_domain = irq_domain_create_legacy(of_fwnode_handle(of_node), GFPIC_NR_IRQS,
-						     GFPIC_IRQ_BASE, 0, &goldfish_irq_domain_ops,
-						     NULL);
+	gfpic->irq_domain = irq_domain_add_legacy(of_node, GFPIC_NR_IRQS,
+						  GFPIC_IRQ_BASE, 0,
+						  &goldfish_irq_domain_ops,
+						  NULL);
 	if (!gfpic->irq_domain) {
 		pr_err("Failed to add irqdomain!\n");
 		ret = -ENOMEM;

@@ -17,19 +17,7 @@
 #include <linux/dsa/loop.h>
 #include <net/dsa.h>
 
-#define DSA_LOOP_NUM_PORTS	6
-#define DSA_LOOP_CPU_PORT	(DSA_LOOP_NUM_PORTS - 1)
-#define NUM_FIXED_PHYS		(DSA_LOOP_NUM_PORTS - 2)
-
-struct dsa_loop_pdata {
-	/* Must be first, such that dsa_register_switch() can access this
-	 * without gory pointer manipulations
-	 */
-	struct dsa_chip_data cd;
-	const char *name;
-	unsigned int enabled_ports;
-	const char *netdev;
-};
+#include "dsa_loop.h"
 
 static struct dsa_loop_mib_entry dsa_loop_mibs[] = {
 	[DSA_LOOP_PHY_READ_OK]	= { "phy_read_ok", },
@@ -39,7 +27,6 @@ static struct dsa_loop_mib_entry dsa_loop_mibs[] = {
 };
 
 static struct phy_device *phydevs[PHY_MAX_ADDR];
-static struct mdio_device *switch_mdiodev;
 
 enum dsa_loop_devlink_resource_id {
 	DSA_LOOP_DEVLINK_PARAM_ID_VTU,
@@ -134,7 +121,8 @@ static void dsa_loop_get_strings(struct dsa_switch *ds, int port,
 		return;
 
 	for (i = 0; i < __DSA_LOOP_CNT_MAX; i++)
-		ethtool_puts(&data, ps->ports[port].mib[i].name);
+		memcpy(data + i * ETH_GSTRING_LEN,
+		       ps->ports[port].mib[i].name, ETH_GSTRING_LEN);
 }
 
 static void dsa_loop_get_ethtool_stats(struct dsa_switch *ds, int port,
@@ -179,21 +167,19 @@ static int dsa_loop_phy_write(struct dsa_switch *ds, int port,
 }
 
 static int dsa_loop_port_bridge_join(struct dsa_switch *ds, int port,
-				     struct dsa_bridge bridge,
-				     bool *tx_fwd_offload,
-				     struct netlink_ext_ack *extack)
+				     struct net_device *bridge)
 {
 	dev_dbg(ds->dev, "%s: port: %d, bridge: %s\n",
-		__func__, port, bridge.dev->name);
+		__func__, port, bridge->name);
 
 	return 0;
 }
 
 static void dsa_loop_port_bridge_leave(struct dsa_switch *ds, int port,
-				       struct dsa_bridge bridge)
+				       struct net_device *bridge)
 {
 	dev_dbg(ds->dev, "%s: port: %d, bridge: %s\n",
-		__func__, port, bridge.dev->name);
+		__func__, port, bridge->name);
 }
 
 static void dsa_loop_port_stp_state_set(struct dsa_switch *ds, int port,
@@ -205,7 +191,7 @@ static void dsa_loop_port_stp_state_set(struct dsa_switch *ds, int port,
 
 static int dsa_loop_port_vlan_filtering(struct dsa_switch *ds, int port,
 					bool vlan_filtering,
-					struct netlink_ext_ack *extack)
+					struct switchdev_trans *trans)
 {
 	dev_dbg(ds->dev, "%s: port: %d, vlan_filtering: %d\n",
 		__func__, port, vlan_filtering);
@@ -213,37 +199,53 @@ static int dsa_loop_port_vlan_filtering(struct dsa_switch *ds, int port,
 	return 0;
 }
 
-static int dsa_loop_port_vlan_add(struct dsa_switch *ds, int port,
-				  const struct switchdev_obj_port_vlan *vlan,
-				  struct netlink_ext_ack *extack)
+static int
+dsa_loop_port_vlan_prepare(struct dsa_switch *ds, int port,
+			   const struct switchdev_obj_port_vlan *vlan)
+{
+	struct dsa_loop_priv *ps = ds->priv;
+	struct mii_bus *bus = ps->bus;
+
+	dev_dbg(ds->dev, "%s: port: %d, vlan: %d-%d",
+		__func__, port, vlan->vid_begin, vlan->vid_end);
+
+	/* Just do a sleeping operation to make lockdep checks effective */
+	mdiobus_read(bus, ps->port_base + port, MII_BMSR);
+
+	if (vlan->vid_end > ARRAY_SIZE(ps->vlans))
+		return -ERANGE;
+
+	return 0;
+}
+
+static void dsa_loop_port_vlan_add(struct dsa_switch *ds, int port,
+				   const struct switchdev_obj_port_vlan *vlan)
 {
 	bool untagged = vlan->flags & BRIDGE_VLAN_INFO_UNTAGGED;
 	bool pvid = vlan->flags & BRIDGE_VLAN_INFO_PVID;
 	struct dsa_loop_priv *ps = ds->priv;
 	struct mii_bus *bus = ps->bus;
 	struct dsa_loop_vlan *vl;
-
-	if (vlan->vid >= ARRAY_SIZE(ps->vlans))
-		return -ERANGE;
+	u16 vid;
 
 	/* Just do a sleeping operation to make lockdep checks effective */
 	mdiobus_read(bus, ps->port_base + port, MII_BMSR);
 
-	vl = &ps->vlans[vlan->vid];
+	for (vid = vlan->vid_begin; vid <= vlan->vid_end; ++vid) {
+		vl = &ps->vlans[vid];
 
-	vl->members |= BIT(port);
-	if (untagged)
-		vl->untagged |= BIT(port);
-	else
-		vl->untagged &= ~BIT(port);
+		vl->members |= BIT(port);
+		if (untagged)
+			vl->untagged |= BIT(port);
+		else
+			vl->untagged &= ~BIT(port);
 
-	dev_dbg(ds->dev, "%s: port: %d vlan: %d, %stagged, pvid: %d\n",
-		__func__, port, vlan->vid, untagged ? "un" : "", pvid);
+		dev_dbg(ds->dev, "%s: port: %d vlan: %d, %stagged, pvid: %d\n",
+			__func__, port, vid, untagged ? "un" : "", pvid);
+	}
 
 	if (pvid)
-		ps->ports[port].pvid = vlan->vid;
-
-	return 0;
+		ps->ports[port].pvid = vid;
 }
 
 static int dsa_loop_port_vlan_del(struct dsa_switch *ds, int port,
@@ -251,24 +253,26 @@ static int dsa_loop_port_vlan_del(struct dsa_switch *ds, int port,
 {
 	bool untagged = vlan->flags & BRIDGE_VLAN_INFO_UNTAGGED;
 	struct dsa_loop_priv *ps = ds->priv;
-	u16 pvid = ps->ports[port].pvid;
 	struct mii_bus *bus = ps->bus;
 	struct dsa_loop_vlan *vl;
+	u16 vid, pvid = ps->ports[port].pvid;
 
 	/* Just do a sleeping operation to make lockdep checks effective */
 	mdiobus_read(bus, ps->port_base + port, MII_BMSR);
 
-	vl = &ps->vlans[vlan->vid];
+	for (vid = vlan->vid_begin; vid <= vlan->vid_end; ++vid) {
+		vl = &ps->vlans[vid];
 
-	vl->members &= ~BIT(port);
-	if (untagged)
-		vl->untagged &= ~BIT(port);
+		vl->members &= ~BIT(port);
+		if (untagged)
+			vl->untagged &= ~BIT(port);
 
-	if (pvid == vlan->vid)
-		pvid = 1;
+		if (pvid == vid)
+			pvid = 1;
 
-	dev_dbg(ds->dev, "%s: port: %d vlan: %d, %stagged, pvid: %d\n",
-		__func__, port, vlan->vid, untagged ? "un" : "", pvid);
+		dev_dbg(ds->dev, "%s: port: %d vlan: %d, %stagged, pvid: %d\n",
+			__func__, port, vid, untagged ? "un" : "", pvid);
+	}
 	ps->ports[port].pvid = pvid;
 
 	return 0;
@@ -289,14 +293,6 @@ static int dsa_loop_port_max_mtu(struct dsa_switch *ds, int port)
 	return ETH_MAX_MTU;
 }
 
-static void dsa_loop_phylink_get_caps(struct dsa_switch *dsa, int port,
-				      struct phylink_config *config)
-{
-	bitmap_fill(config->supported_interfaces, PHY_INTERFACE_MODE_MAX);
-	__clear_bit(PHY_INTERFACE_MODE_NA, config->supported_interfaces);
-	config->mac_capabilities = ~0;
-}
-
 static const struct dsa_switch_ops dsa_loop_driver = {
 	.get_tag_protocol	= dsa_loop_get_protocol,
 	.setup			= dsa_loop_setup,
@@ -311,11 +307,11 @@ static const struct dsa_switch_ops dsa_loop_driver = {
 	.port_bridge_leave	= dsa_loop_port_bridge_leave,
 	.port_stp_state_set	= dsa_loop_port_stp_state_set,
 	.port_vlan_filtering	= dsa_loop_port_vlan_filtering,
+	.port_vlan_prepare	= dsa_loop_port_vlan_prepare,
 	.port_vlan_add		= dsa_loop_port_vlan_add,
 	.port_vlan_del		= dsa_loop_port_vlan_del,
 	.port_change_mtu	= dsa_loop_port_change_mtu,
 	.port_max_mtu		= dsa_loop_port_max_mtu,
-	.phylink_get_caps	= dsa_loop_phylink_get_caps,
 };
 
 static int dsa_loop_drv_probe(struct mdio_device *mdiodev)
@@ -348,6 +344,7 @@ static int dsa_loop_drv_probe(struct mdio_device *mdiodev)
 	ds->dev = &mdiodev->dev;
 	ds->ops = &dsa_loop_driver;
 	ds->priv = ps;
+	ds->configure_vlan_while_not_filtering = true;
 	ps->bus = mdiodev->bus;
 
 	dev_set_drvdata(&mdiodev->dev, ds);
@@ -363,27 +360,10 @@ static int dsa_loop_drv_probe(struct mdio_device *mdiodev)
 static void dsa_loop_drv_remove(struct mdio_device *mdiodev)
 {
 	struct dsa_switch *ds = dev_get_drvdata(&mdiodev->dev);
-	struct dsa_loop_priv *ps;
-
-	if (!ds)
-		return;
-
-	ps = ds->priv;
+	struct dsa_loop_priv *ps = ds->priv;
 
 	dsa_unregister_switch(ds);
 	dev_put(ps->netdev);
-}
-
-static void dsa_loop_drv_shutdown(struct mdio_device *mdiodev)
-{
-	struct dsa_switch *ds = dev_get_drvdata(&mdiodev->dev);
-
-	if (!ds)
-		return;
-
-	dsa_switch_shutdown(ds);
-
-	dev_set_drvdata(&mdiodev->dev, NULL);
 }
 
 static struct mdio_driver dsa_loop_drv = {
@@ -392,51 +372,19 @@ static struct mdio_driver dsa_loop_drv = {
 	},
 	.probe	= dsa_loop_drv_probe,
 	.remove	= dsa_loop_drv_remove,
-	.shutdown = dsa_loop_drv_shutdown,
 };
+
+#define NUM_FIXED_PHYS	(DSA_LOOP_NUM_PORTS - 2)
 
 static void dsa_loop_phydevs_unregister(void)
 {
-	for (int i = 0; i < NUM_FIXED_PHYS; i++) {
-		if (!IS_ERR(phydevs[i]))
+	unsigned int i;
+
+	for (i = 0; i < NUM_FIXED_PHYS; i++)
+		if (!IS_ERR(phydevs[i])) {
 			fixed_phy_unregister(phydevs[i]);
-	}
-}
-
-static int __init dsa_loop_create_switch_mdiodev(void)
-{
-	static struct dsa_loop_pdata dsa_loop_pdata = {
-		.cd = {
-			.port_names[0] = "lan1",
-			.port_names[1] = "lan2",
-			.port_names[2] = "lan3",
-			.port_names[3] = "lan4",
-			.port_names[DSA_LOOP_CPU_PORT] = "cpu",
-		},
-		.name = "DSA mockup driver",
-		.enabled_ports = 0x1f,
-		.netdev = "eth0",
-	};
-	struct mii_bus *bus;
-	int ret = -ENODEV;
-
-	bus = mdio_find_bus("fixed-0");
-	if (WARN_ON(!bus))
-		return ret;
-
-	switch_mdiodev = mdio_device_create(bus, 31);
-	if (IS_ERR(switch_mdiodev))
-		goto out;
-
-	strscpy(switch_mdiodev->modalias, "dsa-loop");
-	switch_mdiodev->dev.platform_data = &dsa_loop_pdata;
-
-	ret = mdio_device_register(switch_mdiodev);
-	if (ret)
-		mdio_device_free(switch_mdiodev);
-out:
-	put_device(&bus->dev);
-	return ret;
+			phy_device_free(phydevs[i]);
+		}
 }
 
 static int __init dsa_loop_init(void)
@@ -446,22 +394,14 @@ static int __init dsa_loop_init(void)
 		.speed = SPEED_100,
 		.duplex = DUPLEX_FULL,
 	};
-	unsigned int i;
-	int ret;
-
-	ret = dsa_loop_create_switch_mdiodev();
-	if (ret)
-		return ret;
+	unsigned int i, ret;
 
 	for (i = 0; i < NUM_FIXED_PHYS; i++)
-		phydevs[i] = fixed_phy_register(&status, NULL);
+		phydevs[i] = fixed_phy_register(PHY_POLL, &status, NULL);
 
 	ret = mdio_driver_register(&dsa_loop_drv);
-	if (ret) {
+	if (ret)
 		dsa_loop_phydevs_unregister();
-		mdio_device_remove(switch_mdiodev);
-		mdio_device_free(switch_mdiodev);
-	}
 
 	return ret;
 }
@@ -471,11 +411,10 @@ static void __exit dsa_loop_exit(void)
 {
 	mdio_driver_unregister(&dsa_loop_drv);
 	dsa_loop_phydevs_unregister();
-	mdio_device_remove(switch_mdiodev);
-	mdio_device_free(switch_mdiodev);
 }
 module_exit(dsa_loop_exit);
 
+MODULE_SOFTDEP("pre: dsa_loop_bdinfo");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Florian Fainelli");
 MODULE_DESCRIPTION("DSA loopback driver");

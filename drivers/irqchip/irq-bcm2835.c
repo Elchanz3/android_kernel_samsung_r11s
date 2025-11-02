@@ -102,9 +102,7 @@ static void armctrl_unmask_irq(struct irq_data *d)
 static struct irq_chip armctrl_chip = {
 	.name = "ARMCTRL-level",
 	.irq_mask = armctrl_mask_irq,
-	.irq_unmask = armctrl_unmask_irq,
-	.flags = IRQCHIP_MASK_ON_SUSPEND |
-		 IRQCHIP_SKIP_SET_WAKE,
+	.irq_unmask = armctrl_unmask_irq
 };
 
 static int armctrl_xlate(struct irq_domain *d, struct device_node *ctrlr,
@@ -144,7 +142,7 @@ static int __init armctrl_of_init(struct device_node *node,
 	if (!base)
 		panic("%pOF: unable to map IC registers\n", node);
 
-	intc.domain = irq_domain_create_linear(of_fwnode_handle(node), MAKE_HWIRQ(NR_BANKS, 0),
+	intc.domain = irq_domain_add_linear(node, MAKE_HWIRQ(NR_BANKS, 0),
 			&armctrl_ops, NULL);
 	if (!intc.domain)
 		panic("%pOF: unable to create IRQ domain\n", node);
@@ -248,7 +246,7 @@ static void __exception_irq_entry bcm2835_handle_irq(
 	u32 hwirq;
 
 	while ((hwirq = get_next_armctrl_hwirq()) != ~0)
-		generic_handle_domain_irq(intc.domain, hwirq);
+		handle_domain_irq(intc.domain, hwirq, regs);
 }
 
 static void bcm2836_chained_handle_irq(struct irq_desc *desc)
@@ -256,7 +254,7 @@ static void bcm2836_chained_handle_irq(struct irq_desc *desc)
 	u32 hwirq;
 
 	while ((hwirq = get_next_armctrl_hwirq()) != ~0)
-		generic_handle_domain_irq(intc.domain, hwirq);
+		generic_handle_irq(irq_linear_revmap(intc.domain, hwirq));
 }
 
 IRQCHIP_DECLARE(bcm2835_armctrl_ic, "brcm,bcm2835-armctrl-ic",

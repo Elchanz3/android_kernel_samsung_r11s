@@ -56,7 +56,7 @@
 
 struct gl_packet {
 	__le32		packet_length;
-	char		packet_data[];
+	char		packet_data [1];
 };
 
 struct gl_header {
@@ -179,7 +179,9 @@ static int genelink_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	dev->hard_mtu = GL_RCV_BUF_SIZE;
 	dev->net->hard_header_len += 4;
-	return usbnet_get_endpoints(dev, intf);
+	dev->in = usb_rcvbulkpipe(dev->udev, dev->driver_info->in);
+	dev->out = usb_sndbulkpipe(dev->udev, dev->driver_info->out);
+	return 0;
 }
 
 static const struct driver_info	genelink_info = {

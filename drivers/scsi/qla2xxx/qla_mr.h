@@ -176,12 +176,8 @@ struct fxdisc_entry_fx00 {
 	uint8_t flags;
 	uint8_t reserved_1;
 
-	/*
-	 * Use array size 1 below to prevent that Coverity complains about
-	 * the append_dsd64() calls for the two arrays below.
-	 */
-	struct dsd64 dseg_rq[1];
-	struct dsd64 dseg_rsp[1];
+	struct dsd64 dseg_rq;
+	struct dsd64 dseg_rsp;
 
 	__le32 dataword;
 	__le32 adapid;
@@ -282,8 +278,8 @@ struct register_host_info {
 #define QLAFX00_TGT_NODE_LIST_SIZE (sizeof(uint32_t) * 32)
 
 struct config_info_data {
-	uint8_t		model_num[16] __nonstring;
-	uint8_t		model_description[80] __nonstring;
+	uint8_t		model_num[16];
+	uint8_t		model_description[80];
 	uint8_t		reserved0[160];
 	uint8_t		symbolic_name[64];
 	uint8_t		serial_num[32];

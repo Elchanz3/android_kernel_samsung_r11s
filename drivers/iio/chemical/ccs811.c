@@ -15,7 +15,6 @@
  * 4. Read error register and put the information in logs
  */
 
-#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -82,7 +81,7 @@ struct ccs811_data {
 	/* Ensures correct alignment of timestamp if present */
 	struct {
 		s16 channels[2];
-		aligned_s64 ts;
+		s64 ts __aligned(8);
 	} scan;
 };
 
@@ -215,40 +214,6 @@ static int ccs811_get_measurement(struct ccs811_data *data)
 	return ret;
 }
 
-static int ccs811_read_info_raw(struct ccs811_data *data,
-				struct iio_chan_spec const *chan,
-				int *val, int mask)
-{
-	int ret;
-
-	guard(mutex)(&data->lock);
-	ret = ccs811_get_measurement(data);
-	if (ret < 0)
-		return ret;
-
-	switch (chan->type) {
-	case IIO_VOLTAGE:
-		*val = be16_to_cpu(data->buffer.raw_data) & CCS811_VOLTAGE_MASK;
-		return IIO_VAL_INT;
-	case IIO_CURRENT:
-		*val = be16_to_cpu(data->buffer.raw_data) >> 10;
-		return IIO_VAL_INT;
-	case IIO_CONCENTRATION:
-		switch (chan->channel2) {
-		case IIO_MOD_CO2:
-			*val = be16_to_cpu(data->buffer.co2);
-			return IIO_VAL_INT;
-		case IIO_MOD_VOC:
-			*val = be16_to_cpu(data->buffer.voc);
-			return IIO_VAL_INT;
-		default:
-			return -EINVAL;
-		}
-	default:
-		return -EINVAL;
-	}
-}
-
 static int ccs811_read_raw(struct iio_dev *indio_dev,
 			   struct iio_chan_spec const *chan,
 			   int *val, int *val2, long mask)
@@ -258,12 +223,46 @@ static int ccs811_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret)
+			return ret;
+		mutex_lock(&data->lock);
+		ret = ccs811_get_measurement(data);
+		if (ret < 0) {
+			mutex_unlock(&data->lock);
+			iio_device_release_direct_mode(indio_dev);
+			return ret;
+		}
 
-		ret = ccs811_read_info_raw(data, chan, val, mask);
-
-		iio_device_release_direct(indio_dev);
+		switch (chan->type) {
+		case IIO_VOLTAGE:
+			*val = be16_to_cpu(data->buffer.raw_data) &
+					   CCS811_VOLTAGE_MASK;
+			ret = IIO_VAL_INT;
+			break;
+		case IIO_CURRENT:
+			*val = be16_to_cpu(data->buffer.raw_data) >> 10;
+			ret = IIO_VAL_INT;
+			break;
+		case IIO_CONCENTRATION:
+			switch (chan->channel2) {
+			case IIO_MOD_CO2:
+				*val = be16_to_cpu(data->buffer.co2);
+				ret =  IIO_VAL_INT;
+				break;
+			case IIO_MOD_VOC:
+				*val = be16_to_cpu(data->buffer.voc);
+				ret = IIO_VAL_INT;
+				break;
+			default:
+				ret = -EINVAL;
+			}
+			break;
+		default:
+			ret = -EINVAL;
+		}
+		mutex_unlock(&data->lock);
+		iio_device_release_direct_mode(indio_dev);
 
 		return ret;
 
@@ -343,8 +342,8 @@ static irqreturn_t ccs811_trigger_handler(int irq, void *p)
 		goto err;
 	}
 
-	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
-				    iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
+					   iio_get_time_ns(indio_dev));
 
 err:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -402,9 +401,9 @@ static int ccs811_reset(struct i2c_client *client)
 	return 0;
 }
 
-static int ccs811_probe(struct i2c_client *client)
+static int ccs811_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct iio_dev *indio_dev;
 	struct ccs811_data *data;
 	int ret;
@@ -492,12 +491,13 @@ static int ccs811_probe(struct i2c_client *client)
 		data->drdy_trig = devm_iio_trigger_alloc(&client->dev,
 							 "%s-dev%d",
 							 indio_dev->name,
-							 iio_device_id(indio_dev));
+							 indio_dev->id);
 		if (!data->drdy_trig) {
 			ret = -ENOMEM;
 			goto err_poweroff;
 		}
 
+		data->drdy_trig->dev.parent = &client->dev;
 		data->drdy_trig->ops = &ccs811_trigger_ops;
 		iio_trigger_set_drvdata(data->drdy_trig, indio_dev);
 		ret = iio_trigger_register(data->drdy_trig);
@@ -533,26 +533,22 @@ err_poweroff:
 	return ret;
 }
 
-static void ccs811_remove(struct i2c_client *client)
+static int ccs811_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct ccs811_data *data = iio_priv(indio_dev);
-	int ret;
 
 	iio_device_unregister(indio_dev);
 	iio_triggered_buffer_cleanup(indio_dev);
 	if (data->drdy_trig)
 		iio_trigger_unregister(data->drdy_trig);
 
-	ret = i2c_smbus_write_byte_data(client, CCS811_MEAS_MODE,
-					CCS811_MODE_IDLE);
-	if (ret)
-		dev_warn(&client->dev, "Failed to power down device (%pe)\n",
-			 ERR_PTR(ret));
+	return i2c_smbus_write_byte_data(client, CCS811_MEAS_MODE,
+					 CCS811_MODE_IDLE);
 }
 
 static const struct i2c_device_id ccs811_id[] = {
-	{ "ccs811" },
+	{"ccs811", 0},
 	{	}
 };
 MODULE_DEVICE_TABLE(i2c, ccs811_id);

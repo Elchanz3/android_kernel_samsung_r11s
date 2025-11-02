@@ -38,7 +38,6 @@
 #include <linux/kdb.h>
 #include <linux/irq.h>
 #include <linux/perf_event.h>
-#include <linux/string_choices.h>
 
 #include <asm/addrspace.h>
 #include <asm/bootinfo.h>
@@ -59,7 +58,6 @@
 #include <asm/module.h>
 #include <asm/msa.h>
 #include <asm/ptrace.h>
-#include <asm/regdef.h>
 #include <asm/sections.h>
 #include <asm/siginfo.h>
 #include <asm/tlbdebug.h>
@@ -74,10 +72,8 @@
 
 #include <asm/mach-loongson64/cpucfg-emul.h>
 
-#include "access-helper.h"
-
 extern void check_wait(void);
-extern asmlinkage void skipover_handle_int(void);
+extern asmlinkage void rollback_handle_int(void);
 extern asmlinkage void handle_int(void);
 extern asmlinkage void handle_adel(void);
 extern asmlinkage void handle_ades(void);
@@ -105,21 +101,14 @@ extern asmlinkage void handle_reserved(void);
 extern void tlb_do_page_fault_0(void);
 
 void (*board_be_init)(void);
-static int (*board_be_handler)(struct pt_regs *regs, int is_fixup);
+int (*board_be_handler)(struct pt_regs *regs, int is_fixup);
 void (*board_nmi_handler_setup)(void);
 void (*board_ejtag_handler_setup)(void);
 void (*board_bind_eic_interrupt)(int irq, int regset);
 void (*board_ebase_setup)(void);
 void(*board_cache_error_setup)(void);
 
-void mips_set_be_handler(int (*handler)(struct pt_regs *regs, int is_fixup))
-{
-	board_be_handler = handler;
-}
-EXPORT_SYMBOL_GPL(mips_set_be_handler);
-
-static void show_raw_backtrace(unsigned long reg29, const char *loglvl,
-			       bool user)
+static void show_raw_backtrace(unsigned long reg29, const char *loglvl)
 {
 	unsigned long *sp = (unsigned long *)(reg29 & ~3);
 	unsigned long addr;
@@ -129,7 +118,9 @@ static void show_raw_backtrace(unsigned long reg29, const char *loglvl,
 	printk("%s\n", loglvl);
 #endif
 	while (!kstack_end(sp)) {
-		if (__get_addr(&addr, sp++, user)) {
+		unsigned long __user *p =
+			(unsigned long __user *)(unsigned long)sp++;
+		if (__get_user(addr, p)) {
 			printk("%s (Bad stack address)", loglvl);
 			break;
 		}
@@ -150,7 +141,7 @@ __setup("raw_show_trace", set_raw_show_trace);
 #endif
 
 static void show_backtrace(struct task_struct *task, const struct pt_regs *regs,
-			   const char *loglvl, bool user)
+			   const char *loglvl)
 {
 	unsigned long sp = regs->regs[29];
 	unsigned long ra = regs->regs[31];
@@ -160,7 +151,7 @@ static void show_backtrace(struct task_struct *task, const struct pt_regs *regs,
 		task = current;
 
 	if (raw_show_trace || user_mode(regs) || !__kernel_text_address(pc)) {
-		show_raw_backtrace(sp, loglvl, user);
+		show_raw_backtrace(sp, loglvl);
 		return;
 	}
 	printk("%sCall Trace:\n", loglvl);
@@ -176,12 +167,12 @@ static void show_backtrace(struct task_struct *task, const struct pt_regs *regs,
  * with at least a bit of error checking ...
  */
 static void show_stacktrace(struct task_struct *task,
-	const struct pt_regs *regs, const char *loglvl, bool user)
+	const struct pt_regs *regs, const char *loglvl)
 {
 	const int field = 2 * sizeof(unsigned long);
-	unsigned long stackdata;
+	long stackdata;
 	int i;
-	unsigned long *sp = (unsigned long *)regs->regs[29];
+	unsigned long __user *sp = (unsigned long __user *)regs->regs[29];
 
 	printk("%sStack :", loglvl);
 	i = 0;
@@ -195,7 +186,7 @@ static void show_stacktrace(struct task_struct *task,
 			break;
 		}
 
-		if (__get_addr(&stackdata, sp++, user)) {
+		if (__get_user(stackdata, sp++)) {
 			pr_cont(" (Bad stack address)");
 			break;
 		}
@@ -204,12 +195,13 @@ static void show_stacktrace(struct task_struct *task,
 		i++;
 	}
 	pr_cont("\n");
-	show_backtrace(task, regs, loglvl, user);
+	show_backtrace(task, regs, loglvl);
 }
 
 void show_stack(struct task_struct *task, unsigned long *sp, const char *loglvl)
 {
 	struct pt_regs regs;
+	mm_segment_t old_fs = get_fs();
 
 	regs.cp0_status = KSU_KERNEL;
 	if (sp) {
@@ -225,41 +217,33 @@ void show_stack(struct task_struct *task, unsigned long *sp, const char *loglvl)
 			prepare_frametrace(&regs);
 		}
 	}
-	show_stacktrace(task, &regs, loglvl, false);
+	/*
+	 * show_stack() deals exclusively with kernel mode, so be sure to access
+	 * the stack in the kernel (not user) address space.
+	 */
+	set_fs(KERNEL_DS);
+	show_stacktrace(task, &regs, loglvl);
+	set_fs(old_fs);
 }
 
-static void show_code(void *pc, bool user)
+static void show_code(unsigned int __user *pc)
 {
 	long i;
-	unsigned short *pc16 = NULL;
+	unsigned short __user *pc16 = NULL;
 
 	printk("Code:");
 
 	if ((unsigned long)pc & 1)
-		pc16 = (u16 *)((unsigned long)pc & ~1);
-
+		pc16 = (unsigned short __user *)((unsigned long)pc & ~1);
 	for(i = -3 ; i < 6 ; i++) {
-		if (pc16) {
-			u16 insn16;
-
-			if (__get_inst16(&insn16, pc16 + i, user))
-				goto bad_address;
-
-			pr_cont("%c%04x%c", (i?' ':'<'), insn16, (i?' ':'>'));
-		} else {
-			u32 insn32;
-
-			if (__get_inst32(&insn32, (u32 *)pc + i, user))
-				goto bad_address;
-
-			pr_cont("%c%08x%c", (i?' ':'<'), insn32, (i?' ':'>'));
+		unsigned int insn;
+		if (pc16 ? __get_user(insn, pc16 + i) : __get_user(insn, pc + i)) {
+			pr_cont(" (Bad address in epc)\n");
+			break;
 		}
+		pr_cont("%c%0*x%c", (i?' ':'<'), pc16 ? 4 : 8, insn, (i?' ':'>'));
 	}
 	pr_cont("\n");
-	return;
-
-bad_address:
-	pr_cont(" (Bad address in epc)\n\n");
 }
 
 static void __show_regs(const struct pt_regs *regs)
@@ -372,6 +356,7 @@ void show_regs(struct pt_regs *regs)
 void show_registers(struct pt_regs *regs)
 {
 	const int field = 2 * sizeof(unsigned long);
+	mm_segment_t old_fs = get_fs();
 
 	__show_regs(regs);
 	print_modules();
@@ -386,9 +371,13 @@ void show_registers(struct pt_regs *regs)
 			printk("*HwTLS: %0*lx\n", field, tls);
 	}
 
-	show_stacktrace(current, regs, KERN_DEFAULT, user_mode(regs));
-	show_code((void *)regs->cp0_epc, user_mode(regs));
+	if (!user_mode(regs))
+		/* Necessary for getting the correct stack content */
+		set_fs(KERNEL_DS);
+	show_stacktrace(current, regs, KERN_DEFAULT);
+	show_code((unsigned int __user *) regs->cp0_epc);
 	printk("\n");
+	set_fs(old_fs);
 }
 
 static DEFINE_RAW_SPINLOCK(die_lock);
@@ -792,6 +781,7 @@ void force_fcr31_sig(unsigned long fcr31, void __user *fault_addr,
 int process_fpemu_return(int sig, void __user *fault_addr, unsigned long fcr31)
 {
 	int si_code;
+	struct vm_area_struct *vma;
 
 	switch (sig) {
 	case 0:
@@ -807,7 +797,8 @@ int process_fpemu_return(int sig, void __user *fault_addr, unsigned long fcr31)
 
 	case SIGSEGV:
 		mmap_read_lock(current->mm);
-		if (vma_lookup(current->mm, (unsigned long)fault_addr))
+		vma = find_vma(current->mm, (unsigned long)fault_addr);
+		if (vma && (vma->vm_start <= (unsigned long)fault_addr))
 			si_code = SEGV_ACCERR;
 		else
 			si_code = SEGV_MAPERR;
@@ -1031,14 +1022,18 @@ asmlinkage void do_bp(struct pt_regs *regs)
 	unsigned long epc = msk_isa16_mode(exception_epc(regs));
 	unsigned int opcode, bcode;
 	enum ctx_state prev_state;
-	bool user = user_mode(regs);
+	mm_segment_t seg;
+
+	seg = get_fs();
+	if (!user_mode(regs))
+		set_fs(KERNEL_DS);
 
 	prev_state = exception_enter();
 	current->thread.trap_nr = (regs->cp0_cause >> 2) & 0x1f;
 	if (get_isa16_mode(regs->cp0_epc)) {
 		u16 instr[2];
 
-		if (__get_inst16(&instr[0], (u16 *)epc, user))
+		if (__get_user(instr[0], (u16 __user *)epc))
 			goto out_sigsegv;
 
 		if (!cpu_has_mmips) {
@@ -1049,13 +1044,13 @@ asmlinkage void do_bp(struct pt_regs *regs)
 			bcode = instr[0] & 0xf;
 		} else {
 			/* 32-bit microMIPS BREAK */
-			if (__get_inst16(&instr[1], (u16 *)(epc + 2), user))
+			if (__get_user(instr[1], (u16 __user *)(epc + 2)))
 				goto out_sigsegv;
 			opcode = (instr[0] << 16) | instr[1];
 			bcode = (opcode >> 6) & ((1 << 20) - 1);
 		}
 	} else {
-		if (__get_inst32(&opcode, (u32 *)epc, user))
+		if (__get_user(opcode, (unsigned int __user *)epc))
 			goto out_sigsegv;
 		bcode = (opcode >> 6) & ((1 << 20) - 1);
 	}
@@ -1105,6 +1100,7 @@ asmlinkage void do_bp(struct pt_regs *regs)
 	do_trap_or_bp(regs, bcode, TRAP_BRKPT, "Break");
 
 out:
+	set_fs(seg);
 	exception_exit(prev_state);
 	return;
 
@@ -1118,21 +1114,25 @@ asmlinkage void do_tr(struct pt_regs *regs)
 	u32 opcode, tcode = 0;
 	enum ctx_state prev_state;
 	u16 instr[2];
-	bool user = user_mode(regs);
+	mm_segment_t seg;
 	unsigned long epc = msk_isa16_mode(exception_epc(regs));
+
+	seg = get_fs();
+	if (!user_mode(regs))
+		set_fs(KERNEL_DS);
 
 	prev_state = exception_enter();
 	current->thread.trap_nr = (regs->cp0_cause >> 2) & 0x1f;
 	if (get_isa16_mode(regs->cp0_epc)) {
-		if (__get_inst16(&instr[0], (u16 *)(epc + 0), user) ||
-		    __get_inst16(&instr[1], (u16 *)(epc + 2), user))
+		if (__get_user(instr[0], (u16 __user *)(epc + 0)) ||
+		    __get_user(instr[1], (u16 __user *)(epc + 2)))
 			goto out_sigsegv;
 		opcode = (instr[0] << 16) | instr[1];
 		/* Immediate versions don't provide a code.  */
 		if (!(opcode & OPCODE))
 			tcode = (opcode >> 12) & ((1 << 4) - 1);
 	} else {
-		if (__get_inst32(&opcode, (u32 *)epc, user))
+		if (__get_user(opcode, (u32 __user *)epc))
 			goto out_sigsegv;
 		/* Immediate versions don't provide a code.  */
 		if (!(opcode & OPCODE))
@@ -1142,6 +1142,7 @@ asmlinkage void do_tr(struct pt_regs *regs)
 	do_trap_or_bp(regs, tcode, 0, "Trap");
 
 out:
+	set_fs(seg);
 	exception_exit(prev_state);
 	return;
 
@@ -1590,6 +1591,7 @@ asmlinkage void do_mcheck(struct pt_regs *regs)
 {
 	int multi_match = regs->cp0_status & ST0_TS;
 	enum ctx_state prev_state;
+	mm_segment_t old_fs = get_fs();
 
 	prev_state = exception_enter();
 	show_regs(regs);
@@ -1600,7 +1602,12 @@ asmlinkage void do_mcheck(struct pt_regs *regs)
 		dump_tlb_all();
 	}
 
-	show_code((void *)regs->cp0_epc, user_mode(regs));
+	if (!user_mode(regs))
+		set_fs(KERNEL_DS);
+
+	show_code((unsigned int __user *) regs->cp0_epc);
+
+	set_fs(old_fs);
 
 	/*
 	 * Some chips may have other causes of machine check (e.g. SB1
@@ -1706,10 +1713,10 @@ static inline __init void parity_protection_init(void)
 		l2parity &= l1parity;
 
 		/* Probe L1 ECC support */
-		cp0_ectl = read_c0_errctl();
-		write_c0_errctl(cp0_ectl | ERRCTL_PE);
+		cp0_ectl = read_c0_ecc();
+		write_c0_ecc(cp0_ectl | ERRCTL_PE);
 		back_to_back_c0_hazard();
-		cp0_ectl = read_c0_errctl();
+		cp0_ectl = read_c0_ecc();
 
 		/* Probe L2 ECC support */
 		gcr_ectl = read_gcr_err_control();
@@ -1728,9 +1735,9 @@ static inline __init void parity_protection_init(void)
 			cp0_ectl |= ERRCTL_PE;
 		else
 			cp0_ectl &= ~ERRCTL_PE;
-		write_c0_errctl(cp0_ectl);
+		write_c0_ecc(cp0_ectl);
 		back_to_back_c0_hazard();
-		WARN_ON(!!(read_c0_errctl() & ERRCTL_PE) != l1parity);
+		WARN_ON(!!(read_c0_ecc() & ERRCTL_PE) != l1parity);
 
 		/* Configure L2 ECC checking */
 		if (l2parity)
@@ -1742,8 +1749,8 @@ static inline __init void parity_protection_init(void)
 		gcr_ectl &= CM_GCR_ERR_CONTROL_L2_ECC_EN;
 		WARN_ON(!!gcr_ectl != l2parity);
 
-		pr_info("Cache parity protection %s\n",
-			str_enabled_disabled(l1parity));
+		pr_info("Cache parity protection %sabled\n",
+			l1parity ? "en" : "dis");
 		return;
 	}
 
@@ -1762,18 +1769,18 @@ static inline __init void parity_protection_init(void)
 			unsigned long errctl;
 			unsigned int l1parity_present, l2parity_present;
 
-			errctl = read_c0_errctl();
+			errctl = read_c0_ecc();
 			errctl &= ~(ERRCTL_PE|ERRCTL_L2P);
 
 			/* probe L1 parity support */
-			write_c0_errctl(errctl | ERRCTL_PE);
+			write_c0_ecc(errctl | ERRCTL_PE);
 			back_to_back_c0_hazard();
-			l1parity_present = (read_c0_errctl() & ERRCTL_PE);
+			l1parity_present = (read_c0_ecc() & ERRCTL_PE);
 
 			/* probe L2 parity support */
-			write_c0_errctl(errctl|ERRCTL_L2P);
+			write_c0_ecc(errctl|ERRCTL_L2P);
 			back_to_back_c0_hazard();
-			l2parity_present = (read_c0_errctl() & ERRCTL_L2P);
+			l2parity_present = (read_c0_ecc() & ERRCTL_L2P);
 
 			if (l1parity_present && l2parity_present) {
 				if (l1parity)
@@ -1792,20 +1799,20 @@ static inline __init void parity_protection_init(void)
 
 			printk(KERN_INFO "Writing ErrCtl register=%08lx\n", errctl);
 
-			write_c0_errctl(errctl);
+			write_c0_ecc(errctl);
 			back_to_back_c0_hazard();
-			errctl = read_c0_errctl();
+			errctl = read_c0_ecc();
 			printk(KERN_INFO "Readback ErrCtl register=%08lx\n", errctl);
 
 			if (l1parity_present)
-				pr_info("Cache parity protection %s\n",
-					str_enabled_disabled(errctl & ERRCTL_PE));
+				printk(KERN_INFO "Cache parity protection %sabled\n",
+				       (errctl & ERRCTL_PE) ? "en" : "dis");
 
 			if (l2parity_present) {
 				if (l1parity_present && l1parity)
 					errctl ^= ERRCTL_L2P;
-				pr_info("L2 cache parity protection %s\n",
-					str_enabled_disabled(errctl & ERRCTL_L2P));
+				printk(KERN_INFO "L2 cache parity protection %sabled\n",
+				       (errctl & ERRCTL_L2P) ? "en" : "dis");
 			}
 		}
 		break;
@@ -1813,11 +1820,11 @@ static inline __init void parity_protection_init(void)
 	case CPU_5KC:
 	case CPU_5KE:
 	case CPU_LOONGSON32:
-		write_c0_errctl(0x80000000);
+		write_c0_ecc(0x80000000);
 		back_to_back_c0_hazard();
 		/* Set the PE bit (bit 31) in the c0_errctl register. */
-		pr_info("Cache parity protection %s\n",
-			str_enabled_disabled(read_c0_errctl() & 0x80000000));
+		printk(KERN_INFO "Cache parity protection %sabled\n",
+		       (read_c0_ecc() & 0x80000000) ? "en" : "dis");
 		break;
 	case CPU_20KC:
 	case CPU_25KF:
@@ -1888,8 +1895,8 @@ asmlinkage void do_ftlb(void)
 	if ((cpu_has_mips_r2_r6) &&
 	    (((current_cpu_data.processor_id & 0xff0000) == PRID_COMP_MIPS) ||
 	    ((current_cpu_data.processor_id & 0xff0000) == PRID_COMP_LOONGSON))) {
-		pr_err("FTLB error exception, cp0_errctl=0x%08x:\n",
-		       read_c0_errctl());
+		pr_err("FTLB error exception, cp0_ecc=0x%08x:\n",
+		       read_c0_ecc());
 		pr_err("cp0_errorepc == %0*lx\n", field, read_c0_errorepc());
 		reg_val = read_c0_cacheerr();
 		pr_err("c0_cacheerr == %08x\n", reg_val);
@@ -2002,21 +2009,12 @@ void __noreturn nmi_exception_handler(struct pt_regs *regs)
 	nmi_exit();
 }
 
+#define VECTORSPACING 0x100	/* for EI/VI mode */
+
 unsigned long ebase;
 EXPORT_SYMBOL_GPL(ebase);
 unsigned long exception_handlers[32];
 unsigned long vi_handlers[64];
-
-void reserve_exception_space(phys_addr_t addr, unsigned long size)
-{
-	/*
-	 * reserve exception space on CPUs other than CPU0
-	 * is too late, since memblock is unavailable when APs
-	 * up
-	 */
-	if (smp_processor_id() == 0)
-		memblock_reserve(addr, size);
-}
 
 void __init *set_except_vector(int n, void *addr)
 {
@@ -2043,12 +2041,13 @@ void __init *set_except_vector(int n, void *addr)
 		unsigned long jump_mask = ~((1 << 28) - 1);
 #endif
 		u32 *buf = (u32 *)(ebase + 0x200);
+		unsigned int k0 = 26;
 		if ((handler & jump_mask) == ((ebase + 0x200) & jump_mask)) {
 			uasm_i_j(&buf, handler & ~jump_mask);
 			uasm_i_nop(&buf);
 		} else {
-			UASM_i_LA(&buf, GPR_K0, handler);
-			uasm_i_jr(&buf, GPR_K0);
+			UASM_i_LA(&buf, k0, handler);
+			uasm_i_jr(&buf, k0);
 			uasm_i_nop(&buf);
 		}
 		local_flush_icache_range(ebase + 0x200, (unsigned long)buf);
@@ -2062,70 +2061,109 @@ static void do_default_vi(void)
 	panic("Caught unexpected vectored interrupt.");
 }
 
-void *set_vi_handler(int n, vi_handler_t addr)
+static void *set_vi_srs_handler(int n, vi_handler_t addr, int srs)
 {
-	extern const u8 except_vec_vi[];
-	extern const u8 except_vec_vi_ori[], except_vec_vi_end[];
-	extern const u8 skipover_except_vec_vi[];
 	unsigned long handler;
 	unsigned long old_handler = vi_handlers[n];
 	int srssets = current_cpu_data.srsets;
 	u16 *h;
 	unsigned char *b;
-	const u8 *vec_start;
-	int ori_offset;
-	int handler_len;
 
 	BUG_ON(!cpu_has_veic && !cpu_has_vint);
 
 	if (addr == NULL) {
 		handler = (unsigned long) do_default_vi;
+		srs = 0;
 	} else
 		handler = (unsigned long) addr;
 	vi_handlers[n] = handler;
 
 	b = (unsigned char *)(ebase + 0x200 + n*VECTORSPACING);
 
+	if (srs >= srssets)
+		panic("Shadow register set %d not supported", srs);
+
 	if (cpu_has_veic) {
 		if (board_bind_eic_interrupt)
-			board_bind_eic_interrupt(n, 0);
+			board_bind_eic_interrupt(n, srs);
 	} else if (cpu_has_vint) {
 		/* SRSMap is only defined if shadow sets are implemented */
 		if (srssets > 1)
-			change_c0_srsmap(0xf << n*4, 0 << n*4);
+			change_c0_srsmap(0xf << n*4, srs << n*4);
 	}
 
-	vec_start = using_skipover_handler() ? skipover_except_vec_vi :
-					       except_vec_vi;
-#if defined(CONFIG_CPU_MICROMIPS) || defined(CONFIG_CPU_BIG_ENDIAN)
-	ori_offset = except_vec_vi_ori - vec_start + 2;
-#else
-	ori_offset = except_vec_vi_ori - vec_start;
-#endif
-	handler_len = except_vec_vi_end - vec_start;
-
-	if (handler_len > VECTORSPACING) {
+	if (srs == 0) {
 		/*
-		 * Sigh... panicing won't help as the console
-		 * is probably not configured :(
+		 * If no shadow set is selected then use the default handler
+		 * that does normal register saving and standard interrupt exit
 		 */
-		panic("VECTORSPACING too small");
-	}
-
-	set_handler(((unsigned long)b - ebase), vec_start,
-#ifdef CONFIG_CPU_MICROMIPS
-			(handler_len - 1));
+		extern const u8 except_vec_vi[], except_vec_vi_lui[];
+		extern const u8 except_vec_vi_ori[], except_vec_vi_end[];
+		extern const u8 rollback_except_vec_vi[];
+		const u8 *vec_start = using_rollback_handler() ?
+				      rollback_except_vec_vi : except_vec_vi;
+#if defined(CONFIG_CPU_MICROMIPS) || defined(CONFIG_CPU_BIG_ENDIAN)
+		const int lui_offset = except_vec_vi_lui - vec_start + 2;
+		const int ori_offset = except_vec_vi_ori - vec_start + 2;
 #else
-			handler_len);
+		const int lui_offset = except_vec_vi_lui - vec_start;
+		const int ori_offset = except_vec_vi_ori - vec_start;
 #endif
-	/* insert offset into vi_handlers[] */
-	h = (u16 *)(b + ori_offset);
-	*h = n * sizeof(handler);
-	local_flush_icache_range((unsigned long)b,
-				 (unsigned long)(b+handler_len));
+		const int handler_len = except_vec_vi_end - vec_start;
+
+		if (handler_len > VECTORSPACING) {
+			/*
+			 * Sigh... panicing won't help as the console
+			 * is probably not configured :(
+			 */
+			panic("VECTORSPACING too small");
+		}
+
+		set_handler(((unsigned long)b - ebase), vec_start,
+#ifdef CONFIG_CPU_MICROMIPS
+				(handler_len - 1));
+#else
+				handler_len);
+#endif
+		h = (u16 *)(b + lui_offset);
+		*h = (handler >> 16) & 0xffff;
+		h = (u16 *)(b + ori_offset);
+		*h = (handler & 0xffff);
+		local_flush_icache_range((unsigned long)b,
+					 (unsigned long)(b+handler_len));
+	}
+	else {
+		/*
+		 * In other cases jump directly to the interrupt handler. It
+		 * is the handler's responsibility to save registers if required
+		 * (eg hi/lo) and return from the exception using "eret".
+		 */
+		u32 insn;
+
+		h = (u16 *)b;
+		/* j handler */
+#ifdef CONFIG_CPU_MICROMIPS
+		insn = 0xd4000000 | (((u32)handler & 0x07ffffff) >> 1);
+#else
+		insn = 0x08000000 | (((u32)handler & 0x0fffffff) >> 2);
+#endif
+		h[0] = (insn >> 16) & 0xffff;
+		h[1] = insn & 0xffff;
+		h[2] = 0;
+		h[3] = 0;
+		local_flush_icache_range((unsigned long)b,
+					 (unsigned long)(b+8));
+	}
 
 	return (void *)old_handler;
 }
+
+void *set_vi_handler(int n, vi_handler_t addr)
+{
+	return set_vi_srs_handler(n, addr, 0);
+}
+
+extern void tlb_init(void);
 
 /*
  * Timer interrupt
@@ -2300,7 +2338,7 @@ static const char panic_null_cerr[] =
 void set_uncached_handler(unsigned long offset, void *addr,
 	unsigned long size)
 {
-	unsigned long uncached_ebase = CKSEG1ADDR_OR_64BIT(__pa(ebase));
+	unsigned long uncached_ebase = CKSEG1ADDR(ebase);
 
 	if (!addr)
 		panic(panic_null_cerr);
@@ -2329,7 +2367,10 @@ void __init trap_init(void)
 
 	if (!cpu_has_mips_r2_r6) {
 		ebase = CAC_BASE;
+		ebase_pa = virt_to_phys((void *)ebase);
 		vec_size = 0x400;
+
+		memblock_reserve(ebase_pa, vec_size);
 	} else {
 		if (cpu_has_veic || cpu_has_vint)
 			vec_size = 0x200 + VECTORSPACING*64;
@@ -2352,13 +2393,10 @@ void __init trap_init(void)
 		 * EVA is special though as it allows segments to be rearranged
 		 * and to become uncached during cache error handling.
 		 */
-		if (!IS_ENABLED(CONFIG_EVA) && ebase_pa < 0x20000000)
+		if (!IS_ENABLED(CONFIG_EVA) && !WARN_ON(ebase_pa >= 0x20000000))
 			ebase = CKSEG0ADDR(ebase_pa);
 		else
 			ebase = (unsigned long)phys_to_virt(ebase_pa);
-		if (ebase_pa >= 0x20000000)
-			pr_warn("ebase(%pa) should better be in KSeg0",
-				&ebase_pa);
 	}
 
 	if (cpu_has_mmips) {
@@ -2389,7 +2427,7 @@ void __init trap_init(void)
 		set_except_vector(i, handle_reserved);
 
 	/*
-	 * Copy the EJTAG debug exception vector handler code to its final
+	 * Copy the EJTAG debug exception vector handler code to it's final
 	 * destination.
 	 */
 	if (cpu_has_ejtag && board_ejtag_handler_setup)
@@ -2426,8 +2464,8 @@ void __init trap_init(void)
 	if (board_be_init)
 		board_be_init();
 
-	set_except_vector(EXCCODE_INT, using_skipover_handler() ?
-					skipover_handle_int : handle_int);
+	set_except_vector(EXCCODE_INT, using_rollback_handler() ?
+					rollback_handle_int : handle_int);
 	set_except_vector(EXCCODE_MOD, handle_tlbm);
 	set_except_vector(EXCCODE_TLBL, handle_tlbl);
 	set_except_vector(EXCCODE_TLBS, handle_tlbs);

@@ -2,6 +2,15 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
  */
 
 #include "atomisp_internal.h"
@@ -17,28 +26,26 @@
 
 #include "isp.h"
 
-int ia_css_vf_config(struct sh_css_isp_vf_isp_config      *to,
-		    const struct ia_css_vf_configuration *from,
-		    unsigned int size)
+void
+ia_css_vf_config(
+    struct sh_css_isp_vf_isp_config      *to,
+    const struct ia_css_vf_configuration *from,
+    unsigned int size)
 {
 	unsigned int elems_a = ISP_VEC_NELEMS;
-	int ret;
 
+	(void)size;
 	to->vf_downscale_bits = from->vf_downscale_bits;
 	to->enable = from->info != NULL;
 
 	if (from->info) {
 		ia_css_frame_info_to_frame_sp_info(&to->info, from->info);
-		ret = ia_css_dma_configure_from_info(&to->dma.port_b, from->info);
-		if (ret)
-			return ret;
+		ia_css_dma_configure_from_info(&to->dma.port_b, from->info);
 		to->dma.width_a_over_b = elems_a / to->dma.port_b.elems;
 
 		/* Assume divisiblity here, may need to generalize to fixed point. */
-		if (elems_a % to->dma.port_b.elems != 0)
-			return -EINVAL;
+		assert(elems_a % to->dma.port_b.elems == 0);
 	}
-	return 0;
 }
 
 /* compute the log2 of the downscale factor needed to get closest
@@ -91,7 +98,8 @@ configure_kernel(
 	unsigned int vf_log_ds = 0;
 
 	/* First compute value */
-	if (vf_info) {
+	if (vf_info)
+	{
 		err = sh_css_vf_downscale_log2(out_info, vf_info, &vf_log_ds);
 		if (err)
 			return err;
@@ -112,11 +120,12 @@ configure_dma(
 	config->info = vf_info;
 }
 
-int ia_css_vf_configure(const struct ia_css_binary *binary,
-			const struct ia_css_frame_info *out_info,
-			struct ia_css_frame_info *vf_info,
-			unsigned int *downscale_log2)
-{
+int
+ia_css_vf_configure(
+    const struct ia_css_binary *binary,
+    const struct ia_css_frame_info *out_info,
+    struct ia_css_frame_info *vf_info,
+    unsigned int *downscale_log2) {
 	int err;
 	struct ia_css_vf_configuration config;
 	const struct ia_css_binary_info *info = &binary->info->sp;
@@ -129,6 +138,7 @@ int ia_css_vf_configure(const struct ia_css_binary *binary,
 
 	if (vf_info)
 		vf_info->raw_bit_depth = info->dma.vfdec_bits_per_pixel;
+	ia_css_configure_vf(binary, &config);
 
-	return ia_css_configure_vf(binary, &config);
+	return 0;
 }

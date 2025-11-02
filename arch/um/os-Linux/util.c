@@ -3,7 +3,6 @@
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -14,13 +13,13 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/utsname.h>
-#include <sys/random.h>
 #include <init.h>
 #include <os.h>
 
 void stack_protections(unsigned long address)
 {
-	if (mprotect((void *) address, UM_THREAD_SIZE, PROT_READ | PROT_WRITE) < 0)
+	if (mprotect((void *) address, UM_THREAD_SIZE,
+		    PROT_READ | PROT_WRITE | PROT_EXEC) < 0)
 		panic("protecting stack failed, errno = %d", errno);
 }
 
@@ -51,8 +50,8 @@ void setup_machinename(char *machine_out)
 	struct utsname host;
 
 	uname(&host);
-#if IS_ENABLED(CONFIG_UML_X86)
-# if !IS_ENABLED(CONFIG_64BIT)
+#ifdef UML_CONFIG_UML_X86
+# ifndef UML_CONFIG_64BIT
 	if (!strcmp(host.machine, "x86_64")) {
 		strcpy(machine_out, "i686");
 		return;
@@ -94,11 +93,6 @@ static inline void __attribute__ ((noreturn)) uml_abort(void)
 	for (;;)
 		if (kill(getpid(), SIGABRT) < 0)
 			exit(127);
-}
-
-ssize_t os_getrandom(void *buf, size_t len, unsigned int flags)
-{
-	return getrandom(buf, len, flags);
 }
 
 /*
@@ -152,7 +146,7 @@ void os_dump_core(void)
 	while ((pid = waitpid(-1, NULL, WNOHANG | __WALL)) > 0)
 		os_kill_ptraced_process(pid, 0);
 
-	uml_abort();
+	exit(0);
 }
 
 void um_early_printk(const char *s, unsigned int n)

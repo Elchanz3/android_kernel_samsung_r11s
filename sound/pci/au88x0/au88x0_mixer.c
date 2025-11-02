@@ -15,7 +15,7 @@ static int remove_ctl(struct snd_card *card, const char *name)
 {
 	struct snd_ctl_elem_id id;
 	memset(&id, 0, sizeof(id));
-	strscpy(id.name, name);
+	strcpy(id.name, name);
 	id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	return snd_ctl_remove_id(card, &id);
 }
@@ -30,8 +30,7 @@ static int snd_vortex_mixer(vortex_t *vortex)
 		.read = vortex_codec_read,
 	};
 
-	err = snd_ac97_bus(vortex->card, 0, &ops, NULL, &pbus);
-	if (err < 0)
+	if ((err = snd_ac97_bus(vortex->card, 0, &ops, NULL, &pbus)) < 0)
 		return err;
 	memset(&ac97, 0, sizeof(ac97));
 	// Initialize AC97 codec stuff.

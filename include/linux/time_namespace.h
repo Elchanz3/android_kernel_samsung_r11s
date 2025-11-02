@@ -4,16 +4,13 @@
 
 
 #include <linux/sched.h>
+#include <linux/kref.h>
 #include <linux/nsproxy.h>
 #include <linux/ns_common.h>
 #include <linux/err.h>
-#include <linux/time64.h>
 
 struct user_namespace;
 extern struct user_namespace init_user_ns;
-
-struct seq_file;
-struct vm_area_struct;
 
 struct timens_offsets {
 	struct timespec64 monotonic;
@@ -21,6 +18,7 @@ struct timens_offsets {
 };
 
 struct time_namespace {
+	struct kref		kref;
 	struct user_namespace	*user_ns;
 	struct ucounts		*ucounts;
 	struct ns_common	ns;
@@ -33,32 +31,26 @@ struct time_namespace {
 extern struct time_namespace init_time_ns;
 
 #ifdef CONFIG_TIME_NS
-static inline struct time_namespace *to_time_ns(struct ns_common *ns)
-{
-	return container_of(ns, struct time_namespace, ns);
-}
-void __init time_ns_init(void);
 extern int vdso_join_timens(struct task_struct *task,
 			    struct time_namespace *ns);
 extern void timens_commit(struct task_struct *tsk, struct time_namespace *ns);
 
 static inline struct time_namespace *get_time_ns(struct time_namespace *ns)
 {
-	ns_ref_inc(ns);
+	kref_get(&ns->kref);
 	return ns;
 }
 
-struct time_namespace *copy_time_ns(u64 flags,
+struct time_namespace *copy_time_ns(unsigned long flags,
 				    struct user_namespace *user_ns,
 				    struct time_namespace *old_ns);
-void free_time_ns(struct time_namespace *ns);
-void timens_on_fork(struct nsproxy *nsproxy, struct task_struct *tsk);
-struct page *find_timens_vvar_page(struct vm_area_struct *vma);
+void free_time_ns(struct kref *kref);
+int timens_on_fork(struct nsproxy *nsproxy, struct task_struct *tsk);
+struct vdso_data *arch_get_vdso_data(void *vvar_page);
 
 static inline void put_time_ns(struct time_namespace *ns)
 {
-	if (ns_ref_put(ns))
-		free_time_ns(ns);
+	kref_put(&ns->kref, free_time_ns);
 }
 
 void proc_timens_show_offsets(struct task_struct *p, struct seq_file *m);
@@ -85,20 +77,6 @@ static inline void timens_add_boottime(struct timespec64 *ts)
 	*ts = timespec64_add(*ts, ns_offsets->boottime);
 }
 
-static inline u64 timens_add_boottime_ns(u64 nsec)
-{
-	struct timens_offsets *ns_offsets = &current->nsproxy->time_ns->offsets;
-
-	return nsec + timespec64_to_ns(&ns_offsets->boottime);
-}
-
-static inline void timens_sub_boottime(struct timespec64 *ts)
-{
-	struct timens_offsets *ns_offsets = &current->nsproxy->time_ns->offsets;
-
-	*ts = timespec64_sub(*ts, ns_offsets->boottime);
-}
-
 ktime_t do_timens_ktime_to_host(clockid_t clockid, ktime_t tim,
 				struct timens_offsets *offsets);
 
@@ -113,10 +91,6 @@ static inline ktime_t timens_ktime_to_host(clockid_t clockid, ktime_t tim)
 }
 
 #else
-static inline void __init time_ns_init(void)
-{
-}
-
 static inline int vdso_join_timens(struct task_struct *task,
 				   struct time_namespace *ns)
 {
@@ -138,7 +112,7 @@ static inline void put_time_ns(struct time_namespace *ns)
 }
 
 static inline
-struct time_namespace *copy_time_ns(u64 flags,
+struct time_namespace *copy_time_ns(unsigned long flags,
 				    struct user_namespace *user_ns,
 				    struct time_namespace *old_ns)
 {
@@ -148,27 +122,14 @@ struct time_namespace *copy_time_ns(u64 flags,
 	return old_ns;
 }
 
-static inline void timens_on_fork(struct nsproxy *nsproxy,
+static inline int timens_on_fork(struct nsproxy *nsproxy,
 				 struct task_struct *tsk)
 {
-	return;
-}
-
-static inline struct page *find_timens_vvar_page(struct vm_area_struct *vma)
-{
-	return NULL;
+	return 0;
 }
 
 static inline void timens_add_monotonic(struct timespec64 *ts) { }
 static inline void timens_add_boottime(struct timespec64 *ts) { }
-
-static inline u64 timens_add_boottime_ns(u64 nsec)
-{
-	return nsec;
-}
-
-static inline void timens_sub_boottime(struct timespec64 *ts) { }
-
 static inline ktime_t timens_ktime_to_host(clockid_t clockid, ktime_t tim)
 {
 	return tim;

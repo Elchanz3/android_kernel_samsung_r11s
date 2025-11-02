@@ -39,28 +39,22 @@ flow_offload_fill_dir(struct flow_offload *flow,
 
 	ft->l3proto = ctt->src.l3num;
 	ft->l4proto = ctt->dst.protonum;
-
-	switch (ctt->dst.protonum) {
-	case IPPROTO_TCP:
-	case IPPROTO_UDP:
-		ft->src_port = ctt->src.u.tcp.port;
-		ft->dst_port = ctt->dst.u.tcp.port;
-		break;
-	}
+	ft->src_port = ctt->src.u.tcp.port;
+	ft->dst_port = ctt->dst.u.tcp.port;
 }
 
 struct flow_offload *flow_offload_alloc(struct nf_conn *ct)
 {
 	struct flow_offload *flow;
 
-	if (unlikely(nf_ct_is_dying(ct)))
+	if (unlikely(nf_ct_is_dying(ct) ||
+	    !atomic_inc_not_zero(&ct->ct_general.use)))
 		return NULL;
 
 	flow = kzalloc(sizeof(*flow), GFP_ATOMIC);
 	if (!flow)
-		return NULL;
+		goto err_ct_refcnt;
 
-	refcount_inc(&ct->ct_general.use);
 	flow->ct = ct;
 
 	flow_offload_fill_dir(flow, FLOW_OFFLOAD_DIR_ORIGINAL);
@@ -72,181 +66,111 @@ struct flow_offload *flow_offload_alloc(struct nf_conn *ct)
 		__set_bit(NF_FLOW_DNAT, &flow->flags);
 
 	return flow;
+
+err_ct_refcnt:
+	nf_ct_put(ct);
+
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(flow_offload_alloc);
 
-static u32 flow_offload_dst_cookie(struct flow_offload_tuple *flow_tuple)
-{
-	if (flow_tuple->l3proto == NFPROTO_IPV6)
-		return rt6_get_cookie(dst_rt6_info(flow_tuple->dst_cache));
-
-	return 0;
-}
-
-static struct dst_entry *nft_route_dst_fetch(struct nf_flow_route *route,
-					     enum flow_offload_tuple_dir dir)
-{
-	struct dst_entry *dst = route->tuple[dir].dst;
-
-	route->tuple[dir].dst = NULL;
-
-	return dst;
-}
-
 static int flow_offload_fill_route(struct flow_offload *flow,
-				   struct nf_flow_route *route,
+				   const struct nf_flow_route *route,
 				   enum flow_offload_tuple_dir dir)
 {
 	struct flow_offload_tuple *flow_tuple = &flow->tuplehash[dir].tuple;
-	struct dst_entry *dst = nft_route_dst_fetch(route, dir);
-	int i, j = 0;
+	struct dst_entry *other_dst = route->tuple[!dir].dst;
+	struct dst_entry *dst = route->tuple[dir].dst;
+
+	if (!dst_hold_safe(route->tuple[dir].dst))
+		return -1;
 
 	switch (flow_tuple->l3proto) {
 	case NFPROTO_IPV4:
 		flow_tuple->mtu = ip_dst_mtu_maybe_forward(dst, true);
 		break;
 	case NFPROTO_IPV6:
-		flow_tuple->mtu = ip6_dst_mtu_maybe_forward(dst, true);
+		flow_tuple->mtu = ip6_dst_mtu_forward(dst);
 		break;
 	}
 
-	flow_tuple->iifidx = route->tuple[dir].in.ifindex;
-	for (i = route->tuple[dir].in.num_encaps - 1; i >= 0; i--) {
-		flow_tuple->encap[j].id = route->tuple[dir].in.encap[i].id;
-		flow_tuple->encap[j].proto = route->tuple[dir].in.encap[i].proto;
-		if (route->tuple[dir].in.ingress_vlans & BIT(i))
-			flow_tuple->in_vlan_ingress |= BIT(j);
-		j++;
-	}
-	flow_tuple->encap_num = route->tuple[dir].in.num_encaps;
-
-	switch (route->tuple[dir].xmit_type) {
-	case FLOW_OFFLOAD_XMIT_DIRECT:
-		memcpy(flow_tuple->out.h_dest, route->tuple[dir].out.h_dest,
-		       ETH_ALEN);
-		memcpy(flow_tuple->out.h_source, route->tuple[dir].out.h_source,
-		       ETH_ALEN);
-		flow_tuple->out.ifidx = route->tuple[dir].out.ifindex;
-		flow_tuple->out.hw_ifidx = route->tuple[dir].out.hw_ifindex;
-		dst_release(dst);
-		break;
-	case FLOW_OFFLOAD_XMIT_XFRM:
-	case FLOW_OFFLOAD_XMIT_NEIGH:
-		flow_tuple->dst_cache = dst;
-		flow_tuple->dst_cookie = flow_offload_dst_cookie(flow_tuple);
-		break;
-	default:
-		WARN_ON_ONCE(1);
-		break;
-	}
-	flow_tuple->xmit_type = route->tuple[dir].xmit_type;
+	flow_tuple->iifidx = other_dst->dev->ifindex;
+	flow_tuple->dst_cache = dst;
 
 	return 0;
 }
 
-static void nft_flow_dst_release(struct flow_offload *flow,
-				 enum flow_offload_tuple_dir dir)
+int flow_offload_route_init(struct flow_offload *flow,
+			    const struct nf_flow_route *route)
 {
-	if (flow->tuplehash[dir].tuple.xmit_type == FLOW_OFFLOAD_XMIT_NEIGH ||
-	    flow->tuplehash[dir].tuple.xmit_type == FLOW_OFFLOAD_XMIT_XFRM)
-		dst_release(flow->tuplehash[dir].tuple.dst_cache);
-}
+	int err;
 
-void flow_offload_route_init(struct flow_offload *flow,
-			     struct nf_flow_route *route)
-{
-	flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_ORIGINAL);
-	flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_REPLY);
+	err = flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_ORIGINAL);
+	if (err < 0)
+		return err;
+
+	err = flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_REPLY);
+	if (err < 0)
+		goto err_route_reply;
+
 	flow->type = NF_FLOW_OFFLOAD_ROUTE;
+
+	return 0;
+
+err_route_reply:
+	dst_release(route->tuple[FLOW_OFFLOAD_DIR_ORIGINAL].dst);
+
+	return err;
 }
 EXPORT_SYMBOL_GPL(flow_offload_route_init);
 
-static inline bool nf_flow_has_expired(const struct flow_offload *flow)
+static void flow_offload_fixup_tcp(struct ip_ct_tcp *tcp)
 {
-	return nf_flow_timeout_delta(flow->timeout) <= 0;
-}
-
-static void flow_offload_fixup_tcp(struct nf_conn *ct, u8 tcp_state)
-{
-	struct ip_ct_tcp *tcp = &ct->proto.tcp;
-
-	spin_lock_bh(&ct->lock);
-	if (tcp->state != tcp_state)
-		tcp->state = tcp_state;
-
-	/* syn packet triggers the TCP reopen case from conntrack. */
-	if (tcp->state == TCP_CONNTRACK_CLOSE)
-		ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_CLOSE_INIT;
-
-	/* Conntrack state is outdated due to offload bypass.
-	 * Clear IP_CT_TCP_FLAG_MAXACK_SET, otherwise conntracks
-	 * TCP reset validation will fail.
-	 */
+	tcp->state = TCP_CONNTRACK_ESTABLISHED;
 	tcp->seen[0].td_maxwin = 0;
-	tcp->seen[0].flags &= ~IP_CT_TCP_FLAG_MAXACK_SET;
 	tcp->seen[1].td_maxwin = 0;
-	tcp->seen[1].flags &= ~IP_CT_TCP_FLAG_MAXACK_SET;
-	spin_unlock_bh(&ct->lock);
 }
 
-static void flow_offload_fixup_ct(struct flow_offload *flow)
+#define NF_FLOWTABLE_TCP_PICKUP_TIMEOUT	(120 * HZ)
+#define NF_FLOWTABLE_UDP_PICKUP_TIMEOUT	(30 * HZ)
+
+static void flow_offload_fixup_ct_timeout(struct nf_conn *ct)
 {
-	struct nf_conn *ct = flow->ct;
-	struct net *net = nf_ct_net(ct);
+	const struct nf_conntrack_l4proto *l4proto;
 	int l4num = nf_ct_protonum(ct);
-	bool expired, closing = false;
-	u32 offload_timeout = 0;
-	s32 timeout;
+	unsigned int timeout;
 
-	if (l4num == IPPROTO_TCP) {
-		const struct nf_tcp_net *tn = nf_tcp_pernet(net);
-		u8 tcp_state;
-
-		/* Enter CLOSE state if fin/rst packet has been seen, this
-		 * allows TCP reopen from conntrack. Otherwise, pick up from
-		 * the last seen TCP state.
-		 */
-		closing = test_bit(NF_FLOW_CLOSING, &flow->flags);
-		if (closing) {
-			flow_offload_fixup_tcp(ct, TCP_CONNTRACK_CLOSE);
-			timeout = READ_ONCE(tn->timeouts[TCP_CONNTRACK_CLOSE]);
-			expired = false;
-		} else {
-			tcp_state = READ_ONCE(ct->proto.tcp.state);
-			flow_offload_fixup_tcp(ct, tcp_state);
-			timeout = READ_ONCE(tn->timeouts[tcp_state]);
-			expired = nf_flow_has_expired(flow);
-		}
-		offload_timeout = READ_ONCE(tn->offload_timeout);
-
-	} else if (l4num == IPPROTO_UDP) {
-		const struct nf_udp_net *tn = nf_udp_pernet(net);
-		enum udp_conntrack state =
-			test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ?
-			UDP_CT_REPLIED : UDP_CT_UNREPLIED;
-
-		timeout = READ_ONCE(tn->timeouts[state]);
-		expired = nf_flow_has_expired(flow);
-		offload_timeout = READ_ONCE(tn->offload_timeout);
-	} else {
+	l4proto = nf_ct_l4proto_find(l4num);
+	if (!l4proto)
 		return;
-	}
 
-	if (expired)
-		timeout -= offload_timeout;
+	if (l4num == IPPROTO_TCP)
+		timeout = NF_FLOWTABLE_TCP_PICKUP_TIMEOUT;
+	else if (l4num == IPPROTO_UDP)
+		timeout = NF_FLOWTABLE_UDP_PICKUP_TIMEOUT;
+	else
+		return;
 
-	if (timeout < 0)
-		timeout = 0;
+	if (nf_flow_timeout_delta(READ_ONCE(ct->timeout)) > (__s32)timeout)
+		WRITE_ONCE(ct->timeout, nfct_time_stamp + timeout);
+}
 
-	if (closing ||
-	    nf_flow_timeout_delta(READ_ONCE(ct->timeout)) > (__s32)timeout)
-		nf_ct_refresh(ct, timeout);
+static void flow_offload_fixup_ct_state(struct nf_conn *ct)
+{
+	if (nf_ct_protonum(ct) == IPPROTO_TCP)
+		flow_offload_fixup_tcp(&ct->proto.tcp);
+}
+
+static void flow_offload_fixup_ct(struct nf_conn *ct)
+{
+	flow_offload_fixup_ct_state(ct);
+	flow_offload_fixup_ct_timeout(ct);
 }
 
 static void flow_offload_route_release(struct flow_offload *flow)
 {
-	nft_flow_dst_release(flow, FLOW_OFFLOAD_DIR_ORIGINAL);
-	nft_flow_dst_release(flow, FLOW_OFFLOAD_DIR_REPLY);
+	dst_release(flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple.dst_cache);
+	dst_release(flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].tuple.dst_cache);
 }
 
 void flow_offload_free(struct flow_offload *flow)
@@ -267,14 +191,14 @@ static u32 flow_offload_hash(const void *data, u32 len, u32 seed)
 {
 	const struct flow_offload_tuple *tuple = data;
 
-	return jhash(tuple, offsetof(struct flow_offload_tuple, __hash), seed);
+	return jhash(tuple, offsetof(struct flow_offload_tuple, dir), seed);
 }
 
 static u32 flow_offload_hash_obj(const void *data, u32 len, u32 seed)
 {
 	const struct flow_offload_tuple_rhash *tuplehash = data;
 
-	return jhash(&tuplehash->tuple, offsetof(struct flow_offload_tuple, __hash), seed);
+	return jhash(&tuplehash->tuple, offsetof(struct flow_offload_tuple, dir), seed);
 }
 
 static int flow_offload_hash_cmp(struct rhashtable_compare_arg *arg,
@@ -283,7 +207,7 @@ static int flow_offload_hash_cmp(struct rhashtable_compare_arg *arg,
 	const struct flow_offload_tuple *tuple = arg->key;
 	const struct flow_offload_tuple_rhash *x = ptr;
 
-	if (memcmp(&x->tuple, tuple, offsetof(struct flow_offload_tuple, __hash)))
+	if (memcmp(&x->tuple, tuple, offsetof(struct flow_offload_tuple, dir)))
 		return 1;
 
 	return 0;
@@ -297,30 +221,11 @@ static const struct rhashtable_params nf_flow_offload_rhash_params = {
 	.automatic_shrinking	= true,
 };
 
-unsigned long flow_offload_get_timeout(struct flow_offload *flow)
-{
-	unsigned long timeout = NF_FLOW_TIMEOUT;
-	struct net *net = nf_ct_net(flow->ct);
-	int l4num = nf_ct_protonum(flow->ct);
-
-	if (l4num == IPPROTO_TCP) {
-		struct nf_tcp_net *tn = nf_tcp_pernet(net);
-
-		timeout = tn->offload_timeout;
-	} else if (l4num == IPPROTO_UDP) {
-		struct nf_udp_net *tn = nf_udp_pernet(net);
-
-		timeout = tn->offload_timeout;
-	}
-
-	return timeout;
-}
-
 int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
 {
 	int err;
 
-	flow->timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
+	flow->timeout = nf_flowtable_time_stamp + NF_FLOW_TIMEOUT;
 
 	err = rhashtable_insert_fast(&flow_table->rhashtable,
 				     &flow->tuplehash[0].node,
@@ -338,7 +243,7 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
 		return err;
 	}
 
-	nf_ct_refresh(flow->ct, NF_CT_DAY);
+	nf_ct_offload_timeout(flow->ct);
 
 	if (nf_flowtable_hw_offload(flow_table)) {
 		__set_bit(NF_FLOW_HW, &flow->flags);
@@ -350,23 +255,21 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
 EXPORT_SYMBOL_GPL(flow_offload_add);
 
 void flow_offload_refresh(struct nf_flowtable *flow_table,
-			  struct flow_offload *flow, bool force)
+			  struct flow_offload *flow)
 {
-	u32 timeout;
+	flow->timeout = nf_flowtable_time_stamp + NF_FLOW_TIMEOUT;
 
-	timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
-	if (force || timeout - READ_ONCE(flow->timeout) > HZ)
-		WRITE_ONCE(flow->timeout, timeout);
-	else
-		return;
-
-	if (likely(!nf_flowtable_hw_offload(flow_table)) ||
-	    test_bit(NF_FLOW_CLOSING, &flow->flags))
+	if (likely(!nf_flowtable_hw_offload(flow_table)))
 		return;
 
 	nf_flow_offload_add(flow_table, flow);
 }
 EXPORT_SYMBOL_GPL(flow_offload_refresh);
+
+static inline bool nf_flow_has_expired(const struct flow_offload *flow)
+{
+	return nf_flow_timeout_delta(flow->timeout) <= 0;
+}
 
 static void flow_offload_del(struct nf_flowtable *flow_table,
 			     struct flow_offload *flow)
@@ -377,14 +280,22 @@ static void flow_offload_del(struct nf_flowtable *flow_table,
 	rhashtable_remove_fast(&flow_table->rhashtable,
 			       &flow->tuplehash[FLOW_OFFLOAD_DIR_REPLY].node,
 			       nf_flow_offload_rhash_params);
+
+	clear_bit(IPS_OFFLOAD_BIT, &flow->ct->status);
+
+	if (nf_flow_has_expired(flow))
+		flow_offload_fixup_ct(flow->ct);
+	else
+		flow_offload_fixup_ct_timeout(flow->ct);
+
 	flow_offload_free(flow);
 }
 
 void flow_offload_teardown(struct flow_offload *flow)
 {
-	clear_bit(IPS_OFFLOAD_BIT, &flow->ct->status);
-	if (!test_and_set_bit(NF_FLOW_TEARDOWN, &flow->flags))
-		flow_offload_fixup_ct(flow);
+	set_bit(NF_FLOW_TEARDOWN, &flow->flags);
+
+	flow_offload_fixup_ct_state(flow->ct);
 }
 EXPORT_SYMBOL_GPL(flow_offload_teardown);
 
@@ -415,8 +326,7 @@ EXPORT_SYMBOL_GPL(flow_offload_lookup);
 
 static int
 nf_flow_table_iterate(struct nf_flowtable *flow_table,
-		      void (*iter)(struct nf_flowtable *flowtable,
-				   struct flow_offload *flow, void *data),
+		      void (*iter)(struct flow_offload *flow, void *data),
 		      void *data)
 {
 	struct flow_offload_tuple_rhash *tuplehash;
@@ -440,7 +350,7 @@ nf_flow_table_iterate(struct nf_flowtable *flow_table,
 
 		flow = container_of(tuplehash, struct flow_offload, tuplehash[0]);
 
-		iter(flow_table, flow, data);
+		iter(flow, data);
 	}
 	rhashtable_walk_stop(&hti);
 	rhashtable_walk_exit(&hti);
@@ -448,124 +358,14 @@ nf_flow_table_iterate(struct nf_flowtable *flow_table,
 	return err;
 }
 
-static bool nf_flow_custom_gc(struct nf_flowtable *flow_table,
-			      const struct flow_offload *flow)
+static void nf_flow_offload_gc_step(struct flow_offload *flow, void *data)
 {
-	return flow_table->type->gc && flow_table->type->gc(flow);
-}
+	struct nf_flowtable *flow_table = data;
 
-/**
- * nf_flow_table_tcp_timeout() - new timeout of offloaded tcp entry
- * @ct:		Flowtable offloaded tcp ct
- *
- * Return: number of seconds when ct entry should expire.
- */
-static u32 nf_flow_table_tcp_timeout(const struct nf_conn *ct)
-{
-	u8 state = READ_ONCE(ct->proto.tcp.state);
+	if (nf_flow_has_expired(flow) || nf_ct_is_dying(flow->ct))
+		set_bit(NF_FLOW_TEARDOWN, &flow->flags);
 
-	switch (state) {
-	case TCP_CONNTRACK_SYN_SENT:
-	case TCP_CONNTRACK_SYN_RECV:
-		return 0;
-	case TCP_CONNTRACK_ESTABLISHED:
-		return NF_CT_DAY;
-	case TCP_CONNTRACK_FIN_WAIT:
-	case TCP_CONNTRACK_CLOSE_WAIT:
-	case TCP_CONNTRACK_LAST_ACK:
-	case TCP_CONNTRACK_TIME_WAIT:
-		return 5 * 60 * HZ;
-	case TCP_CONNTRACK_CLOSE:
-		return 0;
-	}
-
-	return 0;
-}
-
-/**
- * nf_flow_table_extend_ct_timeout() - Extend ct timeout of offloaded conntrack entry
- * @ct:		Flowtable offloaded ct
- *
- * Datapath lookups in the conntrack table will evict nf_conn entries
- * if they have expired.
- *
- * Once nf_conn entries have been offloaded, nf_conntrack might not see any
- * packets anymore.  Thus ct->timeout is no longer refreshed and ct can
- * be evicted.
- *
- * To avoid the need for an additional check on the offload bit for every
- * packet processed via nf_conntrack_in(), set an arbitrary timeout large
- * enough not to ever expire, this save us a check for the IPS_OFFLOAD_BIT
- * from the packet path via nf_ct_is_expired().
- */
-static void nf_flow_table_extend_ct_timeout(struct nf_conn *ct)
-{
-	static const u32 min_timeout = 5 * 60 * HZ;
-	u32 expires = nf_ct_expires(ct);
-
-	/* normal case: large enough timeout, nothing to do. */
-	if (likely(expires >= min_timeout))
-		return;
-
-	/* must check offload bit after this, we do not hold any locks.
-	 * flowtable and ct entries could have been removed on another CPU.
-	 */
-	if (!refcount_inc_not_zero(&ct->ct_general.use))
-		return;
-
-	/* load ct->status after refcount increase */
-	smp_acquire__after_ctrl_dep();
-
-	if (nf_ct_is_confirmed(ct) &&
-	    test_bit(IPS_OFFLOAD_BIT, &ct->status)) {
-		u8 l4proto = nf_ct_protonum(ct);
-		u32 new_timeout = true;
-
-		switch (l4proto) {
-		case IPPROTO_UDP:
-			new_timeout = NF_CT_DAY;
-			break;
-		case IPPROTO_TCP:
-			new_timeout = nf_flow_table_tcp_timeout(ct);
-			break;
-		default:
-			WARN_ON_ONCE(1);
-			break;
-		}
-
-		/* Update to ct->timeout from nf_conntrack happens
-		 * without holding ct->lock.
-		 *
-		 * Use cmpxchg to ensure timeout extension doesn't
-		 * happen when we race with conntrack datapath.
-		 *
-		 * The inverse -- datapath updating ->timeout right
-		 * after this -- is fine, datapath is authoritative.
-		 */
-		if (new_timeout) {
-			new_timeout += nfct_time_stamp;
-			cmpxchg(&ct->timeout, expires, new_timeout);
-		}
-	}
-
-	nf_ct_put(ct);
-}
-
-static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
-				    struct flow_offload *flow, void *data)
-{
-	bool teardown = test_bit(NF_FLOW_TEARDOWN, &flow->flags);
-
-	if (nf_flow_has_expired(flow) ||
-	    nf_ct_is_dying(flow->ct) ||
-	    nf_flow_custom_gc(flow_table, flow)) {
-		flow_offload_teardown(flow);
-		teardown = true;
-	} else if (!teardown) {
-		nf_flow_table_extend_ct_timeout(flow->ct);
-	}
-
-	if (teardown) {
+	if (test_bit(NF_FLOW_TEARDOWN, &flow->flags)) {
 		if (test_bit(NF_FLOW_HW, &flow->flags)) {
 			if (!test_bit(NF_FLOW_HW_DYING, &flow->flags))
 				nf_flow_offload_del(flow_table, flow);
@@ -574,18 +374,9 @@ static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
 		} else {
 			flow_offload_del(flow_table, flow);
 		}
-	} else if (test_bit(NF_FLOW_CLOSING, &flow->flags) &&
-		   test_bit(NF_FLOW_HW, &flow->flags) &&
-		   !test_bit(NF_FLOW_HW_DYING, &flow->flags)) {
-		nf_flow_offload_del(flow_table, flow);
 	} else if (test_bit(NF_FLOW_HW, &flow->flags)) {
 		nf_flow_offload_stats(flow_table, flow);
 	}
-}
-
-void nf_flow_table_gc_run(struct nf_flowtable *flow_table)
-{
-	nf_flow_table_iterate(flow_table, nf_flow_offload_gc_step, NULL);
 }
 
 static void nf_flow_offload_work_gc(struct work_struct *work)
@@ -593,23 +384,32 @@ static void nf_flow_offload_work_gc(struct work_struct *work)
 	struct nf_flowtable *flow_table;
 
 	flow_table = container_of(work, struct nf_flowtable, gc_work.work);
-	nf_flow_table_gc_run(flow_table);
+	nf_flow_table_iterate(flow_table, nf_flow_offload_gc_step, flow_table);
 	queue_delayed_work(system_power_efficient_wq, &flow_table->gc_work, HZ);
 }
 
-static void nf_flow_nat_port_tcp(struct sk_buff *skb, unsigned int thoff,
-				 __be16 port, __be16 new_port)
+
+static int nf_flow_nat_port_tcp(struct sk_buff *skb, unsigned int thoff,
+				__be16 port, __be16 new_port)
 {
 	struct tcphdr *tcph;
 
+	if (skb_try_make_writable(skb, thoff + sizeof(*tcph)))
+		return -1;
+
 	tcph = (void *)(skb_network_header(skb) + thoff);
 	inet_proto_csum_replace2(&tcph->check, skb, port, new_port, false);
+
+	return 0;
 }
 
-static void nf_flow_nat_port_udp(struct sk_buff *skb, unsigned int thoff,
-				 __be16 port, __be16 new_port)
+static int nf_flow_nat_port_udp(struct sk_buff *skb, unsigned int thoff,
+				__be16 port, __be16 new_port)
 {
 	struct udphdr *udph;
+
+	if (skb_try_make_writable(skb, thoff + sizeof(*udph)))
+		return -1;
 
 	udph = (void *)(skb_network_header(skb) + thoff);
 	if (udph->check || skb->ip_summed == CHECKSUM_PARTIAL) {
@@ -618,27 +418,36 @@ static void nf_flow_nat_port_udp(struct sk_buff *skb, unsigned int thoff,
 		if (!udph->check)
 			udph->check = CSUM_MANGLED_0;
 	}
+
+	return 0;
 }
 
-static void nf_flow_nat_port(struct sk_buff *skb, unsigned int thoff,
-			     u8 protocol, __be16 port, __be16 new_port)
+static int nf_flow_nat_port(struct sk_buff *skb, unsigned int thoff,
+			    u8 protocol, __be16 port, __be16 new_port)
 {
 	switch (protocol) {
 	case IPPROTO_TCP:
-		nf_flow_nat_port_tcp(skb, thoff, port, new_port);
+		if (nf_flow_nat_port_tcp(skb, thoff, port, new_port) < 0)
+			return NF_DROP;
 		break;
 	case IPPROTO_UDP:
-		nf_flow_nat_port_udp(skb, thoff, port, new_port);
+		if (nf_flow_nat_port_udp(skb, thoff, port, new_port) < 0)
+			return NF_DROP;
 		break;
 	}
+
+	return 0;
 }
 
-void nf_flow_snat_port(const struct flow_offload *flow,
-		       struct sk_buff *skb, unsigned int thoff,
-		       u8 protocol, enum flow_offload_tuple_dir dir)
+int nf_flow_snat_port(const struct flow_offload *flow,
+		      struct sk_buff *skb, unsigned int thoff,
+		      u8 protocol, enum flow_offload_tuple_dir dir)
 {
 	struct flow_ports *hdr;
 	__be16 port, new_port;
+
+	if (skb_try_make_writable(skb, thoff + sizeof(*hdr)))
+		return -1;
 
 	hdr = (void *)(skb_network_header(skb) + thoff);
 
@@ -653,18 +462,23 @@ void nf_flow_snat_port(const struct flow_offload *flow,
 		new_port = flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple.src_port;
 		hdr->dest = new_port;
 		break;
+	default:
+		return -1;
 	}
 
-	nf_flow_nat_port(skb, thoff, protocol, port, new_port);
+	return nf_flow_nat_port(skb, thoff, protocol, port, new_port);
 }
 EXPORT_SYMBOL_GPL(nf_flow_snat_port);
 
-void nf_flow_dnat_port(const struct flow_offload *flow, struct sk_buff *skb,
-		       unsigned int thoff, u8 protocol,
-		       enum flow_offload_tuple_dir dir)
+int nf_flow_dnat_port(const struct flow_offload *flow,
+		      struct sk_buff *skb, unsigned int thoff,
+		      u8 protocol, enum flow_offload_tuple_dir dir)
 {
 	struct flow_ports *hdr;
 	__be16 port, new_port;
+
+	if (skb_try_make_writable(skb, thoff + sizeof(*hdr)))
+		return -1;
 
 	hdr = (void *)(skb_network_header(skb) + thoff);
 
@@ -679,9 +493,11 @@ void nf_flow_dnat_port(const struct flow_offload *flow, struct sk_buff *skb,
 		new_port = flow->tuplehash[FLOW_OFFLOAD_DIR_ORIGINAL].tuple.dst_port;
 		hdr->source = new_port;
 		break;
+	default:
+		return -1;
 	}
 
-	nf_flow_nat_port(skb, thoff, protocol, port, new_port);
+	return nf_flow_nat_port(skb, thoff, protocol, port, new_port);
 }
 EXPORT_SYMBOL_GPL(nf_flow_dnat_port);
 
@@ -709,8 +525,7 @@ int nf_flow_table_init(struct nf_flowtable *flowtable)
 }
 EXPORT_SYMBOL_GPL(nf_flow_table_init);
 
-static void nf_flow_table_do_cleanup(struct nf_flowtable *flow_table,
-				     struct flow_offload *flow, void *data)
+static void nf_flow_table_do_cleanup(struct flow_offload *flow, void *data)
 {
 	struct net_device *dev = data;
 
@@ -751,89 +566,24 @@ void nf_flow_table_free(struct nf_flowtable *flow_table)
 	mutex_unlock(&flowtable_lock);
 
 	cancel_delayed_work_sync(&flow_table->gc_work);
-	nf_flow_table_offload_flush(flow_table);
-	/* ... no more pending work after this stage ... */
 	nf_flow_table_iterate(flow_table, nf_flow_table_do_cleanup, NULL);
-	nf_flow_table_gc_run(flow_table);
-	nf_flow_table_offload_flush_cleanup(flow_table);
+	nf_flow_table_iterate(flow_table, nf_flow_offload_gc_step, flow_table);
+	nf_flow_table_offload_flush(flow_table);
+	if (nf_flowtable_hw_offload(flow_table))
+		nf_flow_table_iterate(flow_table, nf_flow_offload_gc_step,
+				      flow_table);
 	rhashtable_destroy(&flow_table->rhashtable);
 }
 EXPORT_SYMBOL_GPL(nf_flow_table_free);
 
-static int nf_flow_table_init_net(struct net *net)
-{
-	net->ft.stat = alloc_percpu(struct nf_flow_table_stat);
-	return net->ft.stat ? 0 : -ENOMEM;
-}
-
-static void nf_flow_table_fini_net(struct net *net)
-{
-	free_percpu(net->ft.stat);
-}
-
-static int nf_flow_table_pernet_init(struct net *net)
-{
-	int ret;
-
-	ret = nf_flow_table_init_net(net);
-	if (ret < 0)
-		return ret;
-
-	ret = nf_flow_table_init_proc(net);
-	if (ret < 0)
-		goto out_proc;
-
-	return 0;
-
-out_proc:
-	nf_flow_table_fini_net(net);
-	return ret;
-}
-
-static void nf_flow_table_pernet_exit(struct list_head *net_exit_list)
-{
-	struct net *net;
-
-	list_for_each_entry(net, net_exit_list, exit_list) {
-		nf_flow_table_fini_proc(net);
-		nf_flow_table_fini_net(net);
-	}
-}
-
-static struct pernet_operations nf_flow_table_net_ops = {
-	.init = nf_flow_table_pernet_init,
-	.exit_batch = nf_flow_table_pernet_exit,
-};
-
 static int __init nf_flow_table_module_init(void)
 {
-	int ret;
-
-	ret = register_pernet_subsys(&nf_flow_table_net_ops);
-	if (ret < 0)
-		return ret;
-
-	ret = nf_flow_table_offload_init();
-	if (ret)
-		goto out_offload;
-
-	ret = nf_flow_register_bpf();
-	if (ret)
-		goto out_bpf;
-
-	return 0;
-
-out_bpf:
-	nf_flow_table_offload_exit();
-out_offload:
-	unregister_pernet_subsys(&nf_flow_table_net_ops);
-	return ret;
+	return nf_flow_table_offload_init();
 }
 
 static void __exit nf_flow_table_module_exit(void)
 {
 	nf_flow_table_offload_exit();
-	unregister_pernet_subsys(&nf_flow_table_net_ops);
 }
 
 module_init(nf_flow_table_module_init);

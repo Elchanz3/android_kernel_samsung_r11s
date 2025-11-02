@@ -2,7 +2,7 @@
 /*
  * HDMI driver definition for TI OMAP5 processors.
  *
- * Copyright (C) 2011-2012 Texas Instruments Incorporated - https://www.ti.com/
+ * Copyright (C) 2011-2012 Texas Instruments Incorporated - http://www.ti.com/
  */
 
 #ifndef _HDMI5_CORE_H_
@@ -286,6 +286,7 @@ int hdmi5_core_ddc_read(void *data, u8 *buf, unsigned int block, size_t len);
 void hdmi5_core_ddc_uninit(struct hdmi_core_data *core);
 
 void hdmi5_core_dump(struct hdmi_core_data *core, struct seq_file *s);
+int hdmi5_core_handle_irqs(struct hdmi_core_data *core);
 void hdmi5_configure(struct hdmi_core_data *core, struct hdmi_wp_data *wp,
 			struct hdmi_config *cfg);
 int hdmi5_core_init(struct platform_device *pdev, struct hdmi_core_data *core);

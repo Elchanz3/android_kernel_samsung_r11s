@@ -14,7 +14,7 @@
  *
  *  Refactored and updated to the latest v4l core frameworks:
  *
- *  Copyright (C) 2014 Hans Verkuil <hverkuil@kernel.org>
+ *  Copyright (C) 2014 Hans Verkuil <hverkuil@xs4all.nl>
  */
 
 #include <linux/init.h>
@@ -37,7 +37,7 @@
 
 MODULE_DESCRIPTION("v4l2 driver module for tw6800 based video capture cards");
 MODULE_AUTHOR("William M. Brack");
-MODULE_AUTHOR("Hans Verkuil <hverkuil@kernel.org>");
+MODULE_AUTHOR("Hans Verkuil <hverkuil@xs4all.nl>");
 MODULE_LICENSE("GPL");
 
 static unsigned int latency = UNSET;
@@ -248,7 +248,7 @@ static int tw68_initdev(struct pci_dev *pci_dev,
 		dev->name, pci_name(pci_dev), dev->pci_rev, pci_dev->irq,
 		dev->pci_lat, (u64)pci_resource_start(pci_dev, 0));
 	pci_set_master(pci_dev);
-	err = dma_set_mask(&pci_dev->dev, DMA_BIT_MASK(32));
+	err = pci_set_dma_mask(pci_dev, DMA_BIT_MASK(32));
 	if (err) {
 		pr_info("%s: Oops: no 32bit PCI DMA ???\n", dev->name);
 		goto fail1;

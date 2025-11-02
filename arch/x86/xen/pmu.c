@@ -2,7 +2,6 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 
-#include <asm/msr.h>
 #include <asm/xen/hypercall.h>
 #include <xen/xen.h>
 #include <xen/page.h>
@@ -11,6 +10,7 @@
 #include <xen/interface/xenpmu.h>
 
 #include "xen-ops.h"
+#include "pmu.h"
 
 /* x86_pmu.handle_irq definition */
 #include "../events/perf_event.h"
@@ -129,12 +129,8 @@ static inline uint32_t get_fam15h_addr(u32 addr)
 	return addr;
 }
 
-static bool is_amd_pmu_msr(u32 msr)
+static inline bool is_amd_pmu_msr(unsigned int msr)
 {
-	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD &&
-	    boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
-		return false;
-
 	if ((msr >= MSR_F15H_PERF_CTL &&
 	     msr < MSR_F15H_PERF_CTR + (amd_num_counters * 2)) ||
 	    (msr >= MSR_K7_EVNTSEL0 &&
@@ -144,14 +140,9 @@ static bool is_amd_pmu_msr(u32 msr)
 	return false;
 }
 
-static bool is_intel_pmu_msr(u32 msr_index, int *type, int *index)
+static int is_intel_pmu_msr(u32 msr_index, int *type, int *index)
 {
 	u32 msr_index_pmc;
-
-	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL &&
-	    boot_cpu_data.x86_vendor != X86_VENDOR_CENTAUR &&
-	    boot_cpu_data.x86_vendor != X86_VENDOR_ZHAOXIN)
-		return false;
 
 	switch (msr_index) {
 	case MSR_CORE_PERF_FIXED_CTR_CTRL:
@@ -195,7 +186,8 @@ static bool is_intel_pmu_msr(u32 msr_index, int *type, int *index)
 	}
 }
 
-static bool xen_intel_pmu_emulate(u32 msr, u64 *val, int type, int index, bool is_read)
+static bool xen_intel_pmu_emulate(unsigned int msr, u64 *val, int type,
+				  int index, bool is_read)
 {
 	uint64_t *reg = NULL;
 	struct xen_pmu_intel_ctxt *ctxt;
@@ -257,7 +249,7 @@ static bool xen_intel_pmu_emulate(u32 msr, u64 *val, int type, int index, bool i
 	return false;
 }
 
-static bool xen_amd_pmu_emulate(u32 msr, u64 *val, bool is_read)
+static bool xen_amd_pmu_emulate(unsigned int msr, u64 *val, bool is_read)
 {
 	uint64_t *reg = NULL;
 	int i, off = 0;
@@ -298,20 +290,51 @@ static bool xen_amd_pmu_emulate(u32 msr, u64 *val, bool is_read)
 	return false;
 }
 
-bool pmu_msr_chk_emulated(u32 msr, u64 *val, bool is_read)
+bool pmu_msr_read(unsigned int msr, uint64_t *val, int *err)
 {
-	int type, index = 0;
+	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL) {
+		if (is_amd_pmu_msr(msr)) {
+			if (!xen_amd_pmu_emulate(msr, val, 1))
+				*val = native_read_msr_safe(msr, err);
+			return true;
+		}
+	} else {
+		int type, index;
 
-	if (is_amd_pmu_msr(msr))
-		return xen_amd_pmu_emulate(msr, val, is_read);
-
-	if (is_intel_pmu_msr(msr, &type, &index))
-		return xen_intel_pmu_emulate(msr, val, type, index, is_read);
+		if (is_intel_pmu_msr(msr, &type, &index)) {
+			if (!xen_intel_pmu_emulate(msr, val, type, index, 1))
+				*val = native_read_msr_safe(msr, err);
+			return true;
+		}
+	}
 
 	return false;
 }
 
-static u64 xen_amd_read_pmc(int counter)
+bool pmu_msr_write(unsigned int msr, uint32_t low, uint32_t high, int *err)
+{
+	uint64_t val = ((uint64_t)high << 32) | low;
+
+	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL) {
+		if (is_amd_pmu_msr(msr)) {
+			if (!xen_amd_pmu_emulate(msr, &val, 0))
+				*err = native_write_msr_safe(msr, low, high);
+			return true;
+		}
+	} else {
+		int type, index;
+
+		if (is_intel_pmu_msr(msr, &type, &index)) {
+			if (!xen_intel_pmu_emulate(msr, &val, type, index, 0))
+				*err = native_write_msr_safe(msr, low, high);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static unsigned long long xen_amd_read_pmc(int counter)
 {
 	struct xen_pmu_amd_ctxt *ctxt;
 	uint64_t *counter_regs;
@@ -319,12 +342,11 @@ static u64 xen_amd_read_pmc(int counter)
 	uint8_t xenpmu_flags = get_xenpmu_flags();
 
 	if (!xenpmu_data || !(xenpmu_flags & XENPMU_IRQ_PROCESSING)) {
-		u32 msr;
-		u64 val;
+		uint32_t msr;
+		int err;
 
 		msr = amd_counters_base + (counter * amd_msr_step);
-		native_read_msr_safe(msr, &val);
-		return val;
+		return native_read_msr_safe(msr, &err);
 	}
 
 	ctxt = &xenpmu_data->pmu.c.amd;
@@ -332,7 +354,7 @@ static u64 xen_amd_read_pmc(int counter)
 	return counter_regs[counter];
 }
 
-static u64 xen_intel_read_pmc(int counter)
+static unsigned long long xen_intel_read_pmc(int counter)
 {
 	struct xen_pmu_intel_ctxt *ctxt;
 	uint64_t *fixed_counters;
@@ -341,16 +363,15 @@ static u64 xen_intel_read_pmc(int counter)
 	uint8_t xenpmu_flags = get_xenpmu_flags();
 
 	if (!xenpmu_data || !(xenpmu_flags & XENPMU_IRQ_PROCESSING)) {
-		u32 msr;
-		u64 val;
+		uint32_t msr;
+		int err;
 
 		if (counter & (1 << INTEL_PMC_TYPE_SHIFT))
 			msr = MSR_CORE_PERF_FIXED_CTR0 + (counter & 0xffff);
 		else
 			msr = MSR_IA32_PERFCTR0 + counter;
 
-		native_read_msr_safe(msr, &val);
-		return val;
+		return native_read_msr_safe(msr, &err);
 	}
 
 	ctxt = &xenpmu_data->pmu.c.intel;
@@ -363,7 +384,7 @@ static u64 xen_intel_read_pmc(int counter)
 	return arch_cntr_pair[counter].counter;
 }
 
-u64 xen_read_pmc(int counter)
+unsigned long long xen_read_pmc(int counter)
 {
 	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL)
 		return xen_amd_read_pmc(counter);
@@ -392,29 +413,34 @@ int pmu_apic_update(uint32_t val)
 }
 
 /* perf callbacks */
-static unsigned int xen_guest_state(void)
+static int xen_is_in_guest(void)
 {
 	const struct xen_pmu_data *xenpmu_data = get_xenpmu_data();
-	unsigned int state = 0;
 
 	if (!xenpmu_data) {
 		pr_warn_once("%s: pmudata not initialized\n", __func__);
-		return state;
+		return 0;
 	}
 
 	if (!xen_initial_domain() || (xenpmu_data->domain_id >= DOMID_SELF))
-		return state;
+		return 0;
 
-	state |= PERF_GUEST_ACTIVE;
+	return 1;
+}
 
-	if (xenpmu_data->pmu.pmu_flags & PMU_SAMPLE_PV) {
-		if (xenpmu_data->pmu.pmu_flags & PMU_SAMPLE_USER)
-			state |= PERF_GUEST_USER;
-	} else if (xenpmu_data->pmu.r.regs.cpl & 3) {
-		state |= PERF_GUEST_USER;
+static int xen_is_user_mode(void)
+{
+	const struct xen_pmu_data *xenpmu_data = get_xenpmu_data();
+
+	if (!xenpmu_data) {
+		pr_warn_once("%s: pmudata not initialized\n", __func__);
+		return 0;
 	}
 
-	return state;
+	if (xenpmu_data->pmu.pmu_flags & PMU_SAMPLE_PV)
+		return (xenpmu_data->pmu.pmu_flags & PMU_SAMPLE_USER);
+	else
+		return !!(xenpmu_data->pmu.r.regs.cpl & 3);
 }
 
 static unsigned long xen_get_guest_ip(void)
@@ -430,8 +456,9 @@ static unsigned long xen_get_guest_ip(void)
 }
 
 static struct perf_guest_info_callbacks xen_guest_cbs = {
-	.state                  = xen_guest_state,
-	.get_ip			= xen_get_guest_ip,
+	.is_in_guest            = xen_is_in_guest,
+	.is_user_mode           = xen_is_user_mode,
+	.get_guest_ip           = xen_get_guest_ip,
 };
 
 /* Convert registers from Xen's format to Linux' */

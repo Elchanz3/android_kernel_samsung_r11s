@@ -1,5 +1,3 @@
-.. SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
-
 ================
 BPFTOOL
 ================
@@ -9,62 +7,50 @@ tool for inspection and simple manipulation of eBPF programs and maps
 
 :Manual section: 8
 
-.. include:: substitutions.rst
-
 SYNOPSIS
 ========
 
-**bpftool** [*OPTIONS*] *OBJECT* { *COMMAND* | **help** }
+	**bpftool** [*OPTIONS*] *OBJECT* { *COMMAND* | **help** }
 
-**bpftool** **batch file** *FILE*
+	**bpftool** **batch file** *FILE*
 
-**bpftool** **version**
+	**bpftool** **version**
 
-*OBJECT* := { **map** | **prog** | **link** | **cgroup** | **perf** | **net** | **feature** |
-**btf** | **gen** | **struct_ops** | **iter** }
+	*OBJECT* := { **map** | **program** | **cgroup** | **perf** | **net** | **feature** }
 
-*OPTIONS* := { { **-V** | **--version** } | |COMMON_OPTIONS| }
+	*OPTIONS* := { { **-V** | **--version** } | { **-h** | **--help** }
+	| { **-j** | **--json** } [{ **-p** | **--pretty** }] }
 
-*MAP-COMMANDS* :=
-{ **show** | **list** | **create** | **dump** | **update** | **lookup** | **getnext** |
-**delete** | **pin** | **event_pipe** | **help** }
+	*MAP-COMMANDS* :=
+	{ **show** | **list** | **create** | **dump** | **update** | **lookup** | **getnext**
+	| **delete** | **pin** | **event_pipe** | **help** }
 
-*PROG-COMMANDS* := { **show** | **list** | **dump jited** | **dump xlated** | **pin** |
-**load** | **attach** | **detach** | **help** }
+	*PROG-COMMANDS* := { **show** | **list** | **dump jited** | **dump xlated** | **pin**
+	| **load** | **attach** | **detach** | **help** }
 
-*LINK-COMMANDS* := { **show** | **list** | **pin** | **detach** | **help** }
+	*CGROUP-COMMANDS* := { **show** | **list** | **attach** | **detach** | **help** }
 
-*CGROUP-COMMANDS* := { **show** | **list** | **attach** | **detach** | **help** }
+	*PERF-COMMANDS* := { **show** | **list** | **help** }
 
-*PERF-COMMANDS* := { **show** | **list** | **help** }
+	*NET-COMMANDS* := { **show** | **list** | **help** }
 
-*NET-COMMANDS* := { **show** | **list** | **help** }
-
-*FEATURE-COMMANDS* := { **probe** | **help** }
-
-*BTF-COMMANDS* := { **show** | **list** | **dump** | **help** }
-
-*GEN-COMMANDS* := { **object** | **skeleton** | **min_core_btf** | **help** }
-
-*STRUCT-OPS-COMMANDS* := { **show** | **list** | **dump** | **register** | **unregister** | **help** }
-
-*ITER-COMMANDS* := { **pin** | **help** }
+	*FEATURE-COMMANDS* := { **probe** | **help** }
 
 DESCRIPTION
 ===========
-*bpftool* allows for inspection and simple modification of BPF objects on the
-system.
+	*bpftool* allows for inspection and simple modification of BPF objects
+	on the system.
 
-Note that format of the output of all tools is not guaranteed to be stable and
-should not be depended upon.
+	Note that format of the output of all tools is not guaranteed to be
+	stable and should not be depended upon.
 
 OPTIONS
 =======
-.. include:: common_options.rst
+	.. include:: common_options.rst
 
--m, --mapcompat
-    Allow loading maps with unknown map definitions.
+	-m, --mapcompat
+		  Allow loading maps with unknown map definitions.
 
--n, --nomount
-    Do not automatically attempt to mount any virtual file system (such as
-    tracefs or BPF virtual file system) when necessary.
+	-n, --nomount
+		  Do not automatically attempt to mount any virtual file system
+		  (such as tracefs or BPF virtual file system) when necessary.

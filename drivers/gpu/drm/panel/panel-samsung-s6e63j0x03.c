@@ -11,7 +11,6 @@
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regulator/consumer.h>
 
@@ -226,7 +225,7 @@ static int s6e63j0x03_disable(struct drm_panel *panel)
 	if (ret < 0)
 		return ret;
 
-	ctx->bl_dev->props.power = BACKLIGHT_POWER_REDUCED;
+	ctx->bl_dev->props.power = FB_BLANK_NORMAL;
 
 	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
 	if (ret < 0)
@@ -246,7 +245,7 @@ static int s6e63j0x03_unprepare(struct drm_panel *panel)
 	if (ret < 0)
 		return ret;
 
-	ctx->bl_dev->props.power = BACKLIGHT_POWER_OFF;
+	ctx->bl_dev->props.power = FB_BLANK_POWERDOWN;
 
 	return 0;
 }
@@ -333,7 +332,7 @@ static int s6e63j0x03_prepare(struct drm_panel *panel)
 	if (ret < 0)
 		goto err;
 
-	ctx->bl_dev->props.power = BACKLIGHT_POWER_REDUCED;
+	ctx->bl_dev->props.power = FB_BLANK_NORMAL;
 
 	return 0;
 
@@ -394,7 +393,7 @@ static int s6e63j0x03_enable(struct drm_panel *panel)
 	if (ret < 0)
 		return ret;
 
-	ctx->bl_dev->props.power = BACKLIGHT_POWER_ON;
+	ctx->bl_dev->props.power = FB_BLANK_UNBLANK;
 
 	return 0;
 }
@@ -437,11 +436,9 @@ static int s6e63j0x03_probe(struct mipi_dsi_device *dsi)
 	struct s6e63j0x03 *ctx;
 	int ret;
 
-	ctx = devm_drm_panel_alloc(dev, struct s6e63j0x03, panel,
-				   &s6e63j0x03_funcs,
-				   DRM_MODE_CONNECTOR_DSI);
-	if (IS_ERR(ctx))
-		return PTR_ERR(ctx);
+	ctx = devm_kzalloc(dev, sizeof(struct s6e63j0x03), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 
@@ -449,32 +446,37 @@ static int s6e63j0x03_probe(struct mipi_dsi_device *dsi)
 
 	dsi->lanes = 1;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO_NO_HFP |
-		MIPI_DSI_MODE_VIDEO_NO_HBP | MIPI_DSI_MODE_VIDEO_NO_HSA;
+	dsi->mode_flags = MIPI_DSI_MODE_EOT_PACKET;
 
 	ctx->supplies[0].supply = "vdd3";
 	ctx->supplies[1].supply = "vci";
 	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ctx->supplies),
 				      ctx->supplies);
-	if (ret < 0)
-		return dev_err_probe(dev, ret, "failed to get regulators\n");
+	if (ret < 0) {
+		dev_err(dev, "failed to get regulators: %d\n", ret);
+		return ret;
+	}
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(ctx->reset_gpio))
-		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
-				     "cannot get reset-gpio\n");
+	if (IS_ERR(ctx->reset_gpio)) {
+		dev_err(dev, "cannot get reset-gpio: %ld\n",
+				PTR_ERR(ctx->reset_gpio));
+		return PTR_ERR(ctx->reset_gpio);
+	}
 
-	ctx->panel.prepare_prev_first = true;
+	drm_panel_init(&ctx->panel, dev, &s6e63j0x03_funcs,
+		       DRM_MODE_CONNECTOR_DSI);
 
 	ctx->bl_dev = backlight_device_register("s6e63j0x03", dev, ctx,
 						&s6e63j0x03_bl_ops, NULL);
-	if (IS_ERR(ctx->bl_dev))
-		return dev_err_probe(dev, PTR_ERR(ctx->bl_dev),
-				     "failed to register backlight device\n");
+	if (IS_ERR(ctx->bl_dev)) {
+		dev_err(dev, "failed to register backlight device\n");
+		return PTR_ERR(ctx->bl_dev);
+	}
 
 	ctx->bl_dev->props.max_brightness = MAX_BRIGHTNESS;
 	ctx->bl_dev->props.brightness = DEFAULT_BRIGHTNESS;
-	ctx->bl_dev->props.power = BACKLIGHT_POWER_OFF;
+	ctx->bl_dev->props.power = FB_BLANK_POWERDOWN;
 
 	drm_panel_add(&ctx->panel);
 
@@ -491,7 +493,7 @@ remove_panel:
 	return ret;
 }
 
-static void s6e63j0x03_remove(struct mipi_dsi_device *dsi)
+static int s6e63j0x03_remove(struct mipi_dsi_device *dsi)
 {
 	struct s6e63j0x03 *ctx = mipi_dsi_get_drvdata(dsi);
 
@@ -499,6 +501,8 @@ static void s6e63j0x03_remove(struct mipi_dsi_device *dsi)
 	drm_panel_remove(&ctx->panel);
 
 	backlight_device_unregister(ctx->bl_dev);
+
+	return 0;
 }
 
 static const struct of_device_id s6e63j0x03_of_match[] = {

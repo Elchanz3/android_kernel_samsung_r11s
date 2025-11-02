@@ -9,8 +9,9 @@
  */
 #include "sched.h"
 
+#ifdef CONFIG_SMP
 static int
-select_task_rq_stop(struct task_struct *p, int cpu, int flags)
+select_task_rq_stop(struct task_struct *p, int cpu, int sd_flag, int flags)
 {
 	return task_cpu(p); /* stop tasks as never migrate */
 }
@@ -20,9 +21,10 @@ balance_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	return sched_stop_runnable(rq);
 }
+#endif /* CONFIG_SMP */
 
 static void
-wakeup_preempt_stop(struct rq *rq, struct task_struct *p, int flags)
+check_preempt_curr_stop(struct rq *rq, struct task_struct *p, int flags)
 {
 	/* we're never preempted */
 }
@@ -32,11 +34,12 @@ static void set_next_task_stop(struct rq *rq, struct task_struct *stop, bool fir
 	stop->se.exec_start = rq_clock_task(rq);
 }
 
-static struct task_struct *pick_task_stop(struct rq *rq)
+static struct task_struct *pick_next_task_stop(struct rq *rq)
 {
 	if (!sched_stop_runnable(rq))
 		return NULL;
 
+	set_next_task_stop(rq, rq->stop, true);
 	return rq->stop;
 }
 
@@ -46,11 +49,10 @@ enqueue_task_stop(struct rq *rq, struct task_struct *p, int flags)
 	add_nr_running(rq, 1);
 }
 
-static bool
+static void
 dequeue_task_stop(struct rq *rq, struct task_struct *p, int flags)
 {
 	sub_nr_running(rq, 1);
-	return true;
 }
 
 static void yield_task_stop(struct rq *rq)
@@ -58,9 +60,23 @@ static void yield_task_stop(struct rq *rq)
 	BUG(); /* the stop task should never yield, its pointless. */
 }
 
-static void put_prev_task_stop(struct rq *rq, struct task_struct *prev, struct task_struct *next)
+static void put_prev_task_stop(struct rq *rq, struct task_struct *prev)
 {
-	update_curr_common(rq);
+	struct task_struct *curr = rq->curr;
+	u64 delta_exec;
+
+	delta_exec = rq_clock_task(rq) - curr->se.exec_start;
+	if (unlikely((s64)delta_exec < 0))
+		delta_exec = 0;
+
+	schedstat_set(curr->se.statistics.exec_max,
+			max(curr->se.statistics.exec_max, delta_exec));
+
+	curr->se.sum_exec_runtime += delta_exec;
+	account_group_exec_runtime(curr, delta_exec);
+
+	curr->se.exec_start = rq_clock_task(rq);
+	cgroup_account_cputime(curr, delta_exec);
 }
 
 /*
@@ -93,21 +109,24 @@ static void update_curr_stop(struct rq *rq)
 /*
  * Simple, special scheduling class for the per-CPU stop tasks:
  */
-DEFINE_SCHED_CLASS(stop) = {
+const struct sched_class stop_sched_class
+	__section("__stop_sched_class") = {
 
 	.enqueue_task		= enqueue_task_stop,
 	.dequeue_task		= dequeue_task_stop,
 	.yield_task		= yield_task_stop,
 
-	.wakeup_preempt		= wakeup_preempt_stop,
+	.check_preempt_curr	= check_preempt_curr_stop,
 
-	.pick_task		= pick_task_stop,
+	.pick_next_task		= pick_next_task_stop,
 	.put_prev_task		= put_prev_task_stop,
 	.set_next_task          = set_next_task_stop,
 
+#ifdef CONFIG_SMP
 	.balance		= balance_stop,
 	.select_task_rq		= select_task_rq_stop,
 	.set_cpus_allowed	= set_cpus_allowed_common,
+#endif
 
 	.task_tick		= task_tick_stop,
 

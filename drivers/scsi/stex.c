@@ -334,6 +334,7 @@ struct st_hba {
 	struct st_ccb *wait_ccb;
 	__le32 *scratch;
 
+	char work_q_name[20];
 	struct workqueue_struct *work_q;
 	struct work_struct reset_work;
 	wait_queue_head_t reset_waitq;
@@ -401,8 +402,11 @@ static struct status_msg *stex_get_status(struct st_hba *hba)
 static void stex_invalid_field(struct scsi_cmnd *cmd,
 			       void (*done)(struct scsi_cmnd *))
 {
+	cmd->result = (DRIVER_SENSE << 24) | SAM_STAT_CHECK_CONDITION;
+
 	/* "Invalid field in cdb" */
-	scsi_build_sense(cmd, 0, ILLEGAL_REQUEST, 0x24, 0x0);
+	scsi_build_sense_buffer(0, cmd->sense_buffer, ILLEGAL_REQUEST, 0x24,
+				0x0);
 	done(cmd);
 }
 
@@ -543,7 +547,7 @@ stex_ss_send_cmd(struct st_hba *hba, struct req_msg *req, u16 tag)
 	msg_h = (struct st_msg_header *)req - 1;
 	if (likely(cmd)) {
 		msg_h->channel = (u8)cmd->device->channel;
-		msg_h->timeout = cpu_to_le16(scsi_cmd_to_rq(cmd)->timeout / HZ);
+		msg_h->timeout = cpu_to_le16(cmd->request->timeout/HZ);
 	}
 	addr = hba->dma_handle + hba->req_head * hba->rq_size;
 	addr += (hba->ccb[tag].sg_count+4)/11;
@@ -577,14 +581,14 @@ static void return_abnormal_state(struct st_hba *hba, int status)
 		if (ccb->cmd) {
 			scsi_dma_unmap(ccb->cmd);
 			ccb->cmd->result = status << 16;
-			scsi_done(ccb->cmd);
+			ccb->cmd->scsi_done(ccb->cmd);
 			ccb->cmd = NULL;
 		}
 	}
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
 }
 static int
-stex_sdev_configure(struct scsi_device *sdev, struct queue_limits *lim)
+stex_slave_config(struct scsi_device *sdev)
 {
 	sdev->use_10_for_rw = 1;
 	sdev->use_10_for_ms = 1;
@@ -593,9 +597,9 @@ stex_sdev_configure(struct scsi_device *sdev, struct queue_limits *lim)
 	return 0;
 }
 
-static int stex_queuecommand_lck(struct scsi_cmnd *cmd)
+static int
+stex_queuecommand_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
 {
-	void (*done)(struct scsi_cmnd *) = scsi_done;
 	struct st_hba *hba;
 	struct Scsi_Host *host;
 	unsigned int id, lun;
@@ -625,7 +629,7 @@ static int stex_queuecommand_lck(struct scsi_cmnd *cmd)
 		if (page == 0x8 || page == 0x3f) {
 			scsi_sg_copy_from_buffer(cmd, ms10_caching_page,
 						 sizeof(ms10_caching_page));
-			cmd->result = DID_OK << 16;
+			cmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8;
 			done(cmd);
 		} else
 			stex_invalid_field(cmd, done);
@@ -644,7 +648,7 @@ static int stex_queuecommand_lck(struct scsi_cmnd *cmd)
 		break;
 	case TEST_UNIT_READY:
 		if (id == host->max_id - 1) {
-			cmd->result = DID_OK << 16;
+			cmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8;
 			done(cmd);
 			return 0;
 		}
@@ -661,7 +665,7 @@ static int stex_queuecommand_lck(struct scsi_cmnd *cmd)
 			(cmd->cmnd[1] & INQUIRY_EVPD) == 0) {
 			scsi_sg_copy_from_buffer(cmd, (void *)console_inq_page,
 						 sizeof(console_inq_page));
-			cmd->result = DID_OK << 16;
+			cmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8;
 			done(cmd);
 		} else
 			stex_invalid_field(cmd, done);
@@ -680,19 +684,19 @@ static int stex_queuecommand_lck(struct scsi_cmnd *cmd)
 			size_t cp_len = sizeof(ver);
 
 			cp_len = scsi_sg_copy_from_buffer(cmd, &ver, cp_len);
-			if (sizeof(ver) == cp_len)
-				cmd->result = DID_OK << 16;
-			else
-				cmd->result = DID_ERROR << 16;
+			cmd->result = sizeof(ver) == cp_len ?
+				DID_OK << 16 | COMMAND_COMPLETE << 8 :
+				DID_ERROR << 16 | COMMAND_COMPLETE << 8;
 			done(cmd);
 			return 0;
 		}
-		break;
 	default:
 		break;
 	}
 
-	tag = scsi_cmd_to_rq(cmd)->tag;
+	cmd->scsi_done = done;
+
+	tag = cmd->request->tag;
 
 	if (unlikely(tag >= host->can_queue))
 		return SCSI_MLQUEUE_HOST_BUSY;
@@ -736,37 +740,37 @@ static void stex_scsi_done(struct st_ccb *ccb)
 		result = ccb->scsi_status;
 		switch (ccb->scsi_status) {
 		case SAM_STAT_GOOD:
-			result |= DID_OK << 16;
+			result |= DID_OK << 16 | COMMAND_COMPLETE << 8;
 			break;
 		case SAM_STAT_CHECK_CONDITION:
-			result |= DID_OK << 16;
+			result |= DRIVER_SENSE << 24;
 			break;
 		case SAM_STAT_BUSY:
-			result |= DID_BUS_BUSY << 16;
+			result |= DID_BUS_BUSY << 16 | COMMAND_COMPLETE << 8;
 			break;
 		default:
-			result |= DID_ERROR << 16;
+			result |= DID_ERROR << 16 | COMMAND_COMPLETE << 8;
 			break;
 		}
 	}
 	else if (ccb->srb_status & SRB_SEE_SENSE)
-		result = SAM_STAT_CHECK_CONDITION;
+		result = DRIVER_SENSE << 24 | SAM_STAT_CHECK_CONDITION;
 	else switch (ccb->srb_status) {
 		case SRB_STATUS_SELECTION_TIMEOUT:
-			result = DID_NO_CONNECT << 16;
+			result = DID_NO_CONNECT << 16 | COMMAND_COMPLETE << 8;
 			break;
 		case SRB_STATUS_BUSY:
-			result = DID_BUS_BUSY << 16;
+			result = DID_BUS_BUSY << 16 | COMMAND_COMPLETE << 8;
 			break;
 		case SRB_STATUS_INVALID_REQUEST:
 		case SRB_STATUS_ERROR:
 		default:
-			result = DID_ERROR << 16;
+			result = DID_ERROR << 16 | COMMAND_COMPLETE << 8;
 			break;
 	}
 
 	cmd->result = result;
-	scsi_done(cmd);
+	cmd->scsi_done(cmd);
 }
 
 static void stex_copy_data(struct st_ccb *ccb,
@@ -1248,7 +1252,7 @@ static int stex_abort(struct scsi_cmnd *cmd)
 {
 	struct Scsi_Host *host = cmd->device->host;
 	struct st_hba *hba = (struct st_hba *)host->hostdata;
-	u16 tag = scsi_cmd_to_rq(cmd)->tag;
+	u16 tag = cmd->request->tag;
 	void __iomem *base;
 	u32 data;
 	int result = SUCCESS;
@@ -1457,7 +1461,7 @@ static void stex_reset_work(struct work_struct *work)
 }
 
 static int stex_biosparam(struct scsi_device *sdev,
-	struct gendisk *unused, sector_t capacity, int geom[])
+	struct block_device *bdev, sector_t capacity, int geom[])
 {
 	int heads = 255, sectors = 63;
 
@@ -1475,20 +1479,20 @@ static int stex_biosparam(struct scsi_device *sdev,
 	return 0;
 }
 
-static const struct scsi_host_template driver_template = {
+static struct scsi_host_template driver_template = {
 	.module				= THIS_MODULE,
 	.name				= DRV_NAME,
 	.proc_name			= DRV_NAME,
 	.bios_param			= stex_biosparam,
 	.queuecommand			= stex_queuecommand,
-	.sdev_configure			= stex_sdev_configure,
+	.slave_configure		= stex_slave_config,
 	.eh_abort_handler		= stex_abort,
 	.eh_host_reset_handler		= stex_reset,
 	.this_id			= -1,
 	.dma_boundary			= PAGE_SIZE - 1,
 };
 
-static const struct pci_device_id stex_pci_tbl[] = {
+static struct pci_device_id stex_pci_tbl[] = {
 	/* st_shasta */
 	{ 0x105a, 0x8350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		st_shasta }, /* SuperTrak EX8350/8300/16350/16300 */
@@ -1794,8 +1798,9 @@ static int stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	hba->pdev = pdev;
 	init_waitqueue_head(&hba->reset_waitq);
 
-	hba->work_q = alloc_ordered_workqueue("stex_wq_%d", WQ_MEM_RECLAIM,
-					      host->host_no);
+	snprintf(hba->work_q_name, sizeof(hba->work_q_name),
+		 "stex_wq_%d", host->host_no);
+	hba->work_q = create_singlethread_workqueue(hba->work_q_name);
 	if (!hba->work_q) {
 		printk(KERN_ERR DRV_NAME "(%s): create workqueue failed\n",
 			pci_name(pdev));

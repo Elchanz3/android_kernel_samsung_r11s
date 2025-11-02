@@ -3,14 +3,14 @@
     gpio functions.
     Merging GPIO support into driver:
     Copyright (C) 2004  Chris Kennedy <c@groovy.org>
-    Copyright (C) 2005-2007  Hans Verkuil <hverkuil@kernel.org>
+    Copyright (C) 2005-2007  Hans Verkuil <hverkuil@xs4all.nl>
 
  */
 
 #include "ivtv-driver.h"
 #include "ivtv-cards.h"
 #include "ivtv-gpio.h"
-#include "xc2028.h"
+#include "tuner-xc2028.h"
 #include <media/tuner.h>
 #include <media/v4l2-ctrls.h>
 

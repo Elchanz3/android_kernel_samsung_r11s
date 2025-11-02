@@ -40,11 +40,13 @@ int snd_opl3_synth_setup(struct snd_opl3 * opl3)
 	int idx;
 	struct snd_hwdep *hwdep = opl3->hwdep;
 
-	scoped_guard(mutex, &hwdep->open_mutex) {
-		if (hwdep->used)
-			return -EBUSY;
-		hwdep->used++;
+	mutex_lock(&hwdep->open_mutex);
+	if (hwdep->used) {
+		mutex_unlock(&hwdep->open_mutex);
+		return -EBUSY;
 	}
+	hwdep->used++;
+	mutex_unlock(&hwdep->open_mutex);
 
 	snd_opl3_reset(opl3);
 
@@ -66,21 +68,22 @@ int snd_opl3_synth_setup(struct snd_opl3 * opl3)
 
 void snd_opl3_synth_cleanup(struct snd_opl3 * opl3)
 {
+	unsigned long flags;
 	struct snd_hwdep *hwdep;
 
 	/* Stop system timer */
-	scoped_guard(spinlock_irq, &opl3->sys_timer_lock) {
-		if (opl3->sys_timer_status) {
-			timer_delete(&opl3->tlist);
-			opl3->sys_timer_status = 0;
-		}
+	spin_lock_irqsave(&opl3->sys_timer_lock, flags);
+	if (opl3->sys_timer_status) {
+		del_timer(&opl3->tlist);
+		opl3->sys_timer_status = 0;
 	}
+	spin_unlock_irqrestore(&opl3->sys_timer_lock, flags);
 
 	snd_opl3_reset(opl3);
 	hwdep = opl3->hwdep;
-	scoped_guard(mutex, &hwdep->open_mutex) {
-		hwdep->used--;
-	}
+	mutex_lock(&hwdep->open_mutex);
+	hwdep->used--;
+	mutex_unlock(&hwdep->open_mutex);
 	wake_up(&hwdep->open_wait);
 }
 
@@ -89,8 +92,7 @@ static int snd_opl3_synth_use(void *private_data, struct snd_seq_port_subscribe 
 	struct snd_opl3 *opl3 = private_data;
 	int err;
 
-	err = snd_opl3_synth_setup(opl3);
-	if (err < 0)
+	if ((err = snd_opl3_synth_setup(opl3)) < 0)
 		return err;
 
 	if (use_internal_drums) {
@@ -105,8 +107,7 @@ static int snd_opl3_synth_use(void *private_data, struct snd_seq_port_subscribe 
 	}
 
 	if (info->sender.client != SNDRV_SEQ_CLIENT_SYSTEM) {
-		err = snd_opl3_synth_use_inc(opl3);
-		if (err < 0)
+		if ((err = snd_opl3_synth_use_inc(opl3)) < 0)
 			return err;
 	}
 	opl3->synth_mode = SNDRV_OPL3_MODE_SEQ;
@@ -226,8 +227,7 @@ static int snd_opl3_seq_probe(struct device *_dev)
 	if (client < 0)
 		return client;
 
-	err = snd_opl3_synth_create_port(opl3);
-	if (err < 0) {
+	if ((err = snd_opl3_synth_create_port(opl3)) < 0) {
 		snd_seq_delete_kernel_client(client);
 		opl3->seq_client = -1;
 		return err;

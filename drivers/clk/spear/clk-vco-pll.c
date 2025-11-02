@@ -1,7 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 ST Microelectronics
  * Viresh Kumar <vireshk@kernel.org>
+ *
+ * This file is licensed under the terms of the GNU General Public
+ * License version 2. This program is licensed "as is" without any
+ * warranty of any kind, whether express or implied.
  *
  * VCO-PLL clock implementation
  */
@@ -110,15 +113,12 @@ static long clk_pll_round_rate_index(struct clk_hw *hw, unsigned long drate,
 	return rate;
 }
 
-static int clk_pll_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long clk_pll_round_rate(struct clk_hw *hw, unsigned long drate,
+				unsigned long *prate)
 {
 	int unused;
 
-	req->rate = clk_pll_round_rate_index(hw, req->rate,
-					     &req->best_parent_rate, &unused);
-
-	return 0;
+	return clk_pll_round_rate_index(hw, drate, prate, &unused);
 }
 
 static unsigned long clk_pll_recalc_rate(struct clk_hw *hw, unsigned long
@@ -167,7 +167,7 @@ static int clk_pll_set_rate(struct clk_hw *hw, unsigned long drate,
 
 static const struct clk_ops clk_pll_ops = {
 	.recalc_rate = clk_pll_recalc_rate,
-	.determine_rate = clk_pll_determine_rate,
+	.round_rate = clk_pll_round_rate,
 	.set_rate = clk_pll_set_rate,
 };
 
@@ -179,16 +179,14 @@ static inline unsigned long vco_calc_rate(struct clk_hw *hw,
 	return pll_calc_rate(vco->rtbl, prate, index, NULL);
 }
 
-static int clk_vco_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long clk_vco_round_rate(struct clk_hw *hw, unsigned long drate,
+		unsigned long *prate)
 {
 	struct clk_vco *vco = to_clk_vco(hw);
 	int unused;
 
-	req->rate = clk_round_rate_index(hw, req->rate, req->best_parent_rate,
-					 vco_calc_rate, vco->rtbl_cnt, &unused);
-
-	return 0;
+	return clk_round_rate_index(hw, drate, *prate, vco_calc_rate,
+			vco->rtbl_cnt, &unused);
 }
 
 static unsigned long clk_vco_recalc_rate(struct clk_hw *hw,
@@ -270,7 +268,7 @@ static int clk_vco_set_rate(struct clk_hw *hw, unsigned long drate,
 
 static const struct clk_ops clk_vco_ops = {
 	.recalc_rate = clk_vco_recalc_rate,
-	.determine_rate = clk_vco_determine_rate,
+	.round_rate = clk_vco_round_rate,
 	.set_rate = clk_vco_set_rate,
 };
 

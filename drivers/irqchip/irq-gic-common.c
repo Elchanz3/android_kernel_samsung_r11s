@@ -7,11 +7,23 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/irqchip/arm-gic.h>
-#include <linux/kernel.h>
 
 #include "irq-gic-common.h"
 
 static DEFINE_RAW_SPINLOCK(irq_controller_lock);
+
+static const struct gic_kvm_info *gic_kvm_info;
+
+const struct gic_kvm_info *gic_get_kvm_info(void)
+{
+	return gic_kvm_info;
+}
+
+void gic_set_kvm_info(const struct gic_kvm_info *info)
+{
+	BUG_ON(gic_kvm_info != NULL);
+	gic_kvm_info = info;
+}
 
 void gic_enable_of_quirks(const struct device_node *np,
 			  const struct gic_quirk *quirks, void *data)
@@ -46,7 +58,7 @@ void gic_enable_quirks(u32 iidr, const struct gic_quirk *quirks,
 }
 
 int gic_configure_irq(unsigned int irq, unsigned int type,
-		       void __iomem *base)
+		       void __iomem *base, void (*sync_access)(void))
 {
 	u32 confmask = 0x2 << ((irq % 16) * 2);
 	u32 confoff = (irq / 16) * 4;
@@ -85,10 +97,14 @@ int gic_configure_irq(unsigned int irq, unsigned int type,
 
 	raw_spin_unlock_irqrestore(&irq_controller_lock, flags);
 
+	if (sync_access)
+		sync_access();
+
 	return ret;
 }
 
-void gic_dist_config(void __iomem *base, int gic_irqs, u8 priority)
+void gic_dist_config(void __iomem *base, int gic_irqs,
+		     void (*sync_access)(void))
 {
 	unsigned int i;
 
@@ -103,8 +119,7 @@ void gic_dist_config(void __iomem *base, int gic_irqs, u8 priority)
 	 * Set priority on all global interrupts.
 	 */
 	for (i = 32; i < gic_irqs; i += 4)
-		writel_relaxed(REPEAT_BYTE_U32(priority),
-			       base + GIC_DIST_PRI + i);
+		writel_relaxed(GICD_INT_DEF_PRI_X4, base + GIC_DIST_PRI + i);
 
 	/*
 	 * Deactivate and disable all SPIs. Leave the PPI and SGIs
@@ -116,9 +131,12 @@ void gic_dist_config(void __iomem *base, int gic_irqs, u8 priority)
 		writel_relaxed(GICD_INT_EN_CLR_X32,
 			       base + GIC_DIST_ENABLE_CLEAR + i / 8);
 	}
+
+	if (sync_access)
+		sync_access();
 }
 
-void gic_cpu_config(void __iomem *base, int nr, u8 priority)
+void gic_cpu_config(void __iomem *base, int nr, void (*sync_access)(void))
 {
 	int i;
 
@@ -137,6 +155,9 @@ void gic_cpu_config(void __iomem *base, int nr, u8 priority)
 	 * Set priority on PPI and SGI interrupts
 	 */
 	for (i = 0; i < nr; i += 4)
-		writel_relaxed(REPEAT_BYTE_U32(priority),
+		writel_relaxed(GICD_INT_DEF_PRI_X4,
 					base + GIC_DIST_PRI + i * 4 / 4);
+
+	if (sync_access)
+		sync_access();
 }

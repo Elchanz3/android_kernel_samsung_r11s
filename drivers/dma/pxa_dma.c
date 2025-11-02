@@ -10,14 +10,14 @@
 #include <linux/interrupt.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 #include <linux/dmaengine.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
 #include <linux/platform_data/mmp_dma.h>
 #include <linux/dmapool.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_dma.h>
+#include <linux/of.h>
 #include <linux/wait.h>
 #include <linux/dma/pxa-dma.h>
 
@@ -91,8 +91,7 @@ struct pxad_desc_sw {
 	bool			cyclic;
 	struct dma_pool		*desc_pool;	/* Channel's used allocator */
 
-	struct pxad_desc_hw	*hw_desc[] __counted_by(nb_desc);
-						/* DMA coherent descriptors */
+	struct pxad_desc_hw	*hw_desc[];	/* DMA coherent descriptors */
 };
 
 struct pxad_phy {
@@ -278,7 +277,8 @@ static int chan_state_show(struct seq_file *s, void *p)
 	seq_printf(s, "\tPriority : %s\n",
 			  str_prio[(phy->idx & 0xf) / 4]);
 	seq_printf(s, "\tUnaligned transfer bit: %s\n",
-			  str_yes_no(_phy_readl_relaxed(phy, DALGN) & BIT(phy->idx)));
+			  _phy_readl_relaxed(phy, DALGN) & BIT(phy->idx) ?
+			  "yes" : "no");
 	seq_printf(s, "\tDCSR  = %08x (%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s)\n",
 		   dcsr, PXA_DCSR_STR(RUN), PXA_DCSR_STR(NODESC),
 		   PXA_DCSR_STR(STOPIRQEN), PXA_DCSR_STR(EORIRQEN),
@@ -606,6 +606,7 @@ static irqreturn_t pxad_chan_handler(int irq, void *dev_id)
 	struct pxad_chan *chan = phy->vchan;
 	struct virt_dma_desc *vd, *tmp;
 	unsigned int dcsr;
+	unsigned long flags;
 	bool vd_completed;
 	dma_cookie_t last_started = 0;
 
@@ -615,7 +616,7 @@ static irqreturn_t pxad_chan_handler(int irq, void *dev_id)
 	if (dcsr & PXA_DCSR_RUN)
 		return IRQ_NONE;
 
-	spin_lock(&chan->vc.lock);
+	spin_lock_irqsave(&chan->vc.lock, flags);
 	list_for_each_entry_safe(vd, tmp, &chan->vc.desc_issued, node) {
 		vd_completed = is_desc_completed(vd);
 		dev_dbg(&chan->vc.chan.dev->device,
@@ -657,7 +658,7 @@ static irqreturn_t pxad_chan_handler(int irq, void *dev_id)
 			pxad_launch_chan(chan, to_pxad_sw_desc(vd));
 		}
 	}
-	spin_unlock(&chan->vc.lock);
+	spin_unlock_irqrestore(&chan->vc.lock, flags);
 	wake_up(&chan->wq_state);
 
 	return IRQ_HANDLED;
@@ -739,31 +740,30 @@ pxad_alloc_desc(struct pxad_chan *chan, unsigned int nb_hw_desc)
 {
 	struct pxad_desc_sw *sw_desc;
 	dma_addr_t dma;
-	void *desc;
 	int i;
 
-	sw_desc = kzalloc(struct_size(sw_desc, hw_desc, nb_hw_desc),
+	sw_desc = kzalloc(sizeof(*sw_desc) +
+			  nb_hw_desc * sizeof(struct pxad_desc_hw *),
 			  GFP_NOWAIT);
 	if (!sw_desc)
 		return NULL;
 	sw_desc->desc_pool = chan->desc_pool;
 
 	for (i = 0; i < nb_hw_desc; i++) {
-		desc = dma_pool_alloc(sw_desc->desc_pool, GFP_NOWAIT, &dma);
-		if (!desc) {
+		sw_desc->hw_desc[i] = dma_pool_alloc(sw_desc->desc_pool,
+						     GFP_NOWAIT, &dma);
+		if (!sw_desc->hw_desc[i]) {
 			dev_err(&chan->vc.chan.dev->device,
 				"%s(): Couldn't allocate the %dth hw_desc from dma_pool %p\n",
 				__func__, i, sw_desc->desc_pool);
 			goto err;
 		}
 
-		sw_desc->nb_desc++;
-		sw_desc->hw_desc[i] = desc;
-
 		if (i == 0)
 			sw_desc->first = dma;
 		else
 			sw_desc->hw_desc[i - 1]->ddadr = dma;
+		sw_desc->nb_desc++;
 	}
 
 	return sw_desc;
@@ -1222,12 +1222,13 @@ static void pxad_free_channels(struct dma_device *dmadev)
 	}
 }
 
-static void pxad_remove(struct platform_device *op)
+static int pxad_remove(struct platform_device *op)
 {
 	struct pxad_device *pdev = platform_get_drvdata(op);
 
 	pxad_cleanup_debugfs(pdev);
 	pxad_free_channels(&pdev->slave);
+	return 0;
 }
 
 static int pxad_init_phys(struct platform_device *op,
@@ -1343,8 +1344,10 @@ static int pxad_init_dmadev(struct platform_device *op,
 static int pxad_probe(struct platform_device *op)
 {
 	struct pxad_device *pdev;
+	const struct of_device_id *of_id;
 	const struct dma_slave_map *slave_map = NULL;
 	struct mmp_dma_platdata *pdata = dev_get_platdata(&op->dev);
+	struct resource *iores;
 	int ret, dma_channels = 0, nb_requestors = 0, slave_map_cnt = 0;
 	const enum dma_slave_buswidth widths =
 		DMA_SLAVE_BUSWIDTH_1_BYTE   | DMA_SLAVE_BUSWIDTH_2_BYTES |
@@ -1356,22 +1359,17 @@ static int pxad_probe(struct platform_device *op)
 
 	spin_lock_init(&pdev->phy_lock);
 
-	pdev->base = devm_platform_ioremap_resource(op, 0);
+	iores = platform_get_resource(op, IORESOURCE_MEM, 0);
+	pdev->base = devm_ioremap_resource(&op->dev, iores);
 	if (IS_ERR(pdev->base))
 		return PTR_ERR(pdev->base);
 
-	if (op->dev.of_node) {
-		/* Parse new and deprecated dma-channels properties */
-		if (of_property_read_u32(op->dev.of_node, "dma-channels",
-					 &dma_channels))
-			of_property_read_u32(op->dev.of_node, "#dma-channels",
-					     &dma_channels);
-		/* Parse new and deprecated dma-requests properties */
-		ret = of_property_read_u32(op->dev.of_node, "dma-requests",
+	of_id = of_match_device(pxad_dt_ids, &op->dev);
+	if (of_id) {
+		of_property_read_u32(op->dev.of_node, "#dma-channels",
+				     &dma_channels);
+		ret = of_property_read_u32(op->dev.of_node, "#dma-requests",
 					   &nb_requestors);
-		if (ret)
-			ret = of_property_read_u32(op->dev.of_node, "#dma-requests",
-						   &nb_requestors);
 		if (ret) {
 			dev_warn(pdev->slave.dev,
 				 "#dma-requests set to default 32 as missing in OF: %d",

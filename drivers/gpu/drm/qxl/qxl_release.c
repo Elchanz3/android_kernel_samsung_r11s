@@ -36,10 +36,10 @@
 /* manage releaseables */
 /* stack them 16 high for now -drawable object is 191 */
 #define RELEASE_SIZE 256
-#define RELEASES_PER_BO (PAGE_SIZE / RELEASE_SIZE)
+#define RELEASES_PER_BO (4096 / RELEASE_SIZE)
 /* put an alloc/dealloc surface cmd into one bo and round up to 128 */
 #define SURFACE_RELEASE_SIZE 128
-#define SURFACE_RELEASES_PER_BO (PAGE_SIZE / SURFACE_RELEASE_SIZE)
+#define SURFACE_RELEASES_PER_BO (4096 / SURFACE_RELEASE_SIZE)
 
 static const int release_size_per_bo[] = { RELEASE_SIZE, SURFACE_RELEASE_SIZE, RELEASE_SIZE };
 static const int releases_per_bo[] = { RELEASES_PER_BO, SURFACE_RELEASES_PER_BO, RELEASES_PER_BO };
@@ -58,16 +58,56 @@ static long qxl_fence_wait(struct dma_fence *fence, bool intr,
 			   signed long timeout)
 {
 	struct qxl_device *qdev;
+	struct qxl_release *release;
+	int count = 0, sc = 0;
+	bool have_drawable_releases;
 	unsigned long cur, end = jiffies + timeout;
 
 	qdev = container_of(fence->lock, struct qxl_device, release_lock);
+	release = container_of(fence, struct qxl_release, base);
+	have_drawable_releases = release->type == QXL_RELEASE_DRAWABLE;
 
-	if (!wait_event_timeout(qdev->release_event,
-				(dma_fence_is_signaled(fence) ||
-				 (qxl_io_notify_oom(qdev), 0)),
-				timeout))
-		return 0;
+retry:
+	sc++;
 
+	if (dma_fence_is_signaled(fence))
+		goto signaled;
+
+	qxl_io_notify_oom(qdev);
+
+	for (count = 0; count < 11; count++) {
+		if (!qxl_queue_garbage_collect(qdev, true))
+			break;
+
+		if (dma_fence_is_signaled(fence))
+			goto signaled;
+	}
+
+	if (dma_fence_is_signaled(fence))
+		goto signaled;
+
+	if (have_drawable_releases || sc < 4) {
+		if (sc > 2)
+			/* back off */
+			usleep_range(500, 1000);
+
+		if (time_after(jiffies, end))
+			return 0;
+
+		if (have_drawable_releases && sc > 300) {
+			DMA_FENCE_WARN(fence, "failed to wait on release %llu "
+				       "after spincount %d\n",
+				       fence->context & ~0xf0000000, sc);
+			goto signaled;
+		}
+		goto retry;
+	}
+	/*
+	 * yeah, original sync_obj_wait gave up after 3 spins when
+	 * have_drawable_releases is not set.
+	 */
+
+signaled:
 	cur = jiffies;
 	if (time_after(cur, end))
 		return 0;
@@ -121,11 +161,13 @@ qxl_release_free_list(struct qxl_release *release)
 {
 	while (!list_empty(&release->bos)) {
 		struct qxl_bo_list *entry;
+		struct qxl_bo *bo;
 
 		entry = container_of(release->bos.next,
-				     struct qxl_bo_list, list);
-		qxl_bo_unref(&entry->bo);
-		list_del(&entry->list);
+				     struct qxl_bo_list, tv.head);
+		bo = to_qxl_bo(entry->tv.bo);
+		qxl_bo_unref(&bo);
+		list_del(&entry->tv.head);
 		kfree(entry);
 	}
 	release->release_bo = NULL;
@@ -154,7 +196,6 @@ qxl_release_free(struct qxl_device *qdev,
 		qxl_release_free_list(release);
 		kfree(release);
 	}
-	atomic_dec(&qdev->release_count);
 }
 
 static int qxl_release_bo_alloc(struct qxl_device *qdev,
@@ -170,8 +211,8 @@ int qxl_release_list_add(struct qxl_release *release, struct qxl_bo *bo)
 {
 	struct qxl_bo_list *entry;
 
-	list_for_each_entry(entry, &release->bos, list) {
-		if (entry->bo == bo)
+	list_for_each_entry(entry, &release->bos, tv.head) {
+		if (entry->tv.bo == &bo->tbo)
 			return 0;
 	}
 
@@ -180,8 +221,9 @@ int qxl_release_list_add(struct qxl_release *release, struct qxl_bo *bo)
 		return -ENOMEM;
 
 	qxl_bo_ref(bo);
-	entry->bo = bo;
-	list_add_tail(&entry->list, &release->bos);
+	entry->tv.bo = &bo->tbo;
+	entry->tv.num_shared = 0;
+	list_add_tail(&entry->tv.head, &release->bos);
 	return 0;
 }
 
@@ -190,14 +232,14 @@ static int qxl_release_validate_bo(struct qxl_bo *bo)
 	struct ttm_operation_ctx ctx = { true, false };
 	int ret;
 
-	if (!bo->tbo.pin_count) {
-		qxl_ttm_placement_from_domain(bo, bo->type);
+	if (!bo->pin_count) {
+		qxl_ttm_placement_from_domain(bo, bo->type, false);
 		ret = ttm_bo_validate(&bo->tbo, &bo->placement, &ctx);
 		if (ret)
 			return ret;
 	}
 
-	ret = dma_resv_reserve_fences(bo->tbo.base.resv, 1);
+	ret = dma_resv_reserve_shared(bo->tbo.base.resv, 1);
 	if (ret)
 		return ret;
 
@@ -218,28 +260,21 @@ int qxl_release_reserve_list(struct qxl_release *release, bool no_intr)
 	if (list_is_singular(&release->bos))
 		return 0;
 
-	drm_exec_init(&release->exec, no_intr ? 0 :
-		      DRM_EXEC_INTERRUPTIBLE_WAIT, 0);
-	drm_exec_until_all_locked(&release->exec) {
-		list_for_each_entry(entry, &release->bos, list) {
-			ret = drm_exec_prepare_obj(&release->exec,
-						   &entry->bo->tbo.base,
-						   1);
-			drm_exec_retry_on_contention(&release->exec);
-			if (ret)
-				goto error;
+	ret = ttm_eu_reserve_buffers(&release->ticket, &release->bos,
+				     !no_intr, NULL);
+	if (ret)
+		return ret;
+
+	list_for_each_entry(entry, &release->bos, tv.head) {
+		struct qxl_bo *bo = to_qxl_bo(entry->tv.bo);
+
+		ret = qxl_release_validate_bo(bo);
+		if (ret) {
+			ttm_eu_backoff_reservation(&release->ticket, &release->bos);
+			return ret;
 		}
 	}
-
-	list_for_each_entry(entry, &release->bos, list) {
-		ret = qxl_release_validate_bo(entry->bo);
-		if (ret)
-			goto error;
-	}
 	return 0;
-error:
-	drm_exec_fini(&release->exec);
-	return ret;
 }
 
 void qxl_release_backoff_reserve_list(struct qxl_release *release)
@@ -249,7 +284,7 @@ void qxl_release_backoff_reserve_list(struct qxl_release *release)
 	if (list_is_singular(&release->bos))
 		return;
 
-	drm_exec_fini(&release->exec);
+	ttm_eu_backoff_reservation(&release->ticket, &release->bos);
 }
 
 int qxl_alloc_surface_release_reserved(struct qxl_device *qdev,
@@ -287,7 +322,7 @@ int qxl_alloc_release_reserved(struct qxl_device *qdev, unsigned long size,
 				       int type, struct qxl_release **release,
 				       struct qxl_bo **rbo)
 {
-	struct qxl_bo *bo, *free_bo = NULL;
+	struct qxl_bo *bo;
 	int idr_ret;
 	int ret = 0;
 	union qxl_release_info *info;
@@ -315,11 +350,10 @@ int qxl_alloc_release_reserved(struct qxl_device *qdev, unsigned long size,
 			*rbo = NULL;
 		return idr_ret;
 	}
-	atomic_inc(&qdev->release_count);
 
 	mutex_lock(&qdev->release_mutex);
 	if (qdev->current_release_bo_offset[cur_idx] + 1 >= releases_per_bo[cur_idx]) {
-		free_bo = qdev->current_release_bo[cur_idx];
+		qxl_bo_unref(&qdev->current_release_bo[cur_idx]);
 		qdev->current_release_bo_offset[cur_idx] = 0;
 		qdev->current_release_bo[cur_idx] = NULL;
 	}
@@ -327,10 +361,6 @@ int qxl_alloc_release_reserved(struct qxl_device *qdev, unsigned long size,
 		ret = qxl_release_bo_alloc(qdev, &qdev->current_release_bo[cur_idx], priority);
 		if (ret) {
 			mutex_unlock(&qdev->release_mutex);
-			if (free_bo) {
-				qxl_bo_unpin(free_bo);
-				qxl_bo_unref(&free_bo);
-			}
 			qxl_release_free(qdev, *release);
 			return ret;
 		}
@@ -346,10 +376,6 @@ int qxl_alloc_release_reserved(struct qxl_device *qdev, unsigned long size,
 		*rbo = bo;
 
 	mutex_unlock(&qdev->release_mutex);
-	if (free_bo) {
-		qxl_bo_unpin(free_bo);
-		qxl_bo_unref(&free_bo);
-	}
 
 	ret = qxl_release_list_add(*release, bo);
 	qxl_bo_unref(&bo);
@@ -408,18 +434,18 @@ void qxl_release_unmap(struct qxl_device *qdev,
 
 void qxl_release_fence_buffer_objects(struct qxl_release *release)
 {
-	struct ttm_device *bdev;
-	struct qxl_bo_list *entry;
+	struct ttm_buffer_object *bo;
+	struct ttm_bo_device *bdev;
+	struct ttm_validate_buffer *entry;
 	struct qxl_device *qdev;
-	struct qxl_bo *bo;
 
 	/* if only one object on the release its the release itself
 	   since these objects are pinned no need to reserve */
 	if (list_is_singular(&release->bos) || list_empty(&release->bos))
 		return;
 
-	bo = list_first_entry(&release->bos, struct qxl_bo_list, list)->bo;
-	bdev = bo->tbo.bdev;
+	bo = list_first_entry(&release->bos, struct ttm_validate_buffer, head)->bo;
+	bdev = bo->bdev;
 	qdev = container_of(bdev, struct qxl_device, mman.bdev);
 
 	/*
@@ -430,12 +456,16 @@ void qxl_release_fence_buffer_objects(struct qxl_release *release)
 		       release->id | 0xf0000000, release->base.seqno);
 	trace_dma_fence_emit(&release->base);
 
-	list_for_each_entry(entry, &release->bos, list) {
+	spin_lock(&ttm_bo_glob.lru_lock);
+
+	list_for_each_entry(entry, &release->bos, head) {
 		bo = entry->bo;
 
-		dma_resv_add_fence(bo->tbo.base.resv, &release->base,
-				   DMA_RESV_USAGE_READ);
-		ttm_bo_move_to_lru_tail_unlocked(&bo->tbo);
+		dma_resv_add_shared_fence(bo->base.resv, &release->base);
+		ttm_bo_move_to_lru_tail(bo, NULL);
+		dma_resv_unlock(bo->base.resv);
 	}
-	drm_exec_fini(&release->exec);
+	spin_unlock(&ttm_bo_glob.lru_lock);
+	ww_acquire_fini(&release->ticket);
 }
+

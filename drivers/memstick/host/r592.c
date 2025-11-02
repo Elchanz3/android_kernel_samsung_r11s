@@ -291,7 +291,7 @@ static int r592_transfer_fifo_dma(struct r592_device *dev)
 
 	/* TODO: hidden assumption about nenth beeing always 1 */
 	sg_count = dma_map_sg(&dev->pci_dev->dev, &dev->req->sg, 1, is_write ?
-			      DMA_TO_DEVICE : DMA_FROM_DEVICE);
+		PCI_DMA_TODEVICE : PCI_DMA_FROMDEVICE);
 
 	if (sg_count != 1 || sg_dma_len(&dev->req->sg) < R592_LFIFO_SIZE) {
 		message("problem in dma_map_sg");
@@ -308,7 +308,8 @@ static int r592_transfer_fifo_dma(struct r592_device *dev)
 	}
 
 	dma_unmap_sg(&dev->pci_dev->dev, &dev->req->sg, 1, is_write ?
-		     DMA_TO_DEVICE : DMA_FROM_DEVICE);
+		PCI_DMA_TODEVICE : PCI_DMA_FROMDEVICE);
+
 
 	return dev->dma_error;
 }
@@ -356,15 +357,13 @@ static void r592_write_fifo_pio(struct r592_device *dev,
 /* Flushes the temporary FIFO used to make aligned DWORD writes */
 static void r592_flush_fifo_write(struct r592_device *dev)
 {
-	int ret;
 	u8 buffer[4] = { 0 };
+	int len;
 
 	if (kfifo_is_empty(&dev->pio_fifo))
 		return;
 
-	ret = kfifo_out(&dev->pio_fifo, buffer, 4);
-	/* intentionally ignore __must_check return code */
-	(void)ret;
+	len = kfifo_out(&dev->pio_fifo, buffer, 4);
 	r592_write_reg_raw_be(dev, R592_FIFO_PIO, *(u32 *)buffer);
 }
 
@@ -614,7 +613,7 @@ static void r592_update_card_detect(struct r592_device *dev)
 /* Timer routine that fires 1 second after last card detection event, */
 static void r592_detect_timer(struct timer_list *t)
 {
-	struct r592_device *dev = timer_container_of(dev, t, detect_timer);
+	struct r592_device *dev = from_timer(dev, t, detect_timer);
 	r592_update_card_detect(dev);
 	memstick_detect_change(dev->host);
 }
@@ -675,7 +674,7 @@ static irqreturn_t r592_irq(int irq, void *data)
 	return ret;
 }
 
-/* External interface: set settings */
+/* External inteface: set settings */
 static int r592_set_param(struct memstick_host *host,
 			enum memstick_param param, int value)
 {
@@ -827,7 +826,7 @@ static void r592_remove(struct pci_dev *pdev)
 	/* Stop the processing thread.
 	That ensures that we won't take any more requests */
 	kthread_stop(dev->io_thread);
-	timer_delete_sync(&dev->detect_timer);
+	del_timer_sync(&dev->detect_timer);
 	r592_enable_device(dev, false);
 
 	while (!error && dev->req) {
@@ -854,7 +853,7 @@ static int r592_suspend(struct device *core_dev)
 
 	r592_clear_interrupts(dev);
 	memstick_suspend_host(dev->host);
-	timer_delete_sync(&dev->detect_timer);
+	del_timer_sync(&dev->detect_timer);
 	return 0;
 }
 
@@ -874,7 +873,7 @@ static SIMPLE_DEV_PM_OPS(r592_pm_ops, r592_suspend, r592_resume);
 
 MODULE_DEVICE_TABLE(pci, r592_pci_id_tbl);
 
-static struct pci_driver r592_pci_driver = {
+static struct pci_driver r852_pci_driver = {
 	.name		= DRV_NAME,
 	.id_table	= r592_pci_id_tbl,
 	.probe		= r592_probe,
@@ -882,7 +881,7 @@ static struct pci_driver r592_pci_driver = {
 	.driver.pm	= &r592_pm_ops,
 };
 
-module_pci_driver(r592_pci_driver);
+module_pci_driver(r852_pci_driver);
 
 module_param_named(enable_dma, r592_enable_dma, bool, S_IRUGO);
 MODULE_PARM_DESC(enable_dma, "Enable usage of the DMA (default)");

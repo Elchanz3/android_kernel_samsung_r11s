@@ -1,20 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (c) 2015, Sony Mobile Communications Inc.
- * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013, 2020-2021, The Linux Foundation. All rights reserved.
  * Copyright (c) 2020, Linaro Ltd.
  */
 
+#define pr_fmt(fmt) "qrtr: %s(): " fmt, __func__
+
+#include <linux/ipc_logging.h>
 #include <linux/module.h>
 #include <linux/qrtr.h>
 #include <linux/workqueue.h>
+#include <linux/xarray.h>
 #include <net/sock.h>
 
 #include "qrtr.h"
 
-#include <trace/events/sock.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/qrtr.h>
+
+#define NS_LOG_PAGE_CNT 4
+static void *ns_ilc;
+#define NS_INFO(x, ...) ipc_log_string(ns_ilc, x, ##__VA_ARGS__)
 
 static DEFINE_XARRAY(nodes);
 
@@ -22,8 +29,9 @@ static struct {
 	struct socket *sock;
 	struct sockaddr_qrtr bcast_sq;
 	struct list_head lookups;
-	struct workqueue_struct *workqueue;
-	struct work_struct work;
+	struct kthread_worker kworker;
+	struct kthread_work work;
+	struct task_struct *task;
 	int local_node;
 } qrtr_ns;
 
@@ -85,13 +93,29 @@ static struct qrtr_node *node_get(unsigned int node_id)
 	node->id = node_id;
 	xa_init(&node->servers);
 
-	if (xa_store(&nodes, node_id, node, GFP_KERNEL)) {
-		kfree(node);
-		return NULL;
-	}
+	xa_store(&nodes, node_id, node, GFP_KERNEL);
 
 	return node;
 }
+
+int qrtr_get_service_id(unsigned int node_id, unsigned int port_id)
+{
+	struct qrtr_server *srv;
+	struct qrtr_node *node;
+	unsigned long index;
+
+	node = node_get(node_id);
+	if (!node)
+		return -EINVAL;
+
+	xa_for_each(&node->servers, index, srv) {
+		if (srv->node == node_id && srv->port == port_id)
+			return srv->service;
+	}
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL(qrtr_get_service_id);
 
 static int server_match(const struct qrtr_server *srv,
 			const struct qrtr_server_filter *f)
@@ -116,6 +140,8 @@ static int service_announce_new(struct sockaddr_qrtr *dest,
 	trace_qrtr_ns_service_announce_new(srv->service, srv->instance,
 					   srv->node, srv->port);
 
+	NS_INFO("%s: [0x%x:0x%x]@[0x%x:0x%x]\n", __func__, srv->service,
+		srv->instance, srv->node, srv->port);
 	iv.iov_base = &pkt;
 	iv.iov_len = sizeof(pkt);
 
@@ -132,8 +158,8 @@ static int service_announce_new(struct sockaddr_qrtr *dest,
 	return kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
 }
 
-static void service_announce_del(struct sockaddr_qrtr *dest,
-				 struct qrtr_server *srv)
+static int service_announce_del(struct sockaddr_qrtr *dest,
+				struct qrtr_server *srv)
 {
 	struct qrtr_ctrl_pkt pkt;
 	struct msghdr msg = { };
@@ -142,6 +168,9 @@ static void service_announce_del(struct sockaddr_qrtr *dest,
 
 	trace_qrtr_ns_service_announce_del(srv->service, srv->instance,
 					   srv->node, srv->port);
+
+	NS_INFO("%s: [0x%x:0x%x]@[0x%x:0x%x]\n", __func__, srv->service,
+		srv->instance, srv->node, srv->port);
 
 	iv.iov_base = &pkt;
 	iv.iov_len = sizeof(pkt);
@@ -158,9 +187,9 @@ static void service_announce_del(struct sockaddr_qrtr *dest,
 
 	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
 	if (ret < 0 && ret != -ENODEV)
-		pr_err("failed to announce del service\n");
+		pr_err_ratelimited("failed to announce del service %d\n", ret);
 
-	return;
+	return ret;
 }
 
 static void lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
@@ -189,7 +218,8 @@ static void lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
 
 	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
 	if (ret < 0 && ret != -ENODEV)
-		pr_err("failed to send lookup notification\n");
+		pr_err_ratelimited("failed to send lookup notification %d\n",
+				   ret);
 }
 
 static int announce_servers(struct sockaddr_qrtr *sq)
@@ -210,10 +240,11 @@ static int announce_servers(struct sockaddr_qrtr *sq)
 			if (ret == -ENODEV)
 				continue;
 
-			pr_err("failed to announce new service\n");
+			pr_err("failed to announce new service %d\n", ret);
 			return ret;
 		}
 	}
+
 	return 0;
 }
 
@@ -257,6 +288,9 @@ static struct qrtr_server *server_add(unsigned int service,
 	trace_qrtr_ns_server_add(srv->service, srv->instance,
 				 srv->node, srv->port);
 
+	NS_INFO("%s: [0x%x:0x%x]@[0x%x:0x%x]\n", __func__, srv->service,
+		srv->instance, srv->node, srv->port);
+
 	return srv;
 
 err:
@@ -264,7 +298,7 @@ err:
 	return NULL;
 }
 
-static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
+static int server_del(struct qrtr_node *node, unsigned int port)
 {
 	struct qrtr_lookup *lookup;
 	struct qrtr_server *srv;
@@ -272,12 +306,12 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 
 	srv = xa_load(&node->servers, port);
 	if (!srv)
-		return -ENOENT;
+		return 0;
 
 	xa_erase(&node->servers, port);
 
 	/* Broadcast the removal of local servers */
-	if (srv->node == qrtr_ns.local_node && bcast)
+	if (srv->node == qrtr_ns.local_node)
 		service_announce_del(&qrtr_ns.bcast_sq, srv);
 
 	/* Announce the service's disappearance to observers */
@@ -314,7 +348,7 @@ static int say_hello(struct sockaddr_qrtr *dest)
 
 	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
 	if (ret < 0)
-		pr_err("failed to send hello msg\n");
+		pr_err("failed to send hello msg %d\n", ret);
 
 	return ret;
 }
@@ -352,7 +386,7 @@ static int ctrl_cmd_bye(struct sockaddr_qrtr *from)
 
 	/* Advertise removal of this client to all servers of remote node */
 	xa_for_each(&node->servers, index, srv)
-		server_del(node, srv->port, true);
+		server_del(node, srv->port);
 
 	/* Advertise the removal of this client to all local servers */
 	local_node = node_get(qrtr_ns.local_node);
@@ -372,11 +406,12 @@ static int ctrl_cmd_bye(struct sockaddr_qrtr *from)
 		msg.msg_namelen = sizeof(sq);
 
 		ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
-		if (ret < 0 && ret != -ENODEV) {
-			pr_err("failed to send bye cmd\n");
-			return ret;
-		}
+		if (ret < 0 && ret != -ENODEV)
+			pr_err_ratelimited("send bye failed: [0x%x:0x%x] 0x%x ret: %d\n",
+					   srv->service, srv->instance,
+					   srv->port, ret);
 	}
+
 	return 0;
 }
 
@@ -399,10 +434,6 @@ static int ctrl_cmd_del_client(struct sockaddr_qrtr *from,
 	iv.iov_base = &pkt;
 	iv.iov_len = sizeof(pkt);
 
-	/* Don't accept spoofed messages */
-	if (from->sq_node != node_id)
-		return -EINVAL;
-
 	/* Local DEL_CLIENT messages comes from the port being closed */
 	if (from->sq_node == qrtr_ns.local_node && from->sq_port != port)
 		return -EINVAL;
@@ -419,13 +450,10 @@ static int ctrl_cmd_del_client(struct sockaddr_qrtr *from,
 		kfree(lookup);
 	}
 
-	/* Remove the server belonging to this port but don't broadcast
-	 * DEL_SERVER. Neighbours would've already removed the server belonging
-	 * to this port due to the DEL_CLIENT broadcast from qrtr_port_remove().
-	 */
+	/* Remove the server belonging to this port */
 	node = node_get(node_id);
 	if (node)
-		server_del(node, port, false);
+		server_del(node, port);
 
 	/* Advertise the removal of this client to all local servers */
 	local_node = node_get(qrtr_ns.local_node);
@@ -446,11 +474,12 @@ static int ctrl_cmd_del_client(struct sockaddr_qrtr *from,
 		msg.msg_namelen = sizeof(sq);
 
 		ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
-		if (ret < 0 && ret != -ENODEV) {
-			pr_err("failed to send del client cmd\n");
-			return ret;
-		}
+		if (ret < 0 && ret != -ENODEV)
+			pr_err_ratelimited("del client cmd failed: [0x%x:0x%x] 0x%x %d\n",
+					   srv->service, srv->instance,
+					   srv->port, ret);
 	}
+
 	return 0;
 }
 
@@ -476,7 +505,7 @@ static int ctrl_cmd_new_server(struct sockaddr_qrtr *from,
 	if (srv->node == qrtr_ns.local_node) {
 		ret = service_announce_new(&qrtr_ns.bcast_sq, srv);
 		if (ret < 0) {
-			pr_err("failed to announce new service\n");
+			pr_err("failed to announce new service %d\n", ret);
 			return ret;
 		}
 	}
@@ -515,9 +544,7 @@ static int ctrl_cmd_del_server(struct sockaddr_qrtr *from,
 	if (!node)
 		return -ENOENT;
 
-	server_del(node, port, true);
-
-	return 0;
+	return server_del(node, port);
 }
 
 static int ctrl_cmd_new_lookup(struct sockaddr_qrtr *from,
@@ -585,7 +612,30 @@ static void ctrl_cmd_del_lookup(struct sockaddr_qrtr *from,
 	}
 }
 
-static void qrtr_ns_worker(struct work_struct *work)
+static void ns_log_msg(const struct qrtr_ctrl_pkt *pkt,
+		       struct sockaddr_qrtr *sq)
+{
+	unsigned int cmd = le32_to_cpu(pkt->cmd);
+
+	if (cmd == QRTR_TYPE_HELLO || cmd == QRTR_TYPE_BYE)
+		NS_INFO("cmd:0x%x node[0x%x]\n", cmd, sq->sq_node);
+	else if (cmd == QRTR_TYPE_DEL_CLIENT)
+		NS_INFO("cmd:0x%x addr[0x%x:0x%x]\n", cmd,
+			le32_to_cpu(pkt->client.node),
+			le32_to_cpu(pkt->client.port));
+	else if (cmd == QRTR_TYPE_NEW_SERVER || cmd == QRTR_TYPE_DEL_SERVER)
+		NS_INFO("cmd:0x%x SVC[0x%x:0x%x] addr[0x%x:0x%x]\n", cmd,
+			le32_to_cpu(pkt->server.service),
+			le32_to_cpu(pkt->server.instance),
+			le32_to_cpu(pkt->server.node),
+			le32_to_cpu(pkt->server.port));
+	else if (cmd == QRTR_TYPE_NEW_LOOKUP || cmd == QRTR_TYPE_DEL_LOOKUP)
+		NS_INFO("cmd:0x%x SVC[0x%x:0x%x]\n", cmd,
+			le32_to_cpu(pkt->server.service),
+			le32_to_cpu(pkt->server.instance));
+}
+
+static void qrtr_ns_worker(struct kthread_work *work)
 {
 	const struct qrtr_ctrl_pkt *pkt;
 	size_t recv_buf_size = 4096;
@@ -625,6 +675,8 @@ static void qrtr_ns_worker(struct work_struct *work)
 		    qrtr_ctrl_pkt_strings[cmd])
 			trace_qrtr_ns_message(qrtr_ctrl_pkt_strings[cmd],
 					      sq.sq_node, sq.sq_port);
+
+		ns_log_msg(pkt, &sq);
 
 		ret = 0;
 		switch (cmd) {
@@ -679,23 +731,25 @@ static void qrtr_ns_worker(struct work_struct *work)
 
 static void qrtr_ns_data_ready(struct sock *sk)
 {
-	trace_sk_data_ready(sk);
-
-	queue_work(qrtr_ns.workqueue, &qrtr_ns.work);
+	kthread_queue_work(&qrtr_ns.kworker, &qrtr_ns.work);
 }
 
-int qrtr_ns_init(void)
+void qrtr_ns_init(void)
 {
 	struct sockaddr_qrtr sq;
+	int rx_buf_sz = INT_MAX;
 	int ret;
 
 	INIT_LIST_HEAD(&qrtr_ns.lookups);
-	INIT_WORK(&qrtr_ns.work, qrtr_ns_worker);
+	kthread_init_worker(&qrtr_ns.kworker);
+	kthread_init_work(&qrtr_ns.work, qrtr_ns_worker);
+
+	ns_ilc = ipc_log_context_create(NS_LOG_PAGE_CNT, "qrtr_ns", 0);
 
 	ret = sock_create_kern(&init_net, AF_QIPCRTR, SOCK_DGRAM,
 			       PF_QIPCRTR, &qrtr_ns.sock);
 	if (ret < 0)
-		return ret;
+		return;
 
 	ret = kernel_getsockname(qrtr_ns.sock, (struct sockaddr *)&sq);
 	if (ret < 0) {
@@ -703,9 +757,11 @@ int qrtr_ns_init(void)
 		goto err_sock;
 	}
 
-	qrtr_ns.workqueue = alloc_ordered_workqueue("qrtr_ns_handler", 0);
-	if (!qrtr_ns.workqueue) {
-		ret = -ENOMEM;
+	qrtr_ns.task = kthread_run(kthread_worker_fn, &qrtr_ns.kworker,
+				   "qrtr_ns");
+	if (IS_ERR(qrtr_ns.task)) {
+		pr_err("failed to spawn worker thread %ld\n",
+		       PTR_ERR(qrtr_ns.task));
 		goto err_sock;
 	}
 
@@ -720,6 +776,9 @@ int qrtr_ns_init(void)
 		goto err_wq;
 	}
 
+	sock_setsockopt(qrtr_ns.sock, SOL_SOCKET, SO_RCVBUF,
+			KERNEL_SOCKPTR((void *)&rx_buf_sz), sizeof(rx_buf_sz));
+
 	qrtr_ns.bcast_sq.sq_family = AF_QIPCRTR;
 	qrtr_ns.bcast_sq.sq_node = QRTR_NODE_BCAST;
 	qrtr_ns.bcast_sq.sq_port = QRTR_PORT_CTRL;
@@ -728,47 +787,19 @@ int qrtr_ns_init(void)
 	if (ret < 0)
 		goto err_wq;
 
-	/* As the qrtr ns socket owner and creator is the same module, we have
-	 * to decrease the qrtr module reference count to guarantee that it
-	 * remains zero after the ns socket is created, otherwise, executing
-	 * "rmmod" command is unable to make the qrtr module deleted after the
-	 *  qrtr module is inserted successfully.
-	 *
-	 * However, the reference count is increased twice in
-	 * sock_create_kern(): one is to increase the reference count of owner
-	 * of qrtr socket's proto_ops struct; another is to increment the
-	 * reference count of owner of qrtr proto struct. Therefore, we must
-	 * decrement the module reference count twice to ensure that it keeps
-	 * zero after server's listening socket is created. Of course, we
-	 * must bump the module reference count twice as well before the socket
-	 * is closed.
-	 */
-	module_put(qrtr_ns.sock->ops->owner);
-	module_put(qrtr_ns.sock->sk->sk_prot_creator->owner);
-
-	return 0;
+	return;
 
 err_wq:
-	destroy_workqueue(qrtr_ns.workqueue);
+	kthread_stop(qrtr_ns.task);
 err_sock:
 	sock_release(qrtr_ns.sock);
-	return ret;
 }
 EXPORT_SYMBOL_GPL(qrtr_ns_init);
 
 void qrtr_ns_remove(void)
 {
-	cancel_work_sync(&qrtr_ns.work);
-	destroy_workqueue(qrtr_ns.workqueue);
-
-	/* sock_release() expects the two references that were put during
-	 * qrtr_ns_init(). This function is only called during module remove,
-	 * so try_stop_module() has already set the refcnt to 0. Use
-	 * __module_get() instead of try_module_get() to successfully take two
-	 * references.
-	 */
-	__module_get(qrtr_ns.sock->ops->owner);
-	__module_get(qrtr_ns.sock->sk->sk_prot_creator->owner);
+	kthread_flush_worker(&qrtr_ns.kworker);
+	kthread_stop(qrtr_ns.task);
 	sock_release(qrtr_ns.sock);
 }
 EXPORT_SYMBOL_GPL(qrtr_ns_remove);

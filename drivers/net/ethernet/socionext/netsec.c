@@ -15,7 +15,7 @@
 #include <linux/bpf_trace.h>
 
 #include <net/tcp.h>
-#include <net/page_pool/helpers.h>
+#include <net/page_pool.h>
 #include <net/ip6_checksum.h>
 
 #define NETSEC_REG_SOFT_RST			0x104
@@ -526,15 +526,13 @@ static int netsec_phy_read(struct mii_bus *bus, int phy_addr, int reg_addr)
 static void netsec_et_get_drvinfo(struct net_device *net_device,
 				  struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, "netsec", sizeof(info->driver));
-	strscpy(info->bus_info, dev_name(net_device->dev.parent),
+	strlcpy(info->driver, "netsec", sizeof(info->driver));
+	strlcpy(info->bus_info, dev_name(net_device->dev.parent),
 		sizeof(info->bus_info));
 }
 
 static int netsec_et_get_coalesce(struct net_device *net_device,
-				  struct ethtool_coalesce *et_coalesce,
-				  struct kernel_ethtool_coalesce *kernel_coal,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_coalesce *et_coalesce)
 {
 	struct netsec_priv *priv = netdev_priv(net_device);
 
@@ -544,9 +542,7 @@ static int netsec_et_get_coalesce(struct net_device *net_device,
 }
 
 static int netsec_et_set_coalesce(struct net_device *net_device,
-				  struct ethtool_coalesce *et_coalesce,
-				  struct kernel_ethtool_coalesce *kernel_coal,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_coalesce *et_coalesce)
 {
 	struct netsec_priv *priv = netdev_priv(net_device);
 
@@ -635,7 +631,6 @@ static void netsec_set_rx_de(struct netsec_priv *priv,
 static bool netsec_clean_tx_dring(struct netsec_priv *priv)
 {
 	struct netsec_desc_ring *dring = &priv->desc_ring[NETSEC_RING_TX];
-	struct xdp_frame_bulk bq;
 	struct netsec_de *entry;
 	int tail = dring->tail;
 	unsigned int bytes;
@@ -644,10 +639,7 @@ static bool netsec_clean_tx_dring(struct netsec_priv *priv)
 	spin_lock(&dring->lock);
 
 	bytes = 0;
-	xdp_frame_bulk_init(&bq);
 	entry = dring->vaddr + DESC_SZ * tail;
-
-	rcu_read_lock(); /* need for xdp_return_frame_bulk */
 
 	while (!(entry->attr & (1U << NETSEC_TX_SHIFT_OWN_FIELD)) &&
 	       cnt < DESC_NUM) {
@@ -673,10 +665,7 @@ static bool netsec_clean_tx_dring(struct netsec_priv *priv)
 			dev_kfree_skb(desc->skb);
 		} else {
 			bytes += desc->xdpf->len;
-			if (desc->buf_type == TYPE_NETSEC_XDP_TX)
-				xdp_return_frame_rx_napi(desc->xdpf);
-			else
-				xdp_return_frame_bulk(desc->xdpf, &bq);
+			xdp_return_frame(desc->xdpf);
 		}
 next:
 		/* clean up so netsec_uninit_pkt_dring() won't free the skb
@@ -695,9 +684,6 @@ next:
 		entry = dring->vaddr + DESC_SZ * tail;
 		cnt++;
 	}
-	xdp_flush_frame_bulk(&bq);
-
-	rcu_read_unlock();
 
 	spin_unlock(&dring->lock);
 
@@ -780,7 +766,7 @@ static void netsec_finalize_xdp_rx(struct netsec_priv *priv, u32 xdp_res,
 				   u16 pkts)
 {
 	if (xdp_res & NETSEC_XDP_REDIR)
-		xdp_do_flush();
+		xdp_do_flush_map();
 
 	if (xdp_res & NETSEC_XDP_TX)
 		netsec_xdp_ring_tx_db(priv, pkts);
@@ -933,7 +919,7 @@ static u32 netsec_run_xdp(struct netsec_priv *priv, struct bpf_prog *prog,
 		}
 		break;
 	default:
-		bpf_warn_invalid_xdp_action(priv->ndev, prog, act);
+		bpf_warn_invalid_xdp_action(act);
 		fallthrough;
 	case XDP_ABORTED:
 		trace_xdp_exception(priv->ndev, prog, act);
@@ -960,8 +946,10 @@ static int netsec_process_rx(struct netsec_priv *priv, int budget)
 	u32 xdp_act = 0;
 	int done = 0;
 
-	xdp_init_buff(&xdp, PAGE_SIZE, &dring->xdp_rxq);
+	xdp.rxq = &dring->xdp_rxq;
+	xdp.frame_sz = PAGE_SIZE;
 
+	rcu_read_lock();
 	xdp_prog = READ_ONCE(priv->xdp_prog);
 	dma_dir = page_pool_get_dma_dir(dring->page_pool);
 
@@ -970,7 +958,7 @@ static int netsec_process_rx(struct netsec_priv *priv, int budget)
 		struct netsec_de *de = dring->vaddr + (DESC_SZ * idx);
 		struct netsec_desc *desc = &dring->desc[idx];
 		struct page *page = virt_to_page(desc->addr);
-		u32 metasize, xdp_result = NETSEC_XDP_PASS;
+		u32 xdp_result = NETSEC_XDP_PASS;
 		struct sk_buff *skb = NULL;
 		u16 pkt_len, desc_len;
 		dma_addr_t dma_handle;
@@ -1018,8 +1006,10 @@ static int netsec_process_rx(struct netsec_priv *priv, int budget)
 					dma_dir);
 		prefetch(desc->addr);
 
-		xdp_prepare_buff(&xdp, desc->addr, NETSEC_RXBUF_HEADROOM,
-				 pkt_len, true);
+		xdp.data_hard_start = desc->addr;
+		xdp.data = desc->addr + NETSEC_RXBUF_HEADROOM;
+		xdp_set_data_meta_invalid(&xdp);
+		xdp.data_end = xdp.data + pkt_len;
 
 		if (xdp_prog) {
 			xdp_result = netsec_run_xdp(priv, xdp_prog, &xdp);
@@ -1044,13 +1034,10 @@ static int netsec_process_rx(struct netsec_priv *priv, int budget)
 				  "rx failed to build skb\n");
 			break;
 		}
-		skb_mark_for_recycle(skb);
+		page_pool_release_page(dring->page_pool, page);
 
 		skb_reserve(skb, xdp.data - xdp.data_hard_start);
 		skb_put(skb, xdp.data_end - xdp.data);
-		metasize = xdp.data - xdp.data_meta;
-		if (metasize)
-			skb_metadata_set(skb, metasize);
 		skb->protocol = eth_type_trans(skb, priv->ndev);
 
 		if (priv->rx_cksum_offload_flag &&
@@ -1074,6 +1061,8 @@ next:
 		dring->tail = (dring->tail + 1) % DESC_NUM;
 	}
 	netsec_finalize_xdp_rx(priv, xdp_act, xdp_xmit);
+
+	rcu_read_unlock();
 
 	return done;
 }
@@ -1305,8 +1294,6 @@ static int netsec_setup_rx_dring(struct netsec_priv *priv)
 		.dma_dir = xdp_prog ? DMA_BIDIRECTIONAL : DMA_FROM_DEVICE,
 		.offset = NETSEC_RXBUF_HEADROOM,
 		.max_len = NETSEC_RX_BUF_SIZE,
-		.napi = &priv->napi,
-		.netdev = priv->ndev,
 	};
 	int i, err;
 
@@ -1317,7 +1304,7 @@ static int netsec_setup_rx_dring(struct netsec_priv *priv)
 		goto err_out;
 	}
 
-	err = xdp_rxq_info_reg(&dring->xdp_rxq, priv->ndev, 0, priv->napi.napi_id);
+	err = xdp_rxq_info_reg(&dring->xdp_rxq, priv->ndev, 0);
 	if (err)
 		goto err_out;
 
@@ -1553,7 +1540,7 @@ static int netsec_start_gmac(struct netsec_priv *priv)
 	netsec_write(priv, NETSEC_REG_NRM_RX_INTEN_CLR, ~0);
 	netsec_write(priv, NETSEC_REG_NRM_TX_INTEN_CLR, ~0);
 
-	netsec_et_set_coalesce(priv->ndev, &priv->et_coalesce, NULL, NULL);
+	netsec_et_set_coalesce(priv->ndev, &priv->et_coalesce);
 
 	if (netsec_mac_write(priv, GMAC_REG_OMR, value))
 		return -ETIMEDOUT;
@@ -1766,7 +1753,8 @@ static int netsec_xdp_xmit(struct net_device *ndev, int n,
 {
 	struct netsec_priv *priv = netdev_priv(ndev);
 	struct netsec_desc_ring *tx_ring = &priv->desc_ring[NETSEC_RING_TX];
-	int i, nxmit = 0;
+	int drops = 0;
+	int i;
 
 	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
 		return -EINVAL;
@@ -1777,11 +1765,12 @@ static int netsec_xdp_xmit(struct net_device *ndev, int n,
 		int err;
 
 		err = netsec_xdp_queue_one(priv, xdpf, true);
-		if (err != NETSEC_XDP_TX)
-			break;
-
-		tx_ring->xdp_xmit++;
-		nxmit++;
+		if (err != NETSEC_XDP_TX) {
+			xdp_return_frame_rx_napi(xdpf);
+			drops++;
+		} else {
+			tx_ring->xdp_xmit++;
+		}
 	}
 	spin_unlock(&tx_ring->lock);
 
@@ -1790,7 +1779,7 @@ static int netsec_xdp_xmit(struct net_device *ndev, int n,
 		tx_ring->xdp_xmit = 0;
 	}
 
-	return nxmit;
+	return n - drops;
 }
 
 static int netsec_xdp_setup(struct netsec_priv *priv, struct bpf_prog *prog,
@@ -1840,7 +1829,7 @@ static const struct net_device_ops netsec_netdev_ops = {
 	.ndo_set_features	= netsec_netdev_set_features,
 	.ndo_set_mac_address    = eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_eth_ioctl		= phy_do_ioctl,
+	.ndo_do_ioctl		= phy_do_ioctl,
 	.ndo_xdp_xmit		= netsec_xdp_xmit,
 	.ndo_bpf		= netsec_xdp,
 };
@@ -1876,9 +1865,10 @@ static int netsec_of_probe(struct platform_device *pdev,
 	*phy_addr = of_mdio_parse_addr(&pdev->dev, priv->phy_np);
 
 	priv->clk = devm_clk_get(&pdev->dev, NULL); /* get by 'phy_ref_clk' */
-	if (IS_ERR(priv->clk))
-		return dev_err_probe(&pdev->dev, PTR_ERR(priv->clk),
-				     "phy_ref_clk not found\n");
+	if (IS_ERR(priv->clk)) {
+		dev_err(&pdev->dev, "phy_ref_clk not found\n");
+		return PTR_ERR(priv->clk);
+	}
 	priv->freq = clk_get_rate(priv->clk);
 
 	return 0;
@@ -1901,17 +1891,19 @@ static int netsec_acpi_probe(struct platform_device *pdev,
 	priv->phy_interface = PHY_INTERFACE_MODE_NA;
 
 	ret = device_property_read_u32(&pdev->dev, "phy-channel", phy_addr);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "missing required property 'phy-channel'\n");
+	if (ret) {
+		dev_err(&pdev->dev,
+			"missing required property 'phy-channel'\n");
+		return ret;
+	}
 
 	ret = device_property_read_u32(&pdev->dev,
 				       "socionext,phy-clock-frequency",
 				       &priv->freq);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "missing required property 'socionext,phy-clock-frequency'\n");
-	return 0;
+		dev_err(&pdev->dev,
+			"missing required property 'socionext,phy-clock-frequency'\n");
+	return ret;
 }
 
 static void netsec_unregister_mdio(struct netsec_priv *priv)
@@ -1995,12 +1987,12 @@ static int netsec_register_mdio(struct netsec_priv *priv, u32 phy_addr)
 
 static int netsec_probe(struct platform_device *pdev)
 {
-	struct resource *mmio_res, *eeprom_res;
+	struct resource *mmio_res, *eeprom_res, *irq_res;
+	u8 *mac, macbuf[ETH_ALEN];
 	struct netsec_priv *priv;
 	u32 hw_ver, phy_addr = 0;
 	struct net_device *ndev;
 	int ret;
-	int irq;
 
 	mmio_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!mmio_res) {
@@ -2014,9 +2006,11 @@ static int netsec_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
+	irq_res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!irq_res) {
+		dev_err(&pdev->dev, "No IRQ resource found.\n");
+		return -ENODEV;
+	}
 
 	ndev = alloc_etherdev(sizeof(*priv));
 	if (!ndev)
@@ -2027,7 +2021,7 @@ static int netsec_probe(struct platform_device *pdev)
 	spin_lock_init(&priv->reglock);
 	SET_NETDEV_DEV(ndev, &pdev->dev);
 	platform_set_drvdata(pdev, priv);
-	ndev->irq = irq;
+	ndev->irq = irq_res->start;
 	priv->dev = &pdev->dev;
 	priv->ndev = ndev;
 
@@ -2050,19 +2044,21 @@ static int netsec_probe(struct platform_device *pdev)
 		goto free_ndev;
 	}
 
-	ret = device_get_ethdev_address(&pdev->dev, ndev);
-	if (ret && priv->eeprom_base) {
+	mac = device_get_mac_address(&pdev->dev, macbuf, sizeof(macbuf));
+	if (mac)
+		ether_addr_copy(ndev->dev_addr, mac);
+
+	if (priv->eeprom_base &&
+	    (!mac || !is_valid_ether_addr(ndev->dev_addr))) {
 		void __iomem *macp = priv->eeprom_base +
 					NETSEC_EEPROM_MAC_ADDRESS;
-		u8 addr[ETH_ALEN];
 
-		addr[0] = readb(macp + 3);
-		addr[1] = readb(macp + 2);
-		addr[2] = readb(macp + 1);
-		addr[3] = readb(macp + 0);
-		addr[4] = readb(macp + 7);
-		addr[5] = readb(macp + 6);
-		eth_hw_addr_set(ndev, addr);
+		ndev->dev_addr[0] = readb(macp + 3);
+		ndev->dev_addr[1] = readb(macp + 2);
+		ndev->dev_addr[2] = readb(macp + 1);
+		ndev->dev_addr[3] = readb(macp + 0);
+		ndev->dev_addr[4] = readb(macp + 7);
+		ndev->dev_addr[5] = readb(macp + 6);
 	}
 
 	if (!is_valid_ether_addr(ndev->dev_addr)) {
@@ -2111,7 +2107,7 @@ static int netsec_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "hardware revision %d.%d\n",
 		 hw_ver >> 16, hw_ver & 0xffff);
 
-	netif_napi_add(ndev, &priv->napi, netsec_napi_poll);
+	netif_napi_add(ndev, &priv->napi, netsec_napi_poll, NAPI_POLL_WEIGHT);
 
 	ndev->netdev_ops = &netsec_netdev_ops;
 	ndev->ethtool_ops = &netsec_ethtool_ops;
@@ -2119,9 +2115,6 @@ static int netsec_probe(struct platform_device *pdev)
 	ndev->features |= NETIF_F_HIGHDMA | NETIF_F_RXCSUM | NETIF_F_GSO |
 				NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
 	ndev->hw_features = ndev->features;
-
-	ndev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
-			     NETDEV_XDP_ACT_NDO_XMIT;
 
 	priv->rx_cksum_offload_flag = true;
 
@@ -2155,7 +2148,7 @@ free_ndev:
 	return ret;
 }
 
-static void netsec_remove(struct platform_device *pdev)
+static int netsec_remove(struct platform_device *pdev)
 {
 	struct netsec_priv *priv = platform_get_drvdata(pdev);
 
@@ -2167,6 +2160,8 @@ static void netsec_remove(struct platform_device *pdev)
 
 	pm_runtime_disable(&pdev->dev);
 	free_netdev(priv->ndev);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -2214,7 +2209,7 @@ MODULE_DEVICE_TABLE(acpi, netsec_acpi_ids);
 
 static struct platform_driver netsec_driver = {
 	.probe	= netsec_probe,
-	.remove = netsec_remove,
+	.remove	= netsec_remove,
 	.driver = {
 		.name = "netsec",
 		.pm = &netsec_pm_ops,

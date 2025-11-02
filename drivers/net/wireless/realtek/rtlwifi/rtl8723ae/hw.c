@@ -212,9 +212,14 @@ void rtl8723e_set_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val)
 		}
 	case HW_VAR_AMPDU_MIN_SPACE:{
 			u8 min_spacing_to_set;
+			u8 sec_min_space;
 
 			min_spacing_to_set = *((u8 *)val);
 			if (min_spacing_to_set <= 7) {
+				sec_min_space = 0;
+
+				if (min_spacing_to_set < sec_min_space)
+					min_spacing_to_set = sec_min_space;
 
 				mac->min_space_cfg = ((mac->min_space_cfg &
 						       0xf8) |
@@ -638,17 +643,17 @@ static void _rtl8723e_gen_refresh_led_state(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
-	enum rtl_led_pin pin0 = rtlpriv->ledctl.sw_led0;
+	struct rtl_led *pled0 = &rtlpriv->ledctl.sw_led0;
 
 	if (rtlpriv->rtlhal.up_first_time)
 		return;
 
 	if (ppsc->rfoff_reason == RF_CHANGE_BY_IPS)
-		rtl8723e_sw_led_on(hw, pin0);
+		rtl8723e_sw_led_on(hw, pled0);
 	else if (ppsc->rfoff_reason == RF_CHANGE_BY_INIT)
-		rtl8723e_sw_led_on(hw, pin0);
+		rtl8723e_sw_led_on(hw, pled0);
 	else
-		rtl8723e_sw_led_off(hw, pin0);
+		rtl8723e_sw_led_off(hw, pled0);
 }
 
 static bool _rtl8712e_init_mac(struct ieee80211_hw *hw)
@@ -910,7 +915,7 @@ int rtl8723e_hw_init(struct ieee80211_hw *hw)
 	struct rtl_phy *rtlphy = &(rtlpriv->phy);
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-	bool rtstatus;
+	bool rtstatus = true;
 	int err;
 	u8 tmp_u1b;
 	unsigned long flags;
@@ -1127,6 +1132,7 @@ static int _rtl8723e_set_media_status(struct ieee80211_hw *hw,
 	default:
 		pr_err("Network type %d not support!\n", type);
 		return 1;
+		break;
 	}
 
 	/* MSR_INFRA == Link in infrastructure network;
@@ -1381,9 +1387,9 @@ static u8 _rtl8723e_get_chnl_group(u8 chnl)
 	return group;
 }
 
-static noinline_for_stack void
-_rtl8723e_read_txpower_info_from_hwpg(struct ieee80211_hw *hw,
-				      bool autoload_fail, u8 *hwinfo)
+static void _rtl8723e_read_txpower_info_from_hwpg(struct ieee80211_hw *hw,
+						  bool autoload_fail,
+						  u8 *hwinfo)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_efuse *rtlefuse = rtl_efuse(rtl_priv(hw));
@@ -1449,9 +1455,18 @@ _rtl8723e_read_txpower_info_from_hwpg(struct ieee80211_hw *hw,
 				rtlefuse->eeprom_chnlarea_txpwr_ht40_1s
 					[rf_path][index];
 
-			rtlefuse->txpwrlevel_ht40_2s[rf_path][i] =
-				max(rtlefuse->eeprom_chnlarea_txpwr_ht40_1s[rf_path][index] -
-				    rtlefuse->eprom_chnl_txpwr_ht40_2sdf[rf_path][index], 0);
+			if ((rtlefuse->eeprom_chnlarea_txpwr_ht40_1s
+					[rf_path][index] -
+			     rtlefuse->eprom_chnl_txpwr_ht40_2sdf
+					[rf_path][index]) > 0) {
+				rtlefuse->txpwrlevel_ht40_2s[rf_path][i] =
+				  rtlefuse->eeprom_chnlarea_txpwr_ht40_1s
+				  [rf_path][index] -
+				  rtlefuse->eprom_chnl_txpwr_ht40_2sdf
+				  [rf_path][index];
+			} else {
+				rtlefuse->txpwrlevel_ht40_2s[rf_path][i] = 0;
+			}
 		}
 
 		for (i = 0; i < 14; i++) {
@@ -1827,21 +1842,21 @@ static void rtl8723e_update_hal_rate_table(struct ieee80211_hw *hw,
 	u16 shortgi_rate;
 	u32 tmp_ratr_value;
 	u8 curtxbw_40mhz = mac->bw_40;
-	u8 curshortgi_40mhz = (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_40) ?
+	u8 curshortgi_40mhz = (sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_40) ?
 				1 : 0;
-	u8 curshortgi_20mhz = (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_20) ?
+	u8 curshortgi_20mhz = (sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_20) ?
 				1 : 0;
 	enum wireless_mode wirelessmode = mac->mode;
 	u32 ratr_mask;
 
 	if (rtlhal->current_bandtype == BAND_ON_5G)
-		ratr_value = sta->deflink.supp_rates[1] << 4;
+		ratr_value = sta->supp_rates[1] << 4;
 	else
-		ratr_value = sta->deflink.supp_rates[0];
+		ratr_value = sta->supp_rates[0];
 	if (mac->opmode == NL80211_IFTYPE_ADHOC)
 		ratr_value = 0xfff;
-	ratr_value |= (sta->deflink.ht_cap.mcs.rx_mask[1] << 20 |
-			sta->deflink.ht_cap.mcs.rx_mask[0] << 12);
+	ratr_value |= (sta->ht_cap.mcs.rx_mask[1] << 20 |
+			sta->ht_cap.mcs.rx_mask[0] << 12);
 	switch (wirelessmode) {
 	case WIRELESS_MODE_B:
 		if (ratr_value & 0x0000000c)
@@ -1914,11 +1929,11 @@ static void rtl8723e_update_hal_rate_mask(struct ieee80211_hw *hw,
 	struct rtl_sta_info *sta_entry = NULL;
 	u32 ratr_bitmap;
 	u8 ratr_index;
-	u8 curtxbw_40mhz = (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40)
+	u8 curtxbw_40mhz = (sta->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40)
 				? 1 : 0;
-	u8 curshortgi_40mhz = (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_40) ?
+	u8 curshortgi_40mhz = (sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_40) ?
 				1 : 0;
-	u8 curshortgi_20mhz = (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_20) ?
+	u8 curshortgi_20mhz = (sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_20) ?
 				1 : 0;
 	enum wireless_mode wirelessmode = 0;
 	bool shortgi = false;
@@ -1935,13 +1950,13 @@ static void rtl8723e_update_hal_rate_mask(struct ieee80211_hw *hw,
 		macid = sta->aid + 1;
 
 	if (rtlhal->current_bandtype == BAND_ON_5G)
-		ratr_bitmap = sta->deflink.supp_rates[1] << 4;
+		ratr_bitmap = sta->supp_rates[1] << 4;
 	else
-		ratr_bitmap = sta->deflink.supp_rates[0];
+		ratr_bitmap = sta->supp_rates[0];
 	if (mac->opmode == NL80211_IFTYPE_ADHOC)
 		ratr_bitmap = 0xfff;
-	ratr_bitmap |= (sta->deflink.ht_cap.mcs.rx_mask[1] << 20 |
-			sta->deflink.ht_cap.mcs.rx_mask[0] << 12);
+	ratr_bitmap |= (sta->ht_cap.mcs.rx_mask[1] << 20 |
+			sta->ht_cap.mcs.rx_mask[0] << 12);
 	switch (wirelessmode) {
 	case WIRELESS_MODE_B:
 		ratr_index = RATR_INX_WIRELESS_B;

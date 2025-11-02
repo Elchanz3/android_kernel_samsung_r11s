@@ -7,7 +7,10 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
-#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_crtc_helper.h>
+#include <drm/drm_fb_cma_helper.h>
+#include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_plane_helper.h>
 #include <drm/drm_vblank.h>
 
 #include "tidss_crtc.h"
@@ -82,24 +85,22 @@ void tidss_crtc_error_irq(struct drm_crtc *crtc, u64 irqstatus)
 /* drm_crtc_helper_funcs */
 
 static int tidss_crtc_atomic_check(struct drm_crtc *crtc,
-				   struct drm_atomic_state *state)
+				   struct drm_crtc_state *state)
 {
-	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
-									  crtc);
 	struct drm_device *ddev = crtc->dev;
 	struct tidss_device *tidss = to_tidss(ddev);
 	struct dispc_device *dispc = tidss->dispc;
 	struct tidss_crtc *tcrtc = to_tidss_crtc(crtc);
 	u32 hw_videoport = tcrtc->hw_videoport;
-	struct drm_display_mode *mode;
+	const struct drm_display_mode *mode;
 	enum drm_mode_status ok;
 
 	dev_dbg(ddev->dev, "%s\n", __func__);
 
-	if (!crtc_state->enable)
+	if (!state->enable)
 		return 0;
 
-	mode = &crtc_state->adjusted_mode;
+	mode = &state->adjusted_mode;
 
 	ok = dispc_vp_mode_valid(dispc, hw_videoport, mode);
 	if (ok != MODE_OK) {
@@ -108,10 +109,7 @@ static int tidss_crtc_atomic_check(struct drm_crtc *crtc,
 		return -EINVAL;
 	}
 
-	if (drm_atomic_crtc_needs_modeset(crtc_state))
-		drm_mode_set_crtcinfo(mode, 0);
-
-	return dispc_vp_bus_check(dispc, hw_videoport, crtc_state);
+	return dispc_vp_bus_check(dispc, hw_videoport, state);
 }
 
 /*
@@ -133,7 +131,7 @@ static void tidss_crtc_position_planes(struct tidss_device *tidss,
 	    !to_tidss_crtc_state(cstate)->plane_pos_changed)
 		return;
 
-	for (layer = 0; layer < tidss->feat->num_vids ; layer++) {
+	for (layer = 0; layer < tidss->feat->num_planes; layer++) {
 		struct drm_plane_state *pstate;
 		struct drm_plane *plane;
 		bool layer_active = false;
@@ -163,10 +161,8 @@ static void tidss_crtc_position_planes(struct tidss_device *tidss,
 }
 
 static void tidss_crtc_atomic_flush(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_crtc_state *old_crtc_state)
 {
-	struct drm_crtc_state *old_crtc_state = drm_atomic_get_old_crtc_state(state,
-									      crtc);
 	struct tidss_crtc *tcrtc = to_tidss_crtc(crtc);
 	struct drm_device *ddev = crtc->dev;
 	struct tidss_device *tidss = to_tidss(ddev);
@@ -176,6 +172,10 @@ static void tidss_crtc_atomic_flush(struct drm_crtc *crtc,
 		__func__, crtc->name, crtc->state->active ? "" : "not ",
 		drm_atomic_crtc_needs_modeset(crtc->state) ? "needs" : "doesn't need",
 		crtc->state->event);
+
+	/* There is nothing to do if CRTC is not going to be enabled. */
+	if (!crtc->state->active)
+		return;
 
 	/*
 	 * Flush CRTC changes with go bit only if new modeset is not
@@ -212,10 +212,8 @@ static void tidss_crtc_atomic_flush(struct drm_crtc *crtc,
 }
 
 static void tidss_crtc_atomic_enable(struct drm_crtc *crtc,
-				     struct drm_atomic_state *state)
+				     struct drm_crtc_state *old_state)
 {
-	struct drm_crtc_state *old_state = drm_atomic_get_old_crtc_state(state,
-									 crtc);
 	struct tidss_crtc *tcrtc = to_tidss_crtc(crtc);
 	struct drm_device *ddev = crtc->dev;
 	struct tidss_device *tidss = to_tidss(ddev);
@@ -228,7 +226,7 @@ static void tidss_crtc_atomic_enable(struct drm_crtc *crtc,
 	tidss_runtime_get(tidss);
 
 	r = dispc_vp_set_clk_rate(tidss->dispc, tcrtc->hw_videoport,
-				  mode->crtc_clock * 1000);
+				  mode->clock * 1000);
 	if (r != 0)
 		return;
 
@@ -257,7 +255,7 @@ static void tidss_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void tidss_crtc_atomic_disable(struct drm_crtc *crtc,
-				      struct drm_atomic_state *state)
+				      struct drm_crtc_state *old_state)
 {
 	struct tidss_crtc *tcrtc = to_tidss_crtc(crtc);
 	struct drm_device *ddev = crtc->dev;
@@ -267,16 +265,6 @@ static void tidss_crtc_atomic_disable(struct drm_crtc *crtc,
 	dev_dbg(ddev->dev, "%s, event %p\n", __func__, crtc->state->event);
 
 	reinit_completion(&tcrtc->framedone_completion);
-
-	/*
-	 * If a layer is left enabled when the videoport is disabled, and the
-	 * vid pipeline that was used for the layer is taken into use on
-	 * another videoport, the DSS will report sync lost issues. Disable all
-	 * the layers here as a work-around.
-	 */
-	for (u32 layer = 0; layer < tidss->feat->num_vids; layer++)
-		dispc_ovr_enable_layer(tidss->dispc, tcrtc->hw_videoport, layer,
-				       false);
 
 	dispc_vp_disable(tidss->dispc, tcrtc->hw_videoport);
 

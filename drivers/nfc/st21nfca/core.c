@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/nfc.h>
 #include <net/nfc/hci.h>
+#include <net/nfc/llc.h>
 
 #include "st21nfca.h"
 
@@ -71,7 +72,7 @@
 
 static DECLARE_BITMAP(dev_mask, ST21NFCA_NUM_DEVICES);
 
-static const struct nfc_hci_gate st21nfca_gates[] = {
+static struct nfc_hci_gate st21nfca_gates[] = {
 	{NFC_HCI_ADMIN_GATE, NFC_HCI_ADMIN_PIPE},
 	{NFC_HCI_LINK_MGMT_GATE, NFC_HCI_LINK_MGMT_PIPE},
 	{ST21NFCA_DEVICE_MGNT_GATE, ST21NFCA_DEVICE_MGNT_PIPE},
@@ -844,7 +845,7 @@ static void st21nfca_hci_cmd_received(struct nfc_hci_dev *hdev, u8 pipe, u8 cmd,
 			info->se_info.count_pipes++;
 
 		if (info->se_info.count_pipes == info->se_info.expected_pipes) {
-			timer_delete_sync(&info->se_info.se_active_timer);
+			del_timer_sync(&info->se_info.se_active_timer);
 			info->se_info.se_active = false;
 			info->se_info.count_pipes = 0;
 			complete(&info->se_info.req_completion);
@@ -864,7 +865,7 @@ static int st21nfca_admin_event_received(struct nfc_hci_dev *hdev, u8 event,
 	case ST21NFCA_EVT_HOT_PLUG:
 		if (info->se_info.se_active) {
 			if (!ST21NFCA_EVT_HOT_PLUG_IS_INHIBITED(skb)) {
-				timer_delete_sync(&info->se_info.se_active_timer);
+				del_timer_sync(&info->se_info.se_active_timer);
 				info->se_info.se_active = false;
 				complete(&info->se_info.req_completion);
 			} else {
@@ -911,7 +912,7 @@ static int st21nfca_hci_event_received(struct nfc_hci_dev *hdev, u8 pipe,
 	}
 }
 
-static const struct nfc_hci_ops st21nfca_hci_ops = {
+static struct nfc_hci_ops st21nfca_hci_ops = {
 	.open = st21nfca_hci_open,
 	.close = st21nfca_hci_close,
 	.load_session = st21nfca_hci_load_session,
@@ -934,7 +935,7 @@ static const struct nfc_hci_ops st21nfca_hci_ops = {
 	.se_io = st21nfca_hci_se_io,
 };
 
-int st21nfca_hci_probe(void *phy_id, const struct nfc_phy_ops *phy_ops,
+int st21nfca_hci_probe(void *phy_id, struct nfc_phy_ops *phy_ops,
 		       char *llc_name, int phy_headroom, int phy_tailroom,
 		       int phy_payload, struct nfc_hci_dev **hdev,
 			   struct st21nfca_se_status *se_status)

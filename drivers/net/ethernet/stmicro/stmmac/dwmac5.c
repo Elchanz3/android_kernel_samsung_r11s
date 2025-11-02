@@ -183,41 +183,20 @@ static void dwmac5_handle_dma_err(struct net_device *ndev,
 			STAT_OFF(dma_errors), stats);
 }
 
-int dwmac5_safety_feat_config(void __iomem *ioaddr, unsigned int asp,
-			      struct stmmac_safety_feature_cfg *safety_feat_cfg)
+int dwmac5_safety_feat_config(void __iomem *ioaddr, unsigned int asp)
 {
-	struct stmmac_safety_feature_cfg all_safety_feats = {
-		.tsoee = 1,
-		.mrxpee = 1,
-		.mestee = 1,
-		.mrxee = 1,
-		.mtxee = 1,
-		.epsi = 1,
-		.edpp = 1,
-		.prtyen = 1,
-		.tmouten = 1,
-	};
 	u32 value;
 
 	if (!asp)
 		return -EINVAL;
 
-	if (!safety_feat_cfg)
-		safety_feat_cfg = &all_safety_feats;
-
 	/* 1. Enable Safety Features */
 	value = readl(ioaddr + MTL_ECC_CONTROL);
-	value |= MEEAO; /* MTL ECC Error Addr Status Override */
-	if (safety_feat_cfg->tsoee)
-		value |= TSOEE; /* TSO ECC */
-	if (safety_feat_cfg->mrxpee)
-		value |= MRXPEE; /* MTL RX Parser ECC */
-	if (safety_feat_cfg->mestee)
-		value |= MESTEE; /* MTL EST ECC */
-	if (safety_feat_cfg->mrxee)
-		value |= MRXEE; /* MTL RX FIFO ECC */
-	if (safety_feat_cfg->mtxee)
-		value |= MTXEE; /* MTL TX FIFO ECC */
+	value |= TSOEE; /* TSO ECC */
+	value |= MRXPEE; /* MTL RX Parser ECC */
+	value |= MESTEE; /* MTL EST ECC */
+	value |= MRXEE; /* MTL RX FIFO ECC */
+	value |= MTXEE; /* MTL TX FIFO ECC */
 	writel(value, ioaddr + MTL_ECC_CONTROL);
 
 	/* 2. Enable MTL Safety Interrupts */
@@ -239,16 +218,13 @@ int dwmac5_safety_feat_config(void __iomem *ioaddr, unsigned int asp,
 
 	/* 5. Enable Parity and Timeout for FSM */
 	value = readl(ioaddr + MAC_FSM_CONTROL);
-	if (safety_feat_cfg->prtyen)
-		value |= PRTYEN; /* FSM Parity Feature */
-	if (safety_feat_cfg->tmouten)
-		value |= TMOUTEN; /* FSM Timeout Feature */
+	value |= PRTYEN; /* FSM Parity Feature */
+	value |= TMOUTEN; /* FSM Timeout Feature */
 	writel(value, ioaddr + MAC_FSM_CONTROL);
 
 	/* 4. Enable Data Parity Protection */
 	value = readl(ioaddr + MTL_DPP_CONTROL);
-	if (safety_feat_cfg->edpp)
-		value |= EDPP;
+	value |= EDPP;
 	writel(value, ioaddr + MTL_DPP_CONTROL);
 
 	/*
@@ -258,8 +234,7 @@ int dwmac5_safety_feat_config(void __iomem *ioaddr, unsigned int asp,
 	if (asp <= 0x2)
 		return 0;
 
-	if (safety_feat_cfg->epsi)
-		value |= EPSI;
+	value |= EPSI;
 	writel(value, ioaddr + MTL_DPP_CONTROL);
 	return 0;
 }
@@ -330,13 +305,17 @@ int dwmac5_safety_feat_dump(struct stmmac_safety_stats *stats,
 static int dwmac5_rxp_disable(void __iomem *ioaddr)
 {
 	u32 val;
+	int ret;
 
 	val = readl(ioaddr + MTL_OPERATION_MODE);
 	val &= ~MTL_FRPE;
 	writel(val, ioaddr + MTL_OPERATION_MODE);
 
-	return readl_poll_timeout(ioaddr + MTL_RXP_CONTROL_STATUS, val,
+	ret = readl_poll_timeout(ioaddr + MTL_RXP_CONTROL_STATUS, val,
 			val & RXPI, 1, 10000);
+	if (ret)
+		return ret;
+	return 0;
 }
 
 static void dwmac5_rxp_enable(void __iomem *ioaddr)
@@ -571,4 +550,79 @@ int dwmac5_flex_pps_config(void __iomem *ioaddr, int index,
 	val |= PPSCMDx(index, 0x2);
 	writel(val, ioaddr + MAC_PPS_CONTROL);
 	return 0;
+}
+
+static int dwmac5_est_write(void __iomem *ioaddr, u32 reg, u32 val, bool gcl)
+{
+	u32 ctrl;
+
+	writel(val, ioaddr + MTL_EST_GCL_DATA);
+
+	ctrl = (reg << ADDR_SHIFT);
+	ctrl |= gcl ? 0 : GCRR;
+
+	writel(ctrl, ioaddr + MTL_EST_GCL_CONTROL);
+
+	ctrl |= SRWO;
+	writel(ctrl, ioaddr + MTL_EST_GCL_CONTROL);
+
+	return readl_poll_timeout(ioaddr + MTL_EST_GCL_CONTROL,
+				  ctrl, !(ctrl & SRWO), 100, 5000);
+}
+
+int dwmac5_est_configure(void __iomem *ioaddr, struct stmmac_est *cfg,
+			 unsigned int ptp_rate)
+{
+	int i, ret = 0x0;
+	u32 ctrl;
+
+	ret |= dwmac5_est_write(ioaddr, BTR_LOW, cfg->btr[0], false);
+	ret |= dwmac5_est_write(ioaddr, BTR_HIGH, cfg->btr[1], false);
+	ret |= dwmac5_est_write(ioaddr, TER, cfg->ter, false);
+	ret |= dwmac5_est_write(ioaddr, LLR, cfg->gcl_size, false);
+	ret |= dwmac5_est_write(ioaddr, CTR_LOW, cfg->ctr[0], false);
+	ret |= dwmac5_est_write(ioaddr, CTR_HIGH, cfg->ctr[1], false);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < cfg->gcl_size; i++) {
+		ret = dwmac5_est_write(ioaddr, i, cfg->gcl[i], true);
+		if (ret)
+			return ret;
+	}
+
+	ctrl = readl(ioaddr + MTL_EST_CONTROL);
+	ctrl &= ~PTOV;
+	ctrl |= ((1000000000 / ptp_rate) * 6) << PTOV_SHIFT;
+	if (cfg->enable)
+		ctrl |= EEST | SSWL;
+	else
+		ctrl &= ~EEST;
+
+	writel(ctrl, ioaddr + MTL_EST_CONTROL);
+	return 0;
+}
+
+void dwmac5_fpe_configure(void __iomem *ioaddr, u32 num_txq, u32 num_rxq,
+			  bool enable)
+{
+	u32 value;
+
+	if (!enable) {
+		value = readl(ioaddr + MAC_FPE_CTRL_STS);
+
+		value &= ~EFPE;
+
+		writel(value, ioaddr + MAC_FPE_CTRL_STS);
+		return;
+	}
+
+	value = readl(ioaddr + GMAC_RXQ_CTRL1);
+	value &= ~GMAC_RXQCTRL_FPRQ;
+	value |= (num_rxq - 1) << GMAC_RXQCTRL_FPRQ_SHIFT;
+	writel(value, ioaddr + GMAC_RXQ_CTRL1);
+
+	value = readl(ioaddr + MAC_FPE_CTRL_STS);
+	value |= EFPE;
+	writel(value, ioaddr + MAC_FPE_CTRL_STS);
 }

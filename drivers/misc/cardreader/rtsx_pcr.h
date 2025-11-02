@@ -15,8 +15,6 @@
 #define MIN_DIV_N_PCR		80
 #define MAX_DIV_N_PCR		208
 
-#define RTS522A_PME_FORCE_CTL	0xFF78
-#define RTS522A_AUTOLOAD_CFG1	0xFF7C
 #define RTS522A_PM_CTRL3		0xFF7E
 
 #define RTS524A_PME_FORCE_CTL		0xFF78
@@ -27,7 +25,6 @@
 #define REG_EFUSE_POWEROFF		0x00
 #define RTS5250_CLK_CFG3		0xFF79
 #define RTS525A_CFG_MEM_PD		0xF0
-#define RTS524A_AUTOLOAD_CFG1		0xFF7C
 #define RTS524A_PM_CTRL3		0xFF7E
 #define RTS525A_BIOS_CFG		0xFF2D
 #define RTS525A_LOAD_BIOS_FLAG	0x01
@@ -74,7 +71,6 @@ void rtl8411b_init_params(struct rtsx_pcr *pcr);
 void rts5260_init_params(struct rtsx_pcr *pcr);
 void rts5261_init_params(struct rtsx_pcr *pcr);
 void rts5228_init_params(struct rtsx_pcr *pcr);
-void rts5264_init_params(struct rtsx_pcr *pcr);
 
 static inline u8 map_sd_drive(int idx)
 {
@@ -94,14 +90,11 @@ static inline u8 map_sd_drive(int idx)
 
 #define rtsx_check_mmc_support(reg)		((reg) & 0x10)
 #define rtsx_reg_to_rtd3(reg)				((reg) & 0x02)
-#define rtsx_reg_to_rtd3_uhsii(reg)				((reg) & 0x04)
 #define rtsx_reg_to_aspm(reg)			(((reg) >> 28) & 0x03)
 #define rtsx_reg_to_sd30_drive_sel_1v8(reg)	(((reg) >> 26) & 0x03)
 #define rtsx_reg_to_sd30_drive_sel_3v3(reg)	(((reg) >> 5) & 0x03)
 #define rtsx_reg_to_card_drive_sel(reg)		((((reg) >> 25) & 0x01) << 6)
 #define rtsx_reg_check_reverse_socket(reg)	((reg) & 0x4000)
-#define rtsx_reg_check_cd_reverse(reg)		((reg) & 0x800000)
-#define rtsx_reg_check_wp_reverse(reg)		((reg) & 0x400000)
 #define rts5209_reg_to_aspm(reg)		(((reg) >> 5) & 0x03)
 #define rts5209_reg_check_ms_pmos(reg)		(!((reg) & 0x08))
 #define rts5209_reg_to_sd30_drive_sel_1v8(reg)	(((reg) >> 3) & 0x07)
@@ -129,5 +122,7 @@ int rtsx_pci_get_ocpstat(struct rtsx_pcr *pcr, u8 *val);
 void rtsx_pci_clear_ocpstat(struct rtsx_pcr *pcr);
 void rtsx_pci_enable_oobs_polling(struct rtsx_pcr *pcr);
 void rtsx_pci_disable_oobs_polling(struct rtsx_pcr *pcr);
+int rtsx_sd_power_off_card3v3(struct rtsx_pcr *pcr);
+int rtsx_ms_power_off_card3v3(struct rtsx_pcr *pcr);
 
 #endif

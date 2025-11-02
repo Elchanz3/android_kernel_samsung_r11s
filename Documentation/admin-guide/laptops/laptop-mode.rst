@@ -61,7 +61,7 @@ Caveats
   Check your drive's rating, and don't wear down your drive's lifetime if you
   don't need to.
 
-* If you mount some of your ext3 filesystems with the -n option, then
+* If you mount some of your ext3/reiserfs filesystems with the -n option, then
   the control script will not be able to remount them correctly. You must set
   DO_REMOUNTS=0 in the control script, otherwise it will remount them with the
   wrong options -- or it will fail because it cannot write to /etc/mtab.
@@ -96,10 +96,21 @@ control script increases dirty_expire_centisecs and dirty_writeback_centisecs in
 dirtied are not forced to be written to disk as often. The control script also
 changes the dirty background ratio, so that background writeback of dirty pages
 is not done anymore. Combined with a higher commit value (also 10 minutes) for
-ext3 filesystem (also done automatically by the control script),
+ext3 or ReiserFS filesystems (also done automatically by the control script),
 this results in concentration of disk activity in a small time interval which
 occurs only once every 10 minutes, or whenever the disk is forced to spin up by
 a cache miss. The disk can then be spun down in the periods of inactivity.
+
+If you want to find out which process caused the disk to spin up, you can
+gather information by setting the flag /proc/sys/vm/block_dump. When this flag
+is set, Linux reports all disk read and write operations that take place, and
+all block dirtyings done to files. This makes it possible to debug why a disk
+needs to spin up, and to increase battery life even more. The output of
+block_dump is written to the kernel output, and it can be retrieved using
+"dmesg". When you use block_dump and your kernel logging level also includes
+kernel debugging messages, you probably want to turn off klogd, otherwise
+the output of block_dump will be logged, causing disk activity that is not
+normally there.
 
 
 Configuration
@@ -587,7 +598,7 @@ Control script::
 					FST=$(deduce_fstype $MP)
 				fi
 				case "$FST" in
-					"ext3")
+					"ext3"|"reiserfs")
 						PARSEDOPTS="$(parse_mount_opts commit "$OPTS")"
 						mount $DEV -t $FST $MP -o remount,$PARSEDOPTS,commit=$MAX_AGE$NOATIME_OPT
 						;;
@@ -647,7 +658,7 @@ Control script::
 					FST=$(deduce_fstype $MP)
 				fi
 				case "$FST" in
-					"ext3")
+					"ext3"|"reiserfs")
 						PARSEDOPTS="$(parse_mount_opts_wfstab $DEV commit $OPTS)"
 						PARSEDOPTS="$(parse_yesno_opts_wfstab $DEV atime atime $PARSEDOPTS)"
 						mount $DEV -t $FST $MP -o remount,$PARSEDOPTS

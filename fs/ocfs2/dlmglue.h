@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  * dlmglue.h
  *
  * description here
@@ -137,8 +139,10 @@ int ocfs2_inode_lock_full_nested(struct inode *inode,
 			 int ex,
 			 int arg_flags,
 			 int subclass);
-int ocfs2_inode_lock_with_folio(struct inode *inode,
-		struct buffer_head **ret_bh, int ex, struct folio *folio);
+int ocfs2_inode_lock_with_page(struct inode *inode,
+			      struct buffer_head **ret_bh,
+			      int ex,
+			      struct page *page);
 /* Variants without special locking class or flags */
 #define ocfs2_inode_lock_full(i, r, e, f)\
 		ocfs2_inode_lock_full_nested(i, r, e, f, OI_LS_NORMAL)

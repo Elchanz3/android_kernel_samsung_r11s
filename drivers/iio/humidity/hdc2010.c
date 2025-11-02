@@ -169,12 +169,13 @@ static int hdc2010_read_raw(struct iio_dev *indio_dev,
 			*val = hdc2010_get_heater_status(data);
 			return IIO_VAL_INT;
 		}
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret)
+			return ret;
 		mutex_lock(&data->lock);
 		ret = hdc2010_get_prim_measurement_word(data, chan);
 		mutex_unlock(&data->lock);
-		iio_device_release_direct(indio_dev);
+		iio_device_release_direct_mode(indio_dev);
 		if (ret < 0)
 			return ret;
 		*val = ret;
@@ -183,12 +184,13 @@ static int hdc2010_read_raw(struct iio_dev *indio_dev,
 	case IIO_CHAN_INFO_PEAK: {
 		int ret;
 
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
+		ret = iio_device_claim_direct_mode(indio_dev);
+		if (ret)
+			return ret;
 		mutex_lock(&data->lock);
 		ret = hdc2010_get_peak_measurement_byte(data, chan);
 		mutex_unlock(&data->lock);
-		iio_device_release_direct(indio_dev);
+		iio_device_release_direct_mode(indio_dev);
 		if (ret < 0)
 			return ret;
 		/* Scaling up the value so we can use same offset as RAW */
@@ -249,7 +251,8 @@ static const struct iio_info hdc2010_info = {
 	.attrs = &hdc2010_attribute_group,
 };
 
-static int hdc2010_probe(struct i2c_client *client)
+static int hdc2010_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	struct iio_dev *indio_dev;
 	struct hdc2010_data *data;
@@ -269,6 +272,7 @@ static int hdc2010_probe(struct i2c_client *client)
 	data->client = client;
 	mutex_init(&data->lock);
 
+	indio_dev->dev.parent = &client->dev;
 	/*
 	 * As DEVICE ID register does not differentiate between
 	 * HDC2010 and HDC2080, we have the name hardcoded
@@ -305,7 +309,7 @@ static int hdc2010_probe(struct i2c_client *client)
 	return iio_device_register(indio_dev);
 }
 
-static void hdc2010_remove(struct i2c_client *client)
+static int hdc2010_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct hdc2010_data *data = iio_priv(indio_dev);
@@ -315,6 +319,8 @@ static void hdc2010_remove(struct i2c_client *client)
 	/* Disable Automatic Measurement Mode */
 	if (hdc2010_update_drdy_config(data, HDC2010_AMM, 0))
 		dev_warn(&client->dev, "Unable to restore default AMM\n");
+
+	return 0;
 }
 
 static const struct i2c_device_id hdc2010_id[] = {

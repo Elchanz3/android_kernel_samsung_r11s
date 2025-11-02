@@ -1,5 +1,7 @@
 #!/bin/sh
 #
+# arch/riscv/boot/install.sh
+#
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
@@ -16,21 +18,35 @@
 #   $2 - kernel image file
 #   $3 - kernel map file
 #   $4 - default install path (blank if root directory)
+#
 
-set -e
+verify () {
+	if [ ! -f "$1" ]; then
+		echo ""                                                   1>&2
+		echo " *** Missing file: $1"                              1>&2
+		echo ' *** You need to run "make" before "make install".' 1>&2
+		echo ""                                                   1>&2
+		exit 1
+	fi
+}
 
-case "${2##*/}" in
+# Make sure the files actually exist
+verify "$2"
+verify "$3"
+
+# User may have a custom install script
+if [ -x ~/bin/${INSTALLKERNEL} ]; then exec ~/bin/${INSTALLKERNEL} "$@"; fi
+if [ -x /sbin/${INSTALLKERNEL} ]; then exec /sbin/${INSTALLKERNEL} "$@"; fi
+
+if [ "$(basename $2)" = "Image.gz" ]; then
 # Compressed install
-Image.*|vmlinuz.efi)
   echo "Installing compressed kernel"
   base=vmlinuz
-  ;;
+else
 # Normal install
-*)
   echo "Installing normal kernel"
   base=vmlinux
-  ;;
-esac
+fi
 
 if [ -f $4/$base-$1 ]; then
   mv $4/$base-$1 $4/$base-$1.old

@@ -755,7 +755,7 @@ static void lanai_shutdown_rx_vci(const struct lanai_vcc *lvcc)
 /* Shutdown transmitting on card.
  * Unfortunately the lanai needs us to wait until all the data
  * drains out of the buffer before we can dealloc it, so this
- * can take a while -- up to 370ms for a full 128KB buffer
+ * can take awhile -- up to 370ms for a full 128KB buffer
  * assuming everone else is quiet.  In theory the time is
  * boundless if there's a CBR VCC holding things up.
  */
@@ -765,7 +765,8 @@ static void lanai_shutdown_tx_vci(struct lanai_dev *lanai,
 	struct sk_buff *skb;
 	unsigned long flags, timeout;
 	int read, write, lastread = -1;
-
+	APRINTK(!in_interrupt(),
+	    "lanai_shutdown_tx_vci called w/o process context!\n");
 	if (lvcc->vbase == NULL)	/* We were never bound to a VCI */
 		return;
 	/* 15.2.1 - wait for queue to drain */
@@ -1758,7 +1759,7 @@ static void iter_dequeue(struct lanai_dev *lanai, vci_t vci)
 
 static void lanai_timed_poll(struct timer_list *t)
 {
-	struct lanai_dev *lanai = timer_container_of(lanai, t, timer);
+	struct lanai_dev *lanai = from_timer(lanai, t, timer);
 #ifndef DEBUG_RW
 	unsigned long flags;
 #ifdef USE_POWERDOWN
@@ -1792,7 +1793,7 @@ static inline void lanai_timed_poll_start(struct lanai_dev *lanai)
 
 static inline void lanai_timed_poll_stop(struct lanai_dev *lanai)
 {
-	timer_delete_sync(&lanai->timer);
+	del_timer_sync(&lanai->timer);
 }
 
 /* -------------------- INTERRUPT SERVICE: */

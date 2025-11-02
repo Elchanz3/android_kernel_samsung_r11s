@@ -37,12 +37,12 @@
 
 static struct irq_domain *nvic_irq_domain;
 
-static void __irq_entry nvic_handle_irq(struct pt_regs *regs)
+asmlinkage void __exception_irq_entry
+nvic_handle_irq(irq_hw_number_t hwirq, struct pt_regs *regs)
 {
-	unsigned long icsr = readl_relaxed(BASEADDR_V7M_SCB + V7M_SCB_ICSR);
-	irq_hw_number_t hwirq = (icsr & V7M_SCB_ICSR_VECTACTIVE) - 16;
+	unsigned int irq = irq_linear_revmap(nvic_irq_domain, hwirq);
 
-	generic_handle_domain_irq(nvic_irq_domain, hwirq);
+	handle_IRQ(irq, regs);
 }
 
 static int nvic_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
@@ -73,9 +73,8 @@ static int __init nvic_of_init(struct device_node *node,
 			       struct device_node *parent)
 {
 	unsigned int clr = IRQ_NOREQUEST | IRQ_NOPROBE | IRQ_NOAUTOEN;
-	unsigned int irqs, i, numbanks;
+	unsigned int irqs, i, ret, numbanks;
 	void __iomem *nvic_base;
-	int ret;
 
 	numbanks = (readl_relaxed(V7M_SCS_ICTR) &
 		    V7M_SCS_ICTR_INTLINESNUM_MASK) + 1;
@@ -91,7 +90,7 @@ static int __init nvic_of_init(struct device_node *node,
 		irqs = NVIC_MAX_IRQ;
 
 	nvic_irq_domain =
-		irq_domain_create_linear(of_fwnode_handle(node), irqs, &nvic_irq_domain_ops, NULL);
+		irq_domain_add_linear(node, irqs, &nvic_irq_domain_ops, NULL);
 
 	if (!nvic_irq_domain) {
 		pr_warn("Failed to allocate irq domain\n");
@@ -131,7 +130,6 @@ static int __init nvic_of_init(struct device_node *node,
 	for (i = 0; i < irqs; i += 4)
 		writel_relaxed(0, nvic_base + NVIC_IPR + i);
 
-	set_handle_irq(nvic_handle_irq);
 	return 0;
 }
 IRQCHIP_DECLARE(armv7m_nvic, "arm,armv7m-nvic", nvic_of_init);

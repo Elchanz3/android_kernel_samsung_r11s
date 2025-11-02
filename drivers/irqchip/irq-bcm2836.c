@@ -58,7 +58,6 @@ static struct irq_chip bcm2836_arm_irqchip_timer = {
 	.name		= "bcm2836-timer",
 	.irq_mask	= bcm2836_arm_irqchip_mask_timer_irq,
 	.irq_unmask	= bcm2836_arm_irqchip_unmask_timer_irq,
-	.flags		= IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_SKIP_SET_WAKE,
 };
 
 static void bcm2836_arm_irqchip_mask_pmu_irq(struct irq_data *d)
@@ -75,7 +74,6 @@ static struct irq_chip bcm2836_arm_irqchip_pmu = {
 	.name		= "bcm2836-pmu",
 	.irq_mask	= bcm2836_arm_irqchip_mask_pmu_irq,
 	.irq_unmask	= bcm2836_arm_irqchip_unmask_pmu_irq,
-	.flags		= IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_SKIP_SET_WAKE,
 };
 
 static void bcm2836_arm_irqchip_mask_gpu_irq(struct irq_data *d)
@@ -90,7 +88,6 @@ static struct irq_chip bcm2836_arm_irqchip_gpu = {
 	.name		= "bcm2836-gpu",
 	.irq_mask	= bcm2836_arm_irqchip_mask_gpu_irq,
 	.irq_unmask	= bcm2836_arm_irqchip_unmask_gpu_irq,
-	.flags		= IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_SKIP_SET_WAKE,
 };
 
 static void bcm2836_arm_irqchip_dummy_op(struct irq_data *d)
@@ -146,7 +143,7 @@ __exception_irq_entry bcm2836_arm_irqchip_handle_irq(struct pt_regs *regs)
 	if (stat) {
 		u32 hwirq = ffs(stat) - 1;
 
-		generic_handle_domain_irq(intc.domain, hwirq);
+		handle_domain_irq(intc.domain, hwirq, regs);
 	}
 }
 
@@ -164,13 +161,13 @@ static void bcm2836_arm_irqchip_handle_ipi(struct irq_desc *desc)
 	mbox_val = readl_relaxed(intc.base + LOCAL_MAILBOX0_CLR0 + 16 * cpu);
 	if (mbox_val) {
 		int hwirq = ffs(mbox_val) - 1;
-		generic_handle_domain_irq(ipi_domain, hwirq);
+		generic_handle_irq(irq_find_mapping(ipi_domain, hwirq));
 	}
 
 	chained_irq_exit(chip, desc);
 }
 
-static void bcm2836_arm_irqchip_ipi_ack(struct irq_data *d)
+static void bcm2836_arm_irqchip_ipi_eoi(struct irq_data *d)
 {
 	int cpu = smp_processor_id();
 
@@ -198,7 +195,7 @@ static struct irq_chip bcm2836_arm_irqchip_ipi = {
 	.name		= "IPI",
 	.irq_mask	= bcm2836_arm_irqchip_dummy_op,
 	.irq_unmask	= bcm2836_arm_irqchip_dummy_op,
-	.irq_ack	= bcm2836_arm_irqchip_ipi_ack,
+	.irq_eoi	= bcm2836_arm_irqchip_ipi_eoi,
 	.ipi_send_mask	= bcm2836_arm_irqchip_ipi_send_mask,
 };
 
@@ -212,7 +209,7 @@ static int bcm2836_arm_irqchip_ipi_alloc(struct irq_domain *d,
 		irq_set_percpu_devid(virq + i);
 		irq_domain_set_info(d, virq + i, i, &bcm2836_arm_irqchip_ipi,
 				    d->host_data,
-				    handle_percpu_devid_irq,
+				    handle_percpu_devid_fasteoi_ipi,
 				    NULL, NULL);
 	}
 
@@ -271,7 +268,10 @@ static void __init bcm2836_arm_irqchip_smp_init(void)
 	ipi_domain->flags |= IRQ_DOMAIN_FLAG_IPI_SINGLE;
 	irq_domain_update_bus_token(ipi_domain, DOMAIN_BUS_IPI);
 
-	base_ipi = irq_domain_alloc_irqs(ipi_domain, BITS_PER_MBOX, NUMA_NO_NODE, NULL);
+	base_ipi = __irq_domain_alloc_irqs(ipi_domain, -1, BITS_PER_MBOX,
+					   NUMA_NO_NODE, NULL,
+					   false, NULL);
+
 	if (WARN_ON(!base_ipi))
 		return;
 
@@ -325,7 +325,7 @@ static int __init bcm2836_arm_irqchip_l1_intc_of_init(struct device_node *node,
 
 	bcm2835_init_local_timer_frequency();
 
-	intc.domain = irq_domain_create_linear(of_fwnode_handle(node), LAST_IRQ + 1,
+	intc.domain = irq_domain_add_linear(node, LAST_IRQ + 1,
 					    &bcm2836_arm_irqchip_intc_ops,
 					    NULL);
 	if (!intc.domain)

@@ -98,97 +98,35 @@ struct statx_timestamp {
  */
 struct statx {
 	/* 0x00 */
-	/* What results were written [uncond] */
-	__u32	stx_mask;
-
-	/* Preferred general I/O size [uncond] */
-	__u32	stx_blksize;
-
-	/* Flags conveying information about the file [uncond] */
-	__u64	stx_attributes;
-
+	__u32	stx_mask;	/* What results were written [uncond] */
+	__u32	stx_blksize;	/* Preferred general I/O size [uncond] */
+	__u64	stx_attributes;	/* Flags conveying information about the file [uncond] */
 	/* 0x10 */
-	/* Number of hard links */
-	__u32	stx_nlink;
-
-	/* User ID of owner */
-	__u32	stx_uid;
-
-	/* Group ID of owner */
-	__u32	stx_gid;
-
-	/* File mode */
-	__u16	stx_mode;
+	__u32	stx_nlink;	/* Number of hard links */
+	__u32	stx_uid;	/* User ID of owner */
+	__u32	stx_gid;	/* Group ID of owner */
+	__u16	stx_mode;	/* File mode */
 	__u16	__spare0[1];
-
 	/* 0x20 */
-	/* Inode number */
-	__u64	stx_ino;
-
-	/* File size */
-	__u64	stx_size;
-
-	/* Number of 512-byte blocks allocated */
-	__u64	stx_blocks;
-
-	/* Mask to show what's supported in stx_attributes */
-	__u64	stx_attributes_mask;
-
+	__u64	stx_ino;	/* Inode number */
+	__u64	stx_size;	/* File size */
+	__u64	stx_blocks;	/* Number of 512-byte blocks allocated */
+	__u64	stx_attributes_mask; /* Mask to show what's supported in stx_attributes */
 	/* 0x40 */
-	/* Last access time */
-	struct statx_timestamp	stx_atime;
-
-	/* File creation time */
-	struct statx_timestamp	stx_btime;
-
-	/* Last attribute change time */
-	struct statx_timestamp	stx_ctime;
-
-	/* Last data modification time */
-	struct statx_timestamp	stx_mtime;
-
+	struct statx_timestamp	stx_atime;	/* Last access time */
+	struct statx_timestamp	stx_btime;	/* File creation time */
+	struct statx_timestamp	stx_ctime;	/* Last attribute change time */
+	struct statx_timestamp	stx_mtime;	/* Last data modification time */
 	/* 0x80 */
-	/* Device ID of special file [if bdev/cdev] */
-	__u32	stx_rdev_major;
+	__u32	stx_rdev_major;	/* Device ID of special file [if bdev/cdev] */
 	__u32	stx_rdev_minor;
-
-	/* ID of device containing file [uncond] */
-	__u32	stx_dev_major;
+	__u32	stx_dev_major;	/* ID of device containing file [uncond] */
 	__u32	stx_dev_minor;
-
 	/* 0x90 */
 	__u64	stx_mnt_id;
-
-	/* Memory buffer alignment for direct I/O */
-	__u32	stx_dio_mem_align;
-
-	/* File offset alignment for direct I/O */
-	__u32	stx_dio_offset_align;
-
+	__u64	__spare2;
 	/* 0xa0 */
-	/* Subvolume identifier */
-	__u64	stx_subvol;
-
-	/* Min atomic write unit in bytes */
-	__u32	stx_atomic_write_unit_min;
-
-	/* Max atomic write unit in bytes */
-	__u32	stx_atomic_write_unit_max;
-
-	/* 0xb0 */
-	/* Max atomic write segment count */
-	__u32   stx_atomic_write_segments_max;
-
-	/* File offset alignment for direct I/O reads */
-	__u32	stx_dio_read_offset_align;
-
-	/* Optimised max atomic write unit in bytes */
-	__u32	stx_atomic_write_unit_max_opt;
-	__u32	__spare2[1];
-
-	/* 0xc0 */
-	__u64	__spare3[8];	/* Spare space for future expansion */
-
+	__u64	__spare3[12];	/* Spare space for future expansion */
 	/* 0x100 */
 };
 
@@ -214,11 +152,6 @@ struct statx {
 #define STATX_BASIC_STATS	0x000007ffU	/* The stuff in the normal stat struct */
 #define STATX_BTIME		0x00000800U	/* Want/got stx_btime */
 #define STATX_MNT_ID		0x00001000U	/* Got stx_mnt_id */
-#define STATX_DIOALIGN		0x00002000U	/* Want/got direct I/O alignment info */
-#define STATX_MNT_ID_UNIQUE	0x00004000U	/* Want/got extended stx_mount_id */
-#define STATX_SUBVOL		0x00008000U	/* Want/got stx_subvol */
-#define STATX_WRITE_ATOMIC	0x00010000U	/* Want/got atomic_write_* fields */
-#define STATX_DIO_READ_ALIGN	0x00020000U	/* Want/got dio read alignment info */
 
 #define STATX__RESERVED		0x80000000U	/* Reserved for future struct statx expansion */
 
@@ -238,12 +171,9 @@ struct statx {
  * be of use to ordinary userspace programs such as GUIs or ls rather than
  * specialised tools.
  *
- * Note that the flags marked [I] correspond to the FS_IOC_SETFLAGS flags
+ * Note that the flags marked [I] correspond to generic FS_IOC_FLAGS
  * semantically.  Where possible, the numerical value is picked to correspond
- * also.  Note that the DAX attribute indicates that the file is in the CPU
- * direct access state.  It does not correspond to the per-inode flag that
- * some filesystems support.
- *
+ * also.
  */
 #define STATX_ATTR_COMPRESSED		0x00000004 /* [I] File is compressed by the fs */
 #define STATX_ATTR_IMMUTABLE		0x00000010 /* [I] File is marked immutable */
@@ -253,8 +183,7 @@ struct statx {
 #define STATX_ATTR_AUTOMOUNT		0x00001000 /* Dir: Automount trigger */
 #define STATX_ATTR_MOUNT_ROOT		0x00002000 /* Root of a mount */
 #define STATX_ATTR_VERITY		0x00100000 /* [I] Verity protected file */
-#define STATX_ATTR_DAX			0x00200000 /* File is currently in DAX state */
-#define STATX_ATTR_WRITE_ATOMIC		0x00400000 /* File supports atomic write operations */
+#define STATX_ATTR_DAX			0x00002000 /* [I] File is DAX */
 
 
 #endif /* _UAPI_LINUX_STAT_H */

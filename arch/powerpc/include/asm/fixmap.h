@@ -14,13 +14,25 @@
 #ifndef _ASM_FIXMAP_H
 #define _ASM_FIXMAP_H
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 #include <linux/sizes.h>
 #include <linux/pgtable.h>
 #include <asm/page.h>
 #ifdef CONFIG_HIGHMEM
 #include <linux/threads.h>
-#include <asm/kmap_size.h>
+#include <asm/kmap_types.h>
+#endif
+
+#ifdef CONFIG_PPC64
+#define FIXADDR_TOP	(IOREMAP_END + FIXADDR_SIZE)
+#else
+#define FIXADDR_SIZE	0
+#ifdef CONFIG_KASAN
+#include <asm/kasan.h>
+#define FIXADDR_TOP	(KASAN_SHADOW_START - PAGE_SIZE)
+#else
+#define FIXADDR_TOP	((unsigned long)(-PAGE_SIZE))
+#endif
 #endif
 
 /*
@@ -49,7 +61,7 @@ enum fixed_addresses {
 	FIX_EARLY_DEBUG_BASE = FIX_EARLY_DEBUG_TOP+(ALIGN(SZ_128K, PAGE_SIZE)/PAGE_SIZE)-1,
 #ifdef CONFIG_HIGHMEM
 	FIX_KMAP_BEGIN,	/* reserved pte's for temporary kernel mappings */
-	FIX_KMAP_END = FIX_KMAP_BEGIN + (KM_MAX_IDX * NR_CPUS) - 1,
+	FIX_KMAP_END = FIX_KMAP_BEGIN+(KM_TYPE_NR*NR_CPUS)-1,
 #endif
 #ifdef CONFIG_PPC_8xx
 	/* For IMMR we need an aligned 512K area */
@@ -107,9 +119,5 @@ static inline void __set_fixmap(enum fixed_addresses idx,
 
 #define __early_set_fixmap	__set_fixmap
 
-#ifdef CONFIG_PPC_8xx
-#define VIRT_IMMR_BASE (__fix_to_virt(FIX_IMMR_BASE))
-#endif
-
-#endif /* !__ASSEMBLER__ */
+#endif /* !__ASSEMBLY__ */
 #endif

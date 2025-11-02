@@ -10,7 +10,7 @@
 #include <linux/hpet.h>
 #include <linux/pci.h>
 #include <linux/irq.h>
-#include <linux/irqchip/irq-msi-lib.h>
+#include <linux/intel-iommu.h>
 #include <linux/acpi.h>
 #include <linux/irqdomain.h>
 #include <linux/crash_dump.h>
@@ -20,11 +20,14 @@
 #include <asm/cpu.h>
 #include <asm/irq_remapping.h>
 #include <asm/pci-direct.h>
-#include <asm/posted_intr.h>
+#include <asm/msidef.h>
 
-#include "iommu.h"
 #include "../irq_remapping.h"
-#include "../iommu-pages.h"
+
+enum irq_mode {
+	IRQ_REMAPPING,
+	IRQ_POSTING,
+};
 
 struct ioapic_scope {
 	struct intel_iommu *iommu;
@@ -45,8 +48,7 @@ struct irq_2_iommu {
 	u16 irte_index;
 	u16 sub_handle;
 	u8  irte_mask;
-	bool posted_msi;
-	bool posted_vcpu;
+	enum irq_mode mode;
 };
 
 struct intel_ir_data {
@@ -80,7 +82,6 @@ static const struct irq_domain_ops intel_ir_domain_ops;
 
 static void iommu_disable_irq_remapping(struct intel_iommu *iommu);
 static int __init parse_ioapics_under_ir(void);
-static const struct msi_parent_ops dmar_msi_parent_ops;
 
 static bool ir_pre_enabled(struct intel_iommu *iommu)
 {
@@ -134,6 +135,7 @@ static int alloc_irte(struct intel_iommu *iommu,
 		irq_iommu->irte_index =  index;
 		irq_iommu->sub_handle = 0;
 		irq_iommu->irte_mask = mask;
+		irq_iommu->mode = IRQ_REMAPPING;
 	}
 	raw_spin_unlock_irqrestore(&irq_2_ir_lock, flags);
 
@@ -171,35 +173,44 @@ static int modify_irte(struct irq_2_iommu *irq_iommu,
 	index = irq_iommu->irte_index + irq_iommu->sub_handle;
 	irte = &iommu->ir_table->base[index];
 
+#if defined(CONFIG_HAVE_CMPXCHG_DOUBLE)
 	if ((irte->pst == 1) || (irte_modified->pst == 1)) {
+		bool ret;
+
+		ret = cmpxchg_double(&irte->low, &irte->high,
+				     irte->low, irte->high,
+				     irte_modified->low, irte_modified->high);
 		/*
 		 * We use cmpxchg16 to atomically update the 128-bit IRTE,
 		 * and it cannot be updated by the hardware or other processors
 		 * behind us, so the return value of cmpxchg16 should be the
 		 * same as the old value.
 		 */
-		u128 old = irte->irte;
-		WARN_ON(!try_cmpxchg128(&irte->irte, &old, irte_modified->irte));
-	} else {
-		WRITE_ONCE(irte->low, irte_modified->low);
-		WRITE_ONCE(irte->high, irte_modified->high);
+		WARN_ON(!ret);
+	} else
+#endif
+	{
+		set_64bit(&irte->low, irte_modified->low);
+		set_64bit(&irte->high, irte_modified->high);
 	}
 	__iommu_flush_cache(iommu, irte, sizeof(*irte));
 
 	rc = qi_flush_iec(iommu, index, 0);
 
+	/* Update iommu mode according to the IRTE mode */
+	irq_iommu->mode = irte->pst ? IRQ_POSTING : IRQ_REMAPPING;
 	raw_spin_unlock_irqrestore(&irq_2_ir_lock, flags);
 
 	return rc;
 }
 
-static struct intel_iommu *map_hpet_to_iommu(u8 hpet_id)
+static struct irq_domain *map_hpet_to_ir(u8 hpet_id)
 {
 	int i;
 
 	for (i = 0; i < MAX_HPET_TBS; i++) {
 		if (ir_hpet[i].id == hpet_id && ir_hpet[i].iommu)
-			return ir_hpet[i].iommu;
+			return ir_hpet[i].iommu->ir_domain;
 	}
 	return NULL;
 }
@@ -215,11 +226,18 @@ static struct intel_iommu *map_ioapic_to_iommu(int apic)
 	return NULL;
 }
 
+static struct irq_domain *map_ioapic_to_ir(int apic)
+{
+	struct intel_iommu *iommu = map_ioapic_to_iommu(apic);
+
+	return iommu ? iommu->ir_domain : NULL;
+}
+
 static struct irq_domain *map_dev_to_ir(struct pci_dev *dev)
 {
 	struct dmar_drhd_unit *drhd = dmar_find_matched_drhd_unit(dev);
 
-	return drhd ? drhd->iommu->ir_domain : NULL;
+	return drhd ? drhd->iommu->ir_msi_domain : NULL;
 }
 
 static int clear_entries(struct irq_2_iommu *irq_iommu)
@@ -238,8 +256,8 @@ static int clear_entries(struct irq_2_iommu *irq_iommu)
 	end = start + (1 << irq_iommu->irte_mask);
 
 	for (entry = start; entry < end; entry++) {
-		WRITE_ONCE(entry->low, 0);
-		WRITE_ONCE(entry->high, 0);
+		set_64bit(&entry->low, 0);
+		set_64bit(&entry->high, 0);
 	}
 	bitmap_release_region(iommu->ir_table->bitmap, index,
 			      irq_iommu->irte_mask);
@@ -302,12 +320,14 @@ static int set_ioapic_sid(struct irte *irte, int apic)
 	if (!irte)
 		return -1;
 
+	down_read(&dmar_global_lock);
 	for (i = 0; i < MAX_IO_APICS; i++) {
 		if (ir_ioapic[i].iommu && ir_ioapic[i].id == apic) {
-			sid = PCI_DEVID(ir_ioapic[i].bus, ir_ioapic[i].devfn);
+			sid = (ir_ioapic[i].bus << 8) | ir_ioapic[i].devfn;
 			break;
 		}
 	}
+	up_read(&dmar_global_lock);
 
 	if (sid == 0) {
 		pr_warn("Failed to set source-id of IOAPIC (%d)\n", apic);
@@ -327,12 +347,14 @@ static int set_hpet_sid(struct irte *irte, u8 id)
 	if (!irte)
 		return -1;
 
+	down_read(&dmar_global_lock);
 	for (i = 0; i < MAX_HPET_TBS; i++) {
 		if (ir_hpet[i].iommu && ir_hpet[i].id == id) {
-			sid = PCI_DEVID(ir_hpet[i].bus, ir_hpet[i].devfn);
+			sid = (ir_hpet[i].bus << 8) | ir_hpet[i].devfn;
 			break;
 		}
 	}
+	up_read(&dmar_global_lock);
 
 	if (sid == 0) {
 		pr_warn("Failed to set source-id of HPET block (%d)\n", id);
@@ -479,8 +501,7 @@ static void iommu_set_irq_remapping(struct intel_iommu *iommu, int mode)
 	 * Global invalidation of interrupt entry cache to make sure the
 	 * hardware uses the new irq remapping table.
 	 */
-	if (!cap_esirtps(iommu->cap))
-		qi_global_iec(iommu);
+	qi_global_iec(iommu);
 }
 
 static void iommu_enable_irq_remapping(struct intel_iommu *iommu)
@@ -519,16 +540,10 @@ static void iommu_enable_irq_remapping(struct intel_iommu *iommu)
 
 static int intel_setup_irq_remapping(struct intel_iommu *iommu)
 {
-	struct irq_domain_info info = {
-		.ops		= &intel_ir_domain_ops,
-		.parent		= arch_get_ir_parent_domain(),
-		.domain_flags	= IRQ_DOMAIN_FLAG_ISOLATED_MSI,
-		.size		= INTR_REMAP_TABLE_ENTRIES,
-		.host_data	= iommu,
-	};
 	struct ir_table *ir_table;
+	struct fwnode_handle *fn;
 	unsigned long *bitmap;
-	void *ir_table_base;
+	struct page *pages;
 
 	if (iommu->ir_table)
 		return 0;
@@ -537,31 +552,39 @@ static int intel_setup_irq_remapping(struct intel_iommu *iommu)
 	if (!ir_table)
 		return -ENOMEM;
 
-	/* 1MB - maximum possible interrupt remapping table size */
-	ir_table_base =
-		iommu_alloc_pages_node_sz(iommu->node, GFP_KERNEL, SZ_1M);
-	if (!ir_table_base) {
-		pr_err("IR%d: failed to allocate 1M of pages\n", iommu->seq_id);
+	pages = alloc_pages_node(iommu->node, GFP_KERNEL | __GFP_ZERO,
+				 INTR_REMAP_PAGE_ORDER);
+	if (!pages) {
+		pr_err("IR%d: failed to allocate pages of order %d\n",
+		       iommu->seq_id, INTR_REMAP_PAGE_ORDER);
 		goto out_free_table;
 	}
 
-	bitmap = bitmap_zalloc(INTR_REMAP_TABLE_ENTRIES, GFP_KERNEL);
+	bitmap = bitmap_zalloc(INTR_REMAP_TABLE_ENTRIES, GFP_ATOMIC);
 	if (bitmap == NULL) {
 		pr_err("IR%d: failed to allocate bitmap\n", iommu->seq_id);
 		goto out_free_pages;
 	}
 
-	info.fwnode = irq_domain_alloc_named_id_fwnode("INTEL-IR", iommu->seq_id);
-	if (!info.fwnode)
+	fn = irq_domain_alloc_named_id_fwnode("INTEL-IR", iommu->seq_id);
+	if (!fn)
 		goto out_free_bitmap;
 
-	iommu->ir_domain = msi_create_parent_irq_domain(&info, &dmar_msi_parent_ops);
+	iommu->ir_domain =
+		irq_domain_create_hierarchy(arch_get_ir_parent_domain(),
+					    0, INTR_REMAP_TABLE_ENTRIES,
+					    fn, &intel_ir_domain_ops,
+					    iommu);
 	if (!iommu->ir_domain) {
 		pr_err("IR%d: failed to allocate irqdomain\n", iommu->seq_id);
 		goto out_free_fwnode;
 	}
+	iommu->ir_msi_domain =
+		arch_create_remap_msi_irq_domain(iommu->ir_domain,
+						 "INTEL-IR-MSI",
+						 iommu->seq_id);
 
-	ir_table->base = ir_table_base;
+	ir_table->base = page_address(pages);
 	ir_table->bitmap = bitmap;
 	iommu->ir_table = ir_table;
 
@@ -586,8 +609,8 @@ static int intel_setup_irq_remapping(struct intel_iommu *iommu)
 
 	if (ir_pre_enabled(iommu)) {
 		if (!is_kdump_kernel()) {
-			pr_info_once("IRQ remapping was enabled on %s but we are not in kdump mode\n",
-				     iommu->name);
+			pr_warn("IRQ remapping was enabled on %s but we are not in kdump mode\n",
+				iommu->name);
 			clear_ir_pre_enabled(iommu);
 			iommu_disable_irq_remapping(iommu);
 		} else if (iommu_load_old_irte(iommu))
@@ -603,14 +626,17 @@ static int intel_setup_irq_remapping(struct intel_iommu *iommu)
 	return 0;
 
 out_free_ir_domain:
+	if (iommu->ir_msi_domain)
+		irq_domain_remove(iommu->ir_msi_domain);
+	iommu->ir_msi_domain = NULL;
 	irq_domain_remove(iommu->ir_domain);
 	iommu->ir_domain = NULL;
 out_free_fwnode:
-	irq_domain_free_fwnode(info.fwnode);
+	irq_domain_free_fwnode(fn);
 out_free_bitmap:
 	bitmap_free(bitmap);
 out_free_pages:
-	iommu_free_pages(ir_table_base);
+	__free_pages(pages, INTR_REMAP_PAGE_ORDER);
 out_free_table:
 	kfree(ir_table);
 
@@ -624,6 +650,13 @@ static void intel_teardown_irq_remapping(struct intel_iommu *iommu)
 	struct fwnode_handle *fn;
 
 	if (iommu && iommu->ir_table) {
+		if (iommu->ir_msi_domain) {
+			fn = iommu->ir_msi_domain->fwnode;
+
+			irq_domain_remove(iommu->ir_msi_domain);
+			irq_domain_free_fwnode(fn);
+			iommu->ir_msi_domain = NULL;
+		}
 		if (iommu->ir_domain) {
 			fn = iommu->ir_domain->fwnode;
 
@@ -631,7 +664,8 @@ static void intel_teardown_irq_remapping(struct intel_iommu *iommu)
 			irq_domain_free_fwnode(fn);
 			iommu->ir_domain = NULL;
 		}
-		iommu_free_pages(iommu->ir_table->base);
+		free_pages((unsigned long)iommu->ir_table->base,
+			   INTR_REMAP_PAGE_ORDER);
 		bitmap_free(iommu->ir_table->bitmap);
 		kfree(iommu->ir_table);
 		iommu->ir_table = NULL;
@@ -653,8 +687,7 @@ static void iommu_disable_irq_remapping(struct intel_iommu *iommu)
 	 * global invalidation of interrupt entry cache before disabling
 	 * interrupt-remapping.
 	 */
-	if (!cap_esirtps(iommu->cap))
-		qi_global_iec(iommu);
+	qi_global_iec(iommu);
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flags);
 
@@ -1076,7 +1109,7 @@ error:
  */
 void intel_irq_remap_add_device(struct dmar_pci_notify_info *info)
 {
-	if (!irq_remapping_enabled || !pci_dev_has_default_msi_parent_domain(info->dev))
+	if (!irq_remapping_enabled || pci_dev_has_special_msi_domain(info->dev))
 		return;
 
 	dev_set_msi_domain(&info->dev->dev, map_dev_to_ir(info->dev));
@@ -1087,7 +1120,7 @@ static void prepare_irte(struct irte *irte, int vector, unsigned int dest)
 	memset(irte, 0, sizeof(*irte));
 
 	irte->present = 1;
-	irte->dst_mode = apic->dest_mode_logical;
+	irte->dst_mode = apic->irq_dest_mode;
 	/*
 	 * Trigger mode in the IRTE will always be edge, and for IO-APIC, the
 	 * actual level or edge trigger will be setup in the IO-APIC
@@ -1096,18 +1129,26 @@ static void prepare_irte(struct irte *irte, int vector, unsigned int dest)
 	 * irq migration in the presence of interrupt-remapping.
 	*/
 	irte->trigger_mode = 0;
-	irte->dlvry_mode = APIC_DELIVERY_MODE_FIXED;
+	irte->dlvry_mode = apic->irq_delivery_mode;
 	irte->vector = vector;
 	irte->dest_id = IRTE_DEST(dest);
 	irte->redir_hint = 1;
 }
 
-static void prepare_irte_posted(struct irte *irte)
+static struct irq_domain *intel_get_irq_domain(struct irq_alloc_info *info)
 {
-	memset(irte, 0, sizeof(*irte));
+	if (!info)
+		return NULL;
 
-	irte->present = 1;
-	irte->p_pst = 1;
+	switch (info->type) {
+	case X86_IRQ_ALLOC_TYPE_IOAPIC_GET_PARENT:
+		return map_ioapic_to_ir(info->devid);
+	case X86_IRQ_ALLOC_TYPE_HPET_GET_PARENT:
+		return map_hpet_to_ir(info->devid);
+	default:
+		WARN_ON_ONCE(1);
+		return NULL;
+	}
 }
 
 struct irq_remap_ops intel_irq_remap_ops = {
@@ -1116,69 +1157,10 @@ struct irq_remap_ops intel_irq_remap_ops = {
 	.disable		= disable_irq_remapping,
 	.reenable		= reenable_irq_remapping,
 	.enable_faulting	= enable_drhd_fault_handling,
+	.get_irq_domain		= intel_get_irq_domain,
 };
 
-#ifdef CONFIG_X86_POSTED_MSI
-
-static phys_addr_t get_pi_desc_addr(struct irq_data *irqd)
-{
-	int cpu = cpumask_first(irq_data_get_effective_affinity_mask(irqd));
-
-	if (WARN_ON(cpu >= nr_cpu_ids))
-		return 0;
-
-	return __pa(per_cpu_ptr(&posted_msi_pi_desc, cpu));
-}
-
-static void intel_ir_reconfigure_irte_posted(struct irq_data *irqd)
-{
-	struct intel_ir_data *ir_data = irqd->chip_data;
-	struct irte *irte = &ir_data->irte_entry;
-	struct irte irte_pi;
-	u64 pid_addr;
-
-	pid_addr = get_pi_desc_addr(irqd);
-
-	if (!pid_addr) {
-		pr_warn("Failed to setup IRQ %d for posted mode", irqd->irq);
-		return;
-	}
-
-	memset(&irte_pi, 0, sizeof(irte_pi));
-
-	/* The shared IRTE already be set up as posted during alloc_irte */
-	dmar_copy_shared_irte(&irte_pi, irte);
-
-	irte_pi.pda_l = (pid_addr >> (32 - PDA_LOW_BIT)) & ~(-1UL << PDA_LOW_BIT);
-	irte_pi.pda_h = (pid_addr >> 32) & ~(-1UL << PDA_HIGH_BIT);
-
-	modify_irte(&ir_data->irq_2_iommu, &irte_pi);
-}
-
-#else
-static inline void intel_ir_reconfigure_irte_posted(struct irq_data *irqd) {}
-#endif
-
-static void __intel_ir_reconfigure_irte(struct irq_data *irqd, bool force_host)
-{
-	struct intel_ir_data *ir_data = irqd->chip_data;
-
-	/*
-	 * Don't modify IRTEs for IRQs that are being posted to vCPUs if the
-	 * host CPU affinity changes.
-	 */
-	if (ir_data->irq_2_iommu.posted_vcpu && !force_host)
-		return;
-
-	ir_data->irq_2_iommu.posted_vcpu = false;
-
-	if (ir_data->irq_2_iommu.posted_msi)
-		intel_ir_reconfigure_irte_posted(irqd);
-	else
-		modify_irte(&ir_data->irq_2_iommu, &ir_data->irte_entry);
-}
-
-static void intel_ir_reconfigure_irte(struct irq_data *irqd, bool force_host)
+static void intel_ir_reconfigure_irte(struct irq_data *irqd, bool force)
 {
 	struct intel_ir_data *ir_data = irqd->chip_data;
 	struct irte *irte = &ir_data->irte_entry;
@@ -1191,7 +1173,9 @@ static void intel_ir_reconfigure_irte(struct irq_data *irqd, bool force_host)
 	irte->vector = cfg->vector;
 	irte->dest_id = IRTE_DEST(cfg->dest_apicid);
 
-	__intel_ir_reconfigure_irte(irqd, force_host);
+	/* Update the hardware only if the interrupt is in remapped mode. */
+	if (force || ir_data->irq_2_iommu.mode == IRQ_REMAPPING)
+		modify_irte(&ir_data->irq_2_iommu, irte);
 }
 
 /*
@@ -1226,7 +1210,7 @@ intel_ir_set_affinity(struct irq_data *data, const struct cpumask *mask,
 	 * at the new destination. So, time to cleanup the previous
 	 * vector allocation.
 	 */
-	vector_schedule_cleanup(cfg);
+	send_cleanup_vector(cfg);
 
 	return IRQ_SET_MASK_OK_DONE;
 }
@@ -1242,11 +1226,11 @@ static void intel_ir_compose_msi_msg(struct irq_data *irq_data,
 static int intel_ir_set_vcpu_affinity(struct irq_data *data, void *info)
 {
 	struct intel_ir_data *ir_data = data->chip_data;
-	struct intel_iommu_pi_data *pi_data = info;
+	struct vcpu_data *vcpu_pi_info = info;
 
-	/* stop posting interrupts, back to the default mode */
-	if (!pi_data) {
-		__intel_ir_reconfigure_irte(data, true);
+	/* stop posting interrupts, back to remapping mode */
+	if (!vcpu_pi_info) {
+		modify_irte(&ir_data->irq_2_iommu, &ir_data->irte_entry);
 	} else {
 		struct irte irte_pi;
 
@@ -1263,13 +1247,12 @@ static int intel_ir_set_vcpu_affinity(struct irq_data *data, void *info)
 		/* Update the posted mode fields */
 		irte_pi.p_pst = 1;
 		irte_pi.p_urgent = 0;
-		irte_pi.p_vector = pi_data->vector;
-		irte_pi.pda_l = (pi_data->pi_desc_addr >>
+		irte_pi.p_vector = vcpu_pi_info->vector;
+		irte_pi.pda_l = (vcpu_pi_info->pi_desc_addr >>
 				(32 - PDA_LOW_BIT)) & ~(-1UL << PDA_LOW_BIT);
-		irte_pi.pda_h = (pi_data->pi_desc_addr >> 32) &
+		irte_pi.pda_h = (vcpu_pi_info->pi_desc_addr >> 32) &
 				~(-1UL << PDA_HIGH_BIT);
 
-		ir_data->irq_2_iommu.posted_vcpu = true;
 		modify_irte(&ir_data->irq_2_iommu, &irte_pi);
 	}
 
@@ -1284,103 +1267,66 @@ static struct irq_chip intel_ir_chip = {
 	.irq_set_vcpu_affinity	= intel_ir_set_vcpu_affinity,
 };
 
-/*
- * With posted MSIs, the MSI vectors are multiplexed into a single notification
- * vector, and only the notification vector is sent to the APIC IRR.  Device
- * MSIs are then dispatched in a demux loop that harvests the MSIs from the
- * CPU's Posted Interrupt Request bitmap.  I.e. Posted MSIs never get sent to
- * the APIC IRR, and thus do not need an EOI.  The notification handler instead
- * performs a single EOI after processing the PIR.
- *
- * Note!  Pending SMP/CPU affinity changes, which are per MSI, must still be
- * honored, only the APIC EOI is omitted.
- *
- * For the example below, 3 MSIs are coalesced into one CPU notification. Only
- * one apic_eoi() is needed, but each MSI needs to process pending changes to
- * its CPU affinity.
- *
- * __sysvec_posted_msi_notification()
- *	irq_enter();
- *		handle_edge_irq()
- *			irq_chip_ack_parent()
- *				irq_move_irq(); // No EOI
- *			handle_irq_event()
- *				driver_handler()
- *		handle_edge_irq()
- *			irq_chip_ack_parent()
- *				irq_move_irq(); // No EOI
- *			handle_irq_event()
- *				driver_handler()
- *		handle_edge_irq()
- *			irq_chip_ack_parent()
- *				irq_move_irq(); // No EOI
- *			handle_irq_event()
- *				driver_handler()
- *	apic_eoi()
- *	irq_exit()
- *
- */
-static struct irq_chip intel_ir_chip_post_msi = {
-	.name			= "INTEL-IR-POST",
-	.irq_ack		= irq_move_irq,
-	.irq_set_affinity	= intel_ir_set_affinity,
-	.irq_compose_msi_msg	= intel_ir_compose_msi_msg,
-	.irq_set_vcpu_affinity	= intel_ir_set_vcpu_affinity,
-};
-
-static void fill_msi_msg(struct msi_msg *msg, u32 index, u32 subhandle)
-{
-	memset(msg, 0, sizeof(*msg));
-
-	msg->arch_addr_lo.dmar_base_address = X86_MSI_BASE_ADDRESS_LOW;
-	msg->arch_addr_lo.dmar_subhandle_valid = true;
-	msg->arch_addr_lo.dmar_format = true;
-	msg->arch_addr_lo.dmar_index_0_14 = index & 0x7FFF;
-	msg->arch_addr_lo.dmar_index_15 = !!(index & 0x8000);
-
-	msg->address_hi = X86_MSI_BASE_ADDRESS_HIGH;
-
-	msg->arch_data.dmar_subhandle = subhandle;
-}
-
 static void intel_irq_remapping_prepare_irte(struct intel_ir_data *data,
 					     struct irq_cfg *irq_cfg,
 					     struct irq_alloc_info *info,
 					     int index, int sub_handle)
 {
+	struct IR_IO_APIC_route_entry *entry;
 	struct irte *irte = &data->irte_entry;
+	struct msi_msg *msg = &data->msi_entry;
 
 	prepare_irte(irte, irq_cfg->vector, irq_cfg->dest_apicid);
-
 	switch (info->type) {
 	case X86_IRQ_ALLOC_TYPE_IOAPIC:
 		/* Set source-id of interrupt request */
 		set_ioapic_sid(irte, info->devid);
-		apic_pr_verbose("IOAPIC[%d]: Set IRTE entry (P:%d FPD:%d Dst_Mode:%d Redir_hint:%d Trig_Mode:%d Dlvry_Mode:%X Avail:%X Vector:%02X Dest:%08X SID:%04X SQ:%X SVT:%X)\n",
-				info->devid, irte->present, irte->fpd, irte->dst_mode,
-				irte->redir_hint, irte->trigger_mode, irte->dlvry_mode,
-				irte->avail, irte->vector, irte->dest_id, irte->sid,
-				irte->sq, irte->svt);
-		sub_handle = info->ioapic.pin;
+		apic_printk(APIC_VERBOSE, KERN_DEBUG "IOAPIC[%d]: Set IRTE entry (P:%d FPD:%d Dst_Mode:%d Redir_hint:%d Trig_Mode:%d Dlvry_Mode:%X Avail:%X Vector:%02X Dest:%08X SID:%04X SQ:%X SVT:%X)\n",
+			info->devid, irte->present, irte->fpd,
+			irte->dst_mode, irte->redir_hint,
+			irte->trigger_mode, irte->dlvry_mode,
+			irte->avail, irte->vector, irte->dest_id,
+			irte->sid, irte->sq, irte->svt);
+
+		entry = (struct IR_IO_APIC_route_entry *)info->ioapic.entry;
+		info->ioapic.entry = NULL;
+		memset(entry, 0, sizeof(*entry));
+		entry->index2	= (index >> 15) & 0x1;
+		entry->zero	= 0;
+		entry->format	= 1;
+		entry->index	= (index & 0x7fff);
+		/*
+		 * IO-APIC RTE will be configured with virtual vector.
+		 * irq handler will do the explicit EOI to the io-apic.
+		 */
+		entry->vector	= info->ioapic.pin;
+		entry->mask	= 0;			/* enable IRQ */
+		entry->trigger	= info->ioapic.trigger;
+		entry->polarity	= info->ioapic.polarity;
+		if (info->ioapic.trigger)
+			entry->mask = 1; /* Mask level triggered irqs. */
 		break;
+
 	case X86_IRQ_ALLOC_TYPE_HPET:
-		set_hpet_sid(irte, info->devid);
-		break;
 	case X86_IRQ_ALLOC_TYPE_PCI_MSI:
 	case X86_IRQ_ALLOC_TYPE_PCI_MSIX:
-		if (posted_msi_supported()) {
-			prepare_irte_posted(irte);
-			data->irq_2_iommu.posted_msi = 1;
-		}
+		if (info->type == X86_IRQ_ALLOC_TYPE_HPET)
+			set_hpet_sid(irte, info->devid);
+		else
+			set_msi_sid(irte, msi_desc_to_pci_dev(info->desc));
 
-		set_msi_sid(irte,
-			    pci_real_dma_dev(msi_desc_to_pci_dev(info->desc)));
+		msg->address_hi = MSI_ADDR_BASE_HI;
+		msg->data = sub_handle;
+		msg->address_lo = MSI_ADDR_BASE_LO | MSI_ADDR_IR_EXT_INT |
+				  MSI_ADDR_IR_SHV |
+				  MSI_ADDR_IR_INDEX1(index) |
+				  MSI_ADDR_IR_INDEX2(index);
 		break;
+
 	default:
 		BUG_ON(1);
 		break;
 	}
-	fill_msi_msg(&data->msi_entry, index, sub_handle);
 }
 
 static void intel_free_irq_resources(struct irq_domain *domain,
@@ -1418,8 +1364,16 @@ static int intel_irq_remapping_alloc(struct irq_domain *domain,
 
 	if (!info || !iommu)
 		return -EINVAL;
-	if (nr_irqs > 1 && info->type != X86_IRQ_ALLOC_TYPE_PCI_MSI)
+	if (nr_irqs > 1 && info->type != X86_IRQ_ALLOC_TYPE_PCI_MSI &&
+	    info->type != X86_IRQ_ALLOC_TYPE_PCI_MSIX)
 		return -EINVAL;
+
+	/*
+	 * With IRQ remapping enabled, don't need contiguous CPU vectors
+	 * to support multiple MSI interrupts.
+	 */
+	if (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI)
+		info->flags &= ~X86_IRQ_ALLOC_CONTIGUOUS_VECTORS;
 
 	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);
 	if (ret < 0)
@@ -1430,7 +1384,9 @@ static int intel_irq_remapping_alloc(struct irq_domain *domain,
 	if (!data)
 		goto out_free_parent;
 
+	down_read(&dmar_global_lock);
 	index = alloc_irte(iommu, &data->irq_2_iommu, nr_irqs);
+	up_read(&dmar_global_lock);
 	if (index < 0) {
 		pr_warn("Failed to allocate IRTE\n");
 		kfree(data);
@@ -1460,13 +1416,9 @@ static int intel_irq_remapping_alloc(struct irq_domain *domain,
 
 		irq_data->hwirq = (index << 16) + i;
 		irq_data->chip_data = ird;
-		if (posted_msi_supported() &&
-		    ((info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI) ||
-		     (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSIX)))
-			irq_data->chip = &intel_ir_chip_post_msi;
-		else
-			irq_data->chip = &intel_ir_chip;
+		irq_data->chip = &intel_ir_chip;
 		intel_irq_remapping_prepare_irte(ird, irq_cfg, info, index, i);
+		irq_set_status_flags(virq + i, IRQ_MOVE_PCNTXT);
 	}
 	return 0;
 
@@ -1497,41 +1449,15 @@ static void intel_irq_remapping_deactivate(struct irq_domain *domain,
 	struct intel_ir_data *data = irq_data->chip_data;
 	struct irte entry;
 
-	WARN_ON_ONCE(data->irq_2_iommu.posted_vcpu);
-	data->irq_2_iommu.posted_vcpu = false;
-
 	memset(&entry, 0, sizeof(entry));
 	modify_irte(&data->irq_2_iommu, &entry);
 }
 
-static int intel_irq_remapping_select(struct irq_domain *d,
-				      struct irq_fwspec *fwspec,
-				      enum irq_domain_bus_token bus_token)
-{
-	struct intel_iommu *iommu = NULL;
-
-	if (x86_fwspec_is_ioapic(fwspec))
-		iommu = map_ioapic_to_iommu(fwspec->param[0]);
-	else if (x86_fwspec_is_hpet(fwspec))
-		iommu = map_hpet_to_iommu(fwspec->param[0]);
-
-	return iommu && d == iommu->ir_domain;
-}
-
 static const struct irq_domain_ops intel_ir_domain_ops = {
-	.select = intel_irq_remapping_select,
 	.alloc = intel_irq_remapping_alloc,
 	.free = intel_irq_remapping_free,
 	.activate = intel_irq_remapping_activate,
 	.deactivate = intel_irq_remapping_deactivate,
-};
-
-static const struct msi_parent_ops dmar_msi_parent_ops = {
-	.supported_flags	= X86_VECTOR_MSI_FLAGS_SUPPORTED | MSI_FLAG_MULTI_PCI_MSI,
-	.bus_select_token	= DOMAIN_BUS_DMAR,
-	.bus_select_mask	= MATCH_PCI_MSI,
-	.prefix			= "IR-",
-	.init_dev_msi_info	= msi_parent_init_dev_msi_info,
 };
 
 /*

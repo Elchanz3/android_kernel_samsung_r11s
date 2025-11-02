@@ -60,8 +60,9 @@ static long erst_dbg_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	case APEI_ERST_CLEAR_RECORD:
-		if (copy_from_user(&record_id, (void __user *)arg,
-				   sizeof(record_id)))
+		rc = copy_from_user(&record_id, (void __user *)arg,
+				    sizeof(record_id));
+		if (rc)
 			return -EFAULT;
 		return erst_clear(record_id);
 	case APEI_ERST_GET_RECORD_COUNT:
@@ -110,8 +111,7 @@ retry_next:
 		goto out;
 	}
 retry:
-	rc = len = erst_read_record(id, erst_dbg_buf, erst_dbg_buf_len,
-			erst_dbg_buf_len, NULL);
+	rc = len = erst_read(id, erst_dbg_buf, erst_dbg_buf_len);
 	/* The record may be cleared by others, try read next record */
 	if (rc == -ENOENT)
 		goto retry_next;
@@ -174,7 +174,8 @@ static ssize_t erst_dbg_write(struct file *filp, const char __user *ubuf,
 		erst_dbg_buf = p;
 		erst_dbg_buf_len = usize;
 	}
-	if (copy_from_user(erst_dbg_buf, ubuf, usize)) {
+	rc = copy_from_user(erst_dbg_buf, ubuf, usize);
+	if (rc) {
 		rc = -EFAULT;
 		goto out;
 	}
@@ -197,6 +198,7 @@ static const struct file_operations erst_dbg_ops = {
 	.read		= erst_dbg_read,
 	.write		= erst_dbg_write,
 	.unlocked_ioctl	= erst_dbg_ioctl,
+	.llseek		= no_llseek,
 };
 
 static struct miscdevice erst_dbg_dev = {

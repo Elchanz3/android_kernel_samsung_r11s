@@ -991,8 +991,8 @@ static int sc27xx_fgu_calibration(struct sc27xx_fgu_data *data)
 
 static int sc27xx_fgu_hw_init(struct sc27xx_fgu_data *data)
 {
-	struct power_supply_battery_info *info;
-	const struct power_supply_battery_ocv_table *table;
+	struct power_supply_battery_info info = { };
+	struct power_supply_battery_ocv_table *table;
 	int ret, delta_clbcnt, alarm_adc;
 
 	ret = power_supply_get_battery_info(data->battery, &info);
@@ -1001,23 +1001,24 @@ static int sc27xx_fgu_hw_init(struct sc27xx_fgu_data *data)
 		return ret;
 	}
 
-	data->total_cap = info->charge_full_design_uah / 1000;
-	data->max_volt = info->constant_charge_voltage_max_uv / 1000;
-	data->internal_resist = info->factory_internal_resistance_uohm / 1000;
-	data->min_volt = info->voltage_min_design_uv;
+	data->total_cap = info.charge_full_design_uah / 1000;
+	data->max_volt = info.constant_charge_voltage_max_uv / 1000;
+	data->internal_resist = info.factory_internal_resistance_uohm / 1000;
+	data->min_volt = info.voltage_min_design_uv;
 
 	/*
 	 * For SC27XX fuel gauge device, we only use one ocv-capacity
 	 * table in normal temperature 20 Celsius.
 	 */
-	table = power_supply_find_ocv2cap_table(info, 20, &data->table_len);
+	table = power_supply_find_ocv2cap_table(&info, 20, &data->table_len);
 	if (!table)
 		return -EINVAL;
 
-	data->cap_table = devm_kmemdup_array(data->dev, table, data->table_len,
-					     sizeof(*table), GFP_KERNEL);
+	data->cap_table = devm_kmemdup(data->dev, table,
+				       data->table_len * sizeof(*table),
+				       GFP_KERNEL);
 	if (!data->cap_table) {
-		power_supply_put_battery_info(data->battery, info);
+		power_supply_put_battery_info(data->battery, &info);
 		return -ENOMEM;
 	}
 
@@ -1027,19 +1028,19 @@ static int sc27xx_fgu_hw_init(struct sc27xx_fgu_data *data)
 	if (!data->alarm_cap)
 		data->alarm_cap += 1;
 
-	data->resist_table_len = info->resist_table_size;
+	data->resist_table_len = info.resist_table_size;
 	if (data->resist_table_len > 0) {
-		data->resist_table = devm_kmemdup(data->dev, info->resist_table,
+		data->resist_table = devm_kmemdup(data->dev, info.resist_table,
 						  data->resist_table_len *
 						  sizeof(struct power_supply_resistance_temp_table),
 						  GFP_KERNEL);
 		if (!data->resist_table) {
-			power_supply_put_battery_info(data->battery, info);
+			power_supply_put_battery_info(data->battery, &info);
 			return -ENOMEM;
 		}
 	}
 
-	power_supply_put_battery_info(data->battery, info);
+	power_supply_put_battery_info(data->battery, &info);
 
 	ret = sc27xx_fgu_calibration(data);
 	if (ret)
@@ -1140,6 +1141,7 @@ disable_fgu:
 static int sc27xx_fgu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct device_node *np = dev->of_node;
 	struct power_supply_config fgu_cfg = { };
 	struct sc27xx_fgu_data *data;
 	int ret, irq;
@@ -1181,14 +1183,10 @@ static int sc27xx_fgu_probe(struct platform_device *pdev)
 		return PTR_ERR(data->charge_chan);
 	}
 
-	data->gpiod = devm_gpiod_get(dev, "battery-detect", GPIOD_IN);
+	data->gpiod = devm_gpiod_get(dev, "bat-detect", GPIOD_IN);
 	if (IS_ERR(data->gpiod)) {
-		data->gpiod = devm_gpiod_get(dev, "bat-detect", GPIOD_IN);
-		if (IS_ERR(data->gpiod)) {
-			dev_err(dev, "failed to get battery detection GPIO\n");
-			return PTR_ERR(data->gpiod);
-		}
-		dev_warn(dev, "bat-detect is deprecated, please use battery-detect\n");
+		dev_err(dev, "failed to get battery detection GPIO\n");
+		return PTR_ERR(data->gpiod);
 	}
 
 	ret = gpiod_get_value_cansleep(data->gpiod);
@@ -1203,7 +1201,7 @@ static int sc27xx_fgu_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, data);
 
 	fgu_cfg.drv_data = data;
-	fgu_cfg.fwnode = dev_fwnode(dev);
+	fgu_cfg.of_node = np;
 	data->battery = devm_power_supply_register(dev, &sc27xx_fgu_desc,
 						   &fgu_cfg);
 	if (IS_ERR(data->battery)) {
@@ -1224,8 +1222,10 @@ static int sc27xx_fgu_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	if (irq < 0) {
+		dev_err(dev, "no irq resource specified\n");
 		return irq;
+	}
 
 	ret = devm_request_threaded_irq(data->dev, irq, NULL,
 					sc27xx_fgu_interrupt,

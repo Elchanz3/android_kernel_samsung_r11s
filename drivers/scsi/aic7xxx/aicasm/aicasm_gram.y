@@ -58,6 +58,7 @@
 #include "aicasm_symbol.h"
 #include "aicasm_insformat.h"
 
+int yylineno;
 char *yyfilename;
 char stock_prefix[] = "aic_";
 char *prefix = stock_prefix;
@@ -102,7 +103,6 @@ static void add_conditional(symbol_t *symbol);
 static void add_version(const char *verstring);
 static int  is_download_const(expression_t *immed);
 static int  is_location_address(symbol_t *symbol);
-int yylex();
 void yyerror(const char *string);
 
 #define SRAM_SYMNAME "SRAM_BASE"

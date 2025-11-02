@@ -4,7 +4,6 @@
  * Copyright 2011 Linaro Ltd.
  */
 
-#include <linux/clk/imx.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -16,7 +15,6 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
-#include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/suspend.h>
 #include <asm/cacheflush.h>
@@ -573,8 +571,6 @@ static int __init imx6q_suspend_init(const struct imx6_pm_socdata *socdata)
 		&imx6_suspend,
 		MX6Q_SUSPEND_OCRAM_SIZE - sizeof(*pm_info));
 
-	__arm_iomem_set_ro(suspend_ocram_base, MX6Q_SUSPEND_OCRAM_SIZE);
-
 	goto put_device;
 
 pl310_cache_map_failed:
@@ -634,11 +630,13 @@ static void imx6_pm_stby_poweroff(void)
 
 static int imx6_pm_stby_poweroff_probe(void)
 {
-	if (register_platform_power_off(imx6_pm_stby_poweroff)) {
-		pr_warn("%s: platform power off already claimed!\n", __func__);
+	if (pm_power_off) {
+		pr_warn("%s: pm_power_off already claimed  %p %ps!\n",
+			__func__, pm_power_off, pm_power_off);
 		return -EBUSY;
 	}
 
+	pm_power_off = imx6_pm_stby_poweroff;
 	return 0;
 }
 

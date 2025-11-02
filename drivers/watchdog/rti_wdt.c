@@ -14,8 +14,6 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/of.h>
-#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/types.h>
@@ -54,14 +52,9 @@
 
 #define DWDST			BIT(1)
 
-#define PON_REASON_SOF_NUM	0xBBBBCCCC
-#define PON_REASON_MAGIC_NUM	0xDDDDDDDD
-#define PON_REASON_EOF_NUM	0xCCCCBBBB
-#define RESERVED_MEM_MIN_SIZE	12
-
 #define MAX_HW_ERROR		250
 
-static int heartbeat;
+static int heartbeat = DEFAULT_HEARTBEAT;
 
 /*
  * struct to hold data for each WDT device
@@ -210,14 +203,11 @@ static int rti_wdt_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct device *dev = &pdev->dev;
+	struct resource *wdt_mem;
 	struct watchdog_device *wdd;
 	struct rti_wdt_device *wdt;
 	struct clk *clk;
 	u32 last_ping = 0;
-	u32 reserved_mem_size;
-	struct resource res;
-	u32 *vaddr;
-	u64 paddr;
 
 	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
 	if (!wdt)
@@ -237,8 +227,9 @@ static int rti_wdt_probe(struct platform_device *pdev)
 	}
 
 	pm_runtime_enable(dev);
-	ret = pm_runtime_resume_and_get(dev);
+	ret = pm_runtime_get_sync(dev);
 	if (ret < 0) {
+		pm_runtime_put_noidle(dev);
 		pm_runtime_disable(&pdev->dev);
 		return dev_err_probe(dev, ret, "runtime pm failed\n");
 	}
@@ -251,38 +242,35 @@ static int rti_wdt_probe(struct platform_device *pdev)
 	wdd->min_timeout = 1;
 	wdd->max_hw_heartbeat_ms = (WDT_PRELOAD_MAX << WDT_PRELOAD_SHIFT) /
 		wdt->freq * 1000;
-	wdd->timeout = DEFAULT_HEARTBEAT;
 	wdd->parent = dev;
 
 	watchdog_set_drvdata(wdd, wdt);
 	watchdog_set_nowayout(wdd, 1);
 	watchdog_set_restart_priority(wdd, 128);
 
-	wdt->base = devm_platform_ioremap_resource(pdev, 0);
+	wdt_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	wdt->base = devm_ioremap_resource(dev, wdt_mem);
 	if (IS_ERR(wdt->base)) {
 		ret = PTR_ERR(wdt->base);
 		goto err_iomap;
 	}
 
 	if (readl(wdt->base + RTIDWDCTRL) == WDENABLE_KEY) {
-		int preset_heartbeat;
 		u32 time_left_ms;
 		u64 heartbeat_ms;
 		u32 wsize;
 
 		set_bit(WDOG_HW_RUNNING, &wdd->status);
 		time_left_ms = rti_wdt_get_timeleft_ms(wdd);
-		/* AM62x TRM: texp = (RTIDWDPRLD + 1) * (2^13) / RTICLK1 */
-		heartbeat_ms = readl(wdt->base + RTIDWDPRLD) + 1;
+		heartbeat_ms = readl(wdt->base + RTIDWDPRLD);
 		heartbeat_ms <<= WDT_PRELOAD_SHIFT;
 		heartbeat_ms *= 1000;
 		do_div(heartbeat_ms, wdt->freq);
-		preset_heartbeat = heartbeat_ms + 500;
-		preset_heartbeat /= 1000;
-		if (preset_heartbeat != heartbeat)
+		if (heartbeat_ms != heartbeat * 1000)
 			dev_warn(dev, "watchdog already running, ignoring heartbeat config!\n");
 
-		heartbeat = preset_heartbeat;
+		heartbeat = heartbeat_ms;
+		heartbeat /= 1000;
 
 		wsize = readl(wdt->base + RTIWWDSIZECTRL);
 		ret = rti_wdt_setup_hw_hb(wdd, wsize);
@@ -298,41 +286,13 @@ static int rti_wdt_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = of_reserved_mem_region_to_resource(pdev->dev.of_node, 0, &res);
-	if (!ret) {
-		/*
-		 * If reserved memory is defined for watchdog reset cause.
-		 * Readout the Power-on(PON) reason and pass to bootstatus.
-		 */
-		paddr = res.start;
-		reserved_mem_size = resource_size(&res);
-		if (reserved_mem_size < RESERVED_MEM_MIN_SIZE) {
-			dev_err(dev, "The size of reserved memory is too small.\n");
-			ret = -EINVAL;
-			goto err_iomap;
-		}
-
-		vaddr = memremap(paddr, reserved_mem_size, MEMREMAP_WB);
-		if (!vaddr) {
-			dev_err(dev, "Failed to map memory-region.\n");
-			ret = -ENOMEM;
-			goto err_iomap;
-		}
-
-		if (vaddr[0] == PON_REASON_SOF_NUM &&
-		    vaddr[1] == PON_REASON_MAGIC_NUM &&
-		    vaddr[2] == PON_REASON_EOF_NUM) {
-			wdd->bootstatus |= WDIOF_CARDRESET;
-		}
-		memset(vaddr, 0, reserved_mem_size);
-		memunmap(vaddr);
-	}
-
 	watchdog_init_timeout(wdd, heartbeat, dev);
 
 	ret = watchdog_register_device(wdd);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "cannot register watchdog device\n");
 		goto err_iomap;
+	}
 
 	if (last_ping)
 		watchdog_set_last_hw_keepalive(wdd, last_ping);
@@ -349,7 +309,7 @@ err_iomap:
 	return ret;
 }
 
-static void rti_wdt_remove(struct platform_device *pdev)
+static int rti_wdt_remove(struct platform_device *pdev)
 {
 	struct rti_wdt_device *wdt = platform_get_drvdata(pdev);
 
@@ -359,6 +319,8 @@ static void rti_wdt_remove(struct platform_device *pdev)
 		pm_runtime_put(&pdev->dev);
 
 	pm_runtime_disable(&pdev->dev);
+
+	return 0;
 }
 
 static const struct of_device_id rti_wdt_of_match[] = {

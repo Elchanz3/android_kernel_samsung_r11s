@@ -160,9 +160,10 @@ static irqreturn_t milbeaut_xdmac_interrupt(int irq, void *dev_id)
 {
 	struct milbeaut_xdmac_chan *mc = dev_id;
 	struct milbeaut_xdmac_desc *md;
+	unsigned long flags;
 	u32 val;
 
-	spin_lock(&mc->vc.lock);
+	spin_lock_irqsave(&mc->vc.lock, flags);
 
 	/* Ack and Stop */
 	val = FIELD_PREP(M10V_XDDSD_IS_MASK, 0x0);
@@ -176,7 +177,7 @@ static irqreturn_t milbeaut_xdmac_interrupt(int irq, void *dev_id)
 
 	milbeaut_xdmac_start(mc);
 out:
-	spin_unlock(&mc->vc.lock);
+	spin_unlock_irqrestore(&mc->vc.lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -368,7 +369,7 @@ disable_xdmac:
 	return ret;
 }
 
-static void milbeaut_xdmac_remove(struct platform_device *pdev)
+static int milbeaut_xdmac_remove(struct platform_device *pdev)
 {
 	struct milbeaut_xdmac_device *mdev = platform_get_drvdata(pdev);
 	struct dma_chan *chan;
@@ -383,15 +384,8 @@ static void milbeaut_xdmac_remove(struct platform_device *pdev)
 	 */
 	list_for_each_entry(chan, &mdev->ddev.channels, device_node) {
 		ret = dmaengine_terminate_sync(chan);
-		if (ret) {
-			/*
-			 * This results in resource leakage and maybe also
-			 * use-after-free errors as e.g. *mdev is kfreed.
-			 */
-			dev_alert(&pdev->dev, "Failed to terminate channel %d (%pe)\n",
-				  chan->chan_id, ERR_PTR(ret));
-			return;
-		}
+		if (ret)
+			return ret;
 		milbeaut_xdmac_free_chan_resources(chan);
 	}
 
@@ -399,6 +393,8 @@ static void milbeaut_xdmac_remove(struct platform_device *pdev)
 	dma_async_device_unregister(&mdev->ddev);
 
 	disable_xdmac(mdev);
+
+	return 0;
 }
 
 static const struct of_device_id milbeaut_xdmac_match[] = {

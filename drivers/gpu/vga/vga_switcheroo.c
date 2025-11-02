@@ -437,7 +437,7 @@ find_active_client(struct list_head *head)
  */
 bool vga_switcheroo_client_probe_defer(struct pci_dev *pdev)
 {
-	if (pci_is_display(pdev)) {
+	if ((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY) {
 		/*
 		 * apple-gmux is needed on pre-retina MacBook Pro
 		 * to probe the panel if pdev is the inactive GPU.
@@ -926,7 +926,8 @@ static void vga_switcheroo_debugfs_init(struct vgasr_priv *priv)
 /**
  * vga_switcheroo_process_delayed_switch() - helper for delayed switching
  *
- * Process a delayed switch if one is pending.
+ * Process a delayed switch if one is pending. DRM drivers should call this
+ * from their ->lastclose callback.
  *
  * Return: 0 on success. -EINVAL if no delayed switch is pending, if the client
  * has unregistered in the meantime or if there are other clients blocking the
@@ -1033,12 +1034,17 @@ static int vga_switcheroo_runtime_suspend(struct device *dev)
 static int vga_switcheroo_runtime_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
+	int ret;
 
 	mutex_lock(&vgasr_mutex);
 	vga_switcheroo_power_switch(pdev, VGA_SWITCHEROO_ON);
 	mutex_unlock(&vgasr_mutex);
-	pci_resume_bus(pdev->bus);
-	return dev->bus->pm->runtime_resume(dev);
+	pci_wakeup_bus(pdev->bus);
+	ret = dev->bus->pm->runtime_resume(dev);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 /**

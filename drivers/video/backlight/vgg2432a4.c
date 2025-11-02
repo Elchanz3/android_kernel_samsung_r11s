@@ -10,6 +10,7 @@
 
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/lcd.h>
 #include <linux/module.h>
@@ -232,9 +233,9 @@ static int vgg2432a4_probe(struct spi_device *spi)
 	return 0;
 }
 
-static void vgg2432a4_remove(struct spi_device *spi)
+static int vgg2432a4_remove(struct spi_device *spi)
 {
-	ili9320_remove(spi_get_drvdata(spi));
+	return ili9320_remove(spi_get_drvdata(spi));
 }
 
 static void vgg2432a4_shutdown(struct spi_device *spi)

@@ -2,8 +2,8 @@
 /*
  * CAN driver for PEAK System micro-CAN based adapters
  *
- * Copyright (C) 2003-2025 PEAK System-Technik GmbH
- * Author: Stéphane Grosjean <stephane.grosjean@hms-networks.com>
+ * Copyright (C) 2003-2011 PEAK System-Technik GmbH
+ * Copyright (C) 2011-2013 Stephane Grosjean <s.grosjean@peak-system.com>
  */
 #ifndef PUCAN_H
 #define PUCAN_H
@@ -282,7 +282,7 @@ static inline int pucan_msg_get_channel(const struct pucan_rx_msg *msg)
 }
 
 /* return the dlc value from any received message channel_dlc field */
-static inline u8 pucan_msg_get_dlc(const struct pucan_rx_msg *msg)
+static inline int pucan_msg_get_dlc(const struct pucan_rx_msg *msg)
 {
 	return msg->channel_dlc >> 4;
 }

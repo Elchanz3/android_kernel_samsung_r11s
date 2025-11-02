@@ -10,7 +10,6 @@
 #include <linux/module.h>
 #include <linux/phy.h>
 
-#include "phylib.h"
 #include "bcm-phy-lib.h"
 
 /* RDB per-port registers
@@ -128,10 +127,6 @@
 
 #define BCM54140_DEFAULT_DOWNSHIFT 5
 #define BCM54140_MAX_DOWNSHIFT 9
-
-enum bcm54140_global_phy {
-	BCM54140_BASE_ADDR = 0,
-};
 
 struct bcm54140_priv {
 	int port;
@@ -369,7 +364,7 @@ static int bcm54140_hwmon_write(struct device *dev,
 	}
 }
 
-static const struct hwmon_channel_info * const bcm54140_hwmon_info[] = {
+static const struct hwmon_channel_info *bcm54140_hwmon_info[] = {
 	HWMON_CHANNEL_INFO(temp,
 			   HWMON_T_INPUT | HWMON_T_MIN | HWMON_T_MAX |
 			   HWMON_T_ALARM),
@@ -434,13 +429,11 @@ static int bcm54140_base_read_rdb(struct phy_device *phydev, u16 rdb)
 	int ret;
 
 	phy_lock_mdio_bus(phydev);
-	ret = __phy_package_write(phydev, BCM54140_BASE_ADDR,
-				  MII_BCM54XX_RDB_ADDR, rdb);
+	ret = __phy_package_write(phydev, MII_BCM54XX_RDB_ADDR, rdb);
 	if (ret < 0)
 		goto out;
 
-	ret = __phy_package_read(phydev, BCM54140_BASE_ADDR,
-				 MII_BCM54XX_RDB_DATA);
+	ret = __phy_package_read(phydev, MII_BCM54XX_RDB_DATA);
 
 out:
 	phy_unlock_mdio_bus(phydev);
@@ -453,13 +446,11 @@ static int bcm54140_base_write_rdb(struct phy_device *phydev,
 	int ret;
 
 	phy_lock_mdio_bus(phydev);
-	ret = __phy_package_write(phydev, BCM54140_BASE_ADDR,
-				  MII_BCM54XX_RDB_ADDR, rdb);
+	ret = __phy_package_write(phydev, MII_BCM54XX_RDB_ADDR, rdb);
 	if (ret < 0)
 		goto out;
 
-	ret = __phy_package_write(phydev, BCM54140_BASE_ADDR,
-				  MII_BCM54XX_RDB_DATA, val);
+	ret = __phy_package_write(phydev, MII_BCM54XX_RDB_DATA, val);
 
 out:
 	phy_unlock_mdio_bus(phydev);
@@ -646,29 +637,13 @@ static int bcm54140_config_init(struct phy_device *phydev)
 				  BCM54140_RDB_C_PWR_ISOLATE, 0);
 }
 
-static irqreturn_t bcm54140_handle_interrupt(struct phy_device *phydev)
+static int bcm54140_did_interrupt(struct phy_device *phydev)
 {
-	int irq_status, irq_mask;
+	int ret;
 
-	irq_status = bcm_phy_read_rdb(phydev, BCM54140_RDB_ISR);
-	if (irq_status < 0) {
-		phy_error(phydev);
-		return IRQ_NONE;
-	}
+	ret = bcm_phy_read_rdb(phydev, BCM54140_RDB_ISR);
 
-	irq_mask = bcm_phy_read_rdb(phydev, BCM54140_RDB_IMR);
-	if (irq_mask < 0) {
-		phy_error(phydev);
-		return IRQ_NONE;
-	}
-	irq_mask = ~irq_mask;
-
-	if (!(irq_status & irq_mask))
-		return IRQ_NONE;
-
-	phy_trigger_machine(phydev);
-
-	return IRQ_HANDLED;
+	return (ret < 0) ? 0 : ret;
 }
 
 static int bcm54140_ack_intr(struct phy_device *phydev)
@@ -690,7 +665,7 @@ static int bcm54140_config_intr(struct phy_device *phydev)
 		BCM54140_RDB_TOP_IMR_PORT0, BCM54140_RDB_TOP_IMR_PORT1,
 		BCM54140_RDB_TOP_IMR_PORT2, BCM54140_RDB_TOP_IMR_PORT3,
 	};
-	int reg, err;
+	int reg;
 
 	if (priv->port >= ARRAY_SIZE(port_to_imr_bit))
 		return -EINVAL;
@@ -699,23 +674,12 @@ static int bcm54140_config_intr(struct phy_device *phydev)
 	if (reg < 0)
 		return reg;
 
-	if (phydev->interrupts == PHY_INTERRUPT_ENABLED) {
-		err = bcm54140_ack_intr(phydev);
-		if (err)
-			return err;
-
+	if (phydev->interrupts == PHY_INTERRUPT_ENABLED)
 		reg &= ~port_to_imr_bit[priv->port];
-		err = bcm54140_base_write_rdb(phydev, BCM54140_RDB_TOP_IMR, reg);
-	} else {
+	else
 		reg |= port_to_imr_bit[priv->port];
-		err = bcm54140_base_write_rdb(phydev, BCM54140_RDB_TOP_IMR, reg);
-		if (err)
-			return err;
 
-		err = bcm54140_ack_intr(phydev);
-	}
-
-	return err;
+	return bcm54140_base_write_rdb(phydev, BCM54140_RDB_TOP_IMR, reg);
 }
 
 static int bcm54140_get_downshift(struct phy_device *phydev, u8 *data)
@@ -870,7 +834,8 @@ static struct phy_driver bcm54140_drivers[] = {
 		.flags		= PHY_POLL_CABLE_TEST,
 		.features       = PHY_GBIT_FEATURES,
 		.config_init    = bcm54140_config_init,
-		.handle_interrupt = bcm54140_handle_interrupt,
+		.did_interrupt	= bcm54140_did_interrupt,
+		.ack_interrupt  = bcm54140_ack_intr,
 		.config_intr    = bcm54140_config_intr,
 		.probe		= bcm54140_probe,
 		.suspend	= genphy_suspend,
@@ -884,7 +849,7 @@ static struct phy_driver bcm54140_drivers[] = {
 };
 module_phy_driver(bcm54140_drivers);
 
-static const struct mdio_device_id __maybe_unused bcm54140_tbl[] = {
+static struct mdio_device_id __maybe_unused bcm54140_tbl[] = {
 	{ PHY_ID_BCM54140, BCM54140_PHY_ID_MASK },
 	{ }
 };

@@ -15,7 +15,6 @@
 #include <linux/mii.h>
 #include <linux/mdio.h>
 #include <linux/phy.h>
-#include <linux/clk.h>
 #include <linux/of_mdio.h>
 
 #define XILINX_GMII2RGMII_REG		0x10
@@ -23,33 +22,17 @@
 
 struct gmii2rgmii {
 	struct phy_device *phy_dev;
-	const struct phy_driver *phy_drv;
+	struct phy_driver *phy_drv;
 	struct phy_driver conv_phy_drv;
 	struct mdio_device *mdio;
 };
 
-static void xgmiitorgmii_configure(struct gmii2rgmii *priv, int speed)
-{
-	struct mii_bus *bus = priv->mdio->bus;
-	int addr = priv->mdio->addr;
-	u16 val;
-
-	val = mdiobus_read(bus, addr, XILINX_GMII2RGMII_REG);
-	val &= ~XILINX_GMII2RGMII_SPEED_MASK;
-
-	if (speed == SPEED_1000)
-		val |= BMCR_SPEED1000;
-	else if (speed == SPEED_100)
-		val |= BMCR_SPEED100;
-	else
-		val |= BMCR_SPEED10;
-
-	mdiobus_write(bus, addr, XILINX_GMII2RGMII_REG, val);
-}
-
 static int xgmiitorgmii_read_status(struct phy_device *phydev)
 {
 	struct gmii2rgmii *priv = mdiodev_get_drvdata(&phydev->mdio);
+	struct mii_bus *bus = priv->mdio->bus;
+	int addr = priv->mdio->addr;
+	u16 val = 0;
 	int err;
 
 	if (priv->phy_drv->read_status)
@@ -59,25 +42,17 @@ static int xgmiitorgmii_read_status(struct phy_device *phydev)
 	if (err < 0)
 		return err;
 
-	xgmiitorgmii_configure(priv, phydev->speed);
+	val = mdiobus_read(bus, addr, XILINX_GMII2RGMII_REG);
+	val &= ~XILINX_GMII2RGMII_SPEED_MASK;
 
-	return 0;
-}
-
-static int xgmiitorgmii_set_loopback(struct phy_device *phydev, bool enable,
-				     int speed)
-{
-	struct gmii2rgmii *priv = mdiodev_get_drvdata(&phydev->mdio);
-	int err;
-
-	if (priv->phy_drv->set_loopback)
-		err = priv->phy_drv->set_loopback(phydev, enable, speed);
+	if (phydev->speed == SPEED_1000)
+		val |= BMCR_SPEED1000;
+	else if (phydev->speed == SPEED_100)
+		val |= BMCR_SPEED100;
 	else
-		err = genphy_loopback(phydev, enable, speed);
-	if (err < 0)
-		return err;
+		val |= BMCR_SPEED10;
 
-	xgmiitorgmii_configure(priv, phydev->speed);
+	mdiobus_write(bus, addr, XILINX_GMII2RGMII_REG, val);
 
 	return 0;
 }
@@ -87,16 +62,10 @@ static int xgmiitorgmii_probe(struct mdio_device *mdiodev)
 	struct device *dev = &mdiodev->dev;
 	struct device_node *np = dev->of_node, *phy_node;
 	struct gmii2rgmii *priv;
-	struct clk *clkin;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
-
-	clkin = devm_clk_get_optional_enabled(dev, NULL);
-	if (IS_ERR(clkin))
-		return dev_err_probe(dev, PTR_ERR(clkin),
-					"Failed to get and enable clock from Device Tree\n");
 
 	phy_node = of_parse_phandle(np, "phy-handle", 0);
 	if (!phy_node) {
@@ -122,7 +91,6 @@ static int xgmiitorgmii_probe(struct mdio_device *mdiodev)
 	memcpy(&priv->conv_phy_drv, priv->phy_dev->drv,
 	       sizeof(struct phy_driver));
 	priv->conv_phy_drv.read_status = xgmiitorgmii_read_status;
-	priv->conv_phy_drv.set_loopback = xgmiitorgmii_set_loopback;
 	mdiodev_set_drvdata(&priv->phy_dev->mdio, priv);
 	priv->phy_dev->drv = &priv->conv_phy_drv;
 

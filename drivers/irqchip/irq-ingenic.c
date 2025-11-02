@@ -49,7 +49,8 @@ static irqreturn_t intc_cascade(int irq, void *data)
 		while (pending) {
 			int bit = __fls(pending);
 
-			generic_handle_domain_irq(domain, bit + (i * 32));
+			irq = irq_linear_revmap(domain, bit + (i * 32));
+			generic_handle_irq(irq);
 			pending &= ~BIT(bit);
 		}
 	}
@@ -90,8 +91,8 @@ static int __init ingenic_intc_of_init(struct device_node *node,
 		goto out_unmap_irq;
 	}
 
-	domain = irq_domain_create_linear(of_fwnode_handle(node), num_chips * 32,
-					  &irq_generic_chip_ops, NULL);
+	domain = irq_domain_add_linear(node, num_chips * 32,
+				       &irq_generic_chip_ops, NULL);
 	if (!domain) {
 		err = -ENOMEM;
 		goto out_unmap_base;

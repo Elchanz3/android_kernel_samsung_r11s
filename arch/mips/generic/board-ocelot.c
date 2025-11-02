@@ -4,7 +4,6 @@
  *
  * Copyright (c) 2017 Microsemi Corporation
  */
-#include <linux/string.h>
 #include <asm/machine.h>
 #include <asm/prom.h>
 
@@ -27,13 +26,13 @@ static __init bool ocelot_detect(void)
 	tlb_probe_hazard();
 	idx = read_c0_index();
 	if (idx < 0)
-		return false;
+		return 0;
 
 	/* A TLB entry exists, lets assume its usable and check the CHIP ID */
 	rev = __raw_readl((void __iomem *)DEVCPU_GCB_CHIP_REGS_CHIP_ID);
 
 	if ((rev & CHIP_ID_PART_ID) != OCELOT_PART_ID)
-		return false;
+		return 0;
 
 	/* Copy command line from bootloader early for Initrd detection */
 	if (fw_arg0 < 10 && (fw_arg1 & 0xFFF00000) == 0x80000000) {
@@ -42,10 +41,10 @@ static __init bool ocelot_detect(void)
 
 		if (prom_argc > 1 && strlen(prom_argv[1]) > 0)
 			/* ignore all built-in args if any f/w args given */
-			strscpy(arcs_cmdline, prom_argv[1]);
+			strcpy(arcs_cmdline, prom_argv[1]);
 	}
 
-	return true;
+	return 1;
 }
 
 static void __init ocelot_earlyprintk_init(void)

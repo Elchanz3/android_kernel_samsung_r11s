@@ -398,10 +398,9 @@
    /*
     * Scsi_Host Template
     */
-   static int ips_biosparam(struct scsi_device *sdev, struct gendisk *unused,
+   static int ips_biosparam(struct scsi_device *sdev, struct block_device *bdev,
 		sector_t capacity, int geom[]);
-   static int ips_sdev_configure(struct scsi_device *SDptr,
-				 struct queue_limits *lim);
+   static int ips_slave_configure(struct scsi_device *SDptr);
 
 /*
  * Raid Command Formats
@@ -1212,3 +1211,23 @@ typedef struct {
       IPS_COMPAT_TAMPA, \
       IPS_COMPAT_KEYWEST \
    }
+
+
+/*
+ * Overrides for Emacs so that we almost follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 2
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -2
+ * c-argdecl-indent: 2
+ * c-label-offset: -2
+ * c-continued-statement-offset: 2
+ * c-continued-brace-offset: 0
+ * indent-tabs-mode: nil
+ * tab-width: 8
+ * End:
+ */

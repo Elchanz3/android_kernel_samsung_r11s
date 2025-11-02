@@ -180,6 +180,60 @@ out:
 	return ret;
 }
 
+/*
+ * This function is currently unused, but will be called when the
+ * output/mem2mem device at the IDMAC input pad sends us a new
+ * buffer. It kicks off the IDMAC read channels to bring in the
+ * buffer fields from memory and begin the conversions.
+ */
+static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
+						  struct imx_media_buffer *curr)
+{
+	dma_addr_t prev_phys, curr_phys, next_phys;
+	struct imx_media_buffer *prev;
+	struct vb2_buffer *curr_vb, *prev_vb;
+	u32 fs = priv->field_size;
+	u32 is = priv->in_stride;
+
+	/* current input buffer is now previous */
+	priv->prev_in_buf = priv->curr_in_buf;
+	priv->curr_in_buf = curr;
+	prev = priv->prev_in_buf ? priv->prev_in_buf : curr;
+
+	prev_vb = &prev->vbuf.vb2_buf;
+	curr_vb = &curr->vbuf.vb2_buf;
+
+	switch (priv->fieldtype) {
+	case V4L2_FIELD_SEQ_TB:
+	case V4L2_FIELD_SEQ_BT:
+		prev_phys = vb2_dma_contig_plane_dma_addr(prev_vb, 0) + fs;
+		curr_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0);
+		next_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0) + fs;
+		break;
+	case V4L2_FIELD_INTERLACED_TB:
+	case V4L2_FIELD_INTERLACED_BT:
+	case V4L2_FIELD_INTERLACED:
+		prev_phys = vb2_dma_contig_plane_dma_addr(prev_vb, 0) + is;
+		curr_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0);
+		next_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0) + is;
+		break;
+	default:
+		/*
+		 * can't get here, priv->fieldtype can only be one of
+		 * the above. This is to quiet smatch errors.
+		 */
+		return;
+	}
+
+	ipu_cpmem_set_buffer(priv->vdi_in_ch_p, 0, prev_phys);
+	ipu_cpmem_set_buffer(priv->vdi_in_ch,   0, curr_phys);
+	ipu_cpmem_set_buffer(priv->vdi_in_ch_n, 0, next_phys);
+
+	ipu_idmac_select_buffer(priv->vdi_in_ch_p, 0);
+	ipu_idmac_select_buffer(priv->vdi_in_ch, 0);
+	ipu_idmac_select_buffer(priv->vdi_in_ch_n, 0);
+}
+
 static int setup_vdi_channel(struct vdic_priv *priv,
 			     struct ipuv3_channel *channel,
 			     dma_addr_t phys0, dma_addr_t phys1)
@@ -192,7 +246,7 @@ static int setup_vdi_channel(struct vdic_priv *priv,
 	ipu_cpmem_zero(channel);
 
 	memset(&image, 0, sizeof(image));
-	image.pix = vdev->fmt;
+	image.pix = vdev->fmt.fmt.pix;
 	image.rect = vdev->compose;
 	/* one field to VDIC channels */
 	image.pix.height /= 2;
@@ -478,17 +532,17 @@ out:
 }
 
 static struct v4l2_mbus_framefmt *
-__vdic_get_fmt(struct vdic_priv *priv, struct v4l2_subdev_state *sd_state,
+__vdic_get_fmt(struct vdic_priv *priv, struct v4l2_subdev_pad_config *cfg,
 	       unsigned int pad, enum v4l2_subdev_format_whence which)
 {
 	if (which == V4L2_SUBDEV_FORMAT_TRY)
-		return v4l2_subdev_state_get_format(sd_state, pad);
+		return v4l2_subdev_get_try_format(&priv->sd, cfg, pad);
 	else
 		return &priv->format_mbus[pad];
 }
 
 static int vdic_enum_mbus_code(struct v4l2_subdev *sd,
-			       struct v4l2_subdev_state *sd_state,
+			       struct v4l2_subdev_pad_config *cfg,
 			       struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (code->pad >= VDIC_NUM_PADS)
@@ -499,7 +553,7 @@ static int vdic_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int vdic_get_fmt(struct v4l2_subdev *sd,
-			struct v4l2_subdev_state *sd_state,
+			struct v4l2_subdev_pad_config *cfg,
 			struct v4l2_subdev_format *sdformat)
 {
 	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
@@ -511,7 +565,7 @@ static int vdic_get_fmt(struct v4l2_subdev *sd,
 
 	mutex_lock(&priv->lock);
 
-	fmt = __vdic_get_fmt(priv, sd_state, sdformat->pad, sdformat->which);
+	fmt = __vdic_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	if (!fmt) {
 		ret = -EINVAL;
 		goto out;
@@ -524,7 +578,7 @@ out:
 }
 
 static void vdic_try_fmt(struct vdic_priv *priv,
-			 struct v4l2_subdev_state *sd_state,
+			 struct v4l2_subdev_pad_config *cfg,
 			 struct v4l2_subdev_format *sdformat,
 			 const struct imx_media_pixfmt **cc)
 {
@@ -540,7 +594,7 @@ static void vdic_try_fmt(struct vdic_priv *priv,
 		sdformat->format.code = (*cc)->codes[0];
 	}
 
-	infmt = __vdic_get_fmt(priv, sd_state, priv->active_input_pad,
+	infmt = __vdic_get_fmt(priv, cfg, priv->active_input_pad,
 			       sdformat->which);
 
 	switch (sdformat->pad) {
@@ -566,7 +620,7 @@ static void vdic_try_fmt(struct vdic_priv *priv,
 }
 
 static int vdic_set_fmt(struct v4l2_subdev *sd,
-			struct v4l2_subdev_state *sd_state,
+			struct v4l2_subdev_pad_config *cfg,
 			struct v4l2_subdev_format *sdformat)
 {
 	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
@@ -584,9 +638,9 @@ static int vdic_set_fmt(struct v4l2_subdev *sd,
 		goto out;
 	}
 
-	vdic_try_fmt(priv, sd_state, sdformat, &cc);
+	vdic_try_fmt(priv, cfg, sdformat, &cc);
 
-	fmt = __vdic_get_fmt(priv, sd_state, sdformat->pad, sdformat->which);
+	fmt = __vdic_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	*fmt = sdformat->format;
 
 	/* propagate format to source pad */
@@ -599,9 +653,9 @@ static int vdic_set_fmt(struct v4l2_subdev *sd,
 		format.pad = VDIC_SRC_PAD_DIRECT;
 		format.which = sdformat->which;
 		format.format = sdformat->format;
-		vdic_try_fmt(priv, sd_state, &format, &outcc);
+		vdic_try_fmt(priv, cfg, &format, &outcc);
 
-		outfmt = __vdic_get_fmt(priv, sd_state, VDIC_SRC_PAD_DIRECT,
+		outfmt = __vdic_get_fmt(priv, cfg, VDIC_SRC_PAD_DIRECT,
 					sdformat->which);
 		*outfmt = format.format;
 		if (sdformat->which == V4L2_SUBDEV_FORMAT_ACTIVE)
@@ -726,18 +780,10 @@ static int vdic_link_validate(struct v4l2_subdev *sd,
 	return ret;
 }
 
-static int vdic_get_frame_interval(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_state *sd_state,
-				   struct v4l2_subdev_frame_interval *fi)
+static int vdic_g_frame_interval(struct v4l2_subdev *sd,
+				struct v4l2_subdev_frame_interval *fi)
 {
 	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
-
-	/*
-	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
-	 * subdev active state API.
-	 */
-	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
-		return -EINVAL;
 
 	if (fi->pad >= VDIC_NUM_PADS)
 		return -EINVAL;
@@ -751,20 +797,12 @@ static int vdic_get_frame_interval(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int vdic_set_frame_interval(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_state *sd_state,
-				   struct v4l2_subdev_frame_interval *fi)
+static int vdic_s_frame_interval(struct v4l2_subdev *sd,
+				struct v4l2_subdev_frame_interval *fi)
 {
 	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
 	struct v4l2_fract *input_fi, *output_fi;
 	int ret = 0;
-
-	/*
-	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
-	 * subdev active state API.
-	 */
-	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
-		return -EINVAL;
 
 	mutex_lock(&priv->lock);
 
@@ -818,9 +856,8 @@ static int vdic_registered(struct v4l2_subdev *sd)
 
 		/* set a default mbus format  */
 		ret = imx_media_init_mbus_fmt(&priv->format_mbus[i],
-					      IMX_MEDIA_DEF_PIX_WIDTH,
-					      IMX_MEDIA_DEF_PIX_HEIGHT, code,
-					      V4L2_FIELD_NONE, &priv->cc[i]);
+					      640, 480, code, V4L2_FIELD_NONE,
+					      &priv->cc[i]);
 		if (ret)
 			return ret;
 
@@ -844,15 +881,16 @@ static void vdic_unregistered(struct v4l2_subdev *sd)
 }
 
 static const struct v4l2_subdev_pad_ops vdic_pad_ops = {
+	.init_cfg = imx_media_init_cfg,
 	.enum_mbus_code = vdic_enum_mbus_code,
 	.get_fmt = vdic_get_fmt,
 	.set_fmt = vdic_set_fmt,
-	.get_frame_interval = vdic_get_frame_interval,
-	.set_frame_interval = vdic_set_frame_interval,
 	.link_validate = vdic_link_validate,
 };
 
 static const struct v4l2_subdev_video_ops vdic_video_ops = {
+	.g_frame_interval = vdic_g_frame_interval,
+	.s_frame_interval = vdic_s_frame_interval,
 	.s_stream = vdic_s_stream,
 };
 
@@ -867,7 +905,6 @@ static const struct v4l2_subdev_ops vdic_subdev_ops = {
 };
 
 static const struct v4l2_subdev_internal_ops vdic_internal_ops = {
-	.init_state = imx_media_init_state,
 	.registered = vdic_registered,
 	.unregistered = vdic_unregistered,
 };

@@ -451,6 +451,9 @@ select_timeout:
 		dev->rdev->max_timeout = 200000;
 	}
 
+	if (dev->hw_learning_and_tx_capable)
+		dev->rdev->tx_resolution = sample_period;
+
 	if (dev->rdev->timeout > dev->rdev->max_timeout)
 		dev->rdev->timeout = dev->rdev->max_timeout;
 	if (dev->rdev->timeout < dev->rdev->min_timeout)
@@ -659,7 +662,7 @@ exit:
 /* timer to simulate tx done interrupt */
 static void ene_tx_irqsim(struct timer_list *t)
 {
-	struct ene_device *dev = timer_container_of(dev, t, tx_sim_timer);
+	struct ene_device *dev = from_timer(dev, t, tx_sim_timer);
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->hw_lock, flags);
@@ -1049,7 +1052,7 @@ static int ene_probe(struct pnp_dev *pnp_dev, const struct pnp_device_id *id)
 	rdev->device_name = "ENE eHome Infrared Remote Receiver";
 
 	if (dev->hw_learning_and_tx_capable) {
-		rdev->s_wideband_receiver = ene_set_learning_mode;
+		rdev->s_learning_mode = ene_set_learning_mode;
 		init_completion(&dev->tx_complete);
 		rdev->tx_ir = ene_transmit;
 		rdev->s_tx_mask = ene_set_tx_mask;
@@ -1104,7 +1107,7 @@ static void ene_remove(struct pnp_dev *pnp_dev)
 	unsigned long flags;
 
 	rc_unregister_device(dev->rdev);
-	timer_delete_sync(&dev->tx_sim_timer);
+	del_timer_sync(&dev->tx_sim_timer);
 	spin_lock_irqsave(&dev->hw_lock, flags);
 	ene_rx_disable(dev);
 	ene_rx_restore_hw_buffer(dev);

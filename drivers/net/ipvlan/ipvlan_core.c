@@ -2,9 +2,6 @@
 /* Copyright (c) 2014 Mahesh Bandewar <maheshb@google.com>
  */
 
-#include <net/flow.h>
-#include <net/ip.h>
-
 #include "ipvlan.h"
 
 static u32 ipvlan_jhash_secret __read_mostly;
@@ -22,10 +19,10 @@ void ipvlan_count_rx(const struct ipvl_dev *ipvlan,
 
 		pcptr = this_cpu_ptr(ipvlan->pcpu_stats);
 		u64_stats_update_begin(&pcptr->syncp);
-		u64_stats_inc(&pcptr->rx_pkts);
-		u64_stats_add(&pcptr->rx_bytes, len);
+		pcptr->rx_pkts++;
+		pcptr->rx_bytes += len;
 		if (mcast)
-			u64_stats_inc(&pcptr->rx_mcast);
+			pcptr->rx_mcast++;
 		u64_stats_update_end(&pcptr->syncp);
 	} else {
 		this_cpu_inc(ipvlan->pcpu_stats->rx_errs);
@@ -160,7 +157,7 @@ void *ipvlan_get_L3_hdr(struct ipvl_port *port, struct sk_buff *skb, int *type)
 			return NULL;
 
 		ip4h = ip_hdr(skb);
-		pktlen = skb_ip_totlen(skb);
+		pktlen = ntohs(ip4h->tot_len);
 		if (ip4h->ihl < 5 || ip4h->version != 4)
 			return NULL;
 		if (skb->len < pktlen || pktlen < (ip4h->ihl * 4))
@@ -219,7 +216,7 @@ void *ipvlan_get_L3_hdr(struct ipvl_port *port, struct sk_buff *skb, int *type)
 
 unsigned int ipvlan_mac_hash(const unsigned char *addr)
 {
-	u32 hash = jhash_1word(get_unaligned((u32 *)(addr + 2)),
+	u32 hash = jhash_1word(__get_unaligned_cpu32(addr+2),
 			       ipvlan_jhash_secret);
 
 	return hash & IPVLAN_MAC_FILTER_MASK;
@@ -294,7 +291,8 @@ void ipvlan_process_multicast(struct work_struct *work)
 			else
 				kfree_skb(skb);
 		}
-		dev_put(dev);
+		if (dev)
+			dev_put(dev);
 		cond_resched();
 	}
 }
@@ -416,24 +414,19 @@ struct ipvl_addr *ipvlan_addr_lookup(struct ipvl_port *port, void *lyr3h,
 
 static noinline_for_stack int ipvlan_process_v4_outbound(struct sk_buff *skb)
 {
+	const struct iphdr *ip4h = ip_hdr(skb);
 	struct net_device *dev = skb->dev;
 	struct net *net = dev_net(dev);
-	int err, ret = NET_XMIT_DROP;
-	const struct iphdr *ip4h;
 	struct rtable *rt;
+	int err, ret = NET_XMIT_DROP;
 	struct flowi4 fl4 = {
 		.flowi4_oif = dev->ifindex,
+		.flowi4_tos = RT_TOS(ip4h->tos),
 		.flowi4_flags = FLOWI_FLAG_ANYSRC,
 		.flowi4_mark = skb->mark,
+		.daddr = ip4h->daddr,
+		.saddr = ip4h->saddr,
 	};
-
-	if (!pskb_network_may_pull(skb, sizeof(struct iphdr)))
-		goto err;
-
-	ip4h = ip_hdr(skb);
-	fl4.daddr = ip4h->daddr;
-	fl4.saddr = ip4h->saddr;
-	fl4.flowi4_dscp = ip4h_dscp(ip4h);
 
 	rt = ip_route_output_flow(net, &fl4, NULL);
 	if (IS_ERR(rt))
@@ -449,12 +442,12 @@ static noinline_for_stack int ipvlan_process_v4_outbound(struct sk_buff *skb)
 
 	err = ip_local_out(net, NULL, skb);
 	if (unlikely(net_xmit_eval(err)))
-		DEV_STATS_INC(dev, tx_errors);
+		dev->stats.tx_errors++;
 	else
 		ret = NET_XMIT_SUCCESS;
 	goto out;
 err:
-	DEV_STATS_INC(dev, tx_errors);
+	dev->stats.tx_errors++;
 	kfree_skb(skb);
 out:
 	return ret;
@@ -493,15 +486,9 @@ static int ipvlan_process_v6_outbound(struct sk_buff *skb)
 	struct net_device *dev = skb->dev;
 	int err, ret = NET_XMIT_DROP;
 
-	if (!pskb_network_may_pull(skb, sizeof(struct ipv6hdr))) {
-		DEV_STATS_INC(dev, tx_errors);
-		kfree_skb(skb);
-		return ret;
-	}
-
 	err = ipvlan_route_v6_outbound(dev, skb);
 	if (unlikely(err)) {
-		DEV_STATS_INC(dev, tx_errors);
+		dev->stats.tx_errors++;
 		kfree_skb(skb);
 		return err;
 	}
@@ -510,7 +497,7 @@ static int ipvlan_process_v6_outbound(struct sk_buff *skb)
 
 	err = ip6_local_out(dev_net(dev), NULL, skb);
 	if (unlikely(net_xmit_eval(err)))
-		DEV_STATS_INC(dev, tx_errors);
+		dev->stats.tx_errors++;
 	else
 		ret = NET_XMIT_SUCCESS;
 	return ret;
@@ -578,13 +565,14 @@ static void ipvlan_multicast_enqueue(struct ipvl_port *port,
 
 	spin_lock(&port->backlog.lock);
 	if (skb_queue_len(&port->backlog) < IPVLAN_QBACKLOG_LIMIT) {
-		dev_hold(skb->dev);
+		if (skb->dev)
+			dev_hold(skb->dev);
 		__skb_queue_tail(&port->backlog, skb);
 		spin_unlock(&port->backlog.lock);
 		schedule_work(&port->wq);
 	} else {
 		spin_unlock(&port->backlog.lock);
-		dev_core_stats_rx_dropped_inc(skb->dev);
+		atomic_long_inc(&skb->dev->rx_dropped);
 		kfree_skb(skb);
 	}
 }
@@ -683,7 +671,8 @@ int ipvlan_queue_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	/* Should not reach here */
-	WARN_ONCE(true, "%s called for mode = [%x]\n", __func__, port->mode);
+	WARN_ONCE(true, "ipvlan_queue_xmit() called for mode = [%hx]\n",
+			  port->mode);
 out:
 	kfree_skb(skb);
 	return NET_XMIT_DROP;
@@ -780,7 +769,8 @@ rx_handler_result_t ipvlan_handle_frame(struct sk_buff **pskb)
 	}
 
 	/* Should not reach here */
-	WARN_ONCE(true, "%s called for mode = [%x]\n", __func__, port->mode);
+	WARN_ONCE(true, "ipvlan_handle_frame() called for mode = [%hx]\n",
+			  port->mode);
 	kfree_skb(skb);
 	return RX_HANDLER_CONSUMED;
 }

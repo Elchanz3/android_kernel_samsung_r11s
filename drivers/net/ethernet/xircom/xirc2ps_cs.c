@@ -464,7 +464,7 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_start_xmit		= do_start_xmit,
 	.ndo_tx_timeout 	= xirc_tx_timeout,
 	.ndo_set_config		= do_config,
-	.ndo_eth_ioctl		= do_ioctl,
+	.ndo_do_ioctl		= do_ioctl,
 	.ndo_set_rx_mode	= set_multicast_list,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
@@ -676,6 +676,7 @@ static int pcmcia_get_mac_ce(struct pcmcia_device *p_dev,
 			     void *priv)
 {
 	struct net_device *dev = priv;
+	int i;
 
 	if (tuple->TupleDataLen != 13)
 		return -EINVAL;
@@ -683,7 +684,8 @@ static int pcmcia_get_mac_ce(struct pcmcia_device *p_dev,
 		(tuple->TupleData[2] != 6))
 		return -EINVAL;
 	/* another try	(James Lehmer's CE2 version 4.1)*/
-	dev_addr_mod(dev, 2, &tuple->TupleData[2], 4);
+	for (i = 2; i < 6; i++)
+		dev->dev_addr[i] = tuple->TupleData[i+2];
 	return 0;
 };
 
@@ -745,9 +747,11 @@ xirc2ps_config(struct pcmcia_device * link)
 	    len = pcmcia_get_tuple(link, 0x89, &buf);
 	    /* data layout looks like tuple 0x22 */
 	    if (buf && len == 8) {
-		    if (*buf == CISTPL_FUNCE_LAN_NODE_ID)
-			    dev_addr_mod(dev, 2, &buf[2], 4);
-		    else
+		    if (*buf == CISTPL_FUNCE_LAN_NODE_ID) {
+			    int i;
+			    for (i = 2; i < 6; i++)
+				    dev->dev_addr[i] = buf[i+2];
+		    } else
 			    err = -1;
 	    }
 	    kfree(buf);
@@ -799,6 +803,8 @@ xirc2ps_config(struct pcmcia_device * link)
 	    goto config_error;
     }
   port_found:
+    if (err)
+	 goto config_error;
 
     /****************
      * Now allocate an interrupt line.	Note that this does not
@@ -1233,14 +1239,16 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
     if (pktlen < ETH_ZLEN)
     {
         if (skb_padto(skb, ETH_ZLEN))
-		return NETDEV_TX_OK;
+        	return NETDEV_TX_OK;
 	pktlen = ETH_ZLEN;
     }
 
     netif_stop_queue(dev);
     SelectPage(0);
     PutWord(XIRCREG0_TRS, (u_short)pktlen+2);
-    freespace = GetWord(XIRCREG0_TSO) & 0x7fff;
+    freespace = GetWord(XIRCREG0_TSO);
+    okay = freespace & 0x8000;
+    freespace &= 0x7fff;
     /* TRS doesn't work - (indeed it is eliminated with sil-rev 1) */
     okay = pktlen +2 < freespace;
     pr_debug("%s: avail. tx space=%u%s\n",
@@ -1270,7 +1278,7 @@ struct set_address_info {
 	unsigned int ioaddr;
 };
 
-static void set_address(struct set_address_info *sa_info, const char *addr)
+static void set_address(struct set_address_info *sa_info, char *addr)
 {
 	unsigned int ioaddr = sa_info->ioaddr;
 	int i;
@@ -1366,10 +1374,10 @@ do_config(struct net_device *dev, struct ifmap *map)
 	    return -EINVAL;
 	if (!map->port) {
 	    local->probe_port = 1;
-	    WRITE_ONCE(dev->if_port, 1);
+	    dev->if_port = 1;
 	} else {
 	    local->probe_port = 0;
-	    WRITE_ONCE(dev->if_port, map->port);
+	    dev->if_port = map->port;
 	}
 	netdev_info(dev, "switching to %s port\n", if_names[dev->if_port]);
 	do_reset(dev,1);  /* not the fine way :-) */
@@ -1405,7 +1413,7 @@ do_open(struct net_device *dev)
 static void netdev_get_drvinfo(struct net_device *dev,
 			       struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, "xirc2ps_cs", sizeof(info->driver));
+	strlcpy(info->driver, "xirc2ps_cs", sizeof(info->driver));
 	snprintf(info->bus_info, sizeof(info->bus_info), "PCMCIA 0x%lx",
 		 dev->base_addr);
 }
@@ -1576,7 +1584,7 @@ do_reset(struct net_device *dev, int full)
 	    msleep(40);			/* wait 40 msec to let it complete */
 	}
 	if (full_duplex)
-	    PutByte(XIRCREG1_ECR, GetByte(XIRCREG1_ECR) | FullDuplex);
+	    PutByte(XIRCREG1_ECR, GetByte(XIRCREG1_ECR | FullDuplex));
     } else {  /* No MII */
 	SelectPage(0);
 	value = GetByte(XIRCREG_ESR);	 /* read the ESR */

@@ -35,6 +35,7 @@ struct st_request {
 
 /* The tape buffer descriptor. */
 struct st_buffer {
+	unsigned char dma;	/* DMA-able buffer */
 	unsigned char cleared;  /* internal buffer cleared after open? */
 	unsigned short do_dio;  /* direct i/o set up? */
 	int buffer_size;
@@ -117,6 +118,7 @@ struct scsi_tape_stats {
 
 /* The tape drive descriptor */
 struct scsi_tape {
+	struct scsi_driver *driver;
 	struct scsi_device *device;
 	struct mutex lock;	/* For serialization */
 	struct completion wait;	/* For SCSI commands */
@@ -131,6 +133,7 @@ struct scsi_tape {
 	unsigned char two_fm;
 	unsigned char fast_mteom;
 	unsigned char immediate;
+	unsigned char restr_dma;
 	unsigned char scsi2_logical;
 	unsigned char default_drvbuffer;	/* 0xff = don't touch, value 3 bits */
 	unsigned char cln_mode;			/* 0 = none, otherwise sense byte nbr */
@@ -165,23 +168,16 @@ struct scsi_tape {
 	unsigned char compression_changed;
 	unsigned char drv_buffer;
 	unsigned char density;
-	unsigned char changed_density;
 	unsigned char door_locked;
 	unsigned char autorew_dev;   /* auto-rewind device */
 	unsigned char rew_at_close;  /* rewind necessary at close */
 	unsigned char inited;
 	unsigned char cleaning_req;  /* cleaning requested? */
-	unsigned char first_tur;     /* first TEST UNIT READY */
 	int block_size;
-	int changed_blksize;
 	int min_block;
 	int max_block;
 	int recover_count;     /* From tape opening */
 	int recover_reg;       /* From last status call */
-
-	/* The saved values of midlevel counters */
-	unsigned int new_media_ctr;
-	unsigned int por_ctr;
 
 #if DEBUG
 	unsigned char write_pending;
@@ -193,7 +189,7 @@ struct scsi_tape {
 	unsigned char last_cmnd[6];
 	unsigned char last_sense[16];
 #endif
-	char name[DISK_NAME_LEN];
+	struct gendisk *disk;
 	struct kref     kref;
 	struct scsi_tape_stats *stats;
 };

@@ -11,7 +11,7 @@ static struct ctl_table_header *xfs_table_header;
 #ifdef CONFIG_PROC_FS
 STATIC int
 xfs_stats_clear_proc_handler(
-	const struct ctl_table	*ctl,
+	struct ctl_table	*ctl,
 	int			write,
 	void			*buffer,
 	size_t			*lenp,
@@ -31,7 +31,7 @@ xfs_stats_clear_proc_handler(
 
 STATIC int
 xfs_panic_mask_proc_handler(
-	const struct ctl_table	*ctl,
+	struct ctl_table	*ctl,
 	int			write,
 	void			*buffer,
 	size_t			*lenp,
@@ -50,23 +50,57 @@ xfs_panic_mask_proc_handler(
 }
 #endif /* CONFIG_PROC_FS */
 
-static inline int
-xfs_deprecated_dointvec_minmax(
-	const struct ctl_table	*ctl,
+STATIC int
+xfs_deprecate_irix_sgid_inherit_proc_handler(
+	struct ctl_table	*ctl,
 	int			write,
 	void			*buffer,
 	size_t			*lenp,
 	loff_t			*ppos)
 {
 	if (write) {
-		printk_ratelimited(KERN_WARNING
-				"XFS: %s sysctl option is deprecated.\n",
+		printk_once(KERN_WARNING
+				"XFS: " "%s sysctl option is deprecated.\n",
 				ctl->procname);
 	}
 	return proc_dointvec_minmax(ctl, write, buffer, lenp, ppos);
 }
 
-static const struct ctl_table xfs_table[] = {
+STATIC int
+xfs_deprecate_irix_symlink_mode_proc_handler(
+	struct ctl_table	*ctl,
+	int			write,
+	void			*buffer,
+	size_t			*lenp,
+	loff_t			*ppos)
+{
+	if (write) {
+		printk_once(KERN_WARNING
+				"XFS: " "%s sysctl option is deprecated.\n",
+				ctl->procname);
+	}
+	return proc_dointvec_minmax(ctl, write, buffer, lenp, ppos);
+}
+
+static struct ctl_table xfs_table[] = {
+	{
+		.procname	= "irix_sgid_inherit",
+		.data		= &xfs_params.sgid_inherit.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= xfs_deprecate_irix_sgid_inherit_proc_handler,
+		.extra1		= &xfs_params.sgid_inherit.min,
+		.extra2		= &xfs_params.sgid_inherit.max
+	},
+	{
+		.procname	= "irix_symlink_mode",
+		.data		= &xfs_params.symlink_mode.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= xfs_deprecate_irix_symlink_mode_proc_handler,
+		.extra1		= &xfs_params.symlink_mode.min,
+		.extra2		= &xfs_params.symlink_mode.max
+	},
 	{
 		.procname	= "panic_mask",
 		.data		= &xfs_params.panic_mask.val,
@@ -160,12 +194,21 @@ static const struct ctl_table xfs_table[] = {
 	},
 	{
 		.procname	= "speculative_prealloc_lifetime",
-		.data		= &xfs_params.blockgc_timer.val,
+		.data		= &xfs_params.eofb_timer.val,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &xfs_params.blockgc_timer.min,
-		.extra2		= &xfs_params.blockgc_timer.max,
+		.extra1		= &xfs_params.eofb_timer.min,
+		.extra2		= &xfs_params.eofb_timer.max,
+	},
+	{
+		.procname	= "speculative_cow_prealloc_lifetime",
+		.data		= &xfs_params.cowb_timer.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &xfs_params.cowb_timer.min,
+		.extra2		= &xfs_params.cowb_timer.max,
 	},
 	/* please keep this the last entry */
 #ifdef CONFIG_PROC_FS
@@ -179,12 +222,32 @@ static const struct ctl_table xfs_table[] = {
 		.extra2		= &xfs_params.stats_clear.max
 	},
 #endif /* CONFIG_PROC_FS */
+
+	{}
+};
+
+static struct ctl_table xfs_dir_table[] = {
+	{
+		.procname	= "xfs",
+		.mode		= 0555,
+		.child		= xfs_table
+	},
+	{}
+};
+
+static struct ctl_table xfs_root_table[] = {
+	{
+		.procname	= "fs",
+		.mode		= 0555,
+		.child		= xfs_dir_table
+	},
+	{}
 };
 
 int
 xfs_sysctl_register(void)
 {
-	xfs_table_header = register_sysctl("fs/xfs", xfs_table);
+	xfs_table_header = register_sysctl_table(xfs_root_table);
 	if (!xfs_table_header)
 		return -ENOMEM;
 	return 0;

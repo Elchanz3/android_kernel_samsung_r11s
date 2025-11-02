@@ -137,7 +137,7 @@ static ssize_t ipmb_write(struct file *file, const char __user *buf,
 {
 	struct ipmb_dev *ipmb_dev = to_ipmb_dev(file);
 	u8 rq_sa, netf_rq_lun, msg_len;
-	struct i2c_client *temp_client;
+	union i2c_smbus_data data;
 	u8 msg[MAX_MSG_LEN];
 	ssize_t ret;
 
@@ -160,21 +160,21 @@ static ssize_t ipmb_write(struct file *file, const char __user *buf,
 	}
 
 	/*
-	 * subtract rq_sa and netf_rq_lun from the length of the msg. Fill the
-	 * temporary client. Note that its use is an exception for IPMI.
+	 * subtract rq_sa and netf_rq_lun from the length of the msg passed to
+	 * i2c_smbus_xfer
 	 */
 	msg_len = msg[IPMB_MSG_LEN_IDX] - SMBUS_MSG_HEADER_LENGTH;
-	temp_client = kmemdup(ipmb_dev->client, sizeof(*temp_client), GFP_KERNEL);
-	if (!temp_client)
-		return -ENOMEM;
+	if (msg_len > I2C_SMBUS_BLOCK_MAX)
+		msg_len = I2C_SMBUS_BLOCK_MAX;
 
-	temp_client->addr = rq_sa;
+	data.block[0] = msg_len;
+	memcpy(&data.block[1], msg + SMBUS_MSG_IDX_OFFSET, msg_len);
+	ret = i2c_smbus_xfer(ipmb_dev->client->adapter, rq_sa,
+			     ipmb_dev->client->flags,
+			     I2C_SMBUS_WRITE, netf_rq_lun,
+			     I2C_SMBUS_BLOCK_DATA, &data);
 
-	ret = i2c_smbus_write_block_data(temp_client, netf_rq_lun, msg_len,
-					 msg + SMBUS_MSG_IDX_OFFSET);
-	kfree(temp_client);
-
-	return ret < 0 ? ret : count;
+	return ret ? : count;
 }
 
 static __poll_t ipmb_poll(struct file *file, poll_table *wait)
@@ -299,7 +299,8 @@ static int ipmb_slave_cb(struct i2c_client *client,
 	return 0;
 }
 
-static int ipmb_probe(struct i2c_client *client)
+static int ipmb_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	struct ipmb_dev *ipmb_dev;
 	int ret;
@@ -321,9 +322,6 @@ static int ipmb_probe(struct i2c_client *client)
 	ipmb_dev->miscdev.name = devm_kasprintf(&client->dev, GFP_KERNEL,
 						"%s%d", "ipmb-",
 						client->adapter->nr);
-	if (!ipmb_dev->miscdev.name)
-		return -ENOMEM;
-
 	ipmb_dev->miscdev.fops = &ipmb_fops;
 	ipmb_dev->miscdev.parent = &client->dev;
 	ret = misc_register(&ipmb_dev->miscdev);
@@ -344,27 +342,27 @@ static int ipmb_probe(struct i2c_client *client)
 	return 0;
 }
 
-static void ipmb_remove(struct i2c_client *client)
+static int ipmb_remove(struct i2c_client *client)
 {
 	struct ipmb_dev *ipmb_dev = i2c_get_clientdata(client);
 
 	i2c_slave_unregister(client);
 	misc_deregister(&ipmb_dev->miscdev);
+
+	return 0;
 }
 
 static const struct i2c_device_id ipmb_id[] = {
-	{ "ipmb-dev" },
-	{}
+	{ "ipmb-dev", 0 },
+	{},
 };
 MODULE_DEVICE_TABLE(i2c, ipmb_id);
 
-#ifdef CONFIG_ACPI
 static const struct acpi_device_id acpi_ipmb_id[] = {
 	{ "IPMB0001", 0 },
 	{},
 };
 MODULE_DEVICE_TABLE(acpi, acpi_ipmb_id);
-#endif
 
 static struct i2c_driver ipmb_driver = {
 	.driver = {

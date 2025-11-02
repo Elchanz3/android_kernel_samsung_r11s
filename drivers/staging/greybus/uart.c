@@ -427,7 +427,8 @@ static void gb_tty_hangup(struct tty_struct *tty)
 	tty_port_hangup(&gb_tty->port);
 }
 
-static ssize_t gb_tty_write(struct tty_struct *tty, const u8 *buf, size_t count)
+static int gb_tty_write(struct tty_struct *tty, const unsigned char *buf,
+			int count)
 {
 	struct gb_tty *gb_tty = tty->driver_data;
 
@@ -439,7 +440,7 @@ static ssize_t gb_tty_write(struct tty_struct *tty, const u8 *buf, size_t count)
 	return count;
 }
 
-static unsigned int gb_tty_write_room(struct tty_struct *tty)
+static int gb_tty_write_room(struct tty_struct *tty)
 {
 	struct gb_tty *gb_tty = tty->driver_data;
 	unsigned long flags;
@@ -456,11 +457,11 @@ static unsigned int gb_tty_write_room(struct tty_struct *tty)
 	return room;
 }
 
-static unsigned int gb_tty_chars_in_buffer(struct tty_struct *tty)
+static int gb_tty_chars_in_buffer(struct tty_struct *tty)
 {
 	struct gb_tty *gb_tty = tty->driver_data;
 	unsigned long flags;
-	unsigned int chars;
+	int chars;
 
 	spin_lock_irqsave(&gb_tty->write_lock, flags);
 	chars = kfifo_len(&gb_tty->write_fifo);
@@ -479,7 +480,7 @@ static int gb_tty_break_ctl(struct tty_struct *tty, int state)
 }
 
 static void gb_tty_set_termios(struct tty_struct *tty,
-			       const struct ktermios *termios_old)
+			       struct ktermios *termios_old)
 {
 	struct gb_uart_set_line_coding_request newline;
 	struct gb_tty *gb_tty = tty->driver_data;
@@ -493,7 +494,21 @@ static void gb_tty_set_termios(struct tty_struct *tty,
 				(termios->c_cflag & PARODD ? 1 : 2) +
 				(termios->c_cflag & CMSPAR ? 2 : 0) : 0;
 
-	newline.data_bits = tty_get_char_size(termios->c_cflag);
+	switch (termios->c_cflag & CSIZE) {
+	case CS5:
+		newline.data_bits = 5;
+		break;
+	case CS6:
+		newline.data_bits = 6;
+		break;
+	case CS7:
+		newline.data_bits = 7;
+		break;
+	case CS8:
+	default:
+		newline.data_bits = 8;
+		break;
+	}
 
 	/* FIXME: needs to clear unsupported bits in the termios */
 	gb_tty->clocal = ((termios->c_cflag & CLOCAL) != 0);
@@ -595,14 +610,15 @@ static int get_serial_info(struct tty_struct *tty,
 {
 	struct gb_tty *gb_tty = tty->driver_data;
 
+	ss->type = PORT_16550A;
 	ss->line = gb_tty->minor;
-	mutex_lock(&gb_tty->port.mutex);
+	ss->xmit_fifo_size = 16;
+	ss->baud_base = 9600;
 	ss->close_delay = jiffies_to_msecs(gb_tty->port.close_delay) / 10;
 	ss->closing_wait =
 		gb_tty->port.closing_wait == ASYNC_CLOSING_WAIT_NONE ?
 		ASYNC_CLOSING_WAIT_NONE :
 		jiffies_to_msecs(gb_tty->port.closing_wait) / 10;
-	mutex_unlock(&gb_tty->port.mutex);
 
 	return 0;
 }
@@ -702,7 +718,7 @@ static int gb_tty_ioctl(struct tty_struct *tty, unsigned int cmd,
 	return -ENOIOCTLCMD;
 }
 
-static void gb_tty_dtr_rts(struct tty_port *port, bool active)
+static void gb_tty_dtr_rts(struct tty_port *port, int on)
 {
 	struct gb_tty *gb_tty;
 	u8 newctrl;
@@ -710,7 +726,7 @@ static void gb_tty_dtr_rts(struct tty_port *port, bool active)
 	gb_tty = container_of(port, struct gb_tty, port);
 	newctrl = gb_tty->ctrlout;
 
-	if (active)
+	if (on)
 		newctrl |= (GB_UART_CTRL_DTR | GB_UART_CTRL_RTS);
 	else
 		newctrl &= ~(GB_UART_CTRL_DTR | GB_UART_CTRL_RTS);
@@ -916,6 +932,7 @@ static void gb_uart_remove(struct gbphy_device *gbphy_dev)
 {
 	struct gb_tty *gb_tty = gb_gbphy_get_data(gbphy_dev);
 	struct gb_connection *connection = gb_tty->connection;
+	struct tty_struct *tty;
 	int ret;
 
 	ret = gbphy_runtime_get_sync(gbphy_dev);
@@ -928,7 +945,11 @@ static void gb_uart_remove(struct gbphy_device *gbphy_dev)
 	wake_up_all(&gb_tty->wioctl);
 	mutex_unlock(&gb_tty->mutex);
 
-	tty_port_tty_vhangup(&gb_tty->port);
+	tty = tty_port_tty_get(&gb_tty->port);
+	if (tty) {
+		tty_vhangup(tty);
+		tty_kref_put(tty);
+	}
 
 	gb_connection_disable_rx(connection);
 	tty_unregister_device(gb_tty_driver, gb_tty->minor);
@@ -943,8 +964,7 @@ static int gb_tty_init(void)
 {
 	int retval = 0;
 
-	gb_tty_driver = tty_alloc_driver(GB_NUM_MINORS, TTY_DRIVER_REAL_RAW |
-					 TTY_DRIVER_DYNAMIC_DEV);
+	gb_tty_driver = tty_alloc_driver(GB_NUM_MINORS, 0);
 	if (IS_ERR(gb_tty_driver)) {
 		pr_err("Can not allocate tty driver\n");
 		retval = -ENOMEM;
@@ -957,6 +977,7 @@ static int gb_tty_init(void)
 	gb_tty_driver->minor_start = 0;
 	gb_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
 	gb_tty_driver->subtype = SERIAL_TYPE_NORMAL;
+	gb_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
 	gb_tty_driver->init_termios = tty_std_termios;
 	gb_tty_driver->init_termios.c_cflag = B9600 | CS8 |
 		CREAD | HUPCL | CLOCAL;
@@ -971,7 +992,7 @@ static int gb_tty_init(void)
 	return 0;
 
 fail_put_gb_tty:
-	tty_driver_kref_put(gb_tty_driver);
+	put_tty_driver(gb_tty_driver);
 fail_unregister_dev:
 	return retval;
 }
@@ -979,7 +1000,7 @@ fail_unregister_dev:
 static void gb_tty_exit(void)
 {
 	tty_unregister_driver(gb_tty_driver);
-	tty_driver_kref_put(gb_tty_driver);
+	put_tty_driver(gb_tty_driver);
 	idr_destroy(&tty_minors);
 }
 
@@ -1021,5 +1042,4 @@ static void gb_uart_driver_exit(void)
 }
 
 module_exit(gb_uart_driver_exit);
-MODULE_DESCRIPTION("UART driver for the Greybus 'generic' UART module");
 MODULE_LICENSE("GPL v2");

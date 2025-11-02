@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) B.A.T.M.A.N. contributors:
+/* Copyright (C) 2007-2020  B.A.T.M.A.N. contributors:
  *
  * Marek Lindner, Simon Wunderlich
  */
@@ -7,13 +7,13 @@
 #ifndef _NET_BATMAN_ADV_MAIN_H_
 #define _NET_BATMAN_ADV_MAIN_H_
 
-#define BATADV_DRIVER_AUTHOR "Marek Lindner <marek.lindner@mailbox.org>, " \
+#define BATADV_DRIVER_AUTHOR "Marek Lindner <mareklindner@neomailbox.ch>, " \
 			     "Simon Wunderlich <sw@simonwunderlich.de>"
 #define BATADV_DRIVER_DESC   "B.A.T.M.A.N. advanced"
 #define BATADV_DRIVER_DEVICE "batman-adv"
 
 #ifndef BATADV_SOURCE_VERSION
-#define BATADV_SOURCE_VERSION "2025.4"
+#define BATADV_SOURCE_VERSION "2020.4"
 #endif
 
 /* B.A.T.M.A.N. parameters */
@@ -21,8 +21,6 @@
 #define BATADV_TQ_MAX_VALUE 255
 #define BATADV_THROUGHPUT_MAX_VALUE 0xFFFFFFFF
 #define BATADV_JITTER 20
-
-#define BATADV_MAX_MTU (ETH_MAX_MTU - batadv_max_header_len())
 
 /* Time To Live of broadcast messages */
 #define BATADV_TTL 50
@@ -90,6 +88,7 @@
 /* number of packets to send for broadcasts on different interface types */
 #define BATADV_NUM_BCASTS_DEFAULT 1
 #define BATADV_NUM_BCASTS_WIRELESS 3
+#define BATADV_NUM_BCASTS_MAX 3
 
 /* length of the single packet used by the TP meter */
 #define BATADV_TP_PACKET_LEN ETH_DATA_LEN
@@ -104,7 +103,9 @@
  */
 #define BATADV_TQ_SIMILARITY_THRESHOLD 50
 
-#define BATADV_MAX_AGGREGATION_PACKETS 32
+/* should not be bigger than 512 bytes or change the size of
+ * forw_packet->direct_link_flags
+ */
 #define BATADV_MAX_AGGREGATION_BYTES 512
 #define BATADV_MAX_AGGREGATION_MS 100
 
@@ -121,16 +122,18 @@
 #define BATADV_RESET_PROTECTION_MS 30000
 #define BATADV_EXPECTED_SEQNO_RANGE	65536
 
+#define BATADV_NC_NODE_TIMEOUT 10000 /* Milliseconds */
+
 /**
  * BATADV_TP_MAX_NUM - maximum number of simultaneously active tp sessions
  */
 #define BATADV_TP_MAX_NUM 5
 
 /**
- * enum batadv_mesh_state - State of a mesh interface
+ * enum batadv_mesh_state - State of a soft interface
  */
 enum batadv_mesh_state {
-	/** @BATADV_MESH_INACTIVE: mesh interface is not yet running */
+	/** @BATADV_MESH_INACTIVE: soft interface is not yet running */
 	BATADV_MESH_INACTIVE,
 
 	/** @BATADV_MESH_ACTIVE: interface is up and running */
@@ -209,6 +212,7 @@ enum batadv_uev_type {
 #include <linux/jiffies.h>
 #include <linux/netdevice.h>
 #include <linux/percpu.h>
+#include <linux/seq_file.h>
 #include <linux/skbuff.h>
 #include <linux/types.h>
 #include <uapi/linux/batadv_packet.h>
@@ -233,11 +237,14 @@ static inline int batadv_print_vid(unsigned short vid)
 extern struct list_head batadv_hardif_list;
 extern unsigned int batadv_hardif_generation;
 
+extern unsigned char batadv_broadcast_addr[];
 extern struct workqueue_struct *batadv_event_workqueue;
 
-int batadv_mesh_init(struct net_device *mesh_iface);
-void batadv_mesh_free(struct net_device *mesh_iface);
+int batadv_mesh_init(struct net_device *soft_iface);
+void batadv_mesh_free(struct net_device *soft_iface);
 bool batadv_is_my_mac(struct batadv_priv *bat_priv, const u8 *addr);
+struct batadv_hard_iface *
+batadv_seq_print_text_primary_if_get(struct seq_file *seq);
 int batadv_max_header_len(void);
 void batadv_skb_set_priority(struct sk_buff *skb, int offset);
 int batadv_batman_skb_recv(struct sk_buff *skb, struct net_device *dev,
@@ -248,6 +255,7 @@ batadv_recv_handler_register(u8 packet_type,
 			     int (*recv_handler)(struct sk_buff *,
 						 struct batadv_hard_iface *));
 void batadv_recv_handler_unregister(u8 packet_type);
+__be32 batadv_skb_crc32(struct sk_buff *skb, u8 *payload_ptr);
 
 /**
  * batadv_compare_eth() - Compare two not u16 aligned Ethernet addresses
@@ -341,8 +349,8 @@ static inline bool batadv_has_timed_out(unsigned long timestamp,
 #define batadv_seq_after(x, y) batadv_seq_before(y, x)
 
 /**
- * batadv_add_counter() - Add to per cpu statistics counter of mesh interface
- * @bat_priv: the bat priv with all the mesh interface information
+ * batadv_add_counter() - Add to per cpu statistics counter of soft interface
+ * @bat_priv: the bat priv with all the soft interface information
  * @idx: counter index which should be modified
  * @count: value to increase counter by
  *
@@ -355,8 +363,8 @@ static inline void batadv_add_counter(struct batadv_priv *bat_priv, size_t idx,
 }
 
 /**
- * batadv_inc_counter() - Increase per cpu statistics counter of mesh interface
- * @b: the bat priv with all the mesh interface information
+ * batadv_inc_counter() - Increase per cpu statistics counter of soft interface
+ * @b: the bat priv with all the soft interface information
  * @i: counter index which should be modified
  */
 #define batadv_inc_counter(b, i) batadv_add_counter(b, i, 1)

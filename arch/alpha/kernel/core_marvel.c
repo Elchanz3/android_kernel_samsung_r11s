@@ -17,7 +17,6 @@
 #include <linux/vmalloc.h>
 #include <linux/mc146818rtc.h>
 #include <linux/rtc.h>
-#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/memblock.h>
 
@@ -80,12 +79,13 @@ mk_resource_name(int pe, int port, char *str)
 {
 	char tmp[80];
 	char *name;
-	size_t sz;
-
-	sz = scnprintf(tmp, sizeof(tmp), "PCI %s PE %d PORT %d", str, pe, port);
-	sz += 1; /* NUL terminator */
-	name = memblock_alloc_or_panic(sz, SMP_CACHE_BYTES);
-	strscpy(name, tmp, sz);
+	
+	sprintf(tmp, "PCI %s PE %d PORT %d", str, pe, port);
+	name = memblock_alloc(strlen(tmp) + 1, SMP_CACHE_BYTES);
+	if (!name)
+		panic("%s: Failed to allocate %zu bytes\n", __func__,
+		      strlen(tmp) + 1);
+	strcpy(name, tmp);
 
 	return name;
 }
@@ -119,7 +119,10 @@ alloc_io7(unsigned int pe)
 		return NULL;
 	}
 
-	io7 = memblock_alloc_or_panic(sizeof(*io7), SMP_CACHE_BYTES);
+	io7 = memblock_alloc(sizeof(*io7), SMP_CACHE_BYTES);
+	if (!io7)
+		panic("%s: Failed to allocate %zu bytes\n", __func__,
+		      sizeof(*io7));
 	io7->pe = pe;
 	raw_spin_lock_init(&io7->irq_lock);
 
@@ -284,7 +287,8 @@ io7_init_hose(struct io7 *io7, int port)
 	/*
 	 * Set up window 0 for scatter-gather 8MB at 8MB.
 	 */
-	hose->sg_isa = iommu_arena_new_node(0, hose, 0x00800000, 0x00800000, 0);
+	hose->sg_isa = iommu_arena_new_node(marvel_cpuid_to_nid(io7->pe),
+					    hose, 0x00800000, 0x00800000, 0);
 	hose->sg_isa->align_entry = 8;	/* cache line boundary */
 	csrs->POx_WBASE[0].csr = 
 		hose->sg_isa->dma_base | wbase_m_ena | wbase_m_sg;
@@ -301,7 +305,8 @@ io7_init_hose(struct io7 *io7, int port)
 	/*
 	 * Set up window 2 for scatter-gather (up-to) 1GB at 3GB.
 	 */
-	hose->sg_pci = iommu_arena_new_node(0, hose, 0xc0000000, 0x40000000, 0);
+	hose->sg_pci = iommu_arena_new_node(marvel_cpuid_to_nid(io7->pe),
+					    hose, 0xc0000000, 0x40000000, 0);
 	hose->sg_pci->align_entry = 8;	/* cache line boundary */
 	csrs->POx_WBASE[2].csr = 
 		hose->sg_pci->dma_base | wbase_m_ena | wbase_m_sg;
@@ -352,7 +357,7 @@ marvel_init_io7(struct io7 *io7)
 	}
 }
 
-static void __init
+void __init
 marvel_io7_present(gct6_node *node)
 {
 	int pe;
@@ -800,7 +805,7 @@ void __iomem *marvel_ioportmap (unsigned long addr)
 	return (void __iomem *)addr;
 }
 
-u8
+unsigned int
 marvel_ioread8(const void __iomem *xaddr)
 {
 	unsigned long addr = (unsigned long) xaddr;
@@ -838,8 +843,53 @@ EXPORT_SYMBOL(marvel_ioportmap);
 EXPORT_SYMBOL(marvel_ioread8);
 EXPORT_SYMBOL(marvel_iowrite8);
 #endif
-
+
 /*
+ * NUMA Support
+ */
+/**********
+ * FIXME - for now each cpu is a node by itself 
+ *              -- no real support for striped mode 
+ **********
+ */
+int
+marvel_pa_to_nid(unsigned long pa)
+{
+	int cpuid;
+
+	if ((pa >> 43) & 1) 	/* I/O */ 
+		cpuid = (~(pa >> 35) & 0xff);
+	else			/* mem */
+		cpuid = ((pa >> 34) & 0x3) | ((pa >> (37 - 2)) & (0x1f << 2));
+
+	return marvel_cpuid_to_nid(cpuid);
+}
+
+int
+marvel_cpuid_to_nid(int cpuid)
+{
+	return cpuid;
+}
+
+unsigned long
+marvel_node_mem_start(int nid)
+{
+	unsigned long pa;
+
+	pa = (nid & 0x3) | ((nid & (0x1f << 2)) << 1);
+	pa <<= 34;
+
+	return pa;
+}
+
+unsigned long
+marvel_node_mem_size(int nid)
+{
+	return 16UL * 1024 * 1024 * 1024; /* 16GB */
+}
+
+
+/* 
  * AGP GART Support.
  */
 #include <linux/agp_backend.h>

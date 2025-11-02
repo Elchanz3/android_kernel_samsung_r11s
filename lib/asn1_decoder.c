@@ -381,7 +381,7 @@ next_op:
 	case ASN1_OP_END_SET_ACT:
 		if (unlikely(!(flags & FLAG_MATCHED)))
 			goto tag_mismatch;
-		fallthrough;
+		/* fall through */
 
 	case ASN1_OP_END_SEQ:
 	case ASN1_OP_END_SET_OF:
@@ -448,7 +448,7 @@ next_op:
 			pc += asn1_op_lengths[op];
 			goto next_op;
 		}
-		fallthrough;
+		/* fall through */
 
 	case ASN1_OP_ACT:
 		ret = actions[machine[pc + 1]](context, hdr, tag, data + tdp, len);
@@ -518,5 +518,4 @@ error:
 }
 EXPORT_SYMBOL_GPL(asn1_ber_decoder);
 
-MODULE_DESCRIPTION("Decoder for ASN.1 BER/DER/CER encoded bytestream");
 MODULE_LICENSE("GPL");

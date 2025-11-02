@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2014-2021 Broadcom
+ * Copyright (C) 2014-2017 Broadcom
  */
 
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/module.h>
-#include <linux/panic_notifier.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
 #include <linux/sysfs.h>
@@ -94,20 +93,6 @@ static const int gisb_offsets_bcm7400[] = {
 	[ARB_ERR_CAP_ADDR]	= 0x0cc,
 	[ARB_ERR_CAP_STATUS]	= 0x0d4,
 	[ARB_ERR_CAP_MASTER]	= 0x0d8,
-};
-
-static const int gisb_offsets_bcm74165[] = {
-	[ARB_TIMER]		= 0x008,
-	[ARB_BP_CAP_CLR]	= 0x044,
-	[ARB_BP_CAP_HI_ADDR]	= -1,
-	[ARB_BP_CAP_ADDR]	= 0x048,
-	[ARB_BP_CAP_STATUS]	= 0x058,
-	[ARB_BP_CAP_MASTER]	= 0x05c,
-	[ARB_ERR_CAP_CLR]	= 0x038,
-	[ARB_ERR_CAP_HI_ADDR]	= -1,
-	[ARB_ERR_CAP_ADDR]	= 0x020,
-	[ARB_ERR_CAP_STATUS]	= 0x030,
-	[ARB_ERR_CAP_MASTER]	= 0x034,
 };
 
 static const int gisb_offsets_bcm7435[] = {
@@ -395,7 +380,10 @@ static struct attribute *gisb_arb_sysfs_attrs[] = {
 	&dev_attr_gisb_arb_timeout.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(gisb_arb_sysfs);
+
+static struct attribute_group gisb_arb_sysfs_attr_group = {
+	.attrs = gisb_arb_sysfs_attrs,
+};
 
 static const struct of_device_id brcmstb_gisb_arb_of_match[] = {
 	{ .compatible = "brcm,gisb-arb",         .data = gisb_offsets_bcm7445 },
@@ -404,20 +392,20 @@ static const struct of_device_id brcmstb_gisb_arb_of_match[] = {
 	{ .compatible = "brcm,bcm7400-gisb-arb", .data = gisb_offsets_bcm7400 },
 	{ .compatible = "brcm,bcm7278-gisb-arb", .data = gisb_offsets_bcm7278 },
 	{ .compatible = "brcm,bcm7038-gisb-arb", .data = gisb_offsets_bcm7038 },
-	{ .compatible = "brcm,bcm74165-gisb-arb", .data = gisb_offsets_bcm74165 },
 	{ },
 };
-MODULE_DEVICE_TABLE(of, brcmstb_gisb_arb_of_match);
 
 static int __init brcmstb_gisb_arb_probe(struct platform_device *pdev)
 {
 	struct device_node *dn = pdev->dev.of_node;
 	struct brcmstb_gisb_arb_device *gdev;
 	const struct of_device_id *of_id;
+	struct resource *r;
 	int err, timeout_irq, tea_irq, bp_irq;
 	unsigned int num_masters, j = 0;
 	int i, first, last;
 
+	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	timeout_irq = platform_get_irq(pdev, 0);
 	tea_irq = platform_get_irq(pdev, 1);
 	bp_irq = platform_get_irq(pdev, 2);
@@ -429,7 +417,7 @@ static int __init brcmstb_gisb_arb_probe(struct platform_device *pdev)
 	mutex_init(&gdev->lock);
 	INIT_LIST_HEAD(&gdev->next);
 
-	gdev->base = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
+	gdev->base = devm_ioremap_resource(&pdev->dev, r);
 	if (IS_ERR(gdev->base))
 		return PTR_ERR(gdev->base);
 
@@ -487,12 +475,16 @@ static int __init brcmstb_gisb_arb_probe(struct platform_device *pdev)
 		}
 	}
 
+	err = sysfs_create_group(&pdev->dev.kobj, &gisb_arb_sysfs_attr_group);
+	if (err)
+		return err;
+
 	platform_set_drvdata(pdev, gdev);
 
 	list_add_tail(&gdev->next, &brcmstb_gisb_arb_device_list);
 
 #ifdef CONFIG_MIPS
-	mips_set_be_handler(brcmstb_bus_error_handler);
+	board_be_handler = brcmstb_bus_error_handler;
 #endif
 
 	if (list_is_singular(&brcmstb_gisb_arb_device_list)) {
@@ -543,7 +535,6 @@ static struct platform_driver brcmstb_gisb_arb_driver = {
 		.name	= "brcm-gisb-arb",
 		.of_match_table = brcmstb_gisb_arb_of_match,
 		.pm	= &brcmstb_gisb_arb_pm_ops,
-		.dev_groups = gisb_arb_sysfs_groups,
 	},
 };
 
@@ -554,7 +545,3 @@ static int __init brcm_gisb_driver_init(void)
 }
 
 module_init(brcm_gisb_driver_init);
-
-MODULE_AUTHOR("Broadcom");
-MODULE_DESCRIPTION("Broadcom STB GISB arbiter driver");
-MODULE_LICENSE("GPL v2");

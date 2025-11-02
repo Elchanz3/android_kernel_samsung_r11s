@@ -6,7 +6,6 @@
 #include <linux/clk-provider.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
 #include <dt-bindings/clock/qcom,videocc-sm8150.h>
@@ -21,10 +20,14 @@
 
 enum {
 	P_BI_TCXO,
+	P_CHIP_SLEEP_CLK,
+	P_CORE_BI_PLL_TEST_SE,
+	P_VIDEO_PLL0_OUT_EVEN,
 	P_VIDEO_PLL0_OUT_MAIN,
+	P_VIDEO_PLL0_OUT_ODD,
 };
 
-static const struct pll_vco trion_vco[] = {
+static struct pll_vco trion_vco[] = {
 	{ 249600000, 2000000000, 0 },
 };
 
@@ -101,8 +104,8 @@ static struct clk_branch video_cc_iris_ahb_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_iris_ahb_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_iris_clk_src.clkr.hw,
+			.parent_data = &(const struct clk_parent_data){
+				.hw = &video_cc_iris_clk_src.clkr.hw,
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -119,8 +122,8 @@ static struct clk_branch video_cc_mvs0_core_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_mvs0_core_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_iris_clk_src.clkr.hw,
+			.parent_data = &(const struct clk_parent_data){
+				.hw = &video_cc_iris_clk_src.clkr.hw,
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -137,8 +140,8 @@ static struct clk_branch video_cc_mvs1_core_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_mvs1_core_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_iris_clk_src.clkr.hw,
+			.parent_data = &(const struct clk_parent_data){
+				.hw = &video_cc_iris_clk_src.clkr.hw,
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -155,8 +158,8 @@ static struct clk_branch video_cc_mvsc_core_clk = {
 		.enable_mask = BIT(0),
 		.hw.init = &(struct clk_init_data){
 			.name = "video_cc_mvsc_core_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&video_cc_iris_clk_src.clkr.hw,
+			.parent_data = &(const struct clk_parent_data){
+				.hw = &video_cc_iris_clk_src.clkr.hw,
 			},
 			.num_parents = 1,
 			.flags = CLK_SET_RATE_PARENT,
@@ -179,7 +182,7 @@ static struct gdsc vcodec0_gdsc = {
 	.pd = {
 		.name = "vcodec0_gdsc",
 	},
-	.flags = HW_CTRL_TRIGGER,
+	.flags = HW_CTRL,
 	.pwrsts = PWRSTS_OFF_ON,
 };
 
@@ -188,7 +191,7 @@ static struct gdsc vcodec1_gdsc = {
 	.pd = {
 		.name = "vcodec1_gdsc",
 	},
-	.flags = HW_CTRL_TRIGGER,
+	.flags = HW_CTRL,
 	.pwrsts = PWRSTS_OFF_ON,
 };
 static struct clk_regmap *video_cc_sm8150_clocks[] = {
@@ -215,7 +218,7 @@ static const struct regmap_config video_cc_sm8150_regmap_config = {
 };
 
 static const struct qcom_reset_map video_cc_sm8150_resets[] = {
-	[VIDEO_CC_MVSC_CORE_CLK_BCR] = { .reg = 0x850, .bit = 2, .udelay = 150 },
+	[VIDEO_CC_MVSC_CORE_CLK_BCR] = { 0x850, 2 },
 	[VIDEO_CC_INTERFACE_BCR] = { 0x8f0 },
 	[VIDEO_CC_MVS0_BCR] = { 0x870 },
 	[VIDEO_CC_MVS1_BCR] = { 0x8b0 },
@@ -241,32 +244,17 @@ MODULE_DEVICE_TABLE(of, video_cc_sm8150_match_table);
 static int video_cc_sm8150_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
-	int ret;
-
-	ret = devm_pm_runtime_enable(&pdev->dev);
-	if (ret)
-		return ret;
-
-	ret = pm_runtime_resume_and_get(&pdev->dev);
-	if (ret)
-		return ret;
 
 	regmap = qcom_cc_map(pdev, &video_cc_sm8150_desc);
-	if (IS_ERR(regmap)) {
-		pm_runtime_put_sync(&pdev->dev);
+	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
-	}
 
 	clk_trion_pll_configure(&video_pll0, regmap, &video_pll0_config);
 
 	/* Keep VIDEO_CC_XO_CLK ALWAYS-ON */
 	regmap_update_bits(regmap, 0x984, 0x1, 0x1);
 
-	ret = qcom_cc_really_probe(&pdev->dev, &video_cc_sm8150_desc, regmap);
-
-	pm_runtime_put_sync(&pdev->dev);
-
-	return ret;
+	return qcom_cc_really_probe(pdev, &video_cc_sm8150_desc, regmap);
 }
 
 static struct platform_driver video_cc_sm8150_driver = {
@@ -277,7 +265,17 @@ static struct platform_driver video_cc_sm8150_driver = {
 	},
 };
 
-module_platform_driver(video_cc_sm8150_driver);
+static int __init video_cc_sm8150_init(void)
+{
+	return platform_driver_register(&video_cc_sm8150_driver);
+}
+subsys_initcall(video_cc_sm8150_init);
+
+static void __exit video_cc_sm8150_exit(void)
+{
+	platform_driver_unregister(&video_cc_sm8150_driver);
+}
+module_exit(video_cc_sm8150_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("QTI VIDEOCC SM8150 Driver");

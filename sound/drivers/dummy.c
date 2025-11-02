@@ -9,7 +9,6 @@
 #include <linux/platform_device.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
-#include <linux/string.h>
 #include <linux/time.h>
 #include <linux/wait.h>
 #include <linux/hrtimer.h>
@@ -26,6 +25,7 @@
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Dummy soundcard (/dev/null)");
 MODULE_LICENSE("GPL");
+MODULE_SUPPORTED_DEVICE("{{ALSA,Dummy soundcard}}");
 
 #define MAX_PCM_DEVICES		4
 #define MAX_PCM_SUBSTREAMS	128
@@ -43,8 +43,6 @@ MODULE_LICENSE("GPL");
 #define USE_CHANNELS_MAX 	2
 #define USE_PERIODS_MIN 	1
 #define USE_PERIODS_MAX 	1024
-#define USE_MIXER_VOLUME_LEVEL_MIN	-50
-#define USE_MIXER_VOLUME_LEVEL_MAX	100
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -53,8 +51,6 @@ static char *model[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = NULL};
 static int pcm_devs[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
 static int pcm_substreams[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 8};
 //static int midi_devs[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 2};
-static int mixer_volume_level_min = USE_MIXER_VOLUME_LEVEL_MIN;
-static int mixer_volume_level_max = USE_MIXER_VOLUME_LEVEL_MAX;
 #ifdef CONFIG_HIGH_RES_TIMERS
 static bool hrtimer = 1;
 #endif
@@ -74,10 +70,6 @@ module_param_array(pcm_substreams, int, NULL, 0444);
 MODULE_PARM_DESC(pcm_substreams, "PCM substreams # (1-128) for dummy driver.");
 //module_param_array(midi_devs, int, NULL, 0444);
 //MODULE_PARM_DESC(midi_devs, "MIDI devices # (0-2) for dummy driver.");
-module_param(mixer_volume_level_min, int, 0444);
-MODULE_PARM_DESC(mixer_volume_level_min, "Minimum mixer volume level for dummy driver. Default: -50");
-module_param(mixer_volume_level_max, int, 0444);
-MODULE_PARM_DESC(mixer_volume_level_max, "Maximum mixer volume level for dummy driver. Default: 100");
 module_param(fake_buffer, bool, 0444);
 MODULE_PARM_DESC(fake_buffer, "Fake buffer allocations.");
 #ifdef CONFIG_HIGH_RES_TIMERS
@@ -244,7 +236,7 @@ struct dummy_systimer_pcm {
 static void dummy_systimer_rearm(struct dummy_systimer_pcm *dpcm)
 {
 	mod_timer(&dpcm->timer, jiffies +
-		DIV_ROUND_UP(dpcm->frac_period_rest, dpcm->rate));
+		(dpcm->frac_period_rest + dpcm->rate - 1) / dpcm->rate);
 }
 
 static void dummy_systimer_update(struct dummy_systimer_pcm *dpcm)
@@ -269,19 +261,19 @@ static void dummy_systimer_update(struct dummy_systimer_pcm *dpcm)
 static int dummy_systimer_start(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
-
-	guard(spinlock)(&dpcm->lock);
+	spin_lock(&dpcm->lock);
 	dpcm->base_time = jiffies;
 	dummy_systimer_rearm(dpcm);
+	spin_unlock(&dpcm->lock);
 	return 0;
 }
 
 static int dummy_systimer_stop(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
-
-	guard(spinlock)(&dpcm->lock);
-	timer_delete(&dpcm->timer);
+	spin_lock(&dpcm->lock);
+	del_timer(&dpcm->timer);
+	spin_unlock(&dpcm->lock);
 	return 0;
 }
 
@@ -302,15 +294,16 @@ static int dummy_systimer_prepare(struct snd_pcm_substream *substream)
 
 static void dummy_systimer_callback(struct timer_list *t)
 {
-	struct dummy_systimer_pcm *dpcm = timer_container_of(dpcm, t, timer);
+	struct dummy_systimer_pcm *dpcm = from_timer(dpcm, t, timer);
+	unsigned long flags;
 	int elapsed = 0;
-
-	scoped_guard(spinlock_irqsave, &dpcm->lock) {
-		dummy_systimer_update(dpcm);
-		dummy_systimer_rearm(dpcm);
-		elapsed = dpcm->elapsed;
-		dpcm->elapsed = 0;
-	}
+	
+	spin_lock_irqsave(&dpcm->lock, flags);
+	dummy_systimer_update(dpcm);
+	dummy_systimer_rearm(dpcm);
+	elapsed = dpcm->elapsed;
+	dpcm->elapsed = 0;
+	spin_unlock_irqrestore(&dpcm->lock, flags);
 	if (elapsed)
 		snd_pcm_period_elapsed(dpcm->substream);
 }
@@ -319,10 +312,13 @@ static snd_pcm_uframes_t
 dummy_systimer_pointer(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
+	snd_pcm_uframes_t pos;
 
-	guard(spinlock)(&dpcm->lock);
+	spin_lock(&dpcm->lock);
 	dummy_systimer_update(dpcm);
-	return dpcm->frac_pos / HZ;
+	pos = dpcm->frac_pos / HZ;
+	spin_unlock(&dpcm->lock);
+	return pos;
 }
 
 static int dummy_systimer_create(struct snd_pcm_substream *substream)
@@ -454,7 +450,8 @@ static int dummy_hrtimer_create(struct snd_pcm_substream *substream)
 	if (!dpcm)
 		return -ENOMEM;
 	substream->runtime->private_data = dpcm;
-	hrtimer_setup(&dpcm->timer, dummy_hrtimer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	hrtimer_init(&dpcm->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	dpcm->timer.function = dummy_hrtimer_callback;
 	dpcm->substream = substream;
 	atomic_set(&dpcm->running, 0);
 	return 0;
@@ -622,7 +619,14 @@ static int alloc_fake_buffer(void)
 
 static int dummy_pcm_copy(struct snd_pcm_substream *substream,
 			  int channel, unsigned long pos,
-			  struct iov_iter *iter, unsigned long bytes)
+			  void __user *dst, unsigned long bytes)
+{
+	return 0; /* do nothing */
+}
+
+static int dummy_pcm_copy_kernel(struct snd_pcm_substream *substream,
+				 int channel, unsigned long pos,
+				 void *dst, unsigned long bytes)
 {
 	return 0; /* do nothing */
 }
@@ -656,7 +660,8 @@ static const struct snd_pcm_ops dummy_pcm_ops_no_buf = {
 	.prepare =	dummy_pcm_prepare,
 	.trigger =	dummy_pcm_trigger,
 	.pointer =	dummy_pcm_pointer,
-	.copy =		dummy_pcm_copy,
+	.copy_user =	dummy_pcm_copy,
+	.copy_kernel =	dummy_pcm_copy_kernel,
 	.fill_silence =	dummy_pcm_silence,
 	.page =		dummy_pcm_page,
 };
@@ -681,7 +686,7 @@ static int snd_card_dummy_pcm(struct snd_dummy *dummy, int device,
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, ops);
 	pcm->private_data = dummy;
 	pcm->info_flags = 0;
-	strscpy(pcm->name, "Dummy PCM");
+	strcpy(pcm->name, "Dummy PCM");
 	if (!fake_buffer) {
 		snd_pcm_set_managed_buffer_all(pcm,
 			SNDRV_DMA_TYPE_CONTINUOUS,
@@ -709,20 +714,21 @@ static int snd_dummy_volume_info(struct snd_kcontrol *kcontrol,
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 2;
-	uinfo->value.integer.min = mixer_volume_level_min;
-	uinfo->value.integer.max = mixer_volume_level_max;
+	uinfo->value.integer.min = -50;
+	uinfo->value.integer.max = 100;
 	return 0;
 }
-
+ 
 static int snd_dummy_volume_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_dummy *dummy = snd_kcontrol_chip(kcontrol);
 	int addr = kcontrol->private_value;
 
-	guard(spinlock_irq)(&dummy->mixer_lock);
+	spin_lock_irq(&dummy->mixer_lock);
 	ucontrol->value.integer.value[0] = dummy->mixer_volume[addr][0];
 	ucontrol->value.integer.value[1] = dummy->mixer_volume[addr][1];
+	spin_unlock_irq(&dummy->mixer_lock);
 	return 0;
 }
 
@@ -734,20 +740,21 @@ static int snd_dummy_volume_put(struct snd_kcontrol *kcontrol,
 	int left, right;
 
 	left = ucontrol->value.integer.value[0];
-	if (left < mixer_volume_level_min)
-		left = mixer_volume_level_min;
-	if (left > mixer_volume_level_max)
-		left = mixer_volume_level_max;
+	if (left < -50)
+		left = -50;
+	if (left > 100)
+		left = 100;
 	right = ucontrol->value.integer.value[1];
-	if (right < mixer_volume_level_min)
-		right = mixer_volume_level_min;
-	if (right > mixer_volume_level_max)
-		right = mixer_volume_level_max;
-	guard(spinlock_irq)(&dummy->mixer_lock);
+	if (right < -50)
+		right = -50;
+	if (right > 100)
+		right = 100;
+	spin_lock_irq(&dummy->mixer_lock);
 	change = dummy->mixer_volume[addr][0] != left ||
 	         dummy->mixer_volume[addr][1] != right;
 	dummy->mixer_volume[addr][0] = left;
 	dummy->mixer_volume[addr][1] = right;
+	spin_unlock_irq(&dummy->mixer_lock);
 	return change;
 }
 
@@ -760,16 +767,17 @@ static const DECLARE_TLV_DB_SCALE(db_scale_dummy, -4500, 30, 0);
   .private_value = addr }
 
 #define snd_dummy_capsrc_info	snd_ctl_boolean_stereo_info
-
+ 
 static int snd_dummy_capsrc_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_dummy *dummy = snd_kcontrol_chip(kcontrol);
 	int addr = kcontrol->private_value;
 
-	guard(spinlock_irq)(&dummy->mixer_lock);
+	spin_lock_irq(&dummy->mixer_lock);
 	ucontrol->value.integer.value[0] = dummy->capture_source[addr][0];
 	ucontrol->value.integer.value[1] = dummy->capture_source[addr][1];
+	spin_unlock_irq(&dummy->mixer_lock);
 	return 0;
 }
 
@@ -781,11 +789,12 @@ static int snd_dummy_capsrc_put(struct snd_kcontrol *kcontrol, struct snd_ctl_el
 
 	left = ucontrol->value.integer.value[0] & 1;
 	right = ucontrol->value.integer.value[1] & 1;
-	guard(spinlock_irq)(&dummy->mixer_lock);
+	spin_lock_irq(&dummy->mixer_lock);
 	change = dummy->capture_source[addr][0] != left &&
 	         dummy->capture_source[addr][1] != right;
 	dummy->capture_source[addr][0] = left;
 	dummy->capture_source[addr][1] = right;
+	spin_unlock_irq(&dummy->mixer_lock);
 	return change;
 }
 
@@ -868,7 +877,7 @@ static int snd_card_dummy_new_mixer(struct snd_dummy *dummy)
 	int err;
 
 	spin_lock_init(&dummy->mixer_lock);
-	strscpy(card->mixername, "Dummy Mixer");
+	strcpy(card->mixername, "Dummy Mixer");
 	dummy->iobox = 1;
 
 	for (idx = 0; idx < ARRAY_SIZE(snd_dummy_controls); idx++) {
@@ -1017,15 +1026,16 @@ static int snd_dummy_probe(struct platform_device *devptr)
 	int idx, err;
 	int dev = devptr->id;
 
-	err = snd_devm_card_new(&devptr->dev, index[dev], id[dev], THIS_MODULE,
-				sizeof(struct snd_dummy), &card);
+	err = snd_card_new(&devptr->dev, index[dev], id[dev], THIS_MODULE,
+			   sizeof(struct snd_dummy), &card);
 	if (err < 0)
 		return err;
 	dummy = card->private_data;
 	dummy->card = card;
 	for (mdl = dummy_models; *mdl && model[dev]; mdl++) {
 		if (strcmp(model[dev], (*mdl)->name) == 0) {
-			pr_info("snd-dummy: Using model '%s' for card %i\n",
+			printk(KERN_INFO
+				"snd-dummy: Using model '%s' for card %i\n",
 				(*mdl)->name, card->number);
 			m = dummy->model = *mdl;
 			break;
@@ -1038,7 +1048,7 @@ static int snd_dummy_probe(struct platform_device *devptr)
 			pcm_substreams[dev] = MAX_PCM_SUBSTREAMS;
 		err = snd_card_dummy_pcm(dummy, idx, pcm_substreams[dev]);
 		if (err < 0)
-			return err;
+			goto __nodev;
 	}
 
 	dummy->pcm_hw = dummy_pcm_hardware;
@@ -1067,28 +1077,32 @@ static int snd_dummy_probe(struct platform_device *devptr)
 			dummy->pcm_hw.channels_max = m->channels_max;
 	}
 
-	if (mixer_volume_level_min > mixer_volume_level_max) {
-		pr_warn("snd-dummy: Invalid mixer volume level: min=%d, max=%d. Fall back to default value.\n",
-		mixer_volume_level_min, mixer_volume_level_max);
-		mixer_volume_level_min = USE_MIXER_VOLUME_LEVEL_MIN;
-		mixer_volume_level_max = USE_MIXER_VOLUME_LEVEL_MAX;
-	}
 	err = snd_card_dummy_new_mixer(dummy);
 	if (err < 0)
-		return err;
-	strscpy(card->driver, "Dummy");
-	strscpy(card->shortname, "Dummy");
+		goto __nodev;
+	strcpy(card->driver, "Dummy");
+	strcpy(card->shortname, "Dummy");
 	sprintf(card->longname, "Dummy %i", dev + 1);
 
 	dummy_proc_init(dummy);
 
 	err = snd_card_register(card);
-	if (err < 0)
-		return err;
-	platform_set_drvdata(devptr, card);
+	if (err == 0) {
+		platform_set_drvdata(devptr, card);
+		return 0;
+	}
+      __nodev:
+	snd_card_free(card);
+	return err;
+}
+
+static int snd_dummy_remove(struct platform_device *devptr)
+{
+	snd_card_free(platform_get_drvdata(devptr));
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int snd_dummy_suspend(struct device *pdev)
 {
 	struct snd_card *card = dev_get_drvdata(pdev);
@@ -1096,7 +1110,7 @@ static int snd_dummy_suspend(struct device *pdev)
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
 	return 0;
 }
-
+	
 static int snd_dummy_resume(struct device *pdev)
 {
 	struct snd_card *card = dev_get_drvdata(pdev);
@@ -1105,15 +1119,20 @@ static int snd_dummy_resume(struct device *pdev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(snd_dummy_pm, snd_dummy_suspend, snd_dummy_resume);
+static SIMPLE_DEV_PM_OPS(snd_dummy_pm, snd_dummy_suspend, snd_dummy_resume);
+#define SND_DUMMY_PM_OPS	&snd_dummy_pm
+#else
+#define SND_DUMMY_PM_OPS	NULL
+#endif
 
 #define SND_DUMMY_DRIVER	"snd_dummy"
 
 static struct platform_driver snd_dummy_driver = {
 	.probe		= snd_dummy_probe,
+	.remove		= snd_dummy_remove,
 	.driver		= {
 		.name	= SND_DUMMY_DRIVER,
-		.pm	= &snd_dummy_pm,
+		.pm	= SND_DUMMY_PM_OPS,
 	},
 };
 
@@ -1159,7 +1178,7 @@ static int __init alsa_card_dummy_init(void)
 	}
 	if (!cards) {
 #ifdef MODULE
-		pr_err("Dummy soundcard not found or device busy\n");
+		printk(KERN_ERR "Dummy soundcard not found or device busy\n");
 #endif
 		snd_dummy_unregister_all();
 		return -ENODEV;

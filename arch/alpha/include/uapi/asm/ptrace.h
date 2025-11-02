@@ -42,8 +42,6 @@ struct pt_regs {
 	unsigned long trap_a0;
 	unsigned long trap_a1;
 	unsigned long trap_a2;
-/* This makes the stack 16-byte aligned as GCC expects */
-	unsigned long __pad0;
 /* These are saved by PAL-code: */
 	unsigned long ps;
 	unsigned long pc;
@@ -66,9 +64,7 @@ struct switch_stack {
 	unsigned long r14;
 	unsigned long r15;
 	unsigned long r26;
-#ifndef __KERNEL__
 	unsigned long fp[32];	/* fp[31] is fpcr */
-#endif
 };
 
 

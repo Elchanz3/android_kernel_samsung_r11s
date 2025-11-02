@@ -18,6 +18,24 @@
 
 #include <soc/bcm2835/raspberrypi-firmware.h>
 
+enum rpi_firmware_clk_id {
+	RPI_FIRMWARE_EMMC_CLK_ID = 1,
+	RPI_FIRMWARE_UART_CLK_ID,
+	RPI_FIRMWARE_ARM_CLK_ID,
+	RPI_FIRMWARE_CORE_CLK_ID,
+	RPI_FIRMWARE_V3D_CLK_ID,
+	RPI_FIRMWARE_H264_CLK_ID,
+	RPI_FIRMWARE_ISP_CLK_ID,
+	RPI_FIRMWARE_SDRAM_CLK_ID,
+	RPI_FIRMWARE_PIXEL_CLK_ID,
+	RPI_FIRMWARE_PWM_CLK_ID,
+	RPI_FIRMWARE_HEVC_CLK_ID,
+	RPI_FIRMWARE_EMMC2_CLK_ID,
+	RPI_FIRMWARE_M2MC_CLK_ID,
+	RPI_FIRMWARE_PIXEL_BVB_CLK_ID,
+	RPI_FIRMWARE_NUM_CLK_ID,
+};
+
 static char *rpi_firmware_clk_names[] = {
 	[RPI_FIRMWARE_EMMC_CLK_ID]	= "emmc",
 	[RPI_FIRMWARE_UART_CLK_ID]	= "uart",
@@ -33,14 +51,10 @@ static char *rpi_firmware_clk_names[] = {
 	[RPI_FIRMWARE_EMMC2_CLK_ID]	= "emmc2",
 	[RPI_FIRMWARE_M2MC_CLK_ID]	= "m2mc",
 	[RPI_FIRMWARE_PIXEL_BVB_CLK_ID]	= "pixel-bvb",
-	[RPI_FIRMWARE_VEC_CLK_ID]	= "vec",
-	[RPI_FIRMWARE_DISP_CLK_ID]	= "disp",
 };
 
 #define RPI_FIRMWARE_STATE_ENABLE_BIT	BIT(0)
 #define RPI_FIRMWARE_STATE_WAIT_BIT	BIT(1)
-
-struct raspberrypi_clk_variant;
 
 struct raspberrypi_clk {
 	struct device *dev;
@@ -52,119 +66,8 @@ struct raspberrypi_clk_data {
 	struct clk_hw hw;
 
 	unsigned int id;
-	struct raspberrypi_clk_variant *variant;
 
 	struct raspberrypi_clk *rpi;
-};
-
-static inline
-const struct raspberrypi_clk_data *clk_hw_to_data(const struct clk_hw *hw)
-{
-	return container_of(hw, struct raspberrypi_clk_data, hw);
-}
-
-struct raspberrypi_clk_variant {
-	bool		export;
-	char		*clkdev;
-	unsigned long	min_rate;
-	bool		minimize;
-	bool		maximize;
-	u32		flags;
-};
-
-static struct raspberrypi_clk_variant
-raspberrypi_clk_variants[RPI_FIRMWARE_NUM_CLK_ID] = {
-	[RPI_FIRMWARE_ARM_CLK_ID] = {
-		.export = true,
-		.clkdev = "cpu0",
-		.flags = CLK_IS_CRITICAL,
-	},
-	[RPI_FIRMWARE_CORE_CLK_ID] = {
-		.export = true,
-
-		/*
-		 * The clock is shared between the HVS and the CSI
-		 * controllers, on the BCM2711 and will change depending
-		 * on the pixels composited on the HVS and the capture
-		 * resolution on Unicam.
-		 *
-		 * Since the rate can get quite large, and we need to
-		 * coordinate between both driver instances, let's
-		 * always use the minimum the drivers will let us.
-		 */
-		.minimize = true,
-
-		/*
-		 * It should never be disabled as it drives the bus for
-		 * everything else.
-		 */
-		.flags = CLK_IS_CRITICAL,
-	},
-	[RPI_FIRMWARE_M2MC_CLK_ID] = {
-		.export = true,
-
-		/*
-		 * If we boot without any cable connected to any of the
-		 * HDMI connector, the firmware will skip the HSM
-		 * initialization and leave it with a rate of 0,
-		 * resulting in a bus lockup when we're accessing the
-		 * registers even if it's enabled.
-		 *
-		 * Let's put a sensible default so that we don't end up
-		 * in this situation.
-		 */
-		.min_rate = 120000000,
-
-		/*
-		 * The clock is shared between the two HDMI controllers
-		 * on the BCM2711 and will change depending on the
-		 * resolution output on each. Since the rate can get
-		 * quite large, and we need to coordinate between both
-		 * driver instances, let's always use the minimum the
-		 * drivers will let us.
-		 */
-		.minimize = true,
-
-		/*
-		 * As mentioned above, this clock is disabled during boot,
-		 * the firmware will skip the HSM initialization, resulting
-		 * in a bus lockup. Therefore, make sure it's enabled
-		 * during boot, but after it, it can be enabled/disabled
-		 * by the driver.
-		 */
-		.flags = CLK_IGNORE_UNUSED,
-	},
-	[RPI_FIRMWARE_V3D_CLK_ID] = {
-		.export = true,
-		.maximize = true,
-	},
-	[RPI_FIRMWARE_PIXEL_CLK_ID] = {
-		.export = true,
-		.minimize = true,
-		.flags = CLK_IS_CRITICAL,
-	},
-	[RPI_FIRMWARE_HEVC_CLK_ID] = {
-		.export = true,
-		.minimize = true,
-		.flags = CLK_IS_CRITICAL,
-	},
-	[RPI_FIRMWARE_ISP_CLK_ID] = {
-		.export = true,
-		.minimize = true,
-	},
-	[RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = {
-		.export = true,
-		.minimize = true,
-		.flags = CLK_IS_CRITICAL,
-	},
-	[RPI_FIRMWARE_VEC_CLK_ID] = {
-		.export = true,
-		.minimize = true,
-	},
-	[RPI_FIRMWARE_DISP_CLK_ID] = {
-		.export = true,
-		.minimize = true,
-	},
 };
 
 /*
@@ -194,6 +97,7 @@ static int raspberrypi_clock_property(struct rpi_firmware *firmware,
 	struct raspberrypi_firmware_prop msg = {
 		.id = cpu_to_le32(data->id),
 		.val = cpu_to_le32(*val),
+		.disable_turbo = cpu_to_le32(1),
 	};
 	int ret;
 
@@ -208,18 +112,16 @@ static int raspberrypi_clock_property(struct rpi_firmware *firmware,
 
 static int raspberrypi_fw_is_prepared(struct clk_hw *hw)
 {
-	const struct raspberrypi_clk_data *data = clk_hw_to_data(hw);
+	struct raspberrypi_clk_data *data =
+		container_of(hw, struct raspberrypi_clk_data, hw);
 	struct raspberrypi_clk *rpi = data->rpi;
 	u32 val = 0;
 	int ret;
 
 	ret = raspberrypi_clock_property(rpi->firmware, data,
 					 RPI_FIRMWARE_GET_CLOCK_STATE, &val);
-	if (ret) {
-		dev_err_ratelimited(rpi->dev, "Failed to get %s state: %d\n",
-				    clk_hw_get_name(hw), ret);
+	if (ret)
 		return 0;
-	}
 
 	return !!(val & RPI_FIRMWARE_STATE_ENABLE_BIT);
 }
@@ -228,18 +130,16 @@ static int raspberrypi_fw_is_prepared(struct clk_hw *hw)
 static unsigned long raspberrypi_fw_get_rate(struct clk_hw *hw,
 					     unsigned long parent_rate)
 {
-	const struct raspberrypi_clk_data *data = clk_hw_to_data(hw);
+	struct raspberrypi_clk_data *data =
+		container_of(hw, struct raspberrypi_clk_data, hw);
 	struct raspberrypi_clk *rpi = data->rpi;
 	u32 val = 0;
 	int ret;
 
 	ret = raspberrypi_clock_property(rpi->firmware, data,
 					 RPI_FIRMWARE_GET_CLOCK_RATE, &val);
-	if (ret) {
-		dev_err_ratelimited(rpi->dev, "Failed to get %s frequency: %d\n",
-				    clk_hw_get_name(hw), ret);
+	if (ret)
 		return 0;
-	}
 
 	return val;
 }
@@ -247,7 +147,8 @@ static unsigned long raspberrypi_fw_get_rate(struct clk_hw *hw,
 static int raspberrypi_fw_set_rate(struct clk_hw *hw, unsigned long rate,
 				   unsigned long parent_rate)
 {
-	const struct raspberrypi_clk_data *data = clk_hw_to_data(hw);
+	struct raspberrypi_clk_data *data =
+		container_of(hw, struct raspberrypi_clk_data, hw);
 	struct raspberrypi_clk *rpi = data->rpi;
 	u32 _rate = rate;
 	int ret;
@@ -264,63 +165,16 @@ static int raspberrypi_fw_set_rate(struct clk_hw *hw, unsigned long rate,
 static int raspberrypi_fw_dumb_determine_rate(struct clk_hw *hw,
 					      struct clk_rate_request *req)
 {
-	const struct raspberrypi_clk_data *data = clk_hw_to_data(hw);
-	struct raspberrypi_clk_variant *variant = data->variant;
-
 	/*
 	 * The firmware will do the rounding but that isn't part of
 	 * the interface with the firmware, so we just do our best
 	 * here.
 	 */
-
 	req->rate = clamp(req->rate, req->min_rate, req->max_rate);
-
-	/*
-	 * We want to aggressively reduce the clock rate here, so let's
-	 * just ignore the requested rate and return the bare minimum
-	 * rate we can get away with.
-	 */
-	if (variant->minimize && req->min_rate > 0)
-		req->rate = req->min_rate;
-
 	return 0;
 }
 
-static int raspberrypi_fw_prepare(struct clk_hw *hw)
-{
-	const struct raspberrypi_clk_data *data = clk_hw_to_data(hw);
-	struct raspberrypi_clk *rpi = data->rpi;
-	u32 state = RPI_FIRMWARE_STATE_ENABLE_BIT;
-	int ret;
-
-	ret = raspberrypi_clock_property(rpi->firmware, data,
-					 RPI_FIRMWARE_SET_CLOCK_STATE, &state);
-	if (ret)
-		dev_err_ratelimited(rpi->dev,
-				    "Failed to set clock %s state to on: %d\n",
-				    clk_hw_get_name(hw), ret);
-
-	return ret;
-}
-
-static void raspberrypi_fw_unprepare(struct clk_hw *hw)
-{
-	const struct raspberrypi_clk_data *data = clk_hw_to_data(hw);
-	struct raspberrypi_clk *rpi = data->rpi;
-	u32 state = 0;
-	int ret;
-
-	ret = raspberrypi_clock_property(rpi->firmware, data,
-					 RPI_FIRMWARE_SET_CLOCK_STATE, &state);
-	if (ret)
-		dev_err_ratelimited(rpi->dev,
-				    "Failed to set clock %s state to off: %d\n",
-				    clk_hw_get_name(hw), ret);
-}
-
 static const struct clk_ops raspberrypi_firmware_clk_ops = {
-	.prepare        = raspberrypi_fw_prepare,
-	.unprepare      = raspberrypi_fw_unprepare,
 	.is_prepared	= raspberrypi_fw_is_prepared,
 	.recalc_rate	= raspberrypi_fw_get_rate,
 	.determine_rate	= raspberrypi_fw_dumb_determine_rate,
@@ -329,8 +183,7 @@ static const struct clk_ops raspberrypi_firmware_clk_ops = {
 
 static struct clk_hw *raspberrypi_clk_register(struct raspberrypi_clk *rpi,
 					       unsigned int parent,
-					       unsigned int id,
-					       struct raspberrypi_clk_variant *variant)
+					       unsigned int id)
 {
 	struct raspberrypi_clk_data *data;
 	struct clk_init_data init = {};
@@ -342,15 +195,12 @@ static struct clk_hw *raspberrypi_clk_register(struct raspberrypi_clk *rpi,
 		return ERR_PTR(-ENOMEM);
 	data->rpi = rpi;
 	data->id = id;
-	data->variant = variant;
 
 	init.name = devm_kasprintf(rpi->dev, GFP_KERNEL,
 				   "fw-clk-%s",
 				   rpi_firmware_clk_names[id]);
-	if (!init.name)
-		return ERR_PTR(-ENOMEM);
 	init.ops = &raspberrypi_firmware_clk_ops;
-	init.flags = variant->flags | CLK_GET_RATE_NOCACHE;
+	init.flags = CLK_GET_RATE_NOCACHE;
 
 	data->hw.init = &init;
 
@@ -378,28 +228,12 @@ static struct clk_hw *raspberrypi_clk_register(struct raspberrypi_clk *rpi,
 
 	clk_hw_set_rate_range(&data->hw, min_rate, max_rate);
 
-	if (variant->clkdev) {
+	if (id == RPI_FIRMWARE_ARM_CLK_ID) {
 		ret = devm_clk_hw_register_clkdev(rpi->dev, &data->hw,
-						  NULL, variant->clkdev);
+						  NULL, "cpu0");
 		if (ret) {
 			dev_err(rpi->dev, "Failed to initialize clkdev\n");
 			return ERR_PTR(ret);
-		}
-	}
-
-	if (variant->maximize)
-		variant->min_rate = max_rate;
-
-	if (variant->min_rate) {
-		unsigned long rate;
-
-		clk_hw_set_rate_range(&data->hw, variant->min_rate, max_rate);
-
-		rate = raspberrypi_fw_get_rate(&data->hw, 0);
-		if (rate < variant->min_rate) {
-			ret = raspberrypi_fw_set_rate(&data->hw, variant->min_rate, 0);
-			if (ret)
-				return ERR_PTR(ret);
 		}
 	}
 
@@ -435,28 +269,27 @@ static int raspberrypi_discover_clocks(struct raspberrypi_clk *rpi,
 		return ret;
 
 	while (clks->id) {
-		struct raspberrypi_clk_variant *variant;
+		struct clk_hw *hw;
 
-		if (clks->id >= RPI_FIRMWARE_NUM_CLK_ID) {
-			dev_err(rpi->dev, "Unknown clock id: %u (max: %u)\n",
-					   clks->id, RPI_FIRMWARE_NUM_CLK_ID - 1);
-			return -EINVAL;
-		}
-
-		variant = &raspberrypi_clk_variants[clks->id];
-		if (variant->export) {
-			struct clk_hw *hw;
-
+		switch (clks->id) {
+		case RPI_FIRMWARE_ARM_CLK_ID:
+		case RPI_FIRMWARE_CORE_CLK_ID:
+		case RPI_FIRMWARE_M2MC_CLK_ID:
+		case RPI_FIRMWARE_V3D_CLK_ID:
+		case RPI_FIRMWARE_PIXEL_BVB_CLK_ID:
 			hw = raspberrypi_clk_register(rpi, clks->parent,
-						      clks->id, variant);
+						      clks->id);
 			if (IS_ERR(hw))
 				return PTR_ERR(hw);
 
-			data->num = clks->id + 1;
 			data->hws[clks->id] = hw;
-		}
+			data->num = clks->id + 1;
+			fallthrough;
 
-		clks++;
+		default:
+			clks++;
+			break;
+		}
 	}
 
 	return 0;
@@ -486,7 +319,7 @@ static int raspberrypi_clk_probe(struct platform_device *pdev)
 		return -ENOENT;
 	}
 
-	firmware = devm_rpi_firmware_get(&pdev->dev, firmware_node);
+	firmware = rpi_firmware_get(firmware_node);
 	of_node_put(firmware_node);
 	if (!firmware)
 		return -EPROBE_DEFER;
@@ -520,11 +353,13 @@ static int raspberrypi_clk_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void raspberrypi_clk_remove(struct platform_device *pdev)
+static int raspberrypi_clk_remove(struct platform_device *pdev)
 {
 	struct raspberrypi_clk *rpi = platform_get_drvdata(pdev);
 
 	platform_device_unregister(rpi->cpufreq);
+
+	return 0;
 }
 
 static const struct of_device_id raspberrypi_clk_match[] = {
@@ -546,3 +381,4 @@ module_platform_driver(raspberrypi_clk_driver);
 MODULE_AUTHOR("Nicolas Saenz Julienne <nsaenzjulienne@suse.de>");
 MODULE_DESCRIPTION("Raspberry Pi firmware clock driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:raspberrypi-clk");

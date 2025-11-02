@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
+/**
  * AES ECB routines supporting the Power 7+ Nest Accelerators driver
  *
  * Copyright (C) 2011-2012 International Business Machines Inc.
@@ -8,12 +8,10 @@
  */
 
 #include <crypto/aes.h>
-#include <crypto/internal/skcipher.h>
-#include <linux/err.h>
-#include <linux/kernel.h>
+#include <crypto/algapi.h>
 #include <linux/module.h>
-#include <linux/spinlock.h>
-#include <linux/string.h>
+#include <linux/types.h>
+#include <linux/crypto.h>
 #include <asm/vio.h>
 
 #include "nx_csbcpb.h"
@@ -88,7 +86,7 @@ static int ecb_aes_nx_crypt(struct skcipher_request *req,
 			goto out;
 
 		atomic_inc(&(nx_ctx->stats->aes_ops));
-		atomic64_add(be32_to_cpu(csbcpb->csb.processed_byte_count),
+		atomic64_add(csbcpb->csb.processed_byte_count,
 			     &(nx_ctx->stats->aes_bytes));
 
 		processed += to_process;

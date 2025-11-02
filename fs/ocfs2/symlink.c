@@ -1,4 +1,6 @@
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  *  linux/cluster/ssi/cfs/symlink.c
  *
  *	This program is free software; you can redistribute it and/or
@@ -52,33 +54,36 @@
 #include "buffer_head_io.h"
 
 
-static int ocfs2_fast_symlink_read_folio(struct file *f, struct folio *folio)
+static int ocfs2_fast_symlink_readpage(struct file *unused, struct page *page)
 {
-	struct inode *inode = folio->mapping->host;
+	struct inode *inode = page->mapping->host;
 	struct buffer_head *bh = NULL;
 	int status = ocfs2_read_inode_block(inode, &bh);
 	struct ocfs2_dinode *fe;
 	const char *link;
+	void *kaddr;
 	size_t len;
 
 	if (status < 0) {
 		mlog_errno(status);
-		goto out;
+		return status;
 	}
 
 	fe = (struct ocfs2_dinode *) bh->b_data;
 	link = (char *) fe->id2.i_symlink;
 	/* will be less than a page size */
 	len = strnlen(link, ocfs2_fast_symlink_chars(inode->i_sb));
-	memcpy_to_folio(folio, 0, link, len + 1);
-out:
-	folio_end_read(folio, status == 0);
+	kaddr = kmap_atomic(page);
+	memcpy(kaddr, link, len + 1);
+	kunmap_atomic(kaddr);
+	SetPageUptodate(page);
+	unlock_page(page);
 	brelse(bh);
-	return status;
+	return 0;
 }
 
 const struct address_space_operations ocfs2_fast_symlink_aops = {
-	.read_folio		= ocfs2_fast_symlink_read_folio,
+	.readpage		= ocfs2_fast_symlink_readpage,
 };
 
 const struct inode_operations ocfs2_symlink_inode_operations = {

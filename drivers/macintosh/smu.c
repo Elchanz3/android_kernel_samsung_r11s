@@ -33,16 +33,15 @@
 #include <linux/delay.h>
 #include <linux/poll.h>
 #include <linux/mutex.h>
-#include <linux/of.h>
-#include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
+#include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/pmac_feature.h>
 #include <asm/smu.h>
@@ -472,7 +471,7 @@ EXPORT_SYMBOL(smu_present);
 int __init smu_init (void)
 {
 	struct device_node *np;
-	u64 data;
+	const u32 *data;
 	int ret = 0;
 
         np = of_find_node_by_type(NULL, "smu");
@@ -492,7 +491,11 @@ int __init smu_init (void)
 		goto fail_np;
 	}
 
-	smu = memblock_alloc_or_panic(sizeof(struct smu_device), SMP_CACHE_BYTES);
+	smu = memblock_alloc(sizeof(struct smu_device), SMP_CACHE_BYTES);
+	if (!smu)
+		panic("%s: Failed to allocate %zu bytes\n", __func__,
+		      sizeof(struct smu_device));
+
 	spin_lock_init(&smu->lock);
 	INIT_LIST_HEAD(&smu->cmd_list);
 	INIT_LIST_HEAD(&smu->cmd_i2c_list);
@@ -512,7 +515,8 @@ int __init smu_init (void)
 		ret = -ENXIO;
 		goto fail_bootmem;
 	}
-	if (of_property_read_reg(smu->db_node, 0, &data, NULL)) {
+	data = of_get_property(smu->db_node, "reg", NULL);
+	if (data == NULL) {
 		printk(KERN_ERR "SMU: Can't find doorbell GPIO address !\n");
 		ret = -ENXIO;
 		goto fail_db_node;
@@ -522,7 +526,7 @@ int __init smu_init (void)
 	 * and ack. GPIOs are at 0x50, best would be to find that out
 	 * in the device-tree though.
 	 */
-	smu->doorbell = data;
+	smu->doorbell = *data;
 	if (smu->doorbell < 0x50)
 		smu->doorbell += 0x50;
 
@@ -531,12 +535,13 @@ int __init smu_init (void)
 		smu->msg_node = of_find_node_by_name(NULL, "smu-interrupt");
 		if (smu->msg_node == NULL)
 			break;
-		if (of_property_read_reg(smu->msg_node, 0, &data, NULL)) {
+		data = of_get_property(smu->msg_node, "reg", NULL);
+		if (data == NULL) {
 			of_node_put(smu->msg_node);
 			smu->msg_node = NULL;
 			break;
 		}
-		smu->msg = data;
+		smu->msg = *data;
 		if (smu->msg < 0x50)
 			smu->msg += 0x50;
 	} while(0);
@@ -565,7 +570,7 @@ fail_msg_node:
 fail_db_node:
 	of_node_put(smu->db_node);
 fail_bootmem:
-	memblock_free(smu, sizeof(struct smu_device));
+	memblock_free(__pa(smu), sizeof(struct smu_device));
 	smu = NULL;
 fail_np:
 	of_node_put(np);
@@ -843,8 +848,7 @@ int smu_queue_i2c(struct smu_i2c_cmd *cmd)
 	cmd->read = cmd->info.devaddr & 0x01;
 	switch(cmd->info.type) {
 	case SMU_I2C_TRANSFER_SIMPLE:
-		cmd->info.sublen = 0;
-		memset(cmd->info.subaddr, 0, sizeof(cmd->info.subaddr));
+		memset(&cmd->info.sublen, 0, 4);
 		break;
 	case SMU_I2C_TRANSFER_COMBINED:
 		cmd->info.devaddr &= 0xfe;
@@ -1082,7 +1086,7 @@ static int smu_open(struct inode *inode, struct file *file)
 	unsigned long flags;
 
 	pp = kzalloc(sizeof(struct smu_private), GFP_KERNEL);
-	if (!pp)
+	if (pp == 0)
 		return -ENOMEM;
 	spin_lock_init(&pp->lock);
 	pp->mode = smu_file_commands;
@@ -1249,7 +1253,7 @@ static __poll_t smu_fpoll(struct file *file, poll_table *wait)
 	__poll_t mask = 0;
 	unsigned long flags;
 
-	if (!pp)
+	if (pp == 0)
 		return 0;
 
 	if (pp->mode == smu_file_commands) {
@@ -1272,7 +1276,7 @@ static int smu_release(struct inode *inode, struct file *file)
 	unsigned long flags;
 	unsigned int busy;
 
-	if (!pp)
+	if (pp == 0)
 		return 0;
 
 	file->private_data = NULL;
@@ -1310,6 +1314,7 @@ static int smu_release(struct inode *inode, struct file *file)
 
 
 static const struct file_operations smu_device_fops = {
+	.llseek		= no_llseek,
 	.read		= smu_read,
 	.write		= smu_write,
 	.poll		= smu_fpoll,

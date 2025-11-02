@@ -31,7 +31,6 @@ static int ipcomp4_err(struct sk_buff *skb, u32 info)
 	case ICMP_DEST_UNREACH:
 		if (icmp_hdr(skb)->code != ICMP_FRAG_NEEDED)
 			return 0;
-		break;
 	case ICMP_REDIRECT:
 		break;
 	default:
@@ -54,7 +53,6 @@ static int ipcomp4_err(struct sk_buff *skb, u32 info)
 }
 
 /* We always hold one tunnel user reference to indicate a tunnel */
-static struct lock_class_key xfrm_state_lock_key;
 static struct xfrm_state *ipcomp_tunnel_create(struct xfrm_state *x)
 {
 	struct net *net = xs_net(x);
@@ -63,7 +61,6 @@ static struct xfrm_state *ipcomp_tunnel_create(struct xfrm_state *x)
 	t = xfrm_state_alloc(net);
 	if (!t)
 		goto out;
-	lockdep_set_class(&t->lock, &xfrm_state_lock_key);
 
 	t->id.proto = IPPROTO_IPIP;
 	t->id.spi = x->props.saddr.a4;
@@ -119,8 +116,7 @@ out:
 	return err;
 }
 
-static int ipcomp4_init_state(struct xfrm_state *x,
-			      struct netlink_ext_ack *extack)
+static int ipcomp4_init_state(struct xfrm_state *x)
 {
 	int err = -EINVAL;
 
@@ -132,20 +128,17 @@ static int ipcomp4_init_state(struct xfrm_state *x,
 		x->props.header_len += sizeof(struct iphdr);
 		break;
 	default:
-		NL_SET_ERR_MSG(extack, "Unsupported XFRM mode for IPcomp");
 		goto out;
 	}
 
-	err = ipcomp_init_state(x, extack);
+	err = ipcomp_init_state(x);
 	if (err)
 		goto out;
 
 	if (x->props.mode == XFRM_MODE_TUNNEL) {
 		err = ipcomp_tunnel_attach(x);
-		if (err) {
-			NL_SET_ERR_MSG(extack, "Kernel error: failed to initialize the associated state");
+		if (err)
 			goto out;
-		}
 	}
 
 	err = 0;
@@ -159,6 +152,7 @@ static int ipcomp4_rcv_cb(struct sk_buff *skb, int err)
 }
 
 static const struct xfrm_type ipcomp_type = {
+	.description	= "IPCOMP4",
 	.owner		= THIS_MODULE,
 	.proto	     	= IPPROTO_COMP,
 	.init_state	= ipcomp4_init_state,

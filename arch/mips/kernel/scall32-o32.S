@@ -19,6 +19,7 @@
 #include <asm/sysmips.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
+#include <asm/war.h>
 #include <asm/asm-offsets.h>
 
 	.align	5
@@ -47,8 +48,10 @@ NESTED(handle_sys, PT_SIZE, sp)
 	 * We intentionally keep the kernel stack a little below the top of
 	 * userspace so we don't have to do a slower byte accurate check here.
 	 */
+	lw	t5, TI_ADDR_LIMIT($28)
 	addu	t4, t0, 32
-	bltz	t4, bad_stack		# -> sp is bad
+	and	t5, t4
+	bltz	t5, bad_stack		# -> sp is bad
 
 	/*
 	 * Ok, copy the args from the luser stack to the kernel stack.
@@ -64,17 +67,17 @@ load_a6: user_lw(t7, 24(t0))		# argument #7 from usp
 load_a7: user_lw(t8, 28(t0))		# argument #8 from usp
 loads_done:
 
-	sw	t5, PT_ARG4(sp)		# argument #5 to ksp
-	sw	t6, PT_ARG5(sp)		# argument #6 to ksp
-	sw	t7, PT_ARG6(sp)		# argument #7 to ksp
-	sw	t8, PT_ARG7(sp)		# argument #8 to ksp
+	sw	t5, 16(sp)		# argument #5 to ksp
+	sw	t6, 20(sp)		# argument #6 to ksp
+	sw	t7, 24(sp)		# argument #7 to ksp
+	sw	t8, 28(sp)		# argument #8 to ksp
 	.set	pop
 
 	.section __ex_table,"a"
-	PTR_WD	load_a4, bad_stack_a4
-	PTR_WD	load_a5, bad_stack_a5
-	PTR_WD	load_a6, bad_stack_a6
-	PTR_WD	load_a7, bad_stack_a7
+	PTR	load_a4, bad_stack_a4
+	PTR	load_a5, bad_stack_a5
+	PTR	load_a6, bad_stack_a6
+	PTR	load_a7, bad_stack_a7
 	.previous
 
 	/*
@@ -217,9 +220,9 @@ einval: li	v0, -ENOSYS
 #define sys_sched_getaffinity	mipsmt_sys_sched_getaffinity
 #endif /* CONFIG_MIPS_MT_FPAFF */
 
-#define __SYSCALL_WITH_COMPAT(nr, native, compat)	__SYSCALL(nr, native)
-#define __SYSCALL(nr, entry) 	PTR_WD entry
+#define __SYSCALL(nr, entry) 	PTR entry
 	.align	2
 	.type	sys_call_table, @object
 EXPORT(sys_call_table)
-#include <asm/syscall_table_o32.h>
+#include <asm/syscall_table_32_o32.h>
+#undef __SYSCALL

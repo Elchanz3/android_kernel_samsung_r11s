@@ -17,7 +17,7 @@
 #include <linux/platform_device.h>
 #include <linux/serio.h>
 #include <linux/libps2.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include "psmouse.h"
 #include "elantech.h"
 #include "elan_i2c.h"
@@ -1936,6 +1936,8 @@ static int elantech_create_smbus(struct psmouse *psmouse,
 	};
 	unsigned int idx = 0;
 
+	smbus_board.properties = i2c_props;
+
 	i2c_props[idx++] = PROPERTY_ENTRY_U32("touchscreen-size-x",
 						   info->x_max + 1);
 	i2c_props[idx++] = PROPERTY_ENTRY_U32("touchscreen-size-y",
@@ -1967,15 +1969,11 @@ static int elantech_create_smbus(struct psmouse *psmouse,
 	if (elantech_is_buttonpad(info))
 		i2c_props[idx++] = PROPERTY_ENTRY_BOOL("elan,clickpad");
 
-	smbus_board.fwnode = fwnode_create_software_node(i2c_props, NULL);
-	if (IS_ERR(smbus_board.fwnode))
-		return PTR_ERR(smbus_board.fwnode);
-
 	return psmouse_smbus_init(psmouse, &smbus_board, NULL, 0, false,
 				  leave_breadcrumbs);
 }
 
-/*
+/**
  * elantech_setup_smbus - called once the PS/2 devices are enumerated
  * and decides to instantiate a SMBus InterTouch device.
  */

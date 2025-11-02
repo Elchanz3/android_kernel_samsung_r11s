@@ -313,8 +313,8 @@ struct irq_domain * __init __init_i8259_irqs(struct device_node *node)
 
 	init_8259A(0);
 
-	domain = irq_domain_create_legacy(of_fwnode_handle(node), 16, I8259A_IRQ_BASE, 0,
-					  &i8259A_ops, NULL);
+	domain = irq_domain_add_legacy(node, 16, I8259A_IRQ_BASE, 0,
+				       &i8259A_ops, NULL);
 	if (!domain)
 		panic("Failed to add i8259 IRQ domain");
 
@@ -333,14 +333,16 @@ static void i8259_irq_dispatch(struct irq_desc *desc)
 {
 	struct irq_domain *domain = irq_desc_get_handler_data(desc);
 	int hwirq = i8259_poll();
+	unsigned int irq;
 
 	if (hwirq < 0)
 		return;
 
-	generic_handle_domain_irq(domain, hwirq);
+	irq = irq_linear_revmap(domain, hwirq);
+	generic_handle_irq(irq);
 }
 
-static int __init i8259_of_init(struct device_node *node, struct device_node *parent)
+int __init i8259_of_init(struct device_node *node, struct device_node *parent)
 {
 	struct irq_domain *domain;
 	unsigned int parent_irq;

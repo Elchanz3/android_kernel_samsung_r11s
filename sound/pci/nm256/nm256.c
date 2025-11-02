@@ -32,6 +32,8 @@
 MODULE_AUTHOR("Takashi Iwai <tiwai@suse.de>");
 MODULE_DESCRIPTION("NeoMagic NM256AV/ZX");
 MODULE_LICENSE("GPL");
+MODULE_SUPPORTED_DEVICE("{{NeoMagic,NM256AV},"
+		"{NeoMagic,NM256ZX}}");
 
 /*
  * some compile conditions.
@@ -193,9 +195,11 @@ struct nm256 {
 	struct snd_card *card;
 
 	void __iomem *cport;		/* control port */
+	struct resource *res_cport;	/* its resource */
 	unsigned long cport_addr;	/* physical address */
 
 	void __iomem *buffer;		/* buffer */
+	struct resource *res_buffer;	/* its resource */
 	unsigned long buffer_addr;	/* buffer phyiscal address */
 
 	u32 buffer_start;		/* start offset from pci resource 0 */
@@ -446,25 +450,27 @@ snd_nm256_set_format(struct nm256 *chip, struct nm256_stream *s,
 /* acquire interrupt */
 static int snd_nm256_acquire_irq(struct nm256 *chip)
 {
-	guard(mutex)(&chip->irq_mutex);
+	mutex_lock(&chip->irq_mutex);
 	if (chip->irq < 0) {
 		if (request_irq(chip->pci->irq, chip->interrupt, IRQF_SHARED,
 				KBUILD_MODNAME, chip)) {
 			dev_err(chip->card->dev,
 				"unable to grab IRQ %d\n", chip->pci->irq);
+			mutex_unlock(&chip->irq_mutex);
 			return -EBUSY;
 		}
 		chip->irq = chip->pci->irq;
 		chip->card->sync_irq = chip->irq;
 	}
 	chip->irq_acks++;
+	mutex_unlock(&chip->irq_mutex);
 	return 0;
 }
 
 /* release interrupt */
 static void snd_nm256_release_irq(struct nm256 *chip)
 {
-	guard(mutex)(&chip->irq_mutex);
+	mutex_lock(&chip->irq_mutex);
 	if (chip->irq_acks > 0)
 		chip->irq_acks--;
 	if (chip->irq_acks == 0 && chip->irq >= 0) {
@@ -472,6 +478,7 @@ static void snd_nm256_release_irq(struct nm256 *chip)
 		chip->irq = -1;
 		chip->card->sync_irq = -1;
 	}
+	mutex_unlock(&chip->irq_mutex);
 }
 
 /*
@@ -544,11 +551,12 @@ snd_nm256_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct nm256 *chip = snd_pcm_substream_chip(substream);
 	struct nm256_stream *s = substream->runtime->private_data;
+	int err = 0;
 
 	if (snd_BUG_ON(!s))
 		return -ENXIO;
 
-	guard(spinlock)(&chip->reg_lock);
+	spin_lock(&chip->reg_lock);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_RESUME:
 		s->suspended = 0;
@@ -569,9 +577,11 @@ snd_nm256_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 		}
 		break;
 	default:
-		return -EINVAL;
+		err = -EINVAL;
+		break;
 	}
-	return 0;
+	spin_unlock(&chip->reg_lock);
+	return err;
 }
 
 static int
@@ -579,11 +589,12 @@ snd_nm256_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct nm256 *chip = snd_pcm_substream_chip(substream);
 	struct nm256_stream *s = substream->runtime->private_data;
+	int err = 0;
 
 	if (snd_BUG_ON(!s))
 		return -ENXIO;
 
-	guard(spinlock)(&chip->reg_lock);
+	spin_lock(&chip->reg_lock);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
@@ -600,9 +611,11 @@ snd_nm256_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 		}
 		break;
 	default:
-		return -EINVAL;
+		err = -EINVAL;
+		break;
 	}
-	return 0;
+	spin_unlock(&chip->reg_lock);
+	return err;
 }
 
 
@@ -622,9 +635,10 @@ static int snd_nm256_pcm_prepare(struct snd_pcm_substream *substream)
 	s->periods = substream->runtime->periods;
 	s->cur_period = 0;
 
-	guard(spinlock_irq)(&chip->reg_lock);
+	spin_lock_irq(&chip->reg_lock);
 	s->running = 0;
 	snd_nm256_set_format(chip, s, substream);
+	spin_unlock_irq(&chip->reg_lock);
 
 	return 0;
 }
@@ -681,13 +695,25 @@ snd_nm256_playback_silence(struct snd_pcm_substream *substream,
 static int
 snd_nm256_playback_copy(struct snd_pcm_substream *substream,
 			int channel, unsigned long pos,
-			struct iov_iter *src, unsigned long count)
+			void __user *src, unsigned long count)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct nm256_stream *s = runtime->private_data;
 
-	if (copy_from_iter_toio(s->bufptr + pos, count, src) != count)
+	if (copy_from_user_toio(s->bufptr + pos, src, count))
 		return -EFAULT;
+	return 0;
+}
+
+static int
+snd_nm256_playback_copy_kernel(struct snd_pcm_substream *substream,
+			       int channel, unsigned long pos,
+			       void *src, unsigned long count)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct nm256_stream *s = runtime->private_data;
+
+	memcpy_toio(s->bufptr + pos, src, count);
 	return 0;
 }
 
@@ -697,13 +723,25 @@ snd_nm256_playback_copy(struct snd_pcm_substream *substream,
 static int
 snd_nm256_capture_copy(struct snd_pcm_substream *substream,
 		       int channel, unsigned long pos,
-		       struct iov_iter *dst, unsigned long count)
+		       void __user *dst, unsigned long count)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct nm256_stream *s = runtime->private_data;
 
-	if (copy_to_iter_fromio(s->bufptr + pos, count, dst) != count)
+	if (copy_to_user_fromio(dst, s->bufptr + pos, count))
 		return -EFAULT;
+	return 0;
+}
+
+static int
+snd_nm256_capture_copy_kernel(struct snd_pcm_substream *substream,
+			      int channel, unsigned long pos,
+			      void *dst, unsigned long count)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct nm256_stream *s = runtime->private_data;
+
+	memcpy_fromio(dst, s->bufptr + pos, count);
 	return 0;
 }
 
@@ -875,7 +913,8 @@ static const struct snd_pcm_ops snd_nm256_playback_ops = {
 	.trigger =	snd_nm256_playback_trigger,
 	.pointer =	snd_nm256_playback_pointer,
 #ifndef __i386__
-	.copy =		snd_nm256_playback_copy,
+	.copy_user =	snd_nm256_playback_copy,
+	.copy_kernel =	snd_nm256_playback_copy_kernel,
 	.fill_silence =	snd_nm256_playback_silence,
 #endif
 	.mmap =		snd_pcm_lib_mmap_iomem,
@@ -889,7 +928,8 @@ static const struct snd_pcm_ops snd_nm256_capture_ops = {
 	.trigger =	snd_nm256_capture_trigger,
 	.pointer =	snd_nm256_capture_pointer,
 #ifndef __i386__
-	.copy =		snd_nm256_capture_copy,
+	.copy_user =	snd_nm256_capture_copy,
+	.copy_kernel =	snd_nm256_capture_copy_kernel,
 #endif
 	.mmap =		snd_pcm_lib_mmap_iomem,
 };
@@ -989,7 +1029,7 @@ snd_nm256_interrupt(int irq, void *dev_id)
 
 	/* Rather boring; check for individual interrupts and process them. */
 
-	guard(spinlock)(&chip->reg_lock);
+	spin_lock(&chip->reg_lock);
 	if (status & NM_PLAYBACK_INT) {
 		status &= ~NM_PLAYBACK_INT;
 		NM_ACK_INT(chip, NM_PLAYBACK_INT);
@@ -1028,6 +1068,7 @@ snd_nm256_interrupt(int irq, void *dev_id)
 		NM_ACK_INT(chip, status);
 	}
 
+	spin_unlock(&chip->reg_lock);
 	return IRQ_HANDLED;
 }
 
@@ -1054,7 +1095,7 @@ snd_nm256_interrupt_zx(int irq, void *dev_id)
 
 	/* Rather boring; check for individual interrupts and process them. */
 
-	guard(spinlock)(&chip->reg_lock);
+	spin_lock(&chip->reg_lock);
 	if (status & NM2_PLAYBACK_INT) {
 		status &= ~NM2_PLAYBACK_INT;
 		NM2_ACK_INT(chip, NM2_PLAYBACK_INT);
@@ -1092,6 +1133,7 @@ snd_nm256_interrupt_zx(int irq, void *dev_id)
 		NM2_ACK_INT(chip, status);
 	}
 
+	spin_unlock(&chip->reg_lock);
 	return IRQ_HANDLED;
 }
 
@@ -1273,14 +1315,12 @@ snd_nm256_mixer(struct nm256 *chip)
 		.read = snd_nm256_ac97_read,
 	};
 
-	chip->ac97_regs = devm_kcalloc(chip->card->dev,
-				       ARRAY_SIZE(nm256_ac97_init_val),
-				       sizeof(short), GFP_KERNEL);
+	chip->ac97_regs = kcalloc(ARRAY_SIZE(nm256_ac97_init_val),
+				  sizeof(short), GFP_KERNEL);
 	if (! chip->ac97_regs)
 		return -ENOMEM;
 
-	err = snd_ac97_bus(chip->card, 0, &ops, NULL, &pbus);
-	if (err < 0)
+	if ((err = snd_ac97_bus(chip->card, 0, &ops, NULL, &pbus)) < 0)
 		return err;
 
 	memset(&ac97, 0, sizeof(ac97));
@@ -1348,6 +1388,7 @@ snd_nm256_peek_for_sig(struct nm256 *chip)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
 /*
  * APM event handler, so the card is properly reinitialized after a power
  * event.
@@ -1380,8 +1421,9 @@ static int nm256_resume(struct device *dev)
 	for (i = 0; i < 2; i++) {
 		struct nm256_stream *s = &chip->streams[i];
 		if (s->substream && s->suspended) {
-			guard(spinlock_irq)(&chip->reg_lock);
+			spin_lock_irq(&chip->reg_lock);
 			snd_nm256_set_format(chip, s, s->substream);
+			spin_unlock_irq(&chip->reg_lock);
 		}
 	}
 
@@ -1390,28 +1432,60 @@ static int nm256_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(nm256_pm, nm256_suspend, nm256_resume);
+static SIMPLE_DEV_PM_OPS(nm256_pm, nm256_suspend, nm256_resume);
+#define NM256_PM_OPS	&nm256_pm
+#else
+#define NM256_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
 
-static void snd_nm256_free(struct snd_card *card)
+static int snd_nm256_free(struct nm256 *chip)
 {
-	struct nm256 *chip = card->private_data;
-
 	if (chip->streams[SNDRV_PCM_STREAM_PLAYBACK].running)
 		snd_nm256_playback_stop(chip);
 	if (chip->streams[SNDRV_PCM_STREAM_CAPTURE].running)
 		snd_nm256_capture_stop(chip);
+
+	if (chip->irq >= 0)
+		free_irq(chip->irq, chip);
+
+	iounmap(chip->cport);
+	iounmap(chip->buffer);
+	release_and_free_resource(chip->res_cport);
+	release_and_free_resource(chip->res_buffer);
+
+	pci_disable_device(chip->pci);
+	kfree(chip->ac97_regs);
+	kfree(chip);
+	return 0;
+}
+
+static int snd_nm256_dev_free(struct snd_device *device)
+{
+	struct nm256 *chip = device->device_data;
+	return snd_nm256_free(chip);
 }
 
 static int
-snd_nm256_create(struct snd_card *card, struct pci_dev *pci)
+snd_nm256_create(struct snd_card *card, struct pci_dev *pci,
+		 struct nm256 **chip_ret)
 {
-	struct nm256 *chip = card->private_data;
+	struct nm256 *chip;
 	int err, pval;
+	static const struct snd_device_ops ops = {
+		.dev_free =	snd_nm256_dev_free,
+	};
 	u32 addr;
 
-	err = pcim_enable_device(pci);
-	if (err < 0)
+	*chip_ret = NULL;
+
+	if ((err = pci_enable_device(pci)) < 0)
 		return err;
+
+	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
+	if (chip == NULL) {
+		pci_disable_device(pci);
+		return -ENOMEM;
+	}
 
 	chip->card = card;
 	chip->pci = pci;
@@ -1434,17 +1508,22 @@ snd_nm256_create(struct snd_card *card, struct pci_dev *pci)
 	chip->buffer_addr = pci_resource_start(pci, 0);
 	chip->cport_addr = pci_resource_start(pci, 1);
 
-	err = pcim_request_all_regions(pci, card->driver);
-	if (err < 0)
-		return err;
-
 	/* Init the memory port info.  */
 	/* remap control port (#2) */
-	chip->cport = devm_ioremap(&pci->dev, chip->cport_addr, NM_PORT2_SIZE);
-	if (!chip->cport) {
+	chip->res_cport = request_mem_region(chip->cport_addr, NM_PORT2_SIZE,
+					     card->driver);
+	if (chip->res_cport == NULL) {
+		dev_err(card->dev, "memory region 0x%lx (size 0x%x) busy\n",
+			   chip->cport_addr, NM_PORT2_SIZE);
+		err = -EBUSY;
+		goto __error;
+	}
+	chip->cport = ioremap(chip->cport_addr, NM_PORT2_SIZE);
+	if (chip->cport == NULL) {
 		dev_err(card->dev, "unable to map control port %lx\n",
 			chip->cport_addr);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto __error;
 	}
 
 	if (!strcmp(card->driver, "NM256AV")) {
@@ -1460,7 +1539,8 @@ snd_nm256_create(struct snd_card *card, struct pci_dev *pci)
 					" force_ac97=1\n");
 				dev_err(card->dev,
 					"or try sb16, opl3sa2, or cs423x drivers instead.\n");
-				return -ENXIO;
+				err = -ENXIO;
+				goto __error;
 			}
 		}
 		chip->buffer_end = 2560 * 1024;
@@ -1490,9 +1570,8 @@ snd_nm256_create(struct snd_card *card, struct pci_dev *pci)
 		chip->buffer_end = buffer_top;
 	else {
 		/* get buffer end pointer from signature */
-		err = snd_nm256_peek_for_sig(chip);
-		if (err < 0)
-			return err;
+		if ((err = snd_nm256_peek_for_sig(chip)) < 0)
+			goto __error;
 	}
 
 	chip->buffer_start = chip->buffer_end - chip->buffer_size;
@@ -1501,12 +1580,21 @@ snd_nm256_create(struct snd_card *card, struct pci_dev *pci)
 	dev_info(card->dev, "Mapping port 1 from 0x%x - 0x%x\n",
 	       chip->buffer_start, chip->buffer_end);
 
-	chip->buffer = devm_ioremap(&pci->dev, chip->buffer_addr,
-				    chip->buffer_size);
-	if (!chip->buffer) {
+	chip->res_buffer = request_mem_region(chip->buffer_addr,
+					      chip->buffer_size,
+					      card->driver);
+	if (chip->res_buffer == NULL) {
+		dev_err(card->dev, "buffer 0x%lx (size 0x%x) busy\n",
+			   chip->buffer_addr, chip->buffer_size);
+		err = -EBUSY;
+		goto __error;
+	}
+	chip->buffer = ioremap(chip->buffer_addr, chip->buffer_size);
+	if (chip->buffer == NULL) {
+		err = -ENOMEM;
 		dev_err(card->dev, "unable to map ring buffer at %lx\n",
 			chip->buffer_addr);
-		return -ENOMEM;
+		goto __error;
 	}
 
 	/* set offsets */
@@ -1531,7 +1619,16 @@ snd_nm256_create(struct snd_card *card, struct pci_dev *pci)
 	snd_nm256_init_chip(chip);
 
 	// pci_set_master(pci); /* needed? */
+	
+	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0)
+		goto __error;
+
+	*chip_ret = chip;
 	return 0;
+
+__error:
+	snd_nm256_free(chip);
+	return err;
 }
 
 
@@ -1574,24 +1671,23 @@ static int snd_nm256_probe(struct pci_dev *pci,
 		}
 	}
 
-	err = snd_devm_card_new(&pci->dev, index, id, THIS_MODULE,
-				sizeof(*chip), &card);
+	err = snd_card_new(&pci->dev, index, id, THIS_MODULE, 0, &card);
 	if (err < 0)
 		return err;
-	chip = card->private_data;
 
 	switch (pci->device) {
 	case PCI_DEVICE_ID_NEOMAGIC_NM256AV_AUDIO:
-		strscpy(card->driver, "NM256AV");
+		strcpy(card->driver, "NM256AV");
 		break;
 	case PCI_DEVICE_ID_NEOMAGIC_NM256ZX_AUDIO:
-		strscpy(card->driver, "NM256ZX");
+		strcpy(card->driver, "NM256ZX");
 		break;
 	case PCI_DEVICE_ID_NEOMAGIC_NM256XL_PLUS_AUDIO:
-		strscpy(card->driver, "NM256XL+");
+		strcpy(card->driver, "NM256XL+");
 		break;
 	default:
 		dev_err(&pci->dev, "invalid device id 0x%x\n", pci->device);
+		snd_card_free(card);
 		return -EINVAL;
 	}
 
@@ -1606,9 +1702,11 @@ static int snd_nm256_probe(struct pci_dev *pci,
 		capture_bufsize = 4;
 	if (capture_bufsize > 128)
 		capture_bufsize = 128;
-	err = snd_nm256_create(card, pci);
-	if (err < 0)
+	if ((err = snd_nm256_create(card, pci, &chip)) < 0) {
+		snd_card_free(card);
 		return err;
+	}
+	card->private_data = chip;
 
 	if (reset_workaround) {
 		dev_dbg(&pci->dev, "reset_workaround activated\n");
@@ -1620,33 +1718,39 @@ static int snd_nm256_probe(struct pci_dev *pci,
 		chip->reset_workaround_2 = 1;
 	}
 
-	err = snd_nm256_pcm(chip, 0);
-	if (err < 0)
+	if ((err = snd_nm256_pcm(chip, 0)) < 0 ||
+	    (err = snd_nm256_mixer(chip)) < 0) {
+		snd_card_free(card);
 		return err;
-	err = snd_nm256_mixer(chip);
-	if (err < 0)
-		return err;
+	}
 
 	sprintf(card->shortname, "NeoMagic %s", card->driver);
 	sprintf(card->longname, "%s at 0x%lx & 0x%lx, irq %d",
 		card->shortname,
 		chip->buffer_addr, chip->cport_addr, chip->irq);
 
-	err = snd_card_register(card);
-	if (err < 0)
+	if ((err = snd_card_register(card)) < 0) {
+		snd_card_free(card);
 		return err;
-	card->private_free = snd_nm256_free;
+	}
 
 	pci_set_drvdata(pci, card);
 	return 0;
 }
 
+static void snd_nm256_remove(struct pci_dev *pci)
+{
+	snd_card_free(pci_get_drvdata(pci));
+}
+
+
 static struct pci_driver nm256_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = snd_nm256_ids,
 	.probe = snd_nm256_probe,
+	.remove = snd_nm256_remove,
 	.driver = {
-		.pm = &nm256_pm,
+		.pm = NM256_PM_OPS,
 	},
 };
 

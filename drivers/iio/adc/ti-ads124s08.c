@@ -8,7 +8,8 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
+#include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 
@@ -21,7 +22,7 @@
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/sysfs.h>
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 /* Commands */
 #define ADS124S08_CMD_NOP	0x00
@@ -106,7 +107,7 @@ struct ads124s_private {
 	 * timestamp is maintained.
 	 */
 	u32 buffer[ADS124S08_MAX_CHANNELS + sizeof(s64)/sizeof(u32)] __aligned(8);
-	u8 data[5] __aligned(IIO_DMA_MINALIGN);
+	u8 data[5] ____cacheline_aligned;
 };
 
 #define ADS124S08_CHAN(index)					\
@@ -183,9 +184,9 @@ static int ads124s_reset(struct iio_dev *indio_dev)
 	struct ads124s_private *priv = iio_priv(indio_dev);
 
 	if (priv->reset_gpio) {
-		gpiod_set_value_cansleep(priv->reset_gpio, 0);
-		fsleep(200);
-		gpiod_set_value_cansleep(priv->reset_gpio, 1);
+		gpiod_set_value(priv->reset_gpio, 0);
+		udelay(200);
+		gpiod_set_value(priv->reset_gpio, 1);
 	} else {
 		return ads124s_write_cmd(indio_dev, ADS124S08_CMD_RESET);
 	}
@@ -193,7 +194,7 @@ static int ads124s_reset(struct iio_dev *indio_dev)
 	return 0;
 };
 
-static int ads124s_read(struct iio_dev *indio_dev)
+static int ads124s_read(struct iio_dev *indio_dev, unsigned int chan)
 {
 	struct ads124s_private *priv = iio_priv(indio_dev);
 	int ret;
@@ -242,7 +243,7 @@ static int ads124s_read_raw(struct iio_dev *indio_dev,
 			goto out;
 		}
 
-		ret = ads124s_read(indio_dev);
+		ret = ads124s_read(indio_dev, chan->channel);
 		if (ret < 0) {
 			dev_err(&priv->spi->dev, "Read ADC failed\n");
 			goto out;
@@ -279,7 +280,8 @@ static irqreturn_t ads124s_trigger_handler(int irq, void *p)
 	int scan_index, j = 0;
 	int ret;
 
-	iio_for_each_active_channel(indio_dev, scan_index) {
+	for_each_set_bit(scan_index, indio_dev->active_scan_mask,
+			 indio_dev->masklength) {
 		ret = ads124s_write_reg(indio_dev, ADS124S08_INPUT_MUX,
 					scan_index);
 		if (ret)
@@ -289,7 +291,7 @@ static irqreturn_t ads124s_trigger_handler(int irq, void *p)
 		if (ret)
 			dev_err(&priv->spi->dev, "Start ADC conversions failed\n");
 
-		priv->buffer[j] = ads124s_read(indio_dev);
+		priv->buffer[j] = ads124s_read(indio_dev, scan_index);
 		ret = ads124s_write_cmd(indio_dev, ADS124S08_STOP_CONV);
 		if (ret)
 			dev_err(&priv->spi->dev, "Stop ADC conversions failed\n");
@@ -297,8 +299,8 @@ static irqreturn_t ads124s_trigger_handler(int irq, void *p)
 		j++;
 	}
 
-	iio_push_to_buffers_with_ts(indio_dev, priv->buffer, sizeof(priv->buffer),
-				    pf->timestamp);
+	iio_push_to_buffers_with_timestamp(indio_dev, priv->buffer,
+			pf->timestamp);
 
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -324,6 +326,8 @@ static int ads124s_probe(struct spi_device *spi)
 		dev_info(&spi->dev, "Reset GPIO not defined\n");
 
 	ads124s_priv->chip_info = &ads124s_chip_info_tbl[spi_id->driver_data];
+
+	spi_set_drvdata(spi, indio_dev);
 
 	ads124s_priv->spi = spi;
 
@@ -357,7 +361,7 @@ MODULE_DEVICE_TABLE(spi, ads124s_id);
 static const struct of_device_id ads124s_of_table[] = {
 	{ .compatible = "ti,ads124s06" },
 	{ .compatible = "ti,ads124s08" },
-	{ }
+	{ },
 };
 MODULE_DEVICE_TABLE(of, ads124s_of_table);
 

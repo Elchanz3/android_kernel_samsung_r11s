@@ -172,14 +172,13 @@ module_param(debug, uint, S_IRUGO | S_IWUSR);
 module_param(options, uint, S_IRUGO | S_IWUSR);
 module_param(poll, uint, S_IRUGO | S_IWUSR);
 module_param(dtmfthreshold, uint, S_IRUGO | S_IWUSR);
-MODULE_DESCRIPTION("mISDN driver for Digital Audio Processing of transparent data");
 MODULE_LICENSE("GPL");
 
 /*int spinnest = 0;*/
 
-DEFINE_SPINLOCK(dsp_lock); /* global dsp lock */
-LIST_HEAD(dsp_ilist);
-LIST_HEAD(conf_ilist);
+spinlock_t dsp_lock; /* global dsp lock */
+struct list_head dsp_ilist;
+struct list_head conf_ilist;
 int dsp_debug;
 int dsp_options;
 int dsp_poll, dsp_tics;
@@ -928,7 +927,7 @@ dsp_function(struct mISDNchannel *ch,  struct sk_buff *skb)
 		dsp->tone.hardware = 0;
 		dsp->tone.software = 0;
 		if (timer_pending(&dsp->tone.tl))
-			timer_delete(&dsp->tone.tl);
+			del_timer(&dsp->tone.tl);
 		if (dsp->conf)
 			dsp_cmx_conf(dsp, 0); /* dsp_cmx_hardware will also be
 						 called here */
@@ -954,6 +953,7 @@ dsp_ctrl(struct mISDNchannel *ch, u_int cmd, void *arg)
 {
 	struct dsp		*dsp = container_of(ch, struct dsp, ch);
 	u_long		flags;
+	int		err = 0;
 
 	if (debug & DEBUG_DSP_CTRL)
 		printk(KERN_DEBUG "%s:(%x)\n", __func__, cmd);
@@ -975,7 +975,7 @@ dsp_ctrl(struct mISDNchannel *ch, u_int cmd, void *arg)
 		cancel_work_sync(&dsp->workq);
 		spin_lock_irqsave(&dsp_lock, flags);
 		if (timer_pending(&dsp->tone.tl))
-			timer_delete(&dsp->tone.tl);
+			del_timer(&dsp->tone.tl);
 		skb_queue_purge(&dsp->sendq);
 		if (dsp_debug & DEBUG_DSP_CTRL)
 			printk(KERN_DEBUG "%s: releasing member %s\n",
@@ -998,7 +998,7 @@ dsp_ctrl(struct mISDNchannel *ch, u_int cmd, void *arg)
 		module_put(THIS_MODULE);
 		break;
 	}
-	return 0;
+	return err;
 }
 
 static void
@@ -1170,6 +1170,10 @@ static int __init dsp_init(void)
 	printk(KERN_INFO "mISDN_dsp: DSP clocks every %d samples. This equals "
 	       "%d jiffies.\n", dsp_poll, dsp_tics);
 
+	spin_lock_init(&dsp_lock);
+	INIT_LIST_HEAD(&dsp_ilist);
+	INIT_LIST_HEAD(&conf_ilist);
+
 	/* init conversion tables */
 	dsp_audio_generate_law_tables();
 	dsp_silence = (dsp_options & DSP_OPT_ULAW) ? 0xff : 0x2a;
@@ -1209,7 +1213,7 @@ static void __exit dsp_cleanup(void)
 {
 	mISDN_unregister_Bprotocol(&DSP);
 
-	timer_delete_sync(&dsp_spl_tl);
+	del_timer_sync(&dsp_spl_tl);
 
 	if (!list_empty(&dsp_ilist)) {
 		printk(KERN_ERR "mISDN_dsp: Audio DSP object inst list not "

@@ -19,11 +19,12 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/property.h>
+#include <linux/of_platform.h>
+#include <linux/rational.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
-#include <dt-bindings/clock/versaclock.h>
+#include <dt-bindings/clk/versaclock.h>
 
 /* VersaClock5 registers */
 #define VC5_OTP_CONTROL				0x00
@@ -122,8 +123,9 @@
 #define VC5_GLOBAL_REGISTER			0x76
 #define VC5_GLOBAL_REGISTER_GLOBAL_RESET	BIT(5)
 
-/* The minimum VCO frequency is 2.5 GHz. The maximum is variant specific. */
+/* PLL/VCO runs between 2.5 GHz and 3.0 GHz */
 #define VC5_PLL_VCO_MIN				2500000000UL
+#define VC5_PLL_VCO_MAX				3000000000UL
 
 /* VC5 Input mux settings */
 #define VC5_MUX_IN_XIN		BIT(0)
@@ -136,7 +138,7 @@
 #define VC5_MAX_FOD_NUM	4
 
 /* flags to describe chip features */
-/* chip has built-in oscillator */
+/* chip has built-in oscilator */
 #define VC5_HAS_INTERNAL_XTAL	BIT(0)
 /* chip has PFD requency doubler */
 #define VC5_HAS_PFD_FREQ_DBL	BIT(1)
@@ -149,10 +151,8 @@ enum vc5_model {
 	IDT_VC5_5P49V5925,
 	IDT_VC5_5P49V5933,
 	IDT_VC5_5P49V5935,
-	IDT_VC6_5P49V60,
 	IDT_VC6_5P49V6901,
 	IDT_VC6_5P49V6965,
-	IDT_VC6_5P49V6975,
 };
 
 /* Structure to describe features of a particular VC5 model */
@@ -161,7 +161,6 @@ struct vc5_chip_info {
 	const unsigned int	clk_fod_cnt;
 	const unsigned int	clk_out_cnt;
 	const u32		flags;
-	const unsigned long	vco_max;
 };
 
 struct vc5_driver_data;
@@ -217,7 +216,7 @@ static bool vc5_regmap_is_writeable(struct device *dev, unsigned int reg)
 static const struct regmap_config vc5_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 	.max_register = 0x76,
 	.writeable_reg = vc5_regmap_is_writeable,
 };
@@ -231,12 +230,8 @@ static unsigned char vc5_mux_get_parent(struct clk_hw *hw)
 		container_of(hw, struct vc5_driver_data, clk_mux);
 	const u8 mask = VC5_PRIM_SRC_SHDN_EN_XTAL | VC5_PRIM_SRC_SHDN_EN_CLKIN;
 	unsigned int src;
-	int ret;
 
-	ret = regmap_read(vc5->regmap, VC5_PRIM_SRC_SHDN, &src);
-	if (ret)
-		return 0;
-
+	regmap_read(vc5->regmap, VC5_PRIM_SRC_SHDN, &src);
 	src &= mask;
 
 	if (src == VC5_PRIM_SRC_SHDN_EN_XTAL)
@@ -281,7 +276,6 @@ static int vc5_mux_set_parent(struct clk_hw *hw, u8 index)
 }
 
 static const struct clk_ops vc5_mux_ops = {
-	.determine_rate	= clk_hw_determine_rate_no_reparent,
 	.set_parent	= vc5_mux_set_parent,
 	.get_parent	= vc5_mux_get_parent,
 };
@@ -292,23 +286,19 @@ static unsigned long vc5_dbl_recalc_rate(struct clk_hw *hw,
 	struct vc5_driver_data *vc5 =
 		container_of(hw, struct vc5_driver_data, clk_mul);
 	unsigned int premul;
-	int ret;
 
-	ret = regmap_read(vc5->regmap, VC5_PRIM_SRC_SHDN, &premul);
-	if (ret)
-		return 0;
-
+	regmap_read(vc5->regmap, VC5_PRIM_SRC_SHDN, &premul);
 	if (premul & VC5_PRIM_SRC_SHDN_EN_DOUBLE_XTAL_FREQ)
 		parent_rate *= 2;
 
 	return parent_rate;
 }
 
-static int vc5_dbl_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long vc5_dbl_round_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long *parent_rate)
 {
-	if ((req->best_parent_rate == req->rate) || ((req->best_parent_rate * 2) == req->rate))
-		return 0;
+	if ((*parent_rate == rate) || ((*parent_rate * 2) == rate))
+		return rate;
 	else
 		return -EINVAL;
 }
@@ -325,14 +315,16 @@ static int vc5_dbl_set_rate(struct clk_hw *hw, unsigned long rate,
 	else
 		mask = 0;
 
-	return regmap_update_bits(vc5->regmap, VC5_PRIM_SRC_SHDN,
-				  VC5_PRIM_SRC_SHDN_EN_DOUBLE_XTAL_FREQ,
-				  mask);
+	regmap_update_bits(vc5->regmap, VC5_PRIM_SRC_SHDN,
+			   VC5_PRIM_SRC_SHDN_EN_DOUBLE_XTAL_FREQ,
+			   mask);
+
+	return 0;
 }
 
 static const struct clk_ops vc5_dbl_ops = {
 	.recalc_rate	= vc5_dbl_recalc_rate,
-	.determine_rate = vc5_dbl_determine_rate,
+	.round_rate	= vc5_dbl_round_rate,
 	.set_rate	= vc5_dbl_set_rate,
 };
 
@@ -342,19 +334,14 @@ static unsigned long vc5_pfd_recalc_rate(struct clk_hw *hw,
 	struct vc5_driver_data *vc5 =
 		container_of(hw, struct vc5_driver_data, clk_pfd);
 	unsigned int prediv, div;
-	int ret;
 
-	ret = regmap_read(vc5->regmap, VC5_VCO_CTRL_AND_PREDIV, &prediv);
-	if (ret)
-		return 0;
+	regmap_read(vc5->regmap, VC5_VCO_CTRL_AND_PREDIV, &prediv);
 
 	/* The bypass_prediv is set, PLL fed from Ref_in directly. */
 	if (prediv & VC5_VCO_CTRL_AND_PREDIV_BYPASS_PREDIV)
 		return parent_rate;
 
-	ret = regmap_read(vc5->regmap, VC5_REF_DIVIDER, &div);
-	if (ret)
-		return 0;
+	regmap_read(vc5->regmap, VC5_REF_DIVIDER, &div);
 
 	/* The Sel_prediv2 is set, PLL fed from prediv2 (Ref_in / 2) */
 	if (div & VC5_REF_DIVIDER_SEL_PREDIV2)
@@ -363,29 +350,24 @@ static unsigned long vc5_pfd_recalc_rate(struct clk_hw *hw,
 		return parent_rate / VC5_REF_DIVIDER_REF_DIV(div);
 }
 
-static int vc5_pfd_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long vc5_pfd_round_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long *parent_rate)
 {
 	unsigned long idiv;
 
 	/* PLL cannot operate with input clock above 50 MHz. */
-	if (req->rate > 50000000)
+	if (rate > 50000000)
 		return -EINVAL;
 
 	/* CLKIN within range of PLL input, feed directly to PLL. */
-	if (req->best_parent_rate <= 50000000) {
-		req->rate = req->best_parent_rate;
+	if (*parent_rate <= 50000000)
+		return *parent_rate;
 
-		return 0;
-	}
-
-	idiv = DIV_ROUND_UP(req->best_parent_rate, req->rate);
+	idiv = DIV_ROUND_UP(*parent_rate, rate);
 	if (idiv > 127)
 		return -EINVAL;
 
-	req->rate = req->best_parent_rate / idiv;
-
-	return 0;
+	return *parent_rate / idiv;
 }
 
 static int vc5_pfd_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -394,17 +376,15 @@ static int vc5_pfd_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct vc5_driver_data *vc5 =
 		container_of(hw, struct vc5_driver_data, clk_pfd);
 	unsigned long idiv;
-	int ret;
 	u8 div;
 
 	/* CLKIN within range of PLL input, feed directly to PLL. */
 	if (parent_rate <= 50000000) {
-		ret = regmap_set_bits(vc5->regmap, VC5_VCO_CTRL_AND_PREDIV,
-				      VC5_VCO_CTRL_AND_PREDIV_BYPASS_PREDIV);
-		if (ret)
-			return ret;
-
-		return regmap_update_bits(vc5->regmap, VC5_REF_DIVIDER, 0xff, 0x00);
+		regmap_update_bits(vc5->regmap, VC5_VCO_CTRL_AND_PREDIV,
+				   VC5_VCO_CTRL_AND_PREDIV_BYPASS_PREDIV,
+				   VC5_VCO_CTRL_AND_PREDIV_BYPASS_PREDIV);
+		regmap_update_bits(vc5->regmap, VC5_REF_DIVIDER, 0xff, 0x00);
+		return 0;
 	}
 
 	idiv = DIV_ROUND_UP(parent_rate, rate);
@@ -415,17 +395,16 @@ static int vc5_pfd_set_rate(struct clk_hw *hw, unsigned long rate,
 	else
 		div = VC5_REF_DIVIDER_REF_DIV(idiv);
 
-	ret = regmap_update_bits(vc5->regmap, VC5_REF_DIVIDER, 0xff, div);
-	if (ret)
-		return ret;
+	regmap_update_bits(vc5->regmap, VC5_REF_DIVIDER, 0xff, div);
+	regmap_update_bits(vc5->regmap, VC5_VCO_CTRL_AND_PREDIV,
+			   VC5_VCO_CTRL_AND_PREDIV_BYPASS_PREDIV, 0);
 
-	return regmap_clear_bits(vc5->regmap, VC5_VCO_CTRL_AND_PREDIV,
-				 VC5_VCO_CTRL_AND_PREDIV_BYPASS_PREDIV);
+	return 0;
 }
 
 static const struct clk_ops vc5_pfd_ops = {
 	.recalc_rate	= vc5_pfd_recalc_rate,
-	.determine_rate = vc5_pfd_determine_rate,
+	.round_rate	= vc5_pfd_round_rate,
 	.set_rate	= vc5_pfd_set_rate,
 };
 
@@ -449,32 +428,32 @@ static unsigned long vc5_pll_recalc_rate(struct clk_hw *hw,
 	return (parent_rate * div_int) + ((parent_rate * div_frc) >> 24);
 }
 
-static int vc5_pll_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long vc5_pll_round_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long *parent_rate)
 {
 	struct vc5_hw_data *hwdata = container_of(hw, struct vc5_hw_data, hw);
-	struct vc5_driver_data *vc5 = hwdata->vc5;
 	u32 div_int;
 	u64 div_frc;
 
-	req->rate = clamp(req->rate, VC5_PLL_VCO_MIN, vc5->chip_info->vco_max);
+	if (rate < VC5_PLL_VCO_MIN)
+		rate = VC5_PLL_VCO_MIN;
+	if (rate > VC5_PLL_VCO_MAX)
+		rate = VC5_PLL_VCO_MAX;
 
 	/* Determine integer part, which is 12 bit wide */
-	div_int = req->rate / req->best_parent_rate;
+	div_int = rate / *parent_rate;
 	if (div_int > 0xfff)
-		req->rate = req->best_parent_rate * 0xfff;
+		rate = *parent_rate * 0xfff;
 
 	/* Determine best fractional part, which is 24 bit wide */
-	div_frc = req->rate % req->best_parent_rate;
+	div_frc = rate % *parent_rate;
 	div_frc *= BIT(24) - 1;
-	do_div(div_frc, req->best_parent_rate);
+	do_div(div_frc, *parent_rate);
 
 	hwdata->div_int = div_int;
 	hwdata->div_frc = (u32)div_frc;
 
-	req->rate = (req->best_parent_rate * div_int) + ((req->best_parent_rate * div_frc) >> 24);
-
-	return 0;
+	return (*parent_rate * div_int) + ((*parent_rate * div_frc) >> 24);
 }
 
 static int vc5_pll_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -495,7 +474,7 @@ static int vc5_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 
 static const struct clk_ops vc5_pll_ops = {
 	.recalc_rate	= vc5_pll_recalc_rate,
-	.determine_rate = vc5_pll_determine_rate,
+	.round_rate	= vc5_pll_round_rate,
 	.set_rate	= vc5_pll_set_rate,
 };
 
@@ -527,17 +506,17 @@ static unsigned long vc5_fod_recalc_rate(struct clk_hw *hw,
 	return div64_u64((u64)f_in << 24ULL, ((u64)div_int << 24ULL) + div_frc);
 }
 
-static int vc5_fod_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
+static long vc5_fod_round_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long *parent_rate)
 {
 	struct vc5_hw_data *hwdata = container_of(hw, struct vc5_hw_data, hw);
 	/* VCO frequency is divided by two before entering FOD */
-	u32 f_in = req->best_parent_rate / 2;
+	u32 f_in = *parent_rate / 2;
 	u32 div_int;
 	u64 div_frc;
 
 	/* Determine integer part, which is 12 bit wide */
-	div_int = f_in / req->rate;
+	div_int = f_in / rate;
 	/*
 	 * WARNING: The clock chip does not output signal if the integer part
 	 *          of the divider is 0xfff and fractional part is non-zero.
@@ -545,20 +524,18 @@ static int vc5_fod_determine_rate(struct clk_hw *hw,
 	 */
 	if (div_int > 0xffe) {
 		div_int = 0xffe;
-		req->rate = f_in / div_int;
+		rate = f_in / div_int;
 	}
 
 	/* Determine best fractional part, which is 30 bit wide */
-	div_frc = f_in % req->rate;
+	div_frc = f_in % rate;
 	div_frc <<= 24;
-	do_div(div_frc, req->rate);
+	do_div(div_frc, rate);
 
 	hwdata->div_int = div_int;
 	hwdata->div_frc = (u32)div_frc;
 
-	req->rate = div64_u64((u64)f_in << 24ULL, ((u64)div_int << 24ULL) + div_frc);
-
-	return 0;
+	return div64_u64((u64)f_in << 24ULL, ((u64)div_int << 24ULL) + div_frc);
 }
 
 static int vc5_fod_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -574,12 +551,9 @@ static int vc5_fod_set_rate(struct clk_hw *hw, unsigned long rate,
 		hwdata->div_int >> 4, hwdata->div_int << 4,
 		0
 	};
-	int ret;
 
-	ret = regmap_bulk_write(vc5->regmap, VC5_OUT_DIV_FRAC(hwdata->num, 0),
-				data, 14);
-	if (ret)
-		return ret;
+	regmap_bulk_write(vc5->regmap, VC5_OUT_DIV_FRAC(hwdata->num, 0),
+			  data, 14);
 
 	/*
 	 * Toggle magic bit in undocumented register for unknown reason.
@@ -587,18 +561,17 @@ static int vc5_fod_set_rate(struct clk_hw *hw, unsigned long rate,
 	 * datasheet somewhat implies this is needed, but the register
 	 * and the bit is not documented.
 	 */
-	ret = regmap_clear_bits(vc5->regmap, VC5_GLOBAL_REGISTER,
-				VC5_GLOBAL_REGISTER_GLOBAL_RESET);
-	if (ret)
-		return ret;
-
-	return regmap_set_bits(vc5->regmap, VC5_GLOBAL_REGISTER,
-			       VC5_GLOBAL_REGISTER_GLOBAL_RESET);
+	regmap_update_bits(vc5->regmap, VC5_GLOBAL_REGISTER,
+			   VC5_GLOBAL_REGISTER_GLOBAL_RESET, 0);
+	regmap_update_bits(vc5->regmap, VC5_GLOBAL_REGISTER,
+			   VC5_GLOBAL_REGISTER_GLOBAL_RESET,
+			   VC5_GLOBAL_REGISTER_GLOBAL_RESET);
+	return 0;
 }
 
 static const struct clk_ops vc5_fod_ops = {
 	.recalc_rate	= vc5_fod_recalc_rate,
-	.determine_rate = vc5_fod_determine_rate,
+	.round_rate	= vc5_fod_round_rate,
 	.set_rate	= vc5_fod_set_rate,
 };
 
@@ -621,9 +594,10 @@ static int vc5_clk_out_prepare(struct clk_hw *hw)
 	 * registers.
 	 */
 	if (vc5->chip_info->flags & VC5_HAS_BYPASS_SYNC_BIT) {
-		ret = regmap_set_bits(vc5->regmap,
-				      VC5_RESERVED_X0(hwdata->num),
-				      VC5_RESERVED_X0_BYPASS_SYNC);
+		ret = regmap_update_bits(vc5->regmap,
+					 VC5_RESERVED_X0(hwdata->num),
+					 VC5_RESERVED_X0_BYPASS_SYNC,
+					 VC5_RESERVED_X0_BYPASS_SYNC);
 		if (ret)
 			return ret;
 	}
@@ -632,10 +606,7 @@ static int vc5_clk_out_prepare(struct clk_hw *hw)
 	 * If the input mux is disabled, enable it first and
 	 * select source from matching FOD.
 	 */
-	ret = regmap_read(vc5->regmap, VC5_OUT_DIV_CONTROL(hwdata->num), &src);
-	if (ret)
-		return ret;
-
+	regmap_read(vc5->regmap, VC5_OUT_DIV_CONTROL(hwdata->num), &src);
 	if ((src & mask) == 0) {
 		src = VC5_OUT_DIV_CONTROL_RESET | VC5_OUT_DIV_CONTROL_EN_FOD;
 		ret = regmap_update_bits(vc5->regmap,
@@ -646,22 +617,18 @@ static int vc5_clk_out_prepare(struct clk_hw *hw)
 	}
 
 	/* Enable the clock buffer */
-	ret = regmap_set_bits(vc5->regmap, VC5_CLK_OUTPUT_CFG(hwdata->num, 1),
-			      VC5_CLK_OUTPUT_CFG1_EN_CLKBUF);
-	if (ret)
-		return ret;
-
+	regmap_update_bits(vc5->regmap, VC5_CLK_OUTPUT_CFG(hwdata->num, 1),
+			   VC5_CLK_OUTPUT_CFG1_EN_CLKBUF,
+			   VC5_CLK_OUTPUT_CFG1_EN_CLKBUF);
 	if (hwdata->clk_output_cfg0_mask) {
 		dev_dbg(&vc5->client->dev, "Update output %d mask 0x%0X val 0x%0X\n",
 			hwdata->num, hwdata->clk_output_cfg0_mask,
 			hwdata->clk_output_cfg0);
 
-		ret = regmap_update_bits(vc5->regmap,
-					 VC5_CLK_OUTPUT_CFG(hwdata->num, 0),
-					 hwdata->clk_output_cfg0_mask,
-					 hwdata->clk_output_cfg0);
-		if (ret)
-			return ret;
+		regmap_update_bits(vc5->regmap,
+			VC5_CLK_OUTPUT_CFG(hwdata->num, 0),
+			hwdata->clk_output_cfg0_mask,
+			hwdata->clk_output_cfg0);
 	}
 
 	return 0;
@@ -673,8 +640,8 @@ static void vc5_clk_out_unprepare(struct clk_hw *hw)
 	struct vc5_driver_data *vc5 = hwdata->vc5;
 
 	/* Disable the clock buffer */
-	regmap_clear_bits(vc5->regmap, VC5_CLK_OUTPUT_CFG(hwdata->num, 1),
-			  VC5_CLK_OUTPUT_CFG1_EN_CLKBUF);
+	regmap_update_bits(vc5->regmap, VC5_CLK_OUTPUT_CFG(hwdata->num, 1),
+			   VC5_CLK_OUTPUT_CFG1_EN_CLKBUF, 0);
 }
 
 static unsigned char vc5_clk_out_get_parent(struct clk_hw *hw)
@@ -689,12 +656,8 @@ static unsigned char vc5_clk_out_get_parent(struct clk_hw *hw)
 	const u8 extclk = VC5_OUT_DIV_CONTROL_SELB_NORM |
 			  VC5_OUT_DIV_CONTROL_SEL_EXT;
 	unsigned int src;
-	int ret;
 
-	ret = regmap_read(vc5->regmap, VC5_OUT_DIV_CONTROL(hwdata->num), &src);
-	if (ret)
-		return 0;
-
+	regmap_read(vc5->regmap, VC5_OUT_DIV_CONTROL(hwdata->num), &src);
 	src &= mask;
 
 	if (src == 0)	/* Input mux set to DISABLED */
@@ -735,7 +698,6 @@ static int vc5_clk_out_set_parent(struct clk_hw *hw, u8 index)
 static const struct clk_ops vc5_clk_out_ops = {
 	.prepare	= vc5_clk_out_prepare,
 	.unprepare	= vc5_clk_out_unprepare,
-	.determine_rate	= clk_hw_determine_rate_no_reparent,
 	.set_parent	= vc5_clk_out_set_parent,
 	.get_parent	= vc5_clk_out_get_parent,
 };
@@ -763,7 +725,6 @@ static int vc5_map_index_to_output(const enum vc5_model model,
 	case IDT_VC5_5P49V5935:
 	case IDT_VC6_5P49V6901:
 	case IDT_VC6_5P49V6965:
-	case IDT_VC6_5P49V6975:
 	default:
 		return n;
 	}
@@ -817,68 +778,6 @@ static int vc5_update_power(struct device_node *np_output,
 		}
 	}
 	return 0;
-}
-
-static int vc5_map_cap_value(u32 femtofarads)
-{
-	int mapped_value;
-
-	/*
-	 * The datasheet explicitly states 9000 - 25000 with 0.5pF
-	 * steps, but the Programmer's guide shows the steps are 0.430pF.
-	 * After getting feedback from Renesas, the .5pF steps were the
-	 * goal, but 430nF was the actual values.
-	 * Because of this, the actual range goes to 22760 instead of 25000
-	 */
-	if (femtofarads < 9000 || femtofarads > 22760)
-		return -EINVAL;
-
-	/*
-	 * The Programmer's guide shows XTAL[5:0] but in reality,
-	 * XTAL[0] and XTAL[1] are both LSB which makes the math
-	 * strange.  With clarfication from Renesas, setting the
-	 * values should be simpler by ignoring XTAL[0]
-	 */
-	mapped_value = DIV_ROUND_CLOSEST(femtofarads - 9000, 430);
-
-	/*
-	 * Since the calculation ignores XTAL[0], there is one
-	 * special case where mapped_value = 32.  In reality, this means
-	 * the real mapped value should be 111111b.  In other cases,
-	 * the mapped_value needs to be shifted 1 to the left.
-	 */
-	if (mapped_value > 31)
-		mapped_value = 0x3f;
-	else
-		mapped_value <<= 1;
-
-	return mapped_value;
-}
-static int vc5_update_cap_load(struct device_node *node, struct vc5_driver_data *vc5)
-{
-	u32 value;
-	int mapped_value;
-	int ret;
-
-	if (of_property_read_u32(node, "idt,xtal-load-femtofarads", &value))
-		return 0;
-
-	mapped_value = vc5_map_cap_value(value);
-	if (mapped_value < 0)
-		return mapped_value;
-
-	/*
-	 * The mapped_value is really the high 6 bits of
-	 * VC5_XTAL_X1_LOAD_CAP and VC5_XTAL_X2_LOAD_CAP, so
-	 * shift the value 2 places.
-	 */
-	ret = regmap_update_bits(vc5->regmap, VC5_XTAL_X1_LOAD_CAP, ~0x03,
-				 mapped_value << 2);
-	if (ret)
-		return ret;
-
-	return regmap_update_bits(vc5->regmap, VC5_XTAL_X2_LOAD_CAP, ~0x03,
-				  mapped_value << 2);
 }
 
 static int vc5_update_slew(struct device_node *np_output,
@@ -949,9 +848,8 @@ output_error:
 
 static const struct of_device_id clk_vc5_of_match[];
 
-static int vc5_probe(struct i2c_client *client)
+static int vc5_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
-	unsigned int oe, sd, src_mask = 0, src_val = 0;
 	struct vc5_driver_data *vc5;
 	struct clk_init_data init;
 	const char *parent_names[2];
@@ -964,7 +862,7 @@ static int vc5_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, vc5);
 	vc5->client = client;
-	vc5->chip_info = i2c_get_match_data(client);
+	vc5->chip_info = of_device_get_match_data(&client->dev);
 
 	vc5->pin_xin = devm_clk_get(&client->dev, "xin");
 	if (PTR_ERR(vc5->pin_xin) == -EPROBE_DEFER)
@@ -975,35 +873,10 @@ static int vc5_probe(struct i2c_client *client)
 		return -EPROBE_DEFER;
 
 	vc5->regmap = devm_regmap_init_i2c(client, &vc5_regmap_config);
-	if (IS_ERR(vc5->regmap))
-		return dev_err_probe(&client->dev, PTR_ERR(vc5->regmap),
-				     "failed to allocate register map\n");
-
-	ret = of_property_read_u32(client->dev.of_node, "idt,shutdown", &sd);
-	if (!ret) {
-		src_mask |= VC5_PRIM_SRC_SHDN_EN_GBL_SHDN;
-		if (sd)
-			src_val |= VC5_PRIM_SRC_SHDN_EN_GBL_SHDN;
-	} else if (ret != -EINVAL) {
-		return dev_err_probe(&client->dev, ret,
-				     "could not read idt,shutdown\n");
+	if (IS_ERR(vc5->regmap)) {
+		dev_err(&client->dev, "failed to allocate register map\n");
+		return PTR_ERR(vc5->regmap);
 	}
-
-	ret = of_property_read_u32(client->dev.of_node,
-				   "idt,output-enable-active", &oe);
-	if (!ret) {
-		src_mask |= VC5_PRIM_SRC_SHDN_SP;
-		if (oe)
-			src_val |= VC5_PRIM_SRC_SHDN_SP;
-	} else if (ret != -EINVAL) {
-		return dev_err_probe(&client->dev, ret,
-				     "could not read idt,output-enable-active\n");
-	}
-
-	ret = regmap_update_bits(vc5->regmap, VC5_PRIM_SRC_SHDN, src_mask,
-				 src_val);
-	if (ret)
-		return ret;
 
 	/* Register clock input mux */
 	memset(&init, 0, sizeof(init));
@@ -1027,15 +900,9 @@ static int vc5_probe(struct i2c_client *client)
 		    __clk_get_name(vc5->pin_clkin);
 	}
 
-	if (!init.num_parents)
-		return dev_err_probe(&client->dev, -EINVAL,
-				     "no input clock specified!\n");
-
-	/* Configure Optional Loading Capacitance for external XTAL */
-	if (!(vc5->chip_info->flags & VC5_HAS_INTERNAL_XTAL)) {
-		ret = vc5_update_cap_load(client->dev.of_node, vc5);
-		if (ret)
-			goto err_clk_register;
+	if (!init.num_parents) {
+		dev_err(&client->dev, "no input clock specified!\n");
+		return -EINVAL;
 	}
 
 	init.name = kasprintf(GFP_KERNEL, "%pOFn.mux", client->dev.of_node);
@@ -1197,16 +1064,14 @@ static int vc5_probe(struct i2c_client *client)
 
 	ret = of_clk_add_hw_provider(client->dev.of_node, vc5_of_clk_get, vc5);
 	if (ret) {
-		dev_err_probe(&client->dev, ret,
-			      "unable to add clk provider\n");
+		dev_err(&client->dev, "unable to add clk provider\n");
 		goto err_clk;
 	}
 
 	return 0;
 
 err_clk_register:
-	dev_err_probe(&client->dev, ret,
-		      "unable to register %s\n", init.name);
+	dev_err(&client->dev, "unable to register %s\n", init.name);
 	kfree(init.name); /* clock framework made a copy of the name */
 err_clk:
 	if (vc5->chip_info->flags & VC5_HAS_INTERNAL_XTAL)
@@ -1214,7 +1079,7 @@ err_clk:
 	return ret;
 }
 
-static void vc5_remove(struct i2c_client *client)
+static int vc5_remove(struct i2c_client *client)
 {
 	struct vc5_driver_data *vc5 = i2c_get_clientdata(client);
 
@@ -1222,6 +1087,8 @@ static void vc5_remove(struct i2c_client *client)
 
 	if (vc5->chip_info->flags & VC5_HAS_INTERNAL_XTAL)
 		clk_unregister_fixed_rate(vc5->pin_xin);
+
+	return 0;
 }
 
 static int __maybe_unused vc5_suspend(struct device *dev)
@@ -1251,7 +1118,6 @@ static const struct vc5_chip_info idt_5p49v5923_info = {
 	.clk_fod_cnt = 2,
 	.clk_out_cnt = 3,
 	.flags = 0,
-	.vco_max = 3000000000UL,
 };
 
 static const struct vc5_chip_info idt_5p49v5925_info = {
@@ -1259,7 +1125,6 @@ static const struct vc5_chip_info idt_5p49v5925_info = {
 	.clk_fod_cnt = 4,
 	.clk_out_cnt = 5,
 	.flags = 0,
-	.vco_max = 3000000000UL,
 };
 
 static const struct vc5_chip_info idt_5p49v5933_info = {
@@ -1267,7 +1132,6 @@ static const struct vc5_chip_info idt_5p49v5933_info = {
 	.clk_fod_cnt = 2,
 	.clk_out_cnt = 3,
 	.flags = VC5_HAS_INTERNAL_XTAL,
-	.vco_max = 3000000000UL,
 };
 
 static const struct vc5_chip_info idt_5p49v5935_info = {
@@ -1275,15 +1139,6 @@ static const struct vc5_chip_info idt_5p49v5935_info = {
 	.clk_fod_cnt = 4,
 	.clk_out_cnt = 5,
 	.flags = VC5_HAS_INTERNAL_XTAL,
-	.vco_max = 3000000000UL,
-};
-
-static const struct vc5_chip_info idt_5p49v60_info = {
-	.model = IDT_VC6_5P49V60,
-	.clk_fod_cnt = 4,
-	.clk_out_cnt = 5,
-	.flags = VC5_HAS_PFD_FREQ_DBL | VC5_HAS_BYPASS_SYNC_BIT,
-	.vco_max = 2700000000UL,
 };
 
 static const struct vc5_chip_info idt_5p49v6901_info = {
@@ -1291,7 +1146,6 @@ static const struct vc5_chip_info idt_5p49v6901_info = {
 	.clk_fod_cnt = 4,
 	.clk_out_cnt = 5,
 	.flags = VC5_HAS_PFD_FREQ_DBL | VC5_HAS_BYPASS_SYNC_BIT,
-	.vco_max = 3000000000UL,
 };
 
 static const struct vc5_chip_info idt_5p49v6965_info = {
@@ -1299,26 +1153,15 @@ static const struct vc5_chip_info idt_5p49v6965_info = {
 	.clk_fod_cnt = 4,
 	.clk_out_cnt = 5,
 	.flags = VC5_HAS_BYPASS_SYNC_BIT,
-	.vco_max = 3000000000UL,
-};
-
-static const struct vc5_chip_info idt_5p49v6975_info = {
-	.model = IDT_VC6_5P49V6975,
-	.clk_fod_cnt = 4,
-	.clk_out_cnt = 5,
-	.flags = VC5_HAS_BYPASS_SYNC_BIT | VC5_HAS_INTERNAL_XTAL,
-	.vco_max = 3000000000UL,
 };
 
 static const struct i2c_device_id vc5_id[] = {
-	{ "5p49v5923", .driver_data = (kernel_ulong_t)&idt_5p49v5923_info },
-	{ "5p49v5925", .driver_data = (kernel_ulong_t)&idt_5p49v5925_info },
-	{ "5p49v5933", .driver_data = (kernel_ulong_t)&idt_5p49v5933_info },
-	{ "5p49v5935", .driver_data = (kernel_ulong_t)&idt_5p49v5935_info },
-	{ "5p49v60", .driver_data = (kernel_ulong_t)&idt_5p49v60_info },
-	{ "5p49v6901", .driver_data = (kernel_ulong_t)&idt_5p49v6901_info },
-	{ "5p49v6965", .driver_data = (kernel_ulong_t)&idt_5p49v6965_info },
-	{ "5p49v6975", .driver_data = (kernel_ulong_t)&idt_5p49v6975_info },
+	{ "5p49v5923", .driver_data = IDT_VC5_5P49V5923 },
+	{ "5p49v5925", .driver_data = IDT_VC5_5P49V5925 },
+	{ "5p49v5933", .driver_data = IDT_VC5_5P49V5933 },
+	{ "5p49v5935", .driver_data = IDT_VC5_5P49V5935 },
+	{ "5p49v6901", .driver_data = IDT_VC6_5P49V6901 },
+	{ "5p49v6965", .driver_data = IDT_VC6_5P49V6965 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vc5_id);
@@ -1328,10 +1171,8 @@ static const struct of_device_id clk_vc5_of_match[] = {
 	{ .compatible = "idt,5p49v5925", .data = &idt_5p49v5925_info },
 	{ .compatible = "idt,5p49v5933", .data = &idt_5p49v5933_info },
 	{ .compatible = "idt,5p49v5935", .data = &idt_5p49v5935_info },
-	{ .compatible = "idt,5p49v60", .data = &idt_5p49v60_info },
 	{ .compatible = "idt,5p49v6901", .data = &idt_5p49v6901_info },
 	{ .compatible = "idt,5p49v6965", .data = &idt_5p49v6965_info },
-	{ .compatible = "idt,5p49v6975", .data = &idt_5p49v6975_info },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, clk_vc5_of_match);

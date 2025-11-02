@@ -8,7 +8,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/device.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/io.h>
@@ -72,8 +71,6 @@ static unsigned int _get_maxdiv(const struct clk_div_table *table, u8 width,
 		return clk_div_mask(width);
 	if (flags & CLK_DIVIDER_POWER_OF_TWO)
 		return 1 << clk_div_mask(width);
-	if (flags & CLK_DIVIDER_EVEN_INTEGERS)
-		return 2 * (clk_div_mask(width) + 1);
 	if (table)
 		return _get_table_maxdiv(table, width);
 	return clk_div_mask(width) + 1;
@@ -99,8 +96,6 @@ static unsigned int _get_div(const struct clk_div_table *table,
 		return 1 << val;
 	if (flags & CLK_DIVIDER_MAX_AT_ZERO)
 		return val ? val : clk_div_mask(width) + 1;
-	if (flags & CLK_DIVIDER_EVEN_INTEGERS)
-		return 2 * (val + 1);
 	if (table)
 		return _get_table_div(table, val);
 	return val + 1;
@@ -126,8 +121,6 @@ static unsigned int _get_val(const struct clk_div_table *table,
 		return __ffs(div);
 	if (flags & CLK_DIVIDER_MAX_AT_ZERO)
 		return (div == clk_div_mask(width) + 1) ? 0 : div;
-	if (flags & CLK_DIVIDER_EVEN_INTEGERS)
-		return (div >> 1) - 1;
 	if (table)
 		return  _get_table_val(table, div);
 	return div - 1;
@@ -349,63 +342,16 @@ static int clk_divider_bestdiv(struct clk_hw *hw, struct clk_hw *parent,
 	return bestdiv;
 }
 
-int divider_determine_rate(struct clk_hw *hw, struct clk_rate_request *req,
-			   const struct clk_div_table *table, u8 width,
-			   unsigned long flags)
-{
-	int div;
-
-	div = clk_divider_bestdiv(hw, req->best_parent_hw, req->rate,
-				  &req->best_parent_rate, table, width, flags);
-
-	req->rate = DIV_ROUND_UP_ULL((u64)req->best_parent_rate, div);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(divider_determine_rate);
-
-int divider_ro_determine_rate(struct clk_hw *hw, struct clk_rate_request *req,
-			      const struct clk_div_table *table, u8 width,
-			      unsigned long flags, unsigned int val)
-{
-	int div;
-
-	div = _get_div(table, val, flags, width);
-
-	/* Even a read-only clock can propagate a rate change */
-	if (clk_hw_get_flags(hw) & CLK_SET_RATE_PARENT) {
-		if (!req->best_parent_hw)
-			return -EINVAL;
-
-		req->best_parent_rate = clk_hw_round_rate(req->best_parent_hw,
-							  req->rate * div);
-	}
-
-	req->rate = DIV_ROUND_UP_ULL((u64)req->best_parent_rate, div);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(divider_ro_determine_rate);
-
 long divider_round_rate_parent(struct clk_hw *hw, struct clk_hw *parent,
 			       unsigned long rate, unsigned long *prate,
 			       const struct clk_div_table *table,
 			       u8 width, unsigned long flags)
 {
-	struct clk_rate_request req;
-	int ret;
+	int div;
 
-	clk_hw_init_rate_request(hw, &req, rate);
-	req.best_parent_rate = *prate;
-	req.best_parent_hw = parent;
+	div = clk_divider_bestdiv(hw, parent, rate, prate, table, width, flags);
 
-	ret = divider_determine_rate(hw, &req, table, width, flags);
-	if (ret)
-		return ret;
-
-	*prate = req.best_parent_rate;
-
-	return req.rate;
+	return DIV_ROUND_UP_ULL((u64)*prate, div);
 }
 EXPORT_SYMBOL_GPL(divider_round_rate_parent);
 
@@ -414,25 +360,25 @@ long divider_ro_round_rate_parent(struct clk_hw *hw, struct clk_hw *parent,
 				  const struct clk_div_table *table, u8 width,
 				  unsigned long flags, unsigned int val)
 {
-	struct clk_rate_request req;
-	int ret;
+	int div;
 
-	clk_hw_init_rate_request(hw, &req, rate);
-	req.best_parent_rate = *prate;
-	req.best_parent_hw = parent;
+	div = _get_div(table, val, flags, width);
 
-	ret = divider_ro_determine_rate(hw, &req, table, width, flags, val);
-	if (ret)
-		return ret;
+	/* Even a read-only clock can propagate a rate change */
+	if (clk_hw_get_flags(hw) & CLK_SET_RATE_PARENT) {
+		if (!parent)
+			return -EINVAL;
 
-	*prate = req.best_parent_rate;
+		*prate = clk_hw_round_rate(parent, rate * div);
+	}
 
-	return req.rate;
+	return DIV_ROUND_UP_ULL((u64)*prate, div);
 }
 EXPORT_SYMBOL_GPL(divider_ro_round_rate_parent);
 
-static int clk_divider_determine_rate(struct clk_hw *hw,
-				      struct clk_rate_request *req)
+
+static long clk_divider_round_rate(struct clk_hw *hw, unsigned long rate,
+				unsigned long *prate)
 {
 	struct clk_divider *divider = to_clk_divider(hw);
 
@@ -443,13 +389,13 @@ static int clk_divider_determine_rate(struct clk_hw *hw,
 		val = clk_div_readl(divider) >> divider->shift;
 		val &= clk_div_mask(divider->width);
 
-		return divider_ro_determine_rate(hw, req, divider->table,
-						 divider->width,
-						 divider->flags, val);
+		return divider_ro_round_rate(hw, rate, prate, divider->table,
+					     divider->width, divider->flags,
+					     val);
 	}
 
-	return divider_determine_rate(hw, req, divider->table, divider->width,
-				      divider->flags);
+	return divider_round_rate(hw, rate, prate, divider->table,
+				  divider->width, divider->flags);
 }
 
 int divider_get_val(unsigned long rate, unsigned long parent_rate,
@@ -506,14 +452,14 @@ static int clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
 
 const struct clk_ops clk_divider_ops = {
 	.recalc_rate = clk_divider_recalc_rate,
-	.determine_rate = clk_divider_determine_rate,
+	.round_rate = clk_divider_round_rate,
 	.set_rate = clk_divider_set_rate,
 };
 EXPORT_SYMBOL_GPL(clk_divider_ops);
 
 const struct clk_ops clk_divider_ro_ops = {
 	.recalc_rate = clk_divider_recalc_rate,
-	.determine_rate = clk_divider_determine_rate,
+	.round_rate = clk_divider_round_rate,
 };
 EXPORT_SYMBOL_GPL(clk_divider_ro_ops);
 
@@ -521,8 +467,7 @@ struct clk_hw *__clk_hw_register_divider(struct device *dev,
 		struct device_node *np, const char *name,
 		const char *parent_name, const struct clk_hw *parent_hw,
 		const struct clk_parent_data *parent_data, unsigned long flags,
-		void __iomem *reg, u8 shift, u8 width,
-		unsigned long clk_divider_flags,
+		void __iomem *reg, u8 shift, u8 width, u8 clk_divider_flags,
 		const struct clk_div_table *table, spinlock_t *lock)
 {
 	struct clk_divider *div;
@@ -594,8 +539,8 @@ EXPORT_SYMBOL_GPL(__clk_hw_register_divider);
 struct clk *clk_register_divider_table(struct device *dev, const char *name,
 		const char *parent_name, unsigned long flags,
 		void __iomem *reg, u8 shift, u8 width,
-		unsigned long clk_divider_flags,
-		const struct clk_div_table *table, spinlock_t *lock)
+		u8 clk_divider_flags, const struct clk_div_table *table,
+		spinlock_t *lock)
 {
 	struct clk_hw *hw;
 
@@ -638,37 +583,3 @@ void clk_hw_unregister_divider(struct clk_hw *hw)
 	kfree(div);
 }
 EXPORT_SYMBOL_GPL(clk_hw_unregister_divider);
-
-static void devm_clk_hw_release_divider(struct device *dev, void *res)
-{
-	clk_hw_unregister_divider(*(struct clk_hw **)res);
-}
-
-struct clk_hw *__devm_clk_hw_register_divider(struct device *dev,
-		struct device_node *np, const char *name,
-		const char *parent_name, const struct clk_hw *parent_hw,
-		const struct clk_parent_data *parent_data, unsigned long flags,
-		void __iomem *reg, u8 shift, u8 width,
-		unsigned long clk_divider_flags,
-		const struct clk_div_table *table, spinlock_t *lock)
-{
-	struct clk_hw **ptr, *hw;
-
-	ptr = devres_alloc(devm_clk_hw_release_divider, sizeof(*ptr), GFP_KERNEL);
-	if (!ptr)
-		return ERR_PTR(-ENOMEM);
-
-	hw = __clk_hw_register_divider(dev, np, name, parent_name, parent_hw,
-				       parent_data, flags, reg, shift, width,
-				       clk_divider_flags, table, lock);
-
-	if (!IS_ERR(hw)) {
-		*ptr = hw;
-		devres_add(dev, ptr);
-	} else {
-		devres_free(ptr);
-	}
-
-	return hw;
-}
-EXPORT_SYMBOL_GPL(__devm_clk_hw_register_divider);

@@ -28,7 +28,7 @@ should be a userspace tool that handles all the low-level details, keeps
 a database of the authorized devices and prompts users for new connections.
 
 More details about the sysfs interface for Thunderbolt devices can be
-found in Documentation/ABI/testing/sysfs-bus-thunderbolt.
+found in ``Documentation/ABI/testing/sysfs-bus-thunderbolt``.
 
 Those users who just want to connect any device without any sort of
 manual work can add following line to
@@ -46,9 +46,6 @@ security levels available. Intel Titan Ridge added one more security level
 be DMA masters and thus read contents of the host memory without CPU and OS
 knowing about it. There are ways to prevent this by setting up an IOMMU but
 it is not always available for various reasons.
-
-Some USB4 systems have a BIOS setting to disable PCIe tunneling. This is
-treated as another security level (nopcie).
 
 The security levels are as follows:
 
@@ -79,10 +76,6 @@ The security levels are as follows:
     The firmware automatically creates tunnels for the USB controller and
     Display Port in a dock. All PCIe links downstream of the dock are
     removed.
-
-  nopcie
-    PCIe tunneling is disabled/forbidden from the BIOS. Available in some
-    USB4 systems.
 
 The current security level can be read from
 ``/sys/bus/thunderbolt/devices/domainX/security`` where ``domainX`` is
@@ -159,22 +152,6 @@ returned to the user.
 If the user still wants to connect the device they can either approve
 the device without a key or write a new key and write 1 to the
 ``authorized`` file to get the new key stored on the device NVM.
-
-De-authorizing devices
-----------------------
-It is possible to de-authorize devices by writing ``0`` to their
-``authorized`` attribute. This requires support from the connection
-manager implementation and can be checked by reading domain
-``deauthorization`` attribute. If it reads ``1`` then the feature is
-supported.
-
-When a device is de-authorized the PCIe tunnel from the parent device
-PCIe downstream (or root) port to the device PCIe upstream port is torn
-down. This is essentially the same thing as PCIe hot-remove and the PCIe
-toplogy in question will not be accessible anymore until the device is
-authorized again. If there is storage such as NVMe or similar involved,
-there is a risk for data loss if the filesystem on that storage is not
-properly shut down. You have been warned!
 
 DMA protection utilizing IOMMU
 ------------------------------
@@ -256,35 +233,6 @@ Note names of the NVMem devices ``nvm_activeN`` and ``nvm_non_activeN``
 depend on the order they are registered in the NVMem subsystem. N in
 the name is the identifier added by the NVMem subsystem.
 
-Upgrading on-board retimer NVM when there is no cable connected
----------------------------------------------------------------
-If the platform supports, it may be possible to upgrade the retimer NVM
-firmware even when there is nothing connected to the USB4
-ports. When this is the case the ``usb4_portX`` devices have two special
-attributes: ``offline`` and ``rescan``. The way to upgrade the firmware
-is to first put the USB4 port into offline mode::
-
-  # echo 1 > /sys/bus/thunderbolt/devices/0-0/usb4_port1/offline
-
-This step makes sure the port does not respond to any hotplug events,
-and also ensures the retimers are powered on. The next step is to scan
-for the retimers::
-
-  # echo 1 > /sys/bus/thunderbolt/devices/0-0/usb4_port1/rescan
-
-This enumerates and adds the on-board retimers. Now retimer NVM can be
-upgraded in the same way than with cable connected (see previous
-section). However, the retimer is not disconnected as we are offline
-mode) so after writing ``1`` to ``nvm_authenticate`` one should wait for
-5 or more seconds before running rescan again::
-
-  # echo 1 > /sys/bus/thunderbolt/devices/0-0/usb4_port1/rescan
-
-This point if everything went fine, the port can be put back to
-functional state again::
-
-  # echo 0 > /sys/bus/thunderbolt/devices/0-0/usb4_port1/offline
-
 Upgrading NVM when host controller is in safe mode
 --------------------------------------------------
 If the existing NVM is not properly authenticated (or is missing) the
@@ -295,39 +243,6 @@ information is missing.
 
 To recover from this mode, one needs to flash a valid NVM image to the
 host controller in the same way it is done in the previous chapter.
-
-Tunneling events
-----------------
-The driver sends ``KOBJ_CHANGE`` events to userspace when there is a
-tunneling change in the ``thunderbolt_domain``. The notification carries
-following environment variables::
-
-  TUNNEL_EVENT=<EVENT>
-  TUNNEL_DETAILS=0:12 <-> 1:20 (USB3)
-
-Possible values for ``<EVENT>`` are:
-
-  activated
-    The tunnel was activated (created).
-
-  changed
-    There is a change in this tunnel. For example bandwidth allocation was
-    changed.
-
-  deactivated
-    The tunnel was torn down.
-
-  low bandwidth
-    The tunnel is not getting optimal bandwidth.
-
-  insufficient bandwidth
-    There is not enough bandwidth for the current tunnel requirements.
-
-The ``TUNNEL_DETAILS`` is only provided if the tunnel is known. For
-example, in case of Firmware Connection Manager this is missing or does
-not provide full tunnel information. In case of Software Connection Manager
-this includes full tunnel details. The format currently matches what the
-driver uses when logging. This may change over time.
 
 Networking over Thunderbolt cable
 ---------------------------------
@@ -358,7 +273,12 @@ Forcing power
 Many OEMs include a method that can be used to force the power of a
 Thunderbolt controller to an "On" state even if nothing is connected.
 If supported by your machine this will be exposed by the WMI bus with
-a sysfs attribute called "force_power", see
-Documentation/ABI/testing/sysfs-platform-intel-wmi-thunderbolt for details.
+a sysfs attribute called "force_power".
+
+For example the intel-wmi-thunderbolt driver exposes this attribute in:
+  /sys/bus/wmi/devices/86CCFD48-205E-4A77-9C48-2021CBEDE341/force_power
+
+  To force the power to on, write 1 to this attribute file.
+  To disable force power, write 0 to this attribute file.
 
 Note: it's currently not possible to query the force power state of a platform.

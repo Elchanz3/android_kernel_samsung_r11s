@@ -16,7 +16,9 @@
 
 #include <asm/irq_vectors.h>
 
-#ifndef __ASSEMBLER__
+#define IRQ_MATRIX_BITS		NR_VECTORS
+
+#ifndef __ASSEMBLY__
 
 #include <linux/percpu.h>
 #include <linux/profile.h>
@@ -26,7 +28,7 @@
 #include <asm/irq.h>
 #include <asm/sections.h>
 
-#ifdef	CONFIG_IRQ_DOMAIN_HIERARCHY
+#ifdef	CONFIG_X86_LOCAL_APIC
 struct irq_data;
 struct pci_dev;
 struct msi_desc;
@@ -37,16 +39,18 @@ enum irq_alloc_type {
 	X86_IRQ_ALLOC_TYPE_PCI_MSI,
 	X86_IRQ_ALLOC_TYPE_PCI_MSIX,
 	X86_IRQ_ALLOC_TYPE_DMAR,
-	X86_IRQ_ALLOC_TYPE_AMDVI,
 	X86_IRQ_ALLOC_TYPE_UV,
+	X86_IRQ_ALLOC_TYPE_IOAPIC_GET_PARENT,
+	X86_IRQ_ALLOC_TYPE_HPET_GET_PARENT,
 };
 
 struct ioapic_alloc_info {
-	int		pin;
-	int		node;
-	u32		is_level	: 1;
-	u32		active_low	: 1;
-	u32		valid		: 1;
+	int				pin;
+	int				node;
+	u32				trigger : 1;
+	u32				polarity : 1;
+	u32				valid : 1;
+	struct IO_APIC_route_entry	*entry;
 };
 
 struct uv_alloc_info {
@@ -92,23 +96,21 @@ struct irq_cfg {
 
 extern struct irq_cfg *irq_cfg(unsigned int irq);
 extern struct irq_cfg *irqd_cfg(struct irq_data *irq_data);
-#ifdef CONFIG_SMP
-extern void vector_schedule_cleanup(struct irq_cfg *);
-extern void irq_complete_move(struct irq_cfg *cfg);
-#else
-static inline void vector_schedule_cleanup(struct irq_cfg *c) { }
-static inline void irq_complete_move(struct irq_cfg *c) { }
-#endif
-extern void apic_ack_edge(struct irq_data *data);
-#endif /* CONFIG_IRQ_DOMAIN_HIERARCHY */
-
-#ifdef CONFIG_X86_LOCAL_APIC
 extern void lock_vector_lock(void);
 extern void unlock_vector_lock(void);
+#ifdef CONFIG_SMP
+extern void send_cleanup_vector(struct irq_cfg *);
+extern void irq_complete_move(struct irq_cfg *cfg);
 #else
+static inline void send_cleanup_vector(struct irq_cfg *c) { }
+static inline void irq_complete_move(struct irq_cfg *c) { }
+#endif
+
+extern void apic_ack_edge(struct irq_data *data);
+#else	/*  CONFIG_X86_LOCAL_APIC */
 static inline void lock_vector_lock(void) {}
 static inline void unlock_vector_lock(void) {}
-#endif
+#endif	/* CONFIG_X86_LOCAL_APIC */
 
 /* Statistics */
 extern atomic_t irq_err_count;
@@ -130,6 +132,6 @@ extern char spurious_entries_start[];
 typedef struct irq_desc* vector_irq_t[NR_VECTORS];
 DECLARE_PER_CPU(vector_irq_t, vector_irq);
 
-#endif /* !__ASSEMBLER__ */
+#endif /* !ASSEMBLY_ */
 
 #endif /* _ASM_X86_HW_IRQ_H */

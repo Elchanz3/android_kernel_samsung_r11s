@@ -32,7 +32,7 @@ struct nf_conntrack_l4proto {
 
 	/* convert protoinfo to nfnetink attributes */
 	int (*to_nlattr)(struct sk_buff *skb, struct nlattr *nla,
-			 struct nf_conn *ct, bool destroy);
+			 struct nf_conn *ct);
 
 	/* convert nfnetlink attributes to protoinfo */
 	int (*from_nlattr)(struct nlattr *tb[], struct nf_conn *ct);
@@ -117,6 +117,11 @@ int nf_conntrack_tcp_packet(struct nf_conn *ct,
 			    unsigned int dataoff,
 			    enum ip_conntrack_info ctinfo,
 			    const struct nf_hook_state *state);
+int nf_conntrack_dccp_packet(struct nf_conn *ct,
+			     struct sk_buff *skb,
+			     unsigned int dataoff,
+			     enum ip_conntrack_info ctinfo,
+			     const struct nf_hook_state *state);
 int nf_conntrack_sctp_packet(struct nf_conn *ct,
 			     struct sk_buff *skb,
 			     unsigned int dataoff,
@@ -132,6 +137,7 @@ void nf_conntrack_generic_init_net(struct net *net);
 void nf_conntrack_tcp_init_net(struct net *net);
 void nf_conntrack_udp_init_net(struct net *net);
 void nf_conntrack_gre_init_net(struct net *net);
+void nf_conntrack_dccp_init_net(struct net *net);
 void nf_conntrack_sctp_init_net(struct net *net);
 void nf_conntrack_icmp_init_net(struct net *net);
 void nf_conntrack_icmpv6_init_net(struct net *net);
@@ -153,26 +159,22 @@ unsigned int nf_ct_port_nlattr_tuple_size(void);
 extern const struct nla_policy nf_ct_port_nla_policy[];
 
 #ifdef CONFIG_SYSCTL
-__printf(4, 5) __cold
+__printf(3, 4) __cold
 void nf_ct_l4proto_log_invalid(const struct sk_buff *skb,
 			       const struct nf_conn *ct,
-			       const struct nf_hook_state *state,
 			       const char *fmt, ...);
-__printf(4, 5) __cold
+__printf(5, 6) __cold
 void nf_l4proto_log_invalid(const struct sk_buff *skb,
-			    const struct nf_hook_state *state,
-			    u8 protonum,
+			    struct net *net,
+			    u16 pf, u8 protonum,
 			    const char *fmt, ...);
 #else
-static inline __printf(4, 5) __cold
-void nf_l4proto_log_invalid(const struct sk_buff *skb,
-			    const struct nf_hook_state *state,
-			    u8 protonum,
-			    const char *fmt, ...) {}
-static inline __printf(4, 5) __cold
+static inline __printf(5, 6) __cold
+void nf_l4proto_log_invalid(const struct sk_buff *skb, struct net *net,
+			    u16 pf, u8 protonum, const char *fmt, ...) {}
+static inline __printf(3, 4) __cold
 void nf_ct_l4proto_log_invalid(const struct sk_buff *skb,
 			       const struct nf_conn *ct,
-			       const struct nf_hook_state *state,
 			       const char *fmt, ...) { }
 #endif /* CONFIG_SYSCTL */
 
@@ -201,19 +203,12 @@ static inline struct nf_icmp_net *nf_icmpv6_pernet(struct net *net)
 {
 	return &net->ct.nf_ct_proto.icmpv6;
 }
+#endif
 
-/* Caller must check nf_ct_protonum(ct) is IPPROTO_TCP before calling. */
-static inline void nf_ct_set_tcp_be_liberal(struct nf_conn *ct)
+#ifdef CONFIG_NF_CT_PROTO_DCCP
+static inline struct nf_dccp_net *nf_dccp_pernet(struct net *net)
 {
-	ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
-	ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
-}
-
-/* Caller must check nf_ct_protonum(ct) is IPPROTO_TCP before calling. */
-static inline bool nf_conntrack_tcp_established(const struct nf_conn *ct)
-{
-	return ct->proto.tcp.state == TCP_CONNTRACK_ESTABLISHED &&
-	       test_bit(IPS_ASSURED_BIT, &ct->status);
+	return &net->ct.nf_ct_proto.dccp;
 }
 #endif
 

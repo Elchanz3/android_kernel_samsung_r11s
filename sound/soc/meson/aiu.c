@@ -42,7 +42,7 @@ static const struct snd_soc_dapm_route aiu_cpu_dapm_routes[] = {
 };
 
 int aiu_of_xlate_dai_name(struct snd_soc_component *component,
-			  const struct of_phandle_args *args,
+			  struct of_phandle_args *args,
 			  const char **dai_name,
 			  unsigned int component_id)
 {
@@ -72,7 +72,7 @@ int aiu_of_xlate_dai_name(struct snd_soc_component *component,
 }
 
 static int aiu_cpu_of_xlate_dai_name(struct snd_soc_component *component,
-				     const struct of_phandle_args *args,
+				     struct of_phandle_args *args,
 				     const char **dai_name)
 {
 	return aiu_of_xlate_dai_name(component, args, dai_name, AIU_CPU);
@@ -103,9 +103,6 @@ static const struct snd_soc_component_driver aiu_cpu_component = {
 	.pointer		= aiu_fifo_pointer,
 	.probe			= aiu_cpu_component_probe,
 	.remove			= aiu_cpu_component_remove,
-#ifdef CONFIG_DEBUG_FS
-	.debugfs_prefix		= "cpu",
-#endif
 };
 
 static struct snd_soc_dai_driver aiu_cpu_dai_drv[] = {
@@ -121,6 +118,9 @@ static struct snd_soc_dai_driver aiu_cpu_dai_drv[] = {
 			.formats	= AIU_FORMATS,
 		},
 		.ops		= &aiu_fifo_i2s_dai_ops,
+		.pcm_new	= aiu_fifo_pcm_new,
+		.probe		= aiu_fifo_i2s_dai_probe,
+		.remove		= aiu_fifo_dai_remove,
 	},
 	[CPU_SPDIF_FIFO] = {
 		.name = "SPDIF FIFO",
@@ -134,6 +134,9 @@ static struct snd_soc_dai_driver aiu_cpu_dai_drv[] = {
 			.formats	= AIU_FORMATS,
 		},
 		.ops		= &aiu_fifo_spdif_dai_ops,
+		.pcm_new	= aiu_fifo_pcm_new,
+		.probe		= aiu_fifo_spdif_dai_probe,
+		.remove		= aiu_fifo_dai_remove,
 	},
 	[CPU_I2S_ENCODER] = {
 		.name = "I2S Encoder",
@@ -314,9 +317,11 @@ err:
 	return ret;
 }
 
-static void aiu_remove(struct platform_device *pdev)
+static int aiu_remove(struct platform_device *pdev)
 {
 	snd_soc_unregister_component(&pdev->dev);
+
+	return 0;
 }
 
 static const struct aiu_platform_data aiu_gxbb_pdata = {

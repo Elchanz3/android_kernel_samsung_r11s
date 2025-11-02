@@ -1,6 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2017 Broadcom
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation version 2.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 /*
@@ -71,8 +79,6 @@ static int vfio_platform_bcmflexrm_reset(struct vfio_platform_device *vdev)
 	void __iomem *ring;
 	int rc = 0, ret = 0, ring_num = 0;
 	struct vfio_platform_region *reg = &vdev->regions[0];
-
-	dev_err_once(vdev->device, "DEPRECATION: VFIO Broadcom FlexRM platform reset is deprecated and will be removed in a future kernel release\n");
 
 	/* Map FlexRM ring registers if not mapped */
 	if (!reg->ioaddr) {

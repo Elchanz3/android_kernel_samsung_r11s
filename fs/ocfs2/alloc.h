@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/*
+/* -*- mode: c; c-basic-offset: 8; -*-
+ * vim: noexpandtab sw=8 ts=8 sts=0:
+ *
  * alloc.h
  *
  * Function prototypes
@@ -254,9 +256,11 @@ static inline int ocfs2_is_empty_extent(struct ocfs2_extent_rec *rec)
 	return !rec->e_leaf_clusters;
 }
 
-void ocfs2_map_and_dirty_folio(struct inode *inode, handle_t *handle,
-		size_t from, size_t to, struct folio *folio, int zero,
-		u64 *phys);
+int ocfs2_grab_pages(struct inode *inode, loff_t start, loff_t end,
+		     struct page **pages, int *num);
+void ocfs2_map_and_dirty_page(struct inode *inode, handle_t *handle,
+			      unsigned int from, unsigned int to,
+			      struct page *page, int zero, u64 *phys);
 /*
  * Structures which describe a path through a btree, and functions to
  * manipulate them.

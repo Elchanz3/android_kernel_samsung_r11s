@@ -2,11 +2,6 @@
 /*
  * fwnode.h - Firmware device node object handle type definition.
  *
- * This header file provides low-level data types and definitions for firmware
- * and device property providers. The respective API header files supplied by
- * them should contain all of the requisite data types and definitions for end
- * users, so including it directly should not be necessary.
- *
  * Copyright (C) 2015, Intel Corporation
  * Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
  */
@@ -14,67 +9,44 @@
 #ifndef _LINUX_FWNODE_H_
 #define _LINUX_FWNODE_H_
 
+#include <linux/types.h>
+#include <linux/list.h>
 #include <linux/bits.h>
 #include <linux/err.h>
-#include <linux/list.h>
-#include <linux/types.h>
-
-enum dev_dma_attr {
-	DEV_DMA_NOT_SUPPORTED,
-	DEV_DMA_NON_COHERENT,
-	DEV_DMA_COHERENT,
-};
+#include <linux/android_kabi.h>
 
 struct fwnode_operations;
 struct device;
 
 /*
- * fwnode flags
+ * fwnode link flags
  *
  * LINKS_ADDED:	The fwnode has already be parsed to add fwnode links.
  * NOT_DEVICE:	The fwnode will never be populated as a struct device.
  * INITIALIZED: The hardware corresponding to fwnode has been initialized.
- * NEEDS_CHILD_BOUND_ON_ADD: For this fwnode/device to probe successfully, its
- *			     driver needs its child devices to be bound with
- *			     their respective drivers as soon as they are
- *			     added.
- * BEST_EFFORT: The fwnode/device needs to probe early and might be missing some
- *		suppliers. Only enforce ordering with suppliers that have
- *		drivers.
  */
-#define FWNODE_FLAG_LINKS_ADDED			BIT(0)
-#define FWNODE_FLAG_NOT_DEVICE			BIT(1)
-#define FWNODE_FLAG_INITIALIZED			BIT(2)
-#define FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD	BIT(3)
-#define FWNODE_FLAG_BEST_EFFORT			BIT(4)
-#define FWNODE_FLAG_VISITED			BIT(5)
+#define FWNODE_FLAG_LINKS_ADDED		BIT(0)
+#define FWNODE_FLAG_NOT_DEVICE		BIT(1)
+#define FWNODE_FLAG_INITIALIZED		BIT(2)
 
 struct fwnode_handle {
 	struct fwnode_handle *secondary;
 	const struct fwnode_operations *ops;
-
-	/* The below is used solely by device links, don't use otherwise */
 	struct device *dev;
 	struct list_head suppliers;
 	struct list_head consumers;
 	u8 flags;
+	ANDROID_KABI_RESERVE(1);
 };
-
-/*
- * fwnode link flags
- *
- * CYCLE:	The fwnode link is part of a cycle. Don't defer probe.
- * IGNORE:	Completely ignore this link, even during cycle detection.
- */
-#define FWLINK_FLAG_CYCLE			BIT(0)
-#define FWLINK_FLAG_IGNORE			BIT(1)
 
 struct fwnode_link {
 	struct fwnode_handle *supplier;
 	struct list_head s_hook;
 	struct fwnode_handle *consumer;
 	struct list_head c_hook;
-	u8 flags;
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
 };
 
 /**
@@ -89,14 +61,7 @@ struct fwnode_endpoint {
 	const struct fwnode_handle *local_fwnode;
 };
 
-/*
- * ports and endpoints defined as software_nodes should all follow a common
- * naming scheme; use these macros to ensure commonality.
- */
-#define SWNODE_GRAPH_PORT_NAME_FMT		"port@%u"
-#define SWNODE_GRAPH_ENDPOINT_NAME_FMT		"endpoint@%u"
-
-#define NR_FWNODE_REFERENCE_ARGS	16
+#define NR_FWNODE_REFERENCE_ARGS	8
 
 /**
  * struct fwnode_reference_args - Fwnode reference with additional arguments
@@ -117,7 +82,6 @@ struct fwnode_reference_args {
  * @device_is_available: Return true if the device is available.
  * @device_get_match_data: Return the device driver match data.
  * @property_present: Return true if a property is present.
- * @property_read_bool: Return a boolean property value.
  * @property_read_int_array: Read an array of integer properties. Return zero on
  *			     success, a negative error code otherwise.
  * @property_read_string_array: Read an array of string properties. Return zero
@@ -142,13 +106,8 @@ struct fwnode_operations {
 	bool (*device_is_available)(const struct fwnode_handle *fwnode);
 	const void *(*device_get_match_data)(const struct fwnode_handle *fwnode,
 					     const struct device *dev);
-	bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
-	enum dev_dma_attr
-	(*device_get_dma_attr)(const struct fwnode_handle *fwnode);
 	bool (*property_present)(const struct fwnode_handle *fwnode,
 				 const char *propname);
-	bool (*property_read_bool)(const struct fwnode_handle *fwnode,
-				   const char *propname);
 	int (*property_read_int_array)(const struct fwnode_handle *fwnode,
 				       const char *propname,
 				       unsigned int elem_size, void *val,
@@ -179,17 +138,15 @@ struct fwnode_operations {
 	(*graph_get_port_parent)(struct fwnode_handle *fwnode);
 	int (*graph_parse_endpoint)(const struct fwnode_handle *fwnode,
 				    struct fwnode_endpoint *endpoint);
-	void __iomem *(*iomap)(struct fwnode_handle *fwnode, int index);
-	int (*irq_get)(const struct fwnode_handle *fwnode, unsigned int index);
 	int (*add_links)(struct fwnode_handle *fwnode);
 };
 
-#define fwnode_has_op(fwnode, op)					\
-	(!IS_ERR_OR_NULL(fwnode) && (fwnode)->ops && (fwnode)->ops->op)
-
+#define fwnode_has_op(fwnode, op)				\
+	((fwnode) && (fwnode)->ops && (fwnode)->ops->op)
 #define fwnode_call_int_op(fwnode, op, ...)				\
-	(fwnode_has_op(fwnode, op) ?					\
-	 (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : (IS_ERR_OR_NULL(fwnode) ? -EINVAL : -ENXIO))
+	(fwnode ? (fwnode_has_op(fwnode, op) ?				\
+		   (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : -ENXIO) : \
+	 -EINVAL)
 
 #define fwnode_call_bool_op(fwnode, op, ...)		\
 	(fwnode_has_op(fwnode, op) ?			\
@@ -203,6 +160,7 @@ struct fwnode_operations {
 		if (fwnode_has_op(fwnode, op))				\
 			(fwnode)->ops->op(fwnode, ## __VA_ARGS__);	\
 	} while (false)
+#define get_dev_from_fwnode(fwnode)	get_device((fwnode)->dev)
 
 static inline void fwnode_init(struct fwnode_handle *fwnode,
 			       const struct fwnode_operations *ops)
@@ -224,10 +182,9 @@ static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
 		fwnode->flags &= ~FWNODE_FLAG_INITIALIZED;
 }
 
-int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup,
-		    u8 flags);
+extern u32 fw_devlink_get_flags(void);
+extern bool fw_devlink_is_strict(void);
+int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup);
 void fwnode_links_purge(struct fwnode_handle *fwnode);
-void fw_devlink_purge_absent_suppliers(struct fwnode_handle *fwnode);
-bool fw_devlink_is_strict(void);
 
 #endif

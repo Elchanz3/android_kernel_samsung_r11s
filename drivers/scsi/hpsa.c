@@ -51,7 +51,7 @@
 #include <linux/jiffies.h>
 #include <linux/percpu-defs.h>
 #include <linux/percpu.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 #include <asm/div64.h>
 #include "hpsa_cmd.h"
 #include "hpsa.h"
@@ -80,6 +80,7 @@
 MODULE_AUTHOR("Hewlett-Packard Company");
 MODULE_DESCRIPTION("Driver for HP Smart Array Controller version " \
 	HPSA_DRIVER_VERSION);
+MODULE_SUPPORTED_DEVICE("HP Smart Array Controllers");
 MODULE_VERSION(HPSA_DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("cciss");
@@ -283,10 +284,9 @@ static int hpsa_scan_finished(struct Scsi_Host *sh,
 static int hpsa_change_queue_depth(struct scsi_device *sdev, int qdepth);
 
 static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd);
-static int hpsa_sdev_init(struct scsi_device *sdev);
-static int hpsa_sdev_configure(struct scsi_device *sdev,
-			       struct queue_limits *lim);
-static void hpsa_sdev_destroy(struct scsi_device *sdev);
+static int hpsa_slave_alloc(struct scsi_device *sdev);
+static int hpsa_slave_configure(struct scsi_device *sdev);
+static void hpsa_slave_destroy(struct scsi_device *sdev);
 
 static void hpsa_update_scsi_devices(struct ctlr_info *h);
 static int check_for_unit_attention(struct ctlr_info *h,
@@ -453,13 +453,17 @@ static ssize_t host_store_hp_ssd_smart_path_status(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t count)
 {
-	int status;
+	int status, len;
 	struct ctlr_info *h;
 	struct Scsi_Host *shost = class_to_shost(dev);
+	char tmpbuf[10];
 
 	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
 		return -EACCES;
-	if (kstrtoint(buf, 10, &status))
+	len = count > sizeof(tmpbuf) - 1 ? sizeof(tmpbuf) - 1 : count;
+	strncpy(tmpbuf, buf, len);
+	tmpbuf[len] = '\0';
+	if (sscanf(tmpbuf, "%d", &status) != 1)
 		return -EINVAL;
 	h = shost_to_hba(shost);
 	h->acciopath_status = !!status;
@@ -473,13 +477,17 @@ static ssize_t host_store_raid_offload_debug(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t count)
 {
-	int debug_level;
+	int debug_level, len;
 	struct ctlr_info *h;
 	struct Scsi_Host *shost = class_to_shost(dev);
+	char tmpbuf[10];
 
 	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
 		return -EACCES;
-	if (kstrtoint(buf, 10, &debug_level))
+	len = count > sizeof(tmpbuf) - 1 ? sizeof(tmpbuf) - 1 : count;
+	strncpy(tmpbuf, buf, len);
+	tmpbuf[len] = '\0';
+	if (sscanf(tmpbuf, "%d", &debug_level) != 1)
 		return -EINVAL;
 	if (debug_level < 0)
 		debug_level = 0;
@@ -929,38 +937,34 @@ static DEVICE_ATTR(ctlr_num, S_IRUGO,
 static DEVICE_ATTR(legacy_board, S_IRUGO,
 	host_show_legacy_board, NULL);
 
-static struct attribute *hpsa_sdev_attrs[] = {
-	&dev_attr_raid_level.attr,
-	&dev_attr_lunid.attr,
-	&dev_attr_unique_id.attr,
-	&dev_attr_hp_ssd_smart_path_enabled.attr,
-	&dev_attr_path_info.attr,
-	&dev_attr_sas_address.attr,
+static struct device_attribute *hpsa_sdev_attrs[] = {
+	&dev_attr_raid_level,
+	&dev_attr_lunid,
+	&dev_attr_unique_id,
+	&dev_attr_hp_ssd_smart_path_enabled,
+	&dev_attr_path_info,
+	&dev_attr_sas_address,
 	NULL,
 };
 
-ATTRIBUTE_GROUPS(hpsa_sdev);
-
-static struct attribute *hpsa_shost_attrs[] = {
-	&dev_attr_rescan.attr,
-	&dev_attr_firmware_revision.attr,
-	&dev_attr_commands_outstanding.attr,
-	&dev_attr_transport_mode.attr,
-	&dev_attr_resettable.attr,
-	&dev_attr_hp_ssd_smart_path_status.attr,
-	&dev_attr_raid_offload_debug.attr,
-	&dev_attr_lockup_detected.attr,
-	&dev_attr_ctlr_num.attr,
-	&dev_attr_legacy_board.attr,
+static struct device_attribute *hpsa_shost_attrs[] = {
+	&dev_attr_rescan,
+	&dev_attr_firmware_revision,
+	&dev_attr_commands_outstanding,
+	&dev_attr_transport_mode,
+	&dev_attr_resettable,
+	&dev_attr_hp_ssd_smart_path_status,
+	&dev_attr_raid_offload_debug,
+	&dev_attr_lockup_detected,
+	&dev_attr_ctlr_num,
+	&dev_attr_legacy_board,
 	NULL,
 };
-
-ATTRIBUTE_GROUPS(hpsa_shost);
 
 #define HPSA_NRESERVED_CMDS	(HPSA_CMDS_RESERVED_FOR_DRIVER +\
 				 HPSA_MAX_CONCURRENT_PASSTHRUS)
 
-static const struct scsi_host_template hpsa_driver_template = {
+static struct scsi_host_template hpsa_driver_template = {
 	.module			= THIS_MODULE,
 	.name			= HPSA,
 	.proc_name		= HPSA,
@@ -971,14 +975,14 @@ static const struct scsi_host_template hpsa_driver_template = {
 	.this_id		= -1,
 	.eh_device_reset_handler = hpsa_eh_device_reset_handler,
 	.ioctl			= hpsa_ioctl,
-	.sdev_init		= hpsa_sdev_init,
-	.sdev_configure		= hpsa_sdev_configure,
-	.sdev_destroy		= hpsa_sdev_destroy,
+	.slave_alloc		= hpsa_slave_alloc,
+	.slave_configure	= hpsa_slave_configure,
+	.slave_destroy		= hpsa_slave_destroy,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl		= hpsa_compat_ioctl,
 #endif
-	.sdev_groups = hpsa_sdev_groups,
-	.shost_groups = hpsa_shost_groups,
+	.sdev_attrs = hpsa_sdev_attrs,
+	.shost_attrs = hpsa_shost_attrs,
 	.max_sectors = 2048,
 	.no_write_same = 1,
 };
@@ -1147,10 +1151,7 @@ static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
 {
 	dial_down_lockup_detection_during_fw_flash(h, c);
 	atomic_inc(&h->commands_outstanding);
-	/*
-	 * Check to see if the command is being retried.
-	 */
-	if (c->device && !c->retry_pending)
+	if (c->device)
 		atomic_inc(&c->device->commands_outstanding);
 
 	reply_queue = h->reply_map[raw_smp_processor_id()];
@@ -2100,7 +2101,7 @@ static struct hpsa_scsi_dev_t *lookup_hpsa_scsi_dev(struct ctlr_info *h,
 	return NULL;
 }
 
-static int hpsa_sdev_init(struct scsi_device *sdev)
+static int hpsa_slave_alloc(struct scsi_device *sdev)
 {
 	struct hpsa_scsi_dev_t *sd = NULL;
 	unsigned long flags;
@@ -2135,8 +2136,7 @@ static int hpsa_sdev_init(struct scsi_device *sdev)
 
 /* configure scsi device based on internal per-device structure */
 #define CTLR_TIMEOUT (120 * HZ)
-static int hpsa_sdev_configure(struct scsi_device *sdev,
-			       struct queue_limits *lim)
+static int hpsa_slave_configure(struct scsi_device *sdev)
 {
 	struct hpsa_scsi_dev_t *sd;
 	int queue_depth;
@@ -2167,7 +2167,7 @@ static int hpsa_sdev_configure(struct scsi_device *sdev,
 	return 0;
 }
 
-static void hpsa_sdev_destroy(struct scsi_device *sdev)
+static void hpsa_slave_destroy(struct scsi_device *sdev)
 {
 	struct hpsa_scsi_dev_t *hdev = NULL;
 
@@ -2396,6 +2396,7 @@ static int handle_ioaccel_mode2_error(struct ctlr_info *h,
 			break;
 		case IOACCEL2_STATUS_SR_UNDERRUN:
 			cmd->result = (DID_OK << 16);		/* host byte */
+			cmd->result |= (COMMAND_COMPLETE << 8);	/* msg byte */
 			ioaccel2_resid = get_unaligned_le32(
 						&c2->error_data.resid_cnt[0]);
 			scsi_set_resid(cmd, ioaccel2_resid);
@@ -2480,8 +2481,8 @@ static void hpsa_cmd_free_and_done(struct ctlr_info *h,
 		struct CommandList *c, struct scsi_cmnd *cmd)
 {
 	hpsa_cmd_resolve_and_free(h, c);
-	if (cmd)
-		scsi_done(cmd);
+	if (cmd && cmd->scsi_done)
+		cmd->scsi_done(cmd);
 }
 
 static void hpsa_retry_cmd(struct ctlr_info *h, struct CommandList *c)
@@ -2596,7 +2597,8 @@ static void complete_scsi_command(struct CommandList *cp)
 		(c2->sg[0].chain_indicator == IOACCEL2_CHAIN))
 		hpsa_unmap_ioaccel2_sg_chain_block(h, c2);
 
-	cmd->result = (DID_OK << 16);		/* host byte */
+	cmd->result = (DID_OK << 16); 		/* host byte */
+	cmd->result |= (COMMAND_COMPLETE << 8);	/* msg byte */
 
 	/* SCSI command has already been cleaned up in SML */
 	if (dev->was_removed) {
@@ -2662,8 +2664,10 @@ static void complete_scsi_command(struct CommandList *cp)
 	case CMD_TARGET_STATUS:
 		cmd->result |= ei->ScsiStatus;
 		/* copy the sense data */
-		sense_data_size = min_t(unsigned long, SCSI_SENSE_BUFFERSIZE,
-					sizeof(ei->SenseInfo));
+		if (SCSI_SENSE_BUFFERSIZE < sizeof(ei->SenseInfo))
+			sense_data_size = SCSI_SENSE_BUFFERSIZE;
+		else
+			sense_data_size = sizeof(ei->SenseInfo);
 		if (ei->SenseLen < sense_data_size)
 			sense_data_size = ei->SenseLen;
 		memcpy(cmd->sense_buffer, ei->SenseInfo, sense_data_size);
@@ -3626,7 +3630,10 @@ static bool hpsa_vpd_page_supported(struct ctlr_info *h,
 	if (rc != 0)
 		goto exit_unsupported;
 	pages = buf[3];
-	bufsize = min(pages + HPSA_VPD_HEADER_SZ, 255);
+	if ((pages + HPSA_VPD_HEADER_SZ) <= 255)
+		bufsize = pages + HPSA_VPD_HEADER_SZ;
+	else
+		bufsize = 255;
 
 	/* Get the whole VPD page list */
 	rc = hpsa_scsi_do_inquiry(h, scsi3addr,
@@ -3874,6 +3881,8 @@ static unsigned char hpsa_volume_offline(struct ctlr_info *h,
 	u8 sense_key, asc, ascq;
 	int sense_len;
 	int rc, ldstat = 0;
+	u16 cmd_status;
+	u8 scsi_status;
 #define ASC_LUN_NOT_READY 0x04
 #define ASCQ_LUN_NOT_READY_FORMAT_IN_PROGRESS 0x04
 #define ASCQ_LUN_NOT_READY_INITIALIZING_CMD_REQ 0x02
@@ -3893,6 +3902,8 @@ static unsigned char hpsa_volume_offline(struct ctlr_info *h,
 	else
 		sense_len = c->err_info->SenseLen;
 	decode_sense_data(sense, sense_len, &sense_key, &asc, &ascq);
+	cmd_status = c->err_info->CommandStatus;
+	scsi_status = c->err_info->ScsiStatus;
 	cmd_free(h, c);
 
 	/* Determine the reason for not ready state */
@@ -4340,9 +4351,10 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 	u32 ndev_allocated = 0;
 	struct hpsa_scsi_dev_t **currentsd, *this_device, *tmpdevice;
 	int ncurrent = 0;
-	int i, ndevs_to_allocate;
+	int i, n_ext_target_devs, ndevs_to_allocate;
 	int raid_ctlr_position;
 	bool physical_device;
+	DECLARE_BITMAP(lunzerobits, MAX_EXT_TARGETS);
 
 	currentsd = kcalloc(HPSA_MAX_DEVICES, sizeof(*currentsd), GFP_KERNEL);
 	physdev_list = kzalloc(sizeof(*physdev_list), GFP_KERNEL);
@@ -4356,6 +4368,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 		dev_err(&h->pdev->dev, "out of memory\n");
 		goto out;
 	}
+	memset(lunzerobits, 0, sizeof(lunzerobits));
 
 	h->drv_req_rescan = 0; /* cancel scheduled rescan - we're doing it. */
 
@@ -4403,6 +4416,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 		raid_ctlr_position = nphysicals + nlogicals;
 
 	/* adjust our table of devices */
+	n_ext_target_devs = 0;
 	for (i = 0; i < nphysicals + nlogicals + 1; i++) {
 		u8 *lunaddrbytes, is_OBDR = 0;
 		int rc = 0;
@@ -4566,7 +4580,7 @@ static int hpsa_scatter_gather(struct ctlr_info *h,
 		struct scsi_cmnd *cmd)
 {
 	struct scatterlist *sg;
-	int use_sg, i, sg_limit, chained;
+	int use_sg, i, sg_limit, chained, last_sg;
 	struct SGDescriptor *curr_sg;
 
 	BUG_ON(scsi_sg_count(cmd) > h->maxsgentries);
@@ -4588,6 +4602,7 @@ static int hpsa_scatter_gather(struct ctlr_info *h,
 	curr_sg = cp->SG;
 	chained = use_sg > h->max_cmd_sg_entries;
 	sg_limit = chained ? h->max_cmd_sg_entries - 1 : use_sg;
+	last_sg = scsi_sg_count(cmd) - 1;
 	scsi_for_each_sg(cmd, sg, sg_limit, i) {
 		hpsa_set_sg_descriptor(curr_sg, sg);
 		curr_sg++;
@@ -5560,8 +5575,7 @@ static inline void hpsa_cmd_partial_init(struct ctlr_info *h, int index,
 }
 
 static int hpsa_ioaccel_submit(struct ctlr_info *h,
-		struct CommandList *c, struct scsi_cmnd *cmd,
-		bool retry)
+		struct CommandList *c, struct scsi_cmnd *cmd)
 {
 	struct hpsa_scsi_dev_t *dev = cmd->device->hostdata;
 	int rc = IO_ACCEL_INELIGIBLE;
@@ -5578,22 +5592,18 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 	cmd->host_scribble = (unsigned char *) c;
 
 	if (dev->offload_enabled) {
-		hpsa_cmd_init(h, c->cmdindex, c); /* Zeroes out all fields */
+		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
 		c->scsi_cmd = cmd;
 		c->device = dev;
-		if (retry) /* Resubmit but do not increment device->commands_outstanding. */
-			c->retry_pending = true;
 		rc = hpsa_scsi_ioaccel_raid_map(h, c);
 		if (rc < 0)     /* scsi_dma_map failed. */
 			rc = SCSI_MLQUEUE_HOST_BUSY;
 	} else if (dev->hba_ioaccel_enabled) {
-		hpsa_cmd_init(h, c->cmdindex, c); /* Zeroes out all fields */
+		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
 		c->scsi_cmd = cmd;
 		c->device = dev;
-		if (retry) /* Resubmit but do not increment device->commands_outstanding. */
-			c->retry_pending = true;
 		rc = hpsa_scsi_ioaccel_direct_map(h, c);
 		if (rc < 0)     /* scsi_dma_map failed. */
 			rc = SCSI_MLQUEUE_HOST_BUSY;
@@ -5626,8 +5636,7 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 
 		if (c2->error_data.serv_response ==
 				IOACCEL2_STATUS_SR_TASK_COMP_SET_FULL) {
-			/* Resubmit with the retry_pending flag set. */
-			rc = hpsa_ioaccel_submit(h, c, cmd, true);
+			rc = hpsa_ioaccel_submit(h, c, cmd);
 			if (rc == 0)
 				return;
 			if (rc == SCSI_MLQUEUE_HOST_BUSY) {
@@ -5643,15 +5652,6 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 		}
 	}
 	hpsa_cmd_partial_init(c->h, c->cmdindex, c);
-	/*
-	 * Here we have not come in though queue_command, so we
-	 * can set the retry_pending flag to true for a driver initiated
-	 * retry attempt (I.E. not a SML retry).
-	 * I.E. We are submitting a driver initiated retry.
-	 * Note: hpsa_ciss_submit does not zero out the command fields like
-	 *       ioaccel submit does.
-	 */
-	c->retry_pending = true;
 	if (hpsa_ciss_submit(c->h, c, cmd, dev)) {
 		/*
 		 * If we get here, it means dma mapping failed. Try
@@ -5662,7 +5662,7 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 		 * if it encountered a dma mapping failure.
 		 */
 		cmd->result = DID_IMM_RETRY << 16;
-		scsi_done(cmd);
+		cmd->scsi_done(cmd);
 	}
 }
 
@@ -5677,24 +5677,24 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	/* Get the ptr to our adapter structure out of cmd->host. */
 	h = sdev_to_hba(cmd->device);
 
-	BUG_ON(scsi_cmd_to_rq(cmd)->tag < 0);
+	BUG_ON(cmd->request->tag < 0);
 
 	dev = cmd->device->hostdata;
 	if (!dev) {
 		cmd->result = DID_NO_CONNECT << 16;
-		scsi_done(cmd);
+		cmd->scsi_done(cmd);
 		return 0;
 	}
 
 	if (dev->removed) {
 		cmd->result = DID_NO_CONNECT << 16;
-		scsi_done(cmd);
+		cmd->scsi_done(cmd);
 		return 0;
 	}
 
 	if (unlikely(lockup_detected(h))) {
 		cmd->result = DID_NO_CONNECT << 16;
-		scsi_done(cmd);
+		cmd->scsi_done(cmd);
 		return 0;
 	}
 
@@ -5714,16 +5714,11 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	/*
 	 * Call alternate submit routine for I/O accelerated commands.
 	 * Retries always go down the normal I/O path.
-	 * Note: If cmd->retries is non-zero, then this is a SML
-	 *       initiated retry and not a driver initiated retry.
-	 *       This command has been obtained from cmd_tagged_alloc
-	 *       and is therefore a brand-new command.
 	 */
 	if (likely(cmd->retries == 0 &&
-			!blk_rq_is_passthrough(scsi_cmd_to_rq(cmd)) &&
+			!blk_rq_is_passthrough(cmd->request) &&
 			h->acciopath_status)) {
-		/* Submit with the retry_pending flag unset. */
-		rc = hpsa_ioaccel_submit(h, c, cmd, false);
+		rc = hpsa_ioaccel_submit(h, c, cmd);
 		if (rc == 0)
 			return 0;
 		if (rc == SCSI_MLQUEUE_HOST_BUSY) {
@@ -5885,7 +5880,7 @@ static int hpsa_scsi_add_host(struct ctlr_info *h)
  */
 static int hpsa_get_cmd_index(struct scsi_cmnd *scmd)
 {
-	int idx = scsi_cmd_to_rq(scmd)->tag;
+	int idx = scmd->request->tag;
 
 	if (idx < 0)
 		return idx;
@@ -6118,7 +6113,6 @@ return_reset_status:
  * at init, and managed by cmd_tagged_alloc() and cmd_tagged_free() using the
  * block request tag as an index into a table of entries.  cmd_tagged_free() is
  * the complement, although cmd_free() may be called instead.
- * This function is only called for new requests from queue_command.
  */
 static struct CommandList *cmd_tagged_alloc(struct ctlr_info *h,
 					    struct scsi_cmnd *scmd)
@@ -6153,14 +6147,8 @@ static struct CommandList *cmd_tagged_alloc(struct ctlr_info *h,
 	}
 
 	atomic_inc(&c->refcount);
+
 	hpsa_cmd_partial_init(h, idx, c);
-
-	/*
-	 * This is a new command obtained from queue_command so
-	 * there have not been any driver initiated retry attempts.
-	 */
-	c->retry_pending = false;
-
 	return c;
 }
 
@@ -6222,18 +6210,12 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 			offset = (i + 1) % HPSA_NRESERVED_CMDS;
 			continue;
 		}
-		set_bit(i, h->cmd_pool_bits);
+		set_bit(i & (BITS_PER_LONG - 1),
+			h->cmd_pool_bits + (i / BITS_PER_LONG));
 		break; /* it's ours now. */
 	}
 	hpsa_cmd_partial_init(h, i, c);
 	c->device = NULL;
-
-	/*
-	 * cmd_alloc is for "internal" commands and they are never
-	 * retried.
-	 */
-	c->retry_pending = false;
-
 	return c;
 }
 
@@ -6249,7 +6231,8 @@ static void cmd_free(struct ctlr_info *h, struct CommandList *c)
 		int i;
 
 		i = c - h->cmd_pool;
-		clear_bit(i, h->cmd_pool_bits);
+		clear_bit(i & (BITS_PER_LONG - 1),
+			  h->cmd_pool_bits + (i / BITS_PER_LONG));
 	}
 }
 
@@ -6402,14 +6385,18 @@ static int hpsa_passthru_ioctl(struct ctlr_info *h,
 		return -EINVAL;
 	}
 	if (iocommand->buf_size > 0) {
+		buff = kmalloc(iocommand->buf_size, GFP_KERNEL);
+		if (buff == NULL)
+			return -ENOMEM;
 		if (iocommand->Request.Type.Direction & XFER_WRITE) {
-			buff = memdup_user(iocommand->buf, iocommand->buf_size);
-			if (IS_ERR(buff))
-				return PTR_ERR(buff);
+			/* Copy the data into the buffer we created */
+			if (copy_from_user(buff, iocommand->buf,
+				iocommand->buf_size)) {
+				rc = -EFAULT;
+				goto out_kfree;
+			}
 		} else {
-			buff = kzalloc(iocommand->buf_size, GFP_KERNEL);
-			if (!buff)
-				return -ENOMEM;
+			memset(buff, 0, iocommand->buf_size);
 		}
 	}
 	c = cmd_alloc(h);
@@ -6469,6 +6456,7 @@ static int hpsa_passthru_ioctl(struct ctlr_info *h,
 	}
 out:
 	cmd_free(h, c);
+out_kfree:
 	kfree(buff);
 	return rc;
 }
@@ -6512,21 +6500,18 @@ static int hpsa_big_passthru_ioctl(struct ctlr_info *h,
 	while (left) {
 		sz = (left > ioc->malloc_size) ? ioc->malloc_size : left;
 		buff_size[sg_used] = sz;
-
-		if (ioc->Request.Type.Direction & XFER_WRITE) {
-			buff[sg_used] = memdup_user(data_ptr, sz);
-			if (IS_ERR(buff[sg_used])) {
-				status = PTR_ERR(buff[sg_used]);
-				goto cleanup1;
-			}
-		} else {
-			buff[sg_used] = kzalloc(sz, GFP_KERNEL);
-			if (!buff[sg_used]) {
-				status = -ENOMEM;
-				goto cleanup1;
-			}
+		buff[sg_used] = kmalloc(sz, GFP_KERNEL);
+		if (buff[sg_used] == NULL) {
+			status = -ENOMEM;
+			goto cleanup1;
 		}
-
+		if (ioc->Request.Type.Direction & XFER_WRITE) {
+			if (copy_from_user(buff[sg_used], data_ptr, sz)) {
+				status = -EFAULT;
+				goto cleanup1;
+			}
+		} else
+			memset(buff[sg_used], 0, sz);
 		left -= sz;
 		data_ptr += sz;
 		sg_used++;
@@ -7223,7 +7208,8 @@ static int hpsa_controller_hard_reset(struct pci_dev *pdev,
 
 static void init_driver_version(char *driver_version, int len)
 {
-	strscpy_pad(driver_version, HPSA " " HPSA_DRIVER_VERSION, len);
+	memset(driver_version, 0, len);
+	strncpy(driver_version, HPSA " " HPSA_DRIVER_VERSION, len - 1);
 }
 
 static int write_driver_ver_to_cfgtable(struct CfgTable __iomem *cfgtable)
@@ -7456,6 +7442,7 @@ static int find_PCI_BAR_index(struct pci_dev *pdev, unsigned long pci_bar_addr)
 				dev_warn(&pdev->dev,
 				       "base address is invalid\n");
 				return -1;
+				break;
 			}
 		}
 		if (offset == pci_bar_addr - PCI_BASE_ADDRESS_0)
@@ -7495,7 +7482,7 @@ fallback:
  */
 static int hpsa_interrupt_mode(struct ctlr_info *h)
 {
-	unsigned int flags = PCI_IRQ_INTX;
+	unsigned int flags = PCI_IRQ_LEGACY;
 	int ret;
 
 	/* Some boards advertise MSI but don't really support it */
@@ -7625,8 +7612,8 @@ static void hpsa_free_cfgtables(struct ctlr_info *h)
 }
 
 /* Find and map CISS config table and transfer table
- * several items must be unmapped (freed) later
- */
++ * several items must be unmapped (freed) later
++ * */
 static int hpsa_find_cfgtables(struct ctlr_info *h)
 {
 	u64 cfg_offset;
@@ -8014,7 +8001,7 @@ out_disable:
 
 static void hpsa_free_cmd_pool(struct ctlr_info *h)
 {
-	bitmap_free(h->cmd_pool_bits);
+	kfree(h->cmd_pool_bits);
 	h->cmd_pool_bits = NULL;
 	if (h->cmd_pool) {
 		dma_free_coherent(&h->pdev->dev,
@@ -8036,7 +8023,9 @@ static void hpsa_free_cmd_pool(struct ctlr_info *h)
 
 static int hpsa_alloc_cmd_pool(struct ctlr_info *h)
 {
-	h->cmd_pool_bits = bitmap_zalloc(h->nr_cmds, GFP_KERNEL);
+	h->cmd_pool_bits = kcalloc(DIV_ROUND_UP(h->nr_cmds, BITS_PER_LONG),
+				   sizeof(unsigned long),
+				   GFP_KERNEL);
 	h->cmd_pool = dma_alloc_coherent(&h->pdev->dev,
 		    h->nr_cmds * sizeof(*h->cmd_pool),
 		    &h->cmd_pool_dhandle, GFP_KERNEL);
@@ -8647,7 +8636,7 @@ static struct ctlr_info *hpda_alloc_ctlr_info(void)
 
 static int hpsa_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	int rc;
+	int dac, rc;
 	struct ctlr_info *h;
 	int try_soft_reset = 0;
 	unsigned long flags;
@@ -8723,9 +8712,13 @@ reinit_after_soft_reset:
 
 	/* configure PCI DMA stuff */
 	rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
-	if (rc != 0) {
+	if (rc == 0) {
+		dac = 1;
+	} else {
 		rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
-		if (rc != 0) {
+		if (rc == 0) {
+			dac = 0;
+		} else {
 			dev_err(&pdev->dev, "no suitable DMA available\n");
 			goto clean3;	/* shost, pci, lu, aer/h */
 		}
@@ -9094,23 +9087,21 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 
 	free_percpu(h->lockup_detected);		/* init_one 2 */
 	h->lockup_detected = NULL;			/* init_one 2 */
+	/* (void) pci_disable_pcie_error_reporting(pdev); */	/* init_one 1 */
 
 	hpda_free_ctlr_info(h);				/* init_one 1 */
 }
 
-static int __maybe_unused hpsa_suspend(
-	__attribute__((unused)) struct device *dev)
+static int hpsa_suspend(__attribute__((unused)) struct pci_dev *pdev,
+	__attribute__((unused)) pm_message_t state)
 {
 	return -ENOSYS;
 }
 
-static int __maybe_unused hpsa_resume
-	(__attribute__((unused)) struct device *dev)
+static int hpsa_resume(__attribute__((unused)) struct pci_dev *pdev)
 {
 	return -ENOSYS;
 }
-
-static SIMPLE_DEV_PM_OPS(hpsa_pm_ops, hpsa_suspend, hpsa_resume);
 
 static struct pci_driver hpsa_pci_driver = {
 	.name = HPSA,
@@ -9118,7 +9109,8 @@ static struct pci_driver hpsa_pci_driver = {
 	.remove = hpsa_remove_one,
 	.id_table = hpsa_pci_device_id,	/* id_table */
 	.shutdown = hpsa_shutdown,
-	.driver.pm = &hpsa_pm_ops,
+	.suspend = hpsa_suspend,
+	.resume = hpsa_resume,
 };
 
 /* Fill in bucket_map[], given nsgs (the max number of
@@ -9307,9 +9299,10 @@ static int hpsa_enter_performant_mode(struct ctlr_info *h, u32 trans_support)
 	} else if (trans_support & CFGTBL_Trans_io_accel2) {
 		u64 cfg_offset, cfg_base_addr_index;
 		u32 bft2_offset, cfg_base_addr;
+		int rc;
 
-		hpsa_find_cfg_addrs(h->pdev, h->vaddr, &cfg_base_addr,
-				    &cfg_base_addr_index, &cfg_offset);
+		rc = hpsa_find_cfg_addrs(h->pdev, h->vaddr, &cfg_base_addr,
+			&cfg_base_addr_index, &cfg_offset);
 		BUILD_BUG_ON(offsetof(struct io_accel2_cmd, sg) != 64);
 		bft2[15] = h->ioaccel_maxsg + HPSA_IOACCEL2_HEADER_SZ;
 		calc_bucket_map(bft2, ARRAY_SIZE(bft2), h->ioaccel_maxsg,
@@ -9461,6 +9454,8 @@ static void hpsa_free_performant_mode(struct ctlr_info *h)
 static int hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
 {
 	u32 trans_support;
+	unsigned long transMethod = CFGTBL_Trans_Performant |
+					CFGTBL_Trans_use_short_tags;
 	int i, rc;
 
 	if (hpsa_simple_mode)
@@ -9472,10 +9467,14 @@ static int hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
 
 	/* Check for I/O accelerator mode support */
 	if (trans_support & CFGTBL_Trans_io_accel1) {
+		transMethod |= CFGTBL_Trans_io_accel1 |
+				CFGTBL_Trans_enable_directed_msix;
 		rc = hpsa_alloc_ioaccel1_cmd_and_bft(h);
 		if (rc)
 			return rc;
 	} else if (trans_support & CFGTBL_Trans_io_accel2) {
+		transMethod |= CFGTBL_Trans_io_accel2 |
+				CFGTBL_Trans_enable_directed_msix;
 		rc = hpsa_alloc_ioaccel2_cmd_and_bft(h);
 		if (rc)
 			return rc;

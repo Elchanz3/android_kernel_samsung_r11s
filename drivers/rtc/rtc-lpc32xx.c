@@ -239,7 +239,7 @@ static int lpc32xx_rtc_probe(struct platform_device *pdev)
 	rtc->rtc->ops = &lpc32xx_rtc_ops;
 	rtc->rtc->range_max = U32_MAX;
 
-	err = devm_rtc_register_device(rtc->rtc);
+	err = rtc_register_device(rtc->rtc);
 	if (err)
 		return err;
 
@@ -257,7 +257,7 @@ static int lpc32xx_rtc_probe(struct platform_device *pdev)
 			dev_warn(&pdev->dev, "Can't request interrupt.\n");
 			rtc->irq = -1;
 		} else {
-			device_init_wakeup(&pdev->dev, true);
+			device_init_wakeup(&pdev->dev, 1);
 		}
 	}
 

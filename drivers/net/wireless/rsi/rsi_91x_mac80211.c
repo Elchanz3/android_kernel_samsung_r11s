@@ -237,6 +237,7 @@ static int rsi_mac80211_hw_scan_start(struct ieee80211_hw *hw,
 	struct cfg80211_scan_request *scan_req = &hw_req->req;
 	struct rsi_hw *adapter = hw->priv;
 	struct rsi_common *common = adapter->priv;
+	struct ieee80211_bss_conf *bss = &vif->bss_conf;
 
 	rsi_dbg(INFO_ZONE, "***** Hardware scan start *****\n");
 	common->mac_ops_resumed = false;
@@ -255,7 +256,7 @@ static int rsi_mac80211_hw_scan_start(struct ieee80211_hw *hw,
 	/* If STA is not connected, return with special value 1, in order
 	 * to start sw_scan in mac80211
 	 */
-	if (!vif->cfg.assoc)
+	if (!bss->assoc)
 		return 1;
 
 	mutex_lock(&common->mutex);
@@ -410,11 +411,10 @@ static int rsi_mac80211_start(struct ieee80211_hw *hw)
 /**
  * rsi_mac80211_stop() - This is the last handler that 802.11 module calls.
  * @hw: Pointer to the ieee80211_hw structure.
- * @suspend: true if the this was called from suspend flow.
  *
  * Return: None.
  */
-static void rsi_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
+static void rsi_mac80211_stop(struct ieee80211_hw *hw)
 {
 	struct rsi_hw *adapter = hw->priv;
 	struct rsi_common *common = adapter->priv;
@@ -579,6 +579,7 @@ static int rsi_channel_change(struct ieee80211_hw *hw)
 	struct ieee80211_channel *curchan = hw->conf.chandef.chan;
 	u16 channel = curchan->hw_value;
 	struct ieee80211_vif *vif;
+	struct ieee80211_bss_conf *bss;
 	bool assoc = false;
 	int i;
 
@@ -592,7 +593,8 @@ static int rsi_channel_change(struct ieee80211_hw *hw)
 		if (!vif)
 			continue;
 		if (vif->type == NL80211_IFTYPE_STATION) {
-			if (vif->cfg.assoc) {
+			bss = &vif->bss_conf;
+			if (bss->assoc) {
 				assoc = true;
 				break;
 			}
@@ -656,13 +658,11 @@ static int rsi_config_power(struct ieee80211_hw *hw)
  *			   requests. The stack calls this function to
  *			   change hardware configuration, e.g., channel.
  * @hw: Pointer to the ieee80211_hw structure.
- * @radio_idx: Radio index.
  * @changed: Changed flags set.
  *
  * Return: 0 on success, negative error code on failure.
  */
 static int rsi_mac80211_config(struct ieee80211_hw *hw,
-			       int radio_idx,
 			       u32 changed)
 {
 	struct rsi_hw *adapter = hw->priv;
@@ -700,7 +700,7 @@ static int rsi_mac80211_config(struct ieee80211_hw *hw,
 			}
 			if ((vif->type == NL80211_IFTYPE_STATION ||
 			     vif->type == NL80211_IFTYPE_P2P_CLIENT) &&
-			    (!sta_vif || vif->cfg.assoc))
+			    (!sta_vif || vif->bss_conf.assoc))
 				sta_vif = vif;
 		}
 		if (set_ps && sta_vif) {
@@ -743,7 +743,7 @@ u16 rsi_get_connected_channel(struct ieee80211_vif *vif)
 		return 0;
 
 	bss = &vif->bss_conf;
-	channel = bss->chanreq.oper.chan;
+	channel = bss->chandef.chan;
 
 	if (!channel)
 		return 0;
@@ -762,7 +762,7 @@ static void rsi_switch_channel(struct rsi_hw *adapter,
 	if (!vif)
 		return;
 
-	channel = vif->bss_conf.chanreq.oper.chan;
+	channel = vif->bss_conf.chandef.chan;
 
 	if (!channel)
 		return;
@@ -786,7 +786,7 @@ static void rsi_switch_channel(struct rsi_hw *adapter,
 static void rsi_mac80211_bss_info_changed(struct ieee80211_hw *hw,
 					  struct ieee80211_vif *vif,
 					  struct ieee80211_bss_conf *bss_conf,
-					  u64 changed)
+					  u32 changed)
 {
 	struct rsi_hw *adapter = hw->priv;
 	struct rsi_common *common = adapter->priv;
@@ -797,8 +797,8 @@ static void rsi_mac80211_bss_info_changed(struct ieee80211_hw *hw,
 	mutex_lock(&common->mutex);
 	if (changed & BSS_CHANGED_ASSOC) {
 		rsi_dbg(INFO_ZONE, "%s: Changed Association status: %d\n",
-			__func__, vif->cfg.assoc);
-		if (vif->cfg.assoc) {
+			__func__, bss_conf->assoc);
+		if (bss_conf->assoc) {
 			/* Send the RX filter frame */
 			rx_filter_word = (ALLOW_DATA_ASSOC_PEER |
 					  ALLOW_CTRL_ASSOC_PEER |
@@ -807,17 +807,17 @@ static void rsi_mac80211_bss_info_changed(struct ieee80211_hw *hw,
 		}
 		rsi_inform_bss_status(common,
 				      RSI_OPMODE_STA,
-				      vif->cfg.assoc,
+				      bss_conf->assoc,
 				      bss_conf->bssid,
 				      bss_conf->qos,
-				      vif->cfg.aid,
+				      bss_conf->aid,
 				      NULL, 0,
 				      bss_conf->assoc_capability, vif);
 		adapter->ps_info.dtim_interval_duration = bss->dtim_period;
 		adapter->ps_info.listen_interval = conf->listen_interval;
 
 		/* If U-APSD is updated, send ps parameters to firmware */
-		if (vif->cfg.assoc) {
+		if (bss->assoc) {
 			if (common->uapsd_bitmap) {
 				rsi_dbg(INFO_ZONE, "Configuring UAPSD\n");
 				rsi_conf_uapsd(adapter, vif);
@@ -834,23 +834,6 @@ static void rsi_mac80211_bss_info_changed(struct ieee80211_hw *hw,
 		rsi_dbg(INFO_ZONE, "RSSI threshold & hysteresis are: %d %d\n",
 			common->cqm_info.rssi_thold,
 			common->cqm_info.rssi_hyst);
-	}
-
-	if (changed & BSS_CHANGED_BEACON_INT) {
-		rsi_dbg(INFO_ZONE, "%s: Changed Beacon interval: %d\n",
-			__func__, bss_conf->beacon_int);
-		if (common->beacon_interval != bss->beacon_int) {
-			common->beacon_interval = bss->beacon_int;
-			if (vif->type == NL80211_IFTYPE_AP) {
-				struct vif_priv *vif_info = (struct vif_priv *)vif->drv_priv;
-
-				rsi_set_vap_capabilities(common, RSI_OPMODE_AP,
-							 vif->addr, vif_info->vap_id,
-							 VAP_UPDATE);
-			}
-		}
-		adapter->ps_info.listen_interval =
-			bss->beacon_int * adapter->ps_info.num_bcns_per_lis_int;
 	}
 
 	if ((changed & BSS_CHANGED_BEACON_ENABLED) &&
@@ -892,15 +875,13 @@ static void rsi_mac80211_conf_filter(struct ieee80211_hw *hw,
  *			    for a hardware TX queue.
  * @hw: Pointer to the ieee80211_hw structure
  * @vif: Pointer to the ieee80211_vif structure.
- * @link_id: the link ID if MLO is used, otherwise 0
  * @queue: Queue number.
  * @params: Pointer to ieee80211_tx_queue_params structure.
  *
  * Return: 0 on success, negative error code on failure.
  */
 static int rsi_mac80211_conf_tx(struct ieee80211_hw *hw,
-				struct ieee80211_vif *vif,
-				unsigned int link_id, u16 queue,
+				struct ieee80211_vif *vif, u16 queue,
 				const struct ieee80211_tx_queue_params *params)
 {
 	struct rsi_hw *adapter = hw->priv;
@@ -1110,9 +1091,6 @@ static int rsi_mac80211_ampdu_action(struct ieee80211_hw *hw,
 			break;
 	}
 
-	if (ii >= RSI_MAX_VIFS)
-		return status;
-
 	mutex_lock(&common->mutex);
 
 	if (ssn != NULL)
@@ -1203,13 +1181,12 @@ unlock:
 /**
  * rsi_mac80211_set_rts_threshold() - This function sets rts threshold value.
  * @hw: Pointer to the ieee80211_hw structure.
- * @radio_idx: Radio index.
  * @value: Rts threshold value.
  *
  * Return: 0 on success.
  */
 static int rsi_mac80211_set_rts_threshold(struct ieee80211_hw *hw,
-					  int radio_idx, u32 value)
+					  u32 value)
 {
 	struct rsi_hw *adapter = hw->priv;
 	struct rsi_common *common = adapter->priv;
@@ -1362,7 +1339,7 @@ static void rsi_fill_rx_status(struct ieee80211_hw *hw,
 	if (!bss)
 		return;
 	/* CQM only for connected AP beacons, the RSSI is a weighted avg */
-	if (vif->cfg.assoc && !(memcmp(bss->bssid, hdr->addr2, ETH_ALEN))) {
+	if (bss->assoc && !(memcmp(bss->bssid, hdr->addr2, ETH_ALEN))) {
 		if (ieee80211_is_beacon(hdr->frame_control))
 			rsi_perform_cqm(common, hdr->addr2, rxs->signal, vif);
 	}
@@ -1493,13 +1470,13 @@ static int rsi_mac80211_sta_add(struct ieee80211_hw *hw,
 
 	if ((vif->type == NL80211_IFTYPE_STATION) ||
 	    (vif->type == NL80211_IFTYPE_P2P_CLIENT)) {
-		common->bitrate_mask[common->band] = sta->deflink.supp_rates[common->band];
-		common->vif_info[0].is_ht = sta->deflink.ht_cap.ht_supported;
-		if (sta->deflink.ht_cap.ht_supported) {
+		common->bitrate_mask[common->band] = sta->supp_rates[common->band];
+		common->vif_info[0].is_ht = sta->ht_cap.ht_supported;
+		if (sta->ht_cap.ht_supported) {
 			common->bitrate_mask[NL80211_BAND_2GHZ] =
-					sta->deflink.supp_rates[NL80211_BAND_2GHZ];
-			if ((sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_20) ||
-			    (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_SGI_40))
+					sta->supp_rates[NL80211_BAND_2GHZ];
+			if ((sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_20) ||
+			    (sta->ht_cap.cap & IEEE80211_HT_CAP_SGI_40))
 				common->vif_info[0].sgi = true;
 			ieee80211_start_tx_ba_session(sta, 0, 0);
 		}
@@ -1586,14 +1563,12 @@ static int rsi_mac80211_sta_remove(struct ieee80211_hw *hw,
  * rsi_mac80211_set_antenna() - This function is used to configure
  *				tx and rx antennas.
  * @hw: Pointer to the ieee80211_hw structure.
- * @radio_idx: Radio index
  * @tx_ant: Bitmap for tx antenna
  * @rx_ant: Bitmap for rx antenna
  *
  * Return: 0 on success, Negative error code on failure.
  */
 static int rsi_mac80211_set_antenna(struct ieee80211_hw *hw,
-				    int radio_idx,
 				    u32 tx_ant, u32 rx_ant)
 {
 	struct rsi_hw *adapter = hw->priv;
@@ -1639,14 +1614,12 @@ fail_set_antenna:
  * 				tx and rx antennas.
  *
  * @hw: Pointer to the ieee80211_hw structure.
- * @radio_idx: Radio index
  * @tx_ant: Bitmap for tx antenna
  * @rx_ant: Bitmap for rx antenna
  * 
  * Return: 0 on success, negative error codes on failure.
  */
 static int rsi_mac80211_get_antenna(struct ieee80211_hw *hw,
-				    int radio_idx,
 				    u32 *tx_ant, u32 *rx_ant)
 {
 	struct rsi_hw *adapter = hw->priv;
@@ -1744,7 +1717,7 @@ static void rsi_resume_conn_channel(struct rsi_common *common)
 		}
 		if (((vif->type == NL80211_IFTYPE_STATION) ||
 		     (vif->type == NL80211_IFTYPE_P2P_CLIENT)) &&
-		    vif->cfg.assoc) {
+		    vif->bss_conf.assoc) {
 			rsi_switch_channel(adapter, vif);
 			break;
 		}
@@ -1753,7 +1726,7 @@ static void rsi_resume_conn_channel(struct rsi_common *common)
 
 void rsi_roc_timeout(struct timer_list *t)
 {
-	struct rsi_common *common = timer_container_of(common, t, roc_timer);
+	struct rsi_common *common = from_timer(common, t, roc_timer);
 
 	rsi_dbg(INFO_ZONE, "Remain on channel expired\n");
 
@@ -1761,7 +1734,7 @@ void rsi_roc_timeout(struct timer_list *t)
 	ieee80211_remain_on_channel_expired(common->priv->hw);
 
 	if (timer_pending(&common->roc_timer))
-		timer_delete(&common->roc_timer);
+		del_timer(&common->roc_timer);
 
 	rsi_resume_conn_channel(common);
 	mutex_unlock(&common->mutex);
@@ -1771,8 +1744,8 @@ static int rsi_mac80211_roc(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			    struct ieee80211_channel *chan, int duration,
 			    enum ieee80211_roc_type type)
 {
-	struct rsi_hw *adapter = hw->priv;
-	struct rsi_common *common = adapter->priv;
+	struct rsi_hw *adapter = (struct rsi_hw *)hw->priv;
+	struct rsi_common *common = (struct rsi_common *)adapter->priv;
 	int status = 0;
 
 	rsi_dbg(INFO_ZONE, "***** Remain on channel *****\n");
@@ -1783,7 +1756,7 @@ static int rsi_mac80211_roc(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	if (timer_pending(&common->roc_timer)) {
 		rsi_dbg(INFO_ZONE, "Stop on-going ROC\n");
-		timer_delete(&common->roc_timer);
+		del_timer(&common->roc_timer);
 	}
 	common->roc_timer.expires = msecs_to_jiffies(duration) + jiffies;
 	add_timer(&common->roc_timer);
@@ -1827,7 +1800,7 @@ static int rsi_mac80211_cancel_roc(struct ieee80211_hw *hw,
 		return 0;
 	}
 
-	timer_delete(&common->roc_timer);
+	del_timer(&common->roc_timer);
 
 	rsi_resume_conn_channel(common);
 	mutex_unlock(&common->mutex);
@@ -1869,14 +1842,16 @@ static u16 rsi_wow_map_triggers(struct rsi_common *common,
 int rsi_config_wowlan(struct rsi_hw *adapter, struct cfg80211_wowlan *wowlan)
 {
 	struct rsi_common *common = adapter->priv;
-	struct ieee80211_vif *vif = adapter->vifs[0];
 	u16 triggers = 0;
 	u16 rx_filter_word = 0;
+	struct ieee80211_bss_conf *bss = NULL;
 
 	rsi_dbg(INFO_ZONE, "Config WoWLAN to device\n");
 
-	if (!vif)
+	if (!adapter->vifs[0])
 		return -EINVAL;
+
+	bss = &adapter->vifs[0]->bss_conf;
 
 	if (WARN_ON(!wowlan)) {
 		rsi_dbg(ERR_ZONE, "WoW triggers not enabled\n");
@@ -1889,7 +1864,7 @@ int rsi_config_wowlan(struct rsi_hw *adapter, struct cfg80211_wowlan *wowlan)
 		rsi_dbg(ERR_ZONE, "%s:No valid WoW triggers\n", __func__);
 		return -EINVAL;
 	}
-	if (!vif->cfg.assoc) {
+	if (!bss->assoc) {
 		rsi_dbg(ERR_ZONE,
 			"Cannot configure WoWLAN (Station not connected)\n");
 		common->wow_flags |= RSI_WOW_NO_CONNECTION;
@@ -1965,12 +1940,7 @@ static int rsi_mac80211_resume(struct ieee80211_hw *hw)
 #endif
 
 static const struct ieee80211_ops mac80211_ops = {
-	.add_chanctx = ieee80211_emulate_add_chanctx,
-	.remove_chanctx = ieee80211_emulate_remove_chanctx,
-	.change_chanctx = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = rsi_mac80211_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = rsi_mac80211_start,
 	.stop = rsi_mac80211_stop,
 	.add_interface = rsi_mac80211_add_interface,

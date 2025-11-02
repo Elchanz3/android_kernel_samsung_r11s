@@ -44,8 +44,7 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 	if (snd_BUG_ON((subdevice_id & 0xfff0) != MONA))
 		return -ENODEV;
 
-	err = init_dsp_comm_page(chip);
-	if (err) {
+	if ((err = init_dsp_comm_page(chip))) {
 		dev_err(chip->card->dev,
 			"init_hw - could not initialize DSP comm page\n");
 		return err;
@@ -68,8 +67,7 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 	else
 		chip->dsp_code_to_load = FW_MONA_301_DSP;
 
-	err = load_firmware(chip);
-	if (err < 0)
+	if ((err = load_firmware(chip)) < 0)
 		return err;
 	chip->bad_board = false;
 
@@ -381,7 +379,7 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 		return -EINVAL;
 	}
 
-	guard(spinlock_irq)(&chip->lock);
+	spin_lock_irq(&chip->lock);
 
 	if (incompatible_clock) {	/* Switch to 48KHz, internal */
 		chip->sample_rate = 48000;
@@ -413,6 +411,7 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 	}
 
 	err = write_control_reg(chip, control_reg, false);
+	spin_unlock_irq(&chip->lock);
 	if (err < 0)
 		return err;
 	chip->digital_mode = mode;

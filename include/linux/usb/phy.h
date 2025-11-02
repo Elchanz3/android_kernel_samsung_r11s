@@ -13,6 +13,7 @@
 #include <linux/extcon.h>
 #include <linux/notifier.h>
 #include <linux/usb.h>
+#include <linux/android_kabi.h>
 #include <uapi/linux/usb/charger.h>
 
 enum usb_phy_interface {
@@ -155,6 +156,8 @@ struct usb_phy {
 	 * manually detect the charger type.
 	 */
 	enum usb_charger_type (*charger_detect)(struct usb_phy *x);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /* for board-specific init logic */
@@ -223,6 +226,7 @@ extern struct usb_phy *devm_usb_get_phy_by_phandle(struct device *dev,
 extern struct usb_phy *devm_usb_get_phy_by_node(struct device *dev,
 	struct device_node *node, struct notifier_block *nb);
 extern void usb_put_phy(struct usb_phy *);
+extern void devm_usb_put_phy(struct device *dev, struct usb_phy *x);
 extern void usb_phy_set_event(struct usb_phy *x, unsigned long event);
 extern void usb_phy_set_charger_current(struct usb_phy *usb_phy,
 					unsigned int mA);
@@ -255,6 +259,10 @@ static inline struct usb_phy *devm_usb_get_phy_by_node(struct device *dev,
 }
 
 static inline void usb_put_phy(struct usb_phy *x)
+{
+}
+
+static inline void devm_usb_put_phy(struct device *dev, struct usb_phy *x)
 {
 }
 

@@ -183,7 +183,7 @@ ecn_decap_test()
 
 	log_test "$desc: Inner ECN is not ECT and outer is $ecn_desc"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	tc filter del dev $swp1 egress protocol ip pref 1 handle 101 flower
 }
 
@@ -217,11 +217,9 @@ short_payload_get()
         dest_mac=$(mac_get $h1)
         p=$(:
 		)"08:"$(                      : VXLAN flags
-		)"00:00:00:"$(                : VXLAN reserved
+		)"01:00:00:"$(                : VXLAN reserved
 		)"00:03:e8:"$(                : VXLAN VNI : 1000
 		)"00:"$(                      : VXLAN reserved
-		)"$dest_mac:"$(               : ETH daddr
-		)"00:00:00:00:00:00:"$(       : ETH saddr
 		)
         echo $p
 }
@@ -253,7 +251,7 @@ corrupted_packet_test()
 
 	log_test "$desc"
 
-	kill_process $mz_pid
+	kill $mz_pid && wait $mz_pid &> /dev/null
 	tc filter del dev $swp1 egress protocol ip pref 1 handle 101 flower
 }
 
@@ -265,8 +263,7 @@ decap_error_test()
 
 	corrupted_packet_test "Decap error: Reserved bits in use" \
 		"reserved_bits_payload_get"
-	corrupted_packet_test "Decap error: Too short inner packet" \
-		"short_payload_get"
+	corrupted_packet_test "Decap error: No L2 header" "short_payload_get"
 }
 
 mc_smac_payload_get()

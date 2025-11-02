@@ -42,16 +42,17 @@
 #include <net/ipv6.h>
 #include <net/inet_frag.h>
 
+extern unsigned int nf_conntrack_net_id;
+
 static DEFINE_MUTEX(nf_ct_proto_mutex);
 
 #ifdef CONFIG_SYSCTL
-__printf(4, 5)
+__printf(5, 6)
 void nf_l4proto_log_invalid(const struct sk_buff *skb,
-			    const struct nf_hook_state *state,
-			    u8 protonum,
+			    struct net *net,
+			    u16 pf, u8 protonum,
 			    const char *fmt, ...)
 {
-	struct net *net = state->net;
 	struct va_format vaf;
 	va_list args;
 
@@ -63,16 +64,15 @@ void nf_l4proto_log_invalid(const struct sk_buff *skb,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
-	nf_log_packet(net, state->pf, 0, skb, state->in, state->out,
-		      NULL, "nf_ct_proto_%d: %pV ", protonum, &vaf);
+	nf_log_packet(net, pf, 0, skb, NULL, NULL, NULL,
+		      "nf_ct_proto_%d: %pV ", protonum, &vaf);
 	va_end(args);
 }
 EXPORT_SYMBOL_GPL(nf_l4proto_log_invalid);
 
-__printf(4, 5)
+__printf(3, 4)
 void nf_ct_l4proto_log_invalid(const struct sk_buff *skb,
 			       const struct nf_conn *ct,
-			       const struct nf_hook_state *state,
 			       const char *fmt, ...)
 {
 	struct va_format vaf;
@@ -87,7 +87,7 @@ void nf_ct_l4proto_log_invalid(const struct sk_buff *skb,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
-	nf_l4proto_log_invalid(skb, state,
+	nf_l4proto_log_invalid(skb, net, nf_ct_l3num(ct),
 			       nf_ct_protonum(ct), "%pV", &vaf);
 	va_end(args);
 }
@@ -100,6 +100,9 @@ const struct nf_conntrack_l4proto *nf_ct_l4proto_find(u8 l4proto)
 	case IPPROTO_UDP: return &nf_conntrack_l4proto_udp;
 	case IPPROTO_TCP: return &nf_conntrack_l4proto_tcp;
 	case IPPROTO_ICMP: return &nf_conntrack_l4proto_icmp;
+#ifdef CONFIG_NF_CT_PROTO_DCCP
+	case IPPROTO_DCCP: return &nf_conntrack_l4proto_dccp;
+#endif
 #ifdef CONFIG_NF_CT_PROTO_SCTP
 	case IPPROTO_SCTP: return &nf_conntrack_l4proto_sctp;
 #endif
@@ -118,64 +121,17 @@ const struct nf_conntrack_l4proto *nf_ct_l4proto_find(u8 l4proto)
 };
 EXPORT_SYMBOL_GPL(nf_ct_l4proto_find);
 
-static bool in_vrf_postrouting(const struct nf_hook_state *state)
-{
-#if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
-	if (state->hook == NF_INET_POST_ROUTING &&
-	    netif_is_l3_master(state->out))
-		return true;
-#endif
-	return false;
-}
-
-unsigned int nf_confirm(void *priv,
-			struct sk_buff *skb,
-			const struct nf_hook_state *state)
+unsigned int nf_confirm(struct sk_buff *skb, unsigned int protoff,
+			struct nf_conn *ct, enum ip_conntrack_info ctinfo)
 {
 	const struct nf_conn_help *help;
-	enum ip_conntrack_info ctinfo;
-	unsigned int protoff;
-	struct nf_conn *ct;
-	bool seqadj_needed;
-	__be16 frag_off;
-	int start;
-	u8 pnum;
-
-	ct = nf_ct_get(skb, &ctinfo);
-	if (!ct || in_vrf_postrouting(state))
-		return NF_ACCEPT;
 
 	help = nfct_help(ct);
-
-	seqadj_needed = test_bit(IPS_SEQ_ADJUST_BIT, &ct->status) && !nf_is_loopback_packet(skb);
-	if (!help && !seqadj_needed)
-		return nf_conntrack_confirm(skb);
-
-	/* helper->help() do not expect ICMP packets */
-	if (ctinfo == IP_CT_RELATED_REPLY)
-		return nf_conntrack_confirm(skb);
-
-	switch (nf_ct_l3num(ct)) {
-	case NFPROTO_IPV4:
-		protoff = skb_network_offset(skb) + ip_hdrlen(skb);
-		break;
-	case NFPROTO_IPV6:
-		pnum = ipv6_hdr(skb)->nexthdr;
-		start = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr), &pnum, &frag_off);
-		if (start < 0 || (frag_off & htons(~0x7)) != 0)
-			return nf_conntrack_confirm(skb);
-
-		protoff = start;
-		break;
-	default:
-		return nf_conntrack_confirm(skb);
-	}
-
 	if (help) {
 		const struct nf_conntrack_helper *helper;
 		int ret;
 
-		/* rcu_read_lock()ed by nf_hook */
+		/* rcu_read_lock()ed by nf_hook_thresh */
 		helper = rcu_dereference(help->helper);
 		if (helper) {
 			ret = helper->help(skb,
@@ -186,16 +142,34 @@ unsigned int nf_confirm(void *priv,
 		}
 	}
 
-	if (seqadj_needed &&
-	    !nf_ct_seq_adjust(skb, ct, ctinfo, protoff)) {
-		NF_CT_STAT_INC_ATOMIC(nf_ct_net(ct), drop);
-		return NF_DROP;
+	if (test_bit(IPS_SEQ_ADJUST_BIT, &ct->status) &&
+	    !nf_is_loopback_packet(skb)) {
+		if (!nf_ct_seq_adjust(skb, ct, ctinfo, protoff)) {
+			NF_CT_STAT_INC_ATOMIC(nf_ct_net(ct), drop);
+			return NF_DROP;
+		}
 	}
 
 	/* We've seen it coming out the other side: confirm it */
 	return nf_conntrack_confirm(skb);
 }
 EXPORT_SYMBOL_GPL(nf_confirm);
+
+static unsigned int ipv4_confirm(void *priv,
+				 struct sk_buff *skb,
+				 const struct nf_hook_state *state)
+{
+	enum ip_conntrack_info ctinfo;
+	struct nf_conn *ct;
+
+	ct = nf_ct_get(skb, &ctinfo);
+	if (!ct || ctinfo == IP_CT_RELATED_REPLY)
+		return nf_conntrack_confirm(skb);
+
+	return nf_confirm(skb,
+			  skb_network_offset(skb) + ip_hdrlen(skb),
+			  ct, ctinfo);
+}
 
 static unsigned int ipv4_conntrack_in(void *priv,
 				      struct sk_buff *skb,
@@ -243,13 +217,13 @@ static const struct nf_hook_ops ipv4_conntrack_ops[] = {
 		.priority	= NF_IP_PRI_CONNTRACK,
 	},
 	{
-		.hook		= nf_confirm,
+		.hook		= ipv4_confirm,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,
 	},
 	{
-		.hook		= nf_confirm,
+		.hook		= ipv4_confirm,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,
@@ -281,11 +255,16 @@ getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 
 	/* We only do TCP and SCTP at the moment: is there a better way? */
 	if (tuple.dst.protonum != IPPROTO_TCP &&
-	    tuple.dst.protonum != IPPROTO_SCTP)
+	    tuple.dst.protonum != IPPROTO_SCTP) {
+		pr_debug("SO_ORIGINAL_DST: Not a TCP/SCTP socket\n");
 		return -ENOPROTOOPT;
+	}
 
-	if ((unsigned int)*len < sizeof(struct sockaddr_in))
+	if ((unsigned int)*len < sizeof(struct sockaddr_in)) {
+		pr_debug("SO_ORIGINAL_DST: len %d not %zu\n",
+			 *len, sizeof(struct sockaddr_in));
 		return -EINVAL;
+	}
 
 	h = nf_conntrack_find_get(sock_net(sk), &nf_ct_zone_dflt, &tuple);
 	if (h) {
@@ -299,12 +278,17 @@ getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 			.tuple.dst.u3.ip;
 		memset(sin.sin_zero, 0, sizeof(sin.sin_zero));
 
+		pr_debug("SO_ORIGINAL_DST: %pI4 %u\n",
+			 &sin.sin_addr.s_addr, ntohs(sin.sin_port));
 		nf_ct_put(ct);
 		if (copy_to_user(user, &sin, sizeof(sin)) != 0)
 			return -EFAULT;
 		else
 			return 0;
 	}
+	pr_debug("SO_ORIGINAL_DST: Can't find %pI4/%u-%pI4/%u.\n",
+		 &tuple.src.u3.ip, ntohs(tuple.src.u.tcp.port),
+		 &tuple.dst.u3.ip, ntohs(tuple.dst.u.tcp.port));
 	return -ENOENT;
 }
 
@@ -347,8 +331,12 @@ ipv6_getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 		return -EINVAL;
 
 	h = nf_conntrack_find_get(sock_net(sk), &nf_ct_zone_dflt, &tuple);
-	if (!h)
+	if (!h) {
+		pr_debug("IP6T_SO_ORIGINAL_DST: Can't find %pI6c/%u-%pI6c/%u.\n",
+			 &tuple.src.u3.ip6, ntohs(tuple.src.u.tcp.port),
+			 &tuple.dst.u3.ip6, ntohs(tuple.dst.u.tcp.port));
 		return -ENOENT;
+	}
 
 	ct = nf_ct_tuplehash_to_ctrack(h);
 
@@ -371,6 +359,30 @@ static struct nf_sockopt_ops so_getorigdst6 = {
 	.get		= ipv6_getorigdst,
 	.owner		= THIS_MODULE,
 };
+
+static unsigned int ipv6_confirm(void *priv,
+				 struct sk_buff *skb,
+				 const struct nf_hook_state *state)
+{
+	struct nf_conn *ct;
+	enum ip_conntrack_info ctinfo;
+	unsigned char pnum = ipv6_hdr(skb)->nexthdr;
+	__be16 frag_off;
+	int protoff;
+
+	ct = nf_ct_get(skb, &ctinfo);
+	if (!ct || ctinfo == IP_CT_RELATED_REPLY)
+		return nf_conntrack_confirm(skb);
+
+	protoff = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr), &pnum,
+				   &frag_off);
+	if (protoff < 0 || (frag_off & htons(~0x7)) != 0) {
+		pr_debug("proto header not found\n");
+		return nf_conntrack_confirm(skb);
+	}
+
+	return nf_confirm(skb, protoff, ct, ctinfo);
+}
 
 static unsigned int ipv6_conntrack_in(void *priv,
 				      struct sk_buff *skb,
@@ -400,13 +412,13 @@ static const struct nf_hook_ops ipv6_conntrack_ops[] = {
 		.priority	= NF_IP6_PRI_CONNTRACK,
 	},
 	{
-		.hook		= nf_confirm,
+		.hook		= ipv6_confirm,
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP6_PRI_LAST,
 	},
 	{
-		.hook		= nf_confirm,
+		.hook		= ipv6_confirm,
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP6_PRI_LAST - 1,
@@ -434,7 +446,7 @@ static struct nf_ct_bridge_info *nf_ct_bridge_info;
 
 static int nf_ct_netns_do_get(struct net *net, u8 nfproto)
 {
-	struct nf_conntrack_net *cnet = nf_ct_pernet(net);
+	struct nf_conntrack_net *cnet = net_generic(net, nf_conntrack_net_id);
 	bool fixup_needed = false, retry = true;
 	int err = 0;
 retry:
@@ -510,37 +522,29 @@ retry:
  out_unlock:
 	mutex_unlock(&nf_ct_proto_mutex);
 
-	if (fixup_needed) {
-		struct nf_ct_iter_data iter_data = {
-			.net	= net,
-			.data	= (void *)(unsigned long)nfproto,
-		};
-		nf_ct_iterate_cleanup_net(nf_ct_tcp_fixup, &iter_data);
-	}
+	if (fixup_needed)
+		nf_ct_iterate_cleanup_net(net, nf_ct_tcp_fixup,
+					  (void *)(unsigned long)nfproto, 0, 0);
 
 	return err;
 }
 
 static void nf_ct_netns_do_put(struct net *net, u8 nfproto)
 {
-	struct nf_conntrack_net *cnet = nf_ct_pernet(net);
+	struct nf_conntrack_net *cnet = net_generic(net, nf_conntrack_net_id);
 
 	mutex_lock(&nf_ct_proto_mutex);
 	switch (nfproto) {
 	case NFPROTO_IPV4:
-		if (cnet->users4 && (--cnet->users4 == 0)) {
+		if (cnet->users4 && (--cnet->users4 == 0))
 			nf_unregister_net_hooks(net, ipv4_conntrack_ops,
 						ARRAY_SIZE(ipv4_conntrack_ops));
-			nf_defrag_ipv4_disable(net);
-		}
 		break;
 #if IS_ENABLED(CONFIG_IPV6)
 	case NFPROTO_IPV6:
-		if (cnet->users6 && (--cnet->users6 == 0)) {
+		if (cnet->users6 && (--cnet->users6 == 0))
 			nf_unregister_net_hooks(net, ipv6_conntrack_ops,
 						ARRAY_SIZE(ipv6_conntrack_ops));
-			nf_defrag_ipv6_disable(net);
-		}
 		break;
 #endif
 	case NFPROTO_BRIDGE:
@@ -678,11 +682,21 @@ void nf_conntrack_proto_pernet_init(struct net *net)
 #if IS_ENABLED(CONFIG_IPV6)
 	nf_conntrack_icmpv6_init_net(net);
 #endif
+#ifdef CONFIG_NF_CT_PROTO_DCCP
+	nf_conntrack_dccp_init_net(net);
+#endif
 #ifdef CONFIG_NF_CT_PROTO_SCTP
 	nf_conntrack_sctp_init_net(net);
 #endif
 #ifdef CONFIG_NF_CT_PROTO_GRE
 	nf_conntrack_gre_init_net(net);
+#endif
+}
+
+void nf_conntrack_proto_pernet_fini(struct net *net)
+{
+#ifdef CONFIG_NF_CT_PROTO_GRE
+	nf_ct_gre_keymap_flush(net);
 #endif
 }
 
@@ -693,4 +707,3 @@ MODULE_ALIAS("ip_conntrack");
 MODULE_ALIAS("nf_conntrack-" __stringify(AF_INET));
 MODULE_ALIAS("nf_conntrack-" __stringify(AF_INET6));
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("IPv4 and IPv6 connection tracking");

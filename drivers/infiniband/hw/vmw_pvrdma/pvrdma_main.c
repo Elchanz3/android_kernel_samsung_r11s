@@ -68,21 +68,21 @@ static int pvrdma_del_gid(const struct ib_gid_attr *attr, void **context);
 static ssize_t hca_type_show(struct device *device,
 			     struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "VMW_PVRDMA-%s\n", DRV_VERSION);
+	return sprintf(buf, "VMW_PVRDMA-%s\n", DRV_VERSION);
 }
 static DEVICE_ATTR_RO(hca_type);
 
 static ssize_t hw_rev_show(struct device *device,
 			   struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%d\n", PVRDMA_REV_ID);
+	return sprintf(buf, "%d\n", PVRDMA_REV_ID);
 }
 static DEVICE_ATTR_RO(hw_rev);
 
 static ssize_t board_id_show(struct device *device,
 			     struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%d\n", PVRDMA_BOARD_ID);
+	return sprintf(buf, "%d\n", PVRDMA_BOARD_ID);
 }
 static DEVICE_ATTR_RO(board_id);
 
@@ -121,7 +121,7 @@ static int pvrdma_init_device(struct pvrdma_dev *dev)
 	return 0;
 }
 
-static int pvrdma_port_immutable(struct ib_device *ibdev, u32 port_num,
+static int pvrdma_port_immutable(struct ib_device *ibdev, u8 port_num,
 				 struct ib_port_immutable *immutable)
 {
 	struct pvrdma_dev *dev = to_vdev(ibdev);
@@ -143,46 +143,6 @@ static int pvrdma_port_immutable(struct ib_device *ibdev, u32 port_num,
 	return 0;
 }
 
-static void pvrdma_dispatch_event(struct pvrdma_dev *dev, int port,
-				  enum ib_event_type event)
-{
-	struct ib_event ib_event;
-
-	memset(&ib_event, 0, sizeof(ib_event));
-	ib_event.device = &dev->ib_dev;
-	ib_event.element.port_num = port;
-	ib_event.event = event;
-	ib_dispatch_event(&ib_event);
-}
-
-static void pvrdma_report_event_handle(struct ib_device *ibdev,
-				       struct net_device *ndev,
-				       unsigned long event)
-{
-	struct pvrdma_dev *dev = container_of(ibdev, struct pvrdma_dev, ib_dev);
-
-	switch (event) {
-	case NETDEV_DOWN:
-		pvrdma_dispatch_event(dev, 1, IB_EVENT_PORT_ERR);
-		break;
-	case NETDEV_UP:
-		pvrdma_write_reg(dev, PVRDMA_REG_CTL,
-				 PVRDMA_DEVICE_CTL_UNQUIESCE);
-
-		mb();
-
-		if (pvrdma_read_reg(dev, PVRDMA_REG_ERR))
-			dev_err(&dev->pdev->dev,
-				"failed to activate device during link up\n");
-		else
-			pvrdma_dispatch_event(dev, 1, IB_EVENT_PORT_ACTIVE);
-		break;
-
-	default:
-		break;
-	}
-}
-
 static const struct ib_device_ops pvrdma_dev_ops = {
 	.owner = THIS_MODULE,
 	.driver_id = RDMA_DRIVER_VMW_PVRDMA,
@@ -202,7 +162,6 @@ static const struct ib_device_ops pvrdma_dev_ops = {
 	.destroy_ah = pvrdma_destroy_ah,
 	.destroy_cq = pvrdma_destroy_cq,
 	.destroy_qp = pvrdma_destroy_qp,
-	.device_group = &pvrdma_attr_group,
 	.get_dev_fw_str = pvrdma_get_fw_ver_str,
 	.get_dma_mr = pvrdma_get_dma_mr,
 	.get_link_layer = pvrdma_port_link_layer,
@@ -221,12 +180,10 @@ static const struct ib_device_ops pvrdma_dev_ops = {
 	.query_qp = pvrdma_query_qp,
 	.reg_user_mr = pvrdma_reg_user_mr,
 	.req_notify_cq = pvrdma_req_notify_cq,
-	.report_port_event = pvrdma_report_event_handle,
 
 	INIT_RDMA_OBJ_SIZE(ib_ah, pvrdma_ah, ibah),
 	INIT_RDMA_OBJ_SIZE(ib_cq, pvrdma_cq, ibcq),
 	INIT_RDMA_OBJ_SIZE(ib_pd, pvrdma_pd, ibpd),
-	INIT_RDMA_OBJ_SIZE(ib_qp, pvrdma_qp, ibqp),
 	INIT_RDMA_OBJ_SIZE(ib_ucontext, pvrdma_ucontext, ibucontext),
 };
 
@@ -248,6 +205,27 @@ static int pvrdma_register_device(struct pvrdma_dev *dev)
 	dev->flags = 0;
 	dev->ib_dev.num_comp_vectors = 1;
 	dev->ib_dev.dev.parent = &dev->pdev->dev;
+	dev->ib_dev.uverbs_cmd_mask =
+		(1ull << IB_USER_VERBS_CMD_GET_CONTEXT)		|
+		(1ull << IB_USER_VERBS_CMD_QUERY_DEVICE)	|
+		(1ull << IB_USER_VERBS_CMD_QUERY_PORT)		|
+		(1ull << IB_USER_VERBS_CMD_ALLOC_PD)		|
+		(1ull << IB_USER_VERBS_CMD_DEALLOC_PD)		|
+		(1ull << IB_USER_VERBS_CMD_REG_MR)		|
+		(1ull << IB_USER_VERBS_CMD_DEREG_MR)		|
+		(1ull << IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL)	|
+		(1ull << IB_USER_VERBS_CMD_CREATE_CQ)		|
+		(1ull << IB_USER_VERBS_CMD_POLL_CQ)		|
+		(1ull << IB_USER_VERBS_CMD_REQ_NOTIFY_CQ)	|
+		(1ull << IB_USER_VERBS_CMD_DESTROY_CQ)		|
+		(1ull << IB_USER_VERBS_CMD_CREATE_QP)		|
+		(1ull << IB_USER_VERBS_CMD_MODIFY_QP)		|
+		(1ull << IB_USER_VERBS_CMD_QUERY_QP)		|
+		(1ull << IB_USER_VERBS_CMD_DESTROY_QP)		|
+		(1ull << IB_USER_VERBS_CMD_POST_SEND)		|
+		(1ull << IB_USER_VERBS_CMD_POST_RECV)		|
+		(1ull << IB_USER_VERBS_CMD_CREATE_AH)		|
+		(1ull << IB_USER_VERBS_CMD_DESTROY_AH);
 
 	dev->ib_dev.node_type = RDMA_NODE_IB_CA;
 	dev->ib_dev.phys_port_cnt = dev->dsr->caps.phys_port_cnt;
@@ -271,6 +249,13 @@ static int pvrdma_register_device(struct pvrdma_dev *dev)
 
 	/* Check if SRQ is supported by backend */
 	if (dev->dsr->caps.max_srq) {
+		dev->ib_dev.uverbs_cmd_mask |=
+			(1ull << IB_USER_VERBS_CMD_CREATE_SRQ)	|
+			(1ull << IB_USER_VERBS_CMD_MODIFY_SRQ)	|
+			(1ull << IB_USER_VERBS_CMD_QUERY_SRQ)	|
+			(1ull << IB_USER_VERBS_CMD_DESTROY_SRQ)	|
+			(1ull << IB_USER_VERBS_CMD_POST_SRQ_RECV);
+
 		ib_set_device_ops(&dev->ib_dev, &pvrdma_dev_srq_ops);
 
 		dev->srq_tbl = kcalloc(dev->dsr->caps.max_srq,
@@ -283,6 +268,7 @@ static int pvrdma_register_device(struct pvrdma_dev *dev)
 	if (ret)
 		goto err_srq_free;
 	spin_lock_init(&dev->srq_tbl_lock);
+	rdma_set_device_sysfs_group(&dev->ib_dev, &pvrdma_attr_group);
 
 	ret = ib_register_device(&dev->ib_dev, "vmw_pvrdma%d", &dev->pdev->dev);
 	if (ret)
@@ -403,6 +389,18 @@ static void pvrdma_srq_event(struct pvrdma_dev *dev, u32 srqn, int type)
 	}
 }
 
+static void pvrdma_dispatch_event(struct pvrdma_dev *dev, int port,
+				  enum ib_event_type event)
+{
+	struct ib_event ib_event;
+
+	memset(&ib_event, 0, sizeof(ib_event));
+	ib_event.device = &dev->ib_dev;
+	ib_event.element.port_num = port;
+	ib_event.event = event;
+	ib_dispatch_event(&ib_event);
+}
+
 static void pvrdma_dev_event(struct pvrdma_dev *dev, u8 port, int type)
 {
 	if (port < 1 || port > dev->dsr->caps.phys_port_cnt) {
@@ -504,6 +502,7 @@ static irqreturn_t pvrdma_intrx_handler(int irq, void *dev_id)
 	int ring_slots = (dev->dsr->cq_ring_pages.num_pages - 1) * PAGE_SIZE /
 			 sizeof(struct pvrdma_cqne);
 	unsigned int head;
+	unsigned long flags;
 
 	dev_dbg(&dev->pdev->dev, "interrupt x (completion) handler\n");
 
@@ -512,11 +511,11 @@ static irqreturn_t pvrdma_intrx_handler(int irq, void *dev_id)
 		struct pvrdma_cq *cq;
 
 		cqne = get_cqne(dev, head);
-		spin_lock(&dev->cq_tbl_lock);
+		spin_lock_irqsave(&dev->cq_tbl_lock, flags);
 		cq = dev->cq_tbl[cqne->info % dev->dsr->caps.max_cq];
 		if (cq)
 			refcount_inc(&cq->refcnt);
-		spin_unlock(&dev->cq_tbl_lock);
+		spin_unlock_irqrestore(&dev->cq_tbl_lock, flags);
 
 		if (cq && cq->ibcq.comp_handler)
 			cq->ibcq.comp_handler(&cq->ibcq, cq->ibcq.cq_context);
@@ -560,7 +559,7 @@ static int pvrdma_alloc_intrs(struct pvrdma_dev *dev)
 			PCI_IRQ_MSIX);
 	if (ret < 0) {
 		ret = pci_alloc_irq_vectors(pdev, 1, 1,
-				PCI_IRQ_MSI | PCI_IRQ_INTX);
+				PCI_IRQ_MSI | PCI_IRQ_LEGACY);
 		if (ret < 0)
 			return ret;
 	}
@@ -695,7 +694,20 @@ static void pvrdma_netdevice_event_handle(struct pvrdma_dev *dev,
 
 	switch (event) {
 	case NETDEV_REBOOT:
+	case NETDEV_DOWN:
 		pvrdma_dispatch_event(dev, 1, IB_EVENT_PORT_ERR);
+		break;
+	case NETDEV_UP:
+		pvrdma_write_reg(dev, PVRDMA_REG_CTL,
+				 PVRDMA_DEVICE_CTL_UNQUIESCE);
+
+		mb();
+
+		if (pvrdma_read_reg(dev, PVRDMA_REG_ERR))
+			dev_err(&dev->pdev->dev,
+				"failed to activate device during link up\n");
+		else
+			pvrdma_dispatch_event(dev, 1, IB_EVENT_PORT_ACTIVE);
 		break;
 	case NETDEV_UNREGISTER:
 		ib_device_set_netdev(&dev->ib_dev, NULL, 1);
@@ -827,10 +839,20 @@ static int pvrdma_pci_probe(struct pci_dev *pdev,
 	}
 
 	/* Enable 64-Bit DMA */
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
-	if (ret) {
-		dev_err(&pdev->dev, "dma_set_mask failed\n");
-		goto err_free_resource;
+	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(64)) == 0) {
+		ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
+		if (ret != 0) {
+			dev_err(&pdev->dev,
+				"pci_set_consistent_dma_mask failed\n");
+			goto err_free_resource;
+		}
+	} else {
+		ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+		if (ret != 0) {
+			dev_err(&pdev->dev,
+				"pci_set_dma_mask failed\n");
+			goto err_free_resource;
+		}
 	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 	pci_set_master(pdev);
@@ -1037,8 +1059,10 @@ err_free_intrs:
 	pvrdma_free_irq(dev);
 	pci_free_irq_vectors(pdev);
 err_free_cq_ring:
-	dev_put(dev->netdev);
-	dev->netdev = NULL;
+	if (dev->netdev) {
+		dev_put(dev->netdev);
+		dev->netdev = NULL;
+	}
 	pvrdma_page_dir_cleanup(dev, &dev->cq_pdir);
 err_free_async_ring:
 	pvrdma_page_dir_cleanup(dev, &dev->async_pdir);
@@ -1078,8 +1102,10 @@ static void pvrdma_pci_remove(struct pci_dev *pdev)
 
 	flush_workqueue(event_wq);
 
-	dev_put(dev->netdev);
-	dev->netdev = NULL;
+	if (dev->netdev) {
+		dev_put(dev->netdev);
+		dev->netdev = NULL;
+	}
 
 	/* Unregister ib device */
 	ib_unregister_device(&dev->ib_dev);

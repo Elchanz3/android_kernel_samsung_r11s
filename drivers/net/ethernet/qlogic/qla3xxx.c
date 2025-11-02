@@ -508,12 +508,10 @@ static void eeprom_readword(struct ql3_adapter *qdev,
 
 static void ql_set_mac_addr(struct net_device *ndev, u16 *addr)
 {
-	__le16 buf[ETH_ALEN / 2];
-
-	buf[0] = cpu_to_le16(addr[0]);
-	buf[1] = cpu_to_le16(addr[1]);
-	buf[2] = cpu_to_le16(addr[2]);
-	eth_hw_addr_set(ndev, (u8 *)buf);
+	__le16 *p = (__le16 *)ndev->dev_addr;
+	p[0] = cpu_to_le16(addr[0]);
+	p[1] = cpu_to_le16(addr[1]);
+	p[2] = cpu_to_le16(addr[2]);
 }
 
 static int ql_get_nvram_params(struct ql3_adapter *qdev)
@@ -1501,7 +1499,7 @@ static int ql_finish_auto_neg(struct ql3_adapter *qdev)
 				     "Remote error detected. Calling ql_port_start()\n");
 			/*
 			 * ql_port_start() is shared code and needs
-			 * to lock the PHY on its own.
+			 * to lock the PHY on it's own.
 			 */
 			ql_sem_unlock(qdev, QL_PHY_GIO_SEM_MASK);
 			if (ql_port_start(qdev))	/* Restart port */
@@ -1736,10 +1734,10 @@ static void ql_get_drvinfo(struct net_device *ndev,
 			   struct ethtool_drvinfo *drvinfo)
 {
 	struct ql3_adapter *qdev = netdev_priv(ndev);
-	strscpy(drvinfo->driver, ql3xxx_driver_name, sizeof(drvinfo->driver));
-	strscpy(drvinfo->version, ql3xxx_driver_version,
+	strlcpy(drvinfo->driver, ql3xxx_driver_name, sizeof(drvinfo->driver));
+	strlcpy(drvinfo->version, ql3xxx_driver_version,
 		sizeof(drvinfo->version));
-	strscpy(drvinfo->bus_info, pci_name(qdev->pdev),
+	strlcpy(drvinfo->bus_info, pci_name(qdev->pdev),
 		sizeof(drvinfo->bus_info));
 }
 
@@ -3420,7 +3418,7 @@ static int ql_adapter_down(struct ql3_adapter *qdev, int do_reset)
 		pci_disable_msi(qdev->pdev);
 	}
 
-	timer_delete_sync(&qdev->adapter_timer);
+	del_timer_sync(&qdev->adapter_timer);
 
 	napi_disable(&qdev->napi);
 
@@ -3568,7 +3566,7 @@ static int ql3xxx_set_mac_address(struct net_device *ndev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	eth_hw_addr_set(ndev, addr->sa_data);
+	memcpy(ndev->dev_addr, addr->sa_data, ndev->addr_len);
 
 	spin_lock_irqsave(&qdev->hw_lock, hw_flags);
 	/* Program lower 32 bits of the MAC address */
@@ -3735,7 +3733,7 @@ static void ql_get_board_info(struct ql3_adapter *qdev)
 
 static void ql3xxx_timer(struct timer_list *t)
 {
-	struct ql3_adapter *qdev = timer_container_of(qdev, t, adapter_timer);
+	struct ql3_adapter *qdev = from_timer(qdev, t, adapter_timer);
 	queue_delayed_work(qdev->workqueue, &qdev->link_state_work, 0);
 }
 
@@ -3754,7 +3752,7 @@ static int ql3xxx_probe(struct pci_dev *pdev,
 	struct net_device *ndev = NULL;
 	struct ql3_adapter *qdev = NULL;
 	static int cards_found;
-	int err;
+	int pci_using_dac, err;
 
 	err = pci_enable_device(pdev);
 	if (err) {
@@ -3770,7 +3768,11 @@ static int ql3xxx_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (!dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64)))
+		pci_using_dac = 1;
+	else if (!(err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))))
+		pci_using_dac = 0;
+
 	if (err) {
 		pr_err("%s no usable DMA configuration\n", pci_name(pdev));
 		goto err_out_free_regions;
@@ -3797,7 +3799,8 @@ static int ql3xxx_probe(struct pci_dev *pdev,
 
 	qdev->msg_enable = netif_msg_init(debug, default_msg);
 
-	ndev->features |= NETIF_F_HIGHDMA;
+	if (pci_using_dac)
+		ndev->features |= NETIF_F_HIGHDMA;
 	if (qdev->device_id == QL3032_DEVICE_ID)
 		ndev->features |= NETIF_F_IP_CSUM | NETIF_F_SG;
 
@@ -3816,7 +3819,7 @@ static int ql3xxx_probe(struct pci_dev *pdev,
 	ndev->ethtool_ops = &ql3xxx_ethtool_ops;
 	ndev->watchdog_timeo = 5 * HZ;
 
-	netif_napi_add(ndev, &qdev->napi, ql_poll);
+	netif_napi_add(ndev, &qdev->napi, ql_poll, 64);
 
 	ndev->irq = pdev->irq;
 

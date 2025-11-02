@@ -8,6 +8,7 @@
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
+#include <asm/extable_64.h>
 #include <asm/spitfire.h>
 #include <asm/adi.h>
 
@@ -58,7 +59,6 @@
 #define R_SPARC_7		43
 #define R_SPARC_5		44
 #define R_SPARC_6		45
-#define R_SPARC_UA64		54
 
 /* Bits present in AT_HWCAP, primarily for Sparc32.  */
 #define HWCAP_SPARC_FLUSH       0x00000001

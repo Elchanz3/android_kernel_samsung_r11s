@@ -243,11 +243,9 @@ static int lg4573_probe(struct spi_device *spi)
 	struct lg4573 *ctx;
 	int ret;
 
-	ctx = devm_drm_panel_alloc(&spi->dev, struct lg4573, panel,
-				   &lg4573_drm_funcs,
-				   DRM_MODE_CONNECTOR_DPI);
-	if (IS_ERR(ctx))
-		return PTR_ERR(ctx);
+	ctx = devm_kzalloc(&spi->dev, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
 
 	ctx->spi = spi;
 
@@ -260,17 +258,22 @@ static int lg4573_probe(struct spi_device *spi)
 		return ret;
 	}
 
+	drm_panel_init(&ctx->panel, &spi->dev, &lg4573_drm_funcs,
+		       DRM_MODE_CONNECTOR_DPI);
+
 	drm_panel_add(&ctx->panel);
 
 	return 0;
 }
 
-static void lg4573_remove(struct spi_device *spi)
+static int lg4573_remove(struct spi_device *spi)
 {
 	struct lg4573 *ctx = spi_get_drvdata(spi);
 
 	lg4573_display_off(ctx);
 	drm_panel_remove(&ctx->panel);
+
+	return 0;
 }
 
 static const struct of_device_id lg4573_of_match[] = {

@@ -48,7 +48,7 @@ static int if_usb_submit_rx_urb(struct if_usb_card *cardp);
 static int if_usb_reset_device(struct lbtf_private *priv);
 
 /**
- *  if_usb_write_bulk_callback -  call back to handle URB status
+ *  if_usb_wrike_bulk_callback -  call back to handle URB status
  *
  *  @urb:		pointer to urb structure
  */
@@ -113,7 +113,7 @@ static void if_usb_setup_firmware(struct lbtf_private *priv)
 
 static void if_usb_fw_timeo(struct timer_list *t)
 {
-	struct if_usb_card *cardp = timer_container_of(cardp, t, fw_timeout);
+	struct if_usb_card *cardp = from_timer(cardp, t, fw_timeout);
 
 	lbtf_deb_enter(LBTF_DEB_USB);
 	if (!cardp->fwdnldover) {
@@ -875,7 +875,7 @@ restart:
 	wait_event_interruptible(cardp->fw_wq, cardp->priv->surpriseremoved ||
 					       cardp->fwdnldover);
 
-	timer_delete_sync(&cardp->fw_timeout);
+	del_timer_sync(&cardp->fw_timeout);
 	usb_kill_urb(cardp->rx_urb);
 
 	if (!cardp->fwdnldover) {

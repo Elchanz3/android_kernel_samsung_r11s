@@ -62,7 +62,7 @@ static void __xgene_gpio_set(struct gpio_chip *gc, unsigned int offset, int val)
 	iowrite32(setval, chip->base + bank_offset);
 }
 
-static int xgene_gpio_set(struct gpio_chip *gc, unsigned int offset, int val)
+static void xgene_gpio_set(struct gpio_chip *gc, unsigned int offset, int val)
 {
 	struct xgene_gpio *chip = gpiochip_get_data(gc);
 	unsigned long flags;
@@ -70,8 +70,6 @@ static int xgene_gpio_set(struct gpio_chip *gc, unsigned int offset, int val)
 	spin_lock_irqsave(&chip->lock, flags);
 	__xgene_gpio_set(gc, offset, val);
 	spin_unlock_irqrestore(&chip->lock, flags);
-
-	return 0;
 }
 
 static int xgene_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
@@ -161,6 +159,7 @@ static SIMPLE_DEV_PM_OPS(xgene_gpio_pm, xgene_gpio_suspend, xgene_gpio_resume);
 static int xgene_gpio_probe(struct platform_device *pdev)
 {
 	struct xgene_gpio *gpio;
+	int err = 0;
 
 	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
 	if (!gpio)
@@ -184,7 +183,15 @@ static int xgene_gpio_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, gpio);
 
-	return devm_gpiochip_add_data(&pdev->dev, &gpio->chip, gpio);
+	err = devm_gpiochip_add_data(&pdev->dev, &gpio->chip, gpio);
+	if (err) {
+		dev_err(&pdev->dev,
+			"failed to register gpiochip.\n");
+		return err;
+	}
+
+	dev_info(&pdev->dev, "X-Gene GPIO driver registered.\n");
+	return 0;
 }
 
 static const struct of_device_id xgene_gpio_of_match[] = {

@@ -21,19 +21,18 @@
  *          Alex Deucher <alexdeucher@gmail.com>
  */
 
-#include <linux/debugfs.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/hwmon.h>
 #include <linux/pci.h>
 #include <linux/power_supply.h>
 
+#include <drm/drm_debugfs.h>
 #include <drm/drm_vblank.h>
 
 #include "atom.h"
 #include "avivod.h"
 #include "r600_dpm.h"
 #include "radeon.h"
-#include "radeon_pm.h"
 
 #define RADEON_IDLE_LOOP_MS 100
 #define RADEON_RECLOCK_DELAY_MS 200
@@ -48,7 +47,7 @@ static const char *radeon_pm_state_type_name[5] = {
 };
 
 static void radeon_dynpm_idle_work_handler(struct work_struct *work);
-static void radeon_debugfs_pm_init(struct radeon_device *rdev);
+static int radeon_debugfs_pm_init(struct radeon_device *rdev);
 static bool radeon_pm_in_vbl(struct radeon_device *rdev);
 static bool radeon_pm_debug_check_in_vbl(struct radeon_device *rdev, bool finish);
 static void radeon_pm_update_profile(struct radeon_device *rdev);
@@ -155,7 +154,7 @@ static void radeon_unmap_vram_bos(struct radeon_device *rdev)
 		return;
 
 	list_for_each_entry_safe(bo, n, &rdev->gem.objects, list) {
-		if (bo->tbo.resource->mem_type == TTM_PL_VRAM)
+		if (bo->tbo.mem.mem_type == TTM_PL_VRAM)
 			ttm_bo_unmap_virtual(&bo->tbo);
 	}
 }
@@ -282,7 +281,7 @@ static void radeon_pm_set_clocks(struct radeon_device *rdev)
 
 	if (rdev->irq.installed) {
 		i = 0;
-		drm_for_each_crtc(crtc, rdev_to_drm(rdev)) {
+		drm_for_each_crtc(crtc, rdev->ddev) {
 			if (rdev->pm.active_crtcs & (1 << i)) {
 				/* This can fail if a modeset is in progress */
 				if (drm_crtc_vblank_get(crtc) == 0)
@@ -299,7 +298,7 @@ static void radeon_pm_set_clocks(struct radeon_device *rdev)
 
 	if (rdev->irq.installed) {
 		i = 0;
-		drm_for_each_crtc(crtc, rdev_to_drm(rdev)) {
+		drm_for_each_crtc(crtc, rdev->ddev) {
 			if (rdev->pm.req_vblank & (1 << i)) {
 				rdev->pm.req_vblank &= ~(1 << i);
 				drm_crtc_vblank_put(crtc);
@@ -361,10 +360,11 @@ static ssize_t radeon_get_pm_profile(struct device *dev,
 	struct radeon_device *rdev = ddev->dev_private;
 	int cp = rdev->pm.profile;
 
-	return sysfs_emit(buf, "%s\n", (cp == PM_PROFILE_AUTO) ? "auto" :
-			  (cp == PM_PROFILE_LOW) ? "low" :
-			  (cp == PM_PROFILE_MID) ? "mid" :
-			  (cp == PM_PROFILE_HIGH) ? "high" : "default");
+	return snprintf(buf, PAGE_SIZE, "%s\n",
+			(cp == PM_PROFILE_AUTO) ? "auto" :
+			(cp == PM_PROFILE_LOW) ? "low" :
+			(cp == PM_PROFILE_MID) ? "mid" :
+			(cp == PM_PROFILE_HIGH) ? "high" : "default");
 }
 
 static ssize_t radeon_set_pm_profile(struct device *dev,
@@ -415,8 +415,9 @@ static ssize_t radeon_get_pm_method(struct device *dev,
 	struct radeon_device *rdev = ddev->dev_private;
 	int pm = rdev->pm.pm_method;
 
-	return sysfs_emit(buf, "%s\n", (pm == PM_METHOD_DYNPM) ? "dynpm" :
-			  (pm == PM_METHOD_PROFILE) ? "profile" : "dpm");
+	return snprintf(buf, PAGE_SIZE, "%s\n",
+			(pm == PM_METHOD_DYNPM) ? "dynpm" :
+			(pm == PM_METHOD_PROFILE) ? "profile" : "dpm");
 }
 
 static ssize_t radeon_set_pm_method(struct device *dev,
@@ -471,9 +472,9 @@ static ssize_t radeon_get_dpm_state(struct device *dev,
 	struct radeon_device *rdev = ddev->dev_private;
 	enum radeon_pm_state_type pm = rdev->pm.dpm.user_state;
 
-	return sysfs_emit(buf, "%s\n",
-			  (pm == POWER_STATE_TYPE_BATTERY) ? "battery" :
-			  (pm == POWER_STATE_TYPE_BALANCED) ? "balanced" : "performance");
+	return snprintf(buf, PAGE_SIZE, "%s\n",
+			(pm == POWER_STATE_TYPE_BATTERY) ? "battery" :
+			(pm == POWER_STATE_TYPE_BALANCED) ? "balanced" : "performance");
 }
 
 static ssize_t radeon_set_dpm_state(struct device *dev,
@@ -517,11 +518,11 @@ static ssize_t radeon_get_dpm_forced_performance_level(struct device *dev,
 
 	if  ((rdev->flags & RADEON_IS_PX) &&
 	     (ddev->switch_power_state != DRM_SWITCH_POWER_ON))
-		return sysfs_emit(buf, "off\n");
+		return snprintf(buf, PAGE_SIZE, "off\n");
 
-	return sysfs_emit(buf, "%s\n",
-			  (level == RADEON_DPM_FORCED_LEVEL_AUTO) ? "auto" :
-			  (level == RADEON_DPM_FORCED_LEVEL_LOW) ? "low" : "high");
+	return snprintf(buf, PAGE_SIZE, "%s\n",
+			(level == RADEON_DPM_FORCED_LEVEL_AUTO) ? "auto" :
+			(level == RADEON_DPM_FORCED_LEVEL_LOW) ? "low" : "high");
 }
 
 static ssize_t radeon_set_dpm_forced_performance_level(struct device *dev,
@@ -588,7 +589,7 @@ static ssize_t radeon_hwmon_set_pwm1_enable(struct device *dev,
 	int err;
 	int value;
 
-	if (!rdev->asic->dpm.fan_ctrl_set_mode)
+	if(!rdev->asic->dpm.fan_ctrl_set_mode)
 		return -EINVAL;
 
 	err = kstrtoint(buf, 10, &value);
@@ -671,7 +672,7 @@ static ssize_t radeon_hwmon_show_temp(struct device *dev,
 				      char *buf)
 {
 	struct radeon_device *rdev = dev_get_drvdata(dev);
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_device *ddev = rdev->ddev;
 	int temp;
 
 	/* Can't get temperature when the card is off */
@@ -684,7 +685,7 @@ static ssize_t radeon_hwmon_show_temp(struct device *dev,
 	else
 		temp = 0;
 
-	return sysfs_emit(buf, "%d\n", temp);
+	return snprintf(buf, PAGE_SIZE, "%d\n", temp);
 }
 
 static ssize_t radeon_hwmon_show_temp_thresh(struct device *dev,
@@ -700,7 +701,7 @@ static ssize_t radeon_hwmon_show_temp_thresh(struct device *dev,
 	else
 		temp = rdev->pm.dpm.thermal.max_temp;
 
-	return sysfs_emit(buf, "%d\n", temp);
+	return snprintf(buf, PAGE_SIZE, "%d\n", temp);
 }
 
 static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO, radeon_hwmon_show_temp, NULL, 0);
@@ -715,7 +716,7 @@ static ssize_t radeon_hwmon_show_sclk(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
 	struct radeon_device *rdev = dev_get_drvdata(dev);
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_device *ddev = rdev->ddev;
 	u32 sclk = 0;
 
 	/* Can't get clock frequency when the card is off */
@@ -730,32 +731,12 @@ static ssize_t radeon_hwmon_show_sclk(struct device *dev,
 	   for hwmon */
 	sclk *= 10000;
 
-	return sysfs_emit(buf, "%u\n", sclk);
+	return snprintf(buf, PAGE_SIZE, "%u\n", sclk);
 }
 
 static SENSOR_DEVICE_ATTR(freq1_input, S_IRUGO, radeon_hwmon_show_sclk, NULL,
 			  0);
 
-static ssize_t radeon_hwmon_show_vddc(struct device *dev,
-				      struct device_attribute *attr, char *buf)
-{
-	struct radeon_device *rdev = dev_get_drvdata(dev);
-	struct drm_device *ddev = rdev_to_drm(rdev);
-	u16 vddc = 0;
-
-	/* Can't get vddc when the card is off */
-	if ((rdev->flags & RADEON_IS_PX) &&
-		(ddev->switch_power_state != DRM_SWITCH_POWER_ON))
-		return -EINVAL;
-
-	if (rdev->asic->dpm.get_current_vddc)
-		vddc = rdev->asic->dpm.get_current_vddc(rdev);
-
-	return sysfs_emit(buf, "%u\n", vddc);
-}
-
-static SENSOR_DEVICE_ATTR(in0_input, S_IRUGO, radeon_hwmon_show_vddc, NULL,
-			  0);
 
 static struct attribute *hwmon_attributes[] = {
 	&sensor_dev_attr_temp1_input.dev_attr.attr,
@@ -766,7 +747,6 @@ static struct attribute *hwmon_attributes[] = {
 	&sensor_dev_attr_pwm1_min.dev_attr.attr,
 	&sensor_dev_attr_pwm1_max.dev_attr.attr,
 	&sensor_dev_attr_freq1_input.dev_attr.attr,
-	&sensor_dev_attr_in0_input.dev_attr.attr,
 	NULL
 };
 
@@ -785,13 +765,7 @@ static umode_t hwmon_attributes_visible(struct kobject *kobj,
 	     attr == &sensor_dev_attr_pwm1_enable.dev_attr.attr ||
 	     attr == &sensor_dev_attr_pwm1_max.dev_attr.attr ||
 	     attr == &sensor_dev_attr_pwm1_min.dev_attr.attr ||
-	     attr == &sensor_dev_attr_freq1_input.dev_attr.attr ||
-	     attr == &sensor_dev_attr_in0_input.dev_attr.attr))
-		return 0;
-
-	/* Skip vddc attribute if get_current_vddc is not implemented */
-	if (attr == &sensor_dev_attr_in0_input.dev_attr.attr &&
-		!rdev->asic->dpm.get_current_vddc)
+	     attr == &sensor_dev_attr_freq1_input.dev_attr.attr))
 		return 0;
 
 	/* Skip fan attributes if fan is not present */
@@ -907,7 +881,8 @@ static void radeon_dpm_thermal_work_handler(struct work_struct *work)
 
 static bool radeon_dpm_single_display(struct radeon_device *rdev)
 {
-	bool single_display = rdev->pm.dpm.new_active_crtc_count < 2;
+	bool single_display = (rdev->pm.dpm.new_active_crtc_count < 2) ?
+		true : false;
 
 	/* check if the vblank period is too short to adjust the mclk */
 	if (single_display && rdev->asic->dpm.vblank_too_short) {
@@ -1396,7 +1371,10 @@ static int radeon_pm_init_old(struct radeon_device *rdev)
 	INIT_DELAYED_WORK(&rdev->pm.dynpm_idle_work, radeon_dynpm_idle_work_handler);
 
 	if (rdev->pm.num_power_states > 1) {
-		radeon_debugfs_pm_init(rdev);
+		if (radeon_debugfs_pm_init(rdev)) {
+			DRM_ERROR("Failed to register debugfs file for PM!\n");
+		}
+
 		DRM_INFO("radeon: power management initialized\n");
 	}
 
@@ -1450,7 +1428,9 @@ static int radeon_pm_init_dpm(struct radeon_device *rdev)
 		goto dpm_failed;
 	rdev->pm.dpm_enabled = true;
 
-	radeon_debugfs_pm_init(rdev);
+	if (radeon_debugfs_pm_init(rdev)) {
+		DRM_ERROR("Failed to register debugfs file for dpm!\n");
+	}
 
 	DRM_INFO("radeon: dpm initialized\n");
 
@@ -1629,7 +1609,7 @@ int radeon_pm_late_init(struct radeon_device *rdev)
 			ret = device_create_file(rdev->dev, &dev_attr_power_method);
 			if (ret)
 				DRM_ERROR("failed to create device file for power method\n");
-			else
+			if (!ret)
 				rdev->pm.sysfs_initialized = true;
 		}
 	}
@@ -1691,7 +1671,7 @@ void radeon_pm_fini(struct radeon_device *rdev)
 
 static void radeon_pm_compute_clocks_old(struct radeon_device *rdev)
 {
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_device *ddev = rdev->ddev;
 	struct drm_crtc *crtc;
 	struct radeon_crtc *radeon_crtc;
 
@@ -1764,7 +1744,7 @@ static void radeon_pm_compute_clocks_old(struct radeon_device *rdev)
 
 static void radeon_pm_compute_clocks_dpm(struct radeon_device *rdev)
 {
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_device *ddev = rdev->ddev;
 	struct drm_crtc *crtc;
 	struct radeon_crtc *radeon_crtc;
 	struct radeon_connector *radeon_connector;
@@ -1825,7 +1805,7 @@ static bool radeon_pm_in_vbl(struct radeon_device *rdev)
 	 */
 	for (crtc = 0; (crtc < rdev->num_crtc) && in_vbl; crtc++) {
 		if (rdev->pm.active_crtcs & (1 << crtc)) {
-			vbl_status = radeon_get_crtc_scanoutpos(rdev_to_drm(rdev),
+			vbl_status = radeon_get_crtc_scanoutpos(rdev->ddev,
 								crtc,
 								USE_REAL_VBLANKSTART,
 								&vpos, &hpos, NULL, NULL,
@@ -1853,10 +1833,11 @@ static bool radeon_pm_debug_check_in_vbl(struct radeon_device *rdev, bool finish
 static void radeon_dynpm_idle_work_handler(struct work_struct *work)
 {
 	struct radeon_device *rdev;
-
+	int resched;
 	rdev = container_of(work, struct radeon_device,
 				pm.dynpm_idle_work.work);
 
+	resched = ttm_bo_lock_delayed_workqueue(&rdev->mman.bdev);
 	mutex_lock(&rdev->pm.mutex);
 	if (rdev->pm.dynpm_state == DYNPM_STATE_ACTIVE) {
 		int not_processed = 0;
@@ -1898,7 +1879,7 @@ static void radeon_dynpm_idle_work_handler(struct work_struct *work)
 		 * to false since we want to wait for vbl to avoid flicker.
 		 */
 		if (rdev->pm.dynpm_planned_action != DYNPM_ACTION_NONE &&
-		    time_after(jiffies, rdev->pm.dynpm_action_timeout)) {
+		    jiffies > rdev->pm.dynpm_action_timeout) {
 			radeon_pm_get_dynpm_state(rdev);
 			radeon_pm_set_clocks(rdev);
 		}
@@ -1907,6 +1888,7 @@ static void radeon_dynpm_idle_work_handler(struct work_struct *work)
 				      msecs_to_jiffies(RADEON_IDLE_LOOP_MS));
 	}
 	mutex_unlock(&rdev->pm.mutex);
+	ttm_bo_unlock_delayed_workqueue(&rdev->mman.bdev, resched);
 }
 
 /*
@@ -1914,10 +1896,12 @@ static void radeon_dynpm_idle_work_handler(struct work_struct *work)
  */
 #if defined(CONFIG_DEBUG_FS)
 
-static int radeon_debugfs_pm_info_show(struct seq_file *m, void *unused)
+static int radeon_debugfs_pm_info(struct seq_file *m, void *data)
 {
-	struct radeon_device *rdev = m->private;
-	struct drm_device *ddev = rdev_to_drm(rdev);
+	struct drm_info_node *node = (struct drm_info_node *) m->private;
+	struct drm_device *dev = node->minor->dev;
+	struct radeon_device *rdev = dev->dev_private;
+	struct drm_device *ddev = rdev->ddev;
 
 	if  ((rdev->flags & RADEON_IS_PX) &&
 	     (ddev->switch_power_state != DRM_SWITCH_POWER_ON)) {
@@ -1948,16 +1932,16 @@ static int radeon_debugfs_pm_info_show(struct seq_file *m, void *unused)
 	return 0;
 }
 
-DEFINE_SHOW_ATTRIBUTE(radeon_debugfs_pm_info);
+static struct drm_info_list radeon_pm_info_list[] = {
+	{"radeon_pm_info", radeon_debugfs_pm_info, 0, NULL},
+};
 #endif
 
-static void radeon_debugfs_pm_init(struct radeon_device *rdev)
+static int radeon_debugfs_pm_init(struct radeon_device *rdev)
 {
 #if defined(CONFIG_DEBUG_FS)
-	struct dentry *root = rdev_to_drm(rdev)->primary->debugfs_root;
-
-	debugfs_create_file("radeon_pm_info", 0444, root, rdev,
-			    &radeon_debugfs_pm_info_fops);
-
+	return radeon_debugfs_add_files(rdev, radeon_pm_info_list, ARRAY_SIZE(radeon_pm_info_list));
+#else
+	return 0;
 #endif
 }

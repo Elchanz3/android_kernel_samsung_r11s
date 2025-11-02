@@ -47,6 +47,8 @@ static void nfc_llcp_socket_purge(struct nfc_llcp_sock *sock)
 	struct nfc_llcp_local *local = sock->local;
 	struct sk_buff *s, *tmp;
 
+	pr_debug("%p\n", &sock->sk);
+
 	skb_queue_purge(&sock->tx_queue);
 	skb_queue_purge(&sock->tx_pending_queue);
 
@@ -160,14 +162,14 @@ static struct nfc_llcp_local *nfc_llcp_local_get(struct nfc_llcp_local *local)
 static void local_cleanup(struct nfc_llcp_local *local)
 {
 	nfc_llcp_socket_release(local, false, ENXIO);
-	timer_delete_sync(&local->link_timer);
+	del_timer_sync(&local->link_timer);
 	skb_queue_purge(&local->tx_queue);
 	cancel_work_sync(&local->tx_work);
 	cancel_work_sync(&local->rx_work);
 	cancel_work_sync(&local->timeout_work);
 	kfree_skb(local->rx_pending);
 	local->rx_pending = NULL;
-	timer_delete_sync(&local->sdreq_timer);
+	del_timer_sync(&local->sdreq_timer);
 	cancel_work_sync(&local->sdreq_timeout_work);
 	nfc_llcp_free_sdp_tlv_list(&local->pending_sdreqs);
 }
@@ -243,8 +245,7 @@ static void nfc_llcp_timeout_work(struct work_struct *work)
 
 static void nfc_llcp_symm_timer(struct timer_list *t)
 {
-	struct nfc_llcp_local *local = timer_container_of(local, t,
-							  link_timer);
+	struct nfc_llcp_local *local = from_timer(local, t, link_timer);
 
 	pr_err("SYMM timeout\n");
 
@@ -287,8 +288,7 @@ static void nfc_llcp_sdreq_timeout_work(struct work_struct *work)
 
 static void nfc_llcp_sdreq_timer(struct timer_list *t)
 {
-	struct nfc_llcp_local *local = timer_container_of(local, t,
-							  sdreq_timer);
+	struct nfc_llcp_local *local = from_timer(local, t, sdreq_timer);
 
 	schedule_work(&local->sdreq_timeout_work);
 }
@@ -422,7 +422,7 @@ u8 nfc_llcp_get_sdp_ssap(struct nfc_llcp_local *local,
 			pr_debug("WKS %d\n", ssap);
 
 			/* This is a WKS, let's check if it's free */
-			if (test_bit(ssap, &local->local_wks)) {
+			if (local->local_wks & BIT(ssap)) {
 				mutex_unlock(&local->sdp_lock);
 
 				return LLCP_SAP_MAX;
@@ -783,6 +783,13 @@ static void nfc_llcp_tx_work(struct work_struct *work)
 			pr_debug("Sending pending skb\n");
 			print_hex_dump_debug("LLCP Tx: ", DUMP_PREFIX_OFFSET,
 					     16, 1, skb->data, skb->len, true);
+
+			if (ptype == LLCP_PDU_DISC && sk != NULL &&
+			    sk->sk_state == LLCP_DISCONNECTING) {
+				nfc_llcp_sock_unlink(&local->sockets, sk);
+				sock_orphan(sk);
+				sock_put(sk);
+			}
 
 			if (ptype == LLCP_PDU_I)
 				copy_skb = skb_copy(skb, GFP_ATOMIC);
@@ -1538,7 +1545,7 @@ static void nfc_llcp_rx_work(struct work_struct *work)
 static void __nfc_llcp_recv(struct nfc_llcp_local *local, struct sk_buff *skb)
 {
 	local->rx_pending = skb;
-	timer_delete(&local->link_timer);
+	del_timer(&local->link_timer);
 	schedule_work(&local->rx_work);
 }
 
@@ -1546,8 +1553,9 @@ void nfc_llcp_recv(void *data, struct sk_buff *skb, int err)
 {
 	struct nfc_llcp_local *local = (struct nfc_llcp_local *) data;
 
+	pr_debug("Received an LLCP PDU\n");
 	if (err < 0) {
-		pr_err("LLCP PDU receive err %d\n", err);
+		pr_err("err %d\n", err);
 		return;
 	}
 

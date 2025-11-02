@@ -204,7 +204,6 @@ module_param(numWriteBufs, int, 0);
 static unsigned int writeBufSize = DEFAULT_BUFF_SIZE ;	/* in bytes */
 module_param(writeBufSize, int, 0);
 
-MODULE_DESCRIPTION("Atari/Amiga/Q40 core DMA sound driver");
 MODULE_LICENSE("GPL");
 
 static int sq_unit = -1;
@@ -354,8 +353,8 @@ static int mixer_ioctl(struct file *file, u_int cmd, u_long arg)
 		{
 		    mixer_info info;
 		    memset(&info, 0, sizeof(info));
-		    strscpy(info.id, dmasound.mach.name2, sizeof(info.id));
-		    strscpy(info.name, dmasound.mach.name2, sizeof(info.name));
+		    strlcpy(info.id, dmasound.mach.name2, sizeof(info.id));
+		    strlcpy(info.name, dmasound.mach.name2, sizeof(info.name));
 		    info.modify_counter = mixer.modify_counter;
 		    if (copy_to_user((void __user *)arg, &info, sizeof(info)))
 			    return -EFAULT;
@@ -381,6 +380,7 @@ static long mixer_unlocked_ioctl(struct file *file, u_int cmd, u_long arg)
 static const struct file_operations mixer_fops =
 {
 	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
 	.unlocked_ioctl	= mixer_unlocked_ioctl,
 	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= mixer_open,
@@ -994,9 +994,11 @@ static int sq_ioctl(struct file *file, u_int cmd, u_long arg)
 	case SNDCTL_DSP_RESET:
 		sq_reset();
 		return 0;
+		break ;
 	case SNDCTL_DSP_GETFMTS:
 		fmt = dmasound.mach.hardware_afmts ; /* this is what OSS says.. */
 		return IOCTL_OUT(arg, fmt);
+		break ;
 	case SNDCTL_DSP_GETBLKSIZE:
 		/* this should tell the caller about bytes that the app can
 		   read/write - the app doesn't care about our internal buffers.
@@ -1013,6 +1015,7 @@ static int sq_ioctl(struct file *file, u_int cmd, u_long arg)
 			size = write_sq.user_frag_size ;
 		}
 		return IOCTL_OUT(arg, size);
+		break ;
 	case SNDCTL_DSP_POST:
 		/* all we are going to do is to tell the LL that any
 		   partial frags can be queued for output.
@@ -1036,6 +1039,7 @@ static int sq_ioctl(struct file *file, u_int cmd, u_long arg)
 		if (file->f_mode & shared_resource_owner)
 			shared_resources_initialised = 0 ;
 		return result ;
+		break ;
 	case SOUND_PCM_READ_RATE:
 		return IOCTL_OUT(arg, dmasound.soft.speed);
 	case SNDCTL_DSP_SPEED:
@@ -1114,6 +1118,7 @@ static int sq_ioctl(struct file *file, u_int cmd, u_long arg)
 		   the value is 'random' and that the user _must_ check the actual
 		   frags values using SNDCTL_DSP_GETBLKSIZE or similar */
 		return IOCTL_OUT(arg, data);
+		break ;
 	case SNDCTL_DSP_GETOSPACE:
 		/*
 		*/
@@ -1154,6 +1159,7 @@ static long sq_unlocked_ioctl(struct file *file, u_int cmd, u_long arg)
 static const struct file_operations sq_fops =
 {
 	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
 	.write		= sq_write,
 	.poll		= sq_poll,
 	.unlocked_ioctl	= sq_unlocked_ioctl,
@@ -1220,22 +1226,31 @@ static char *get_afmt_string(int afmt)
         switch(afmt) {
             case AFMT_MU_LAW:
                 return "mu-law";
+                break;
             case AFMT_A_LAW:
                 return "A-law";
+                break;
             case AFMT_U8:
                 return "unsigned 8 bit";
+                break;
             case AFMT_S8:
                 return "signed 8 bit";
+                break;
             case AFMT_S16_BE:
                 return "signed 16 bit BE";
+                break;
             case AFMT_U16_BE:
                 return "unsigned 16 bit BE";
+                break;
             case AFMT_S16_LE:
                 return "signed 16 bit LE";
+                break;
             case AFMT_U16_LE:
                 return "unsigned 16 bit LE";
+                break;
 	    case 0:
 		return "format not set" ;
+		break ;
             default:
                 break ;
         }
@@ -1349,6 +1364,7 @@ static ssize_t state_read(struct file *file, char __user *buf, size_t count,
 
 static const struct file_operations state_fops = {
 	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
 	.read		= state_read,
 	.open		= state_open,
 	.release	= state_release,

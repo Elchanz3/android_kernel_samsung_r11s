@@ -3,40 +3,37 @@
  * Archs are free to supply their own linker scripts.  ld will
  * combine them automatically.
  */
-#ifdef CONFIG_UNWIND_TABLES
-#define DISCARD_EH_FRAME
-#else
-#define DISCARD_EH_FRAME	*(.eh_frame)
-#endif
-
-#include <asm-generic/codetag.lds.h>
+#include <asm/page.h>
 
 SECTIONS {
 	/DISCARD/ : {
 		*(.discard)
 		*(.discard.*)
-		*(.export_symbol)
-		*(.no_trim_symbol)
+		/*
+		 * LLD may emit .eh_frame with CONFIG_CFI_CLANG despite
+		 * -fno-asynchronous-unwind-tables. Discard the section.
+		 */
+		*(.eh_frame)
 	}
 
-	__ksymtab		0 : ALIGN(8) { *(SORT(___ksymtab+*)) }
-	__ksymtab_gpl		0 : ALIGN(8) { *(SORT(___ksymtab_gpl+*)) }
-	__kcrctab		0 : ALIGN(4) { *(SORT(___kcrctab+*)) }
-	__kcrctab_gpl		0 : ALIGN(4) { *(SORT(___kcrctab_gpl+*)) }
+	__ksymtab		0 : { *(SORT(___ksymtab+*)) }
+	__ksymtab_gpl		0 : { *(SORT(___ksymtab_gpl+*)) }
+	__ksymtab_unused	0 : { *(SORT(___ksymtab_unused+*)) }
+	__ksymtab_unused_gpl	0 : { *(SORT(___ksymtab_unused_gpl+*)) }
+	__ksymtab_gpl_future	0 : { *(SORT(___ksymtab_gpl_future+*)) }
+	__kcrctab		0 : { *(SORT(___kcrctab+*)) }
+	__kcrctab_gpl		0 : { *(SORT(___kcrctab_gpl+*)) }
+	__kcrctab_unused	0 : { *(SORT(___kcrctab_unused+*)) }
+	__kcrctab_unused_gpl	0 : { *(SORT(___kcrctab_unused_gpl+*)) }
+	__kcrctab_gpl_future	0 : { *(SORT(___kcrctab_gpl_future+*)) }
 
-	.ctors			0 : ALIGN(8) { *(SORT(.ctors.*)) *(.ctors) }
 	.init_array		0 : ALIGN(8) { *(SORT(.init_array.*)) *(.init_array) }
 
 	.altinstructions	0 : ALIGN(8) { KEEP(*(.altinstructions)) }
 	__bug_table		0 : ALIGN(8) { KEEP(*(__bug_table)) }
 	__jump_table		0 : ALIGN(8) { KEEP(*(__jump_table)) }
-	__ex_table		0 : ALIGN(4) { KEEP(*(__ex_table)) }
 
 	__patchable_function_entries : { *(__patchable_function_entries) }
-
-#ifdef CONFIG_ARCH_USES_CFI_TRAPS
-	__kcfi_traps 		: { KEEP(*(.kcfi_traps)) }
-#endif
 
 #ifdef CONFIG_LTO_CLANG
 	/*
@@ -55,11 +52,30 @@ SECTIONS {
 	}
 
 	.rodata : {
+		*(.rodata.._start)
 		*(.rodata .rodata.[0-9a-zA-Z_]*)
 		*(.rodata..L*)
+		*(.rodata.._end)
+	}
+
+	.text : ALIGN(PAGE_SIZE) {
+		*(.text.._start)
+#ifdef CONFIG_CFI_CLANG
+		/*
+		 * With CFI_CLANG, ensure __cfi_check is at the beginning of
+		 * the .text section, and that the section is aligned to page
+		 * size.
+		 */
+		*(.text.__cfi_check)
+#endif
+		*(.text .text.[0-9a-zA-Z_]*)
+		__cfi_jt_start = .;
+		*(.text..L.cfi.jumptable .text..L.cfi.jumptable.*)
+		__cfi_jt_end = .;
+		*(.text.._end)
+		*(.text.._fips140_unchecked)
 	}
 #endif
-	MOD_SEPARATE_CODETAG_SECTIONS()
 }
 
 /* bring in arch-specific sections */

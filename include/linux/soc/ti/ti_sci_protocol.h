@@ -195,51 +195,6 @@ struct ti_sci_clk_ops {
 			u64 *current_freq);
 };
 
-/* TISCI LPM IO isolation control values */
-#define TISCI_MSG_VALUE_IO_ENABLE			1
-#define TISCI_MSG_VALUE_IO_DISABLE			0
-
-/* TISCI LPM constraint state values */
-#define TISCI_MSG_CONSTRAINT_SET			1
-#define TISCI_MSG_CONSTRAINT_CLR			0
-
-/**
- * struct ti_sci_pm_ops - Low Power Mode (LPM) control operations
- * @lpm_wake_reason: Get the wake up source that woke the SoC from LPM
- *		- source: The wake up source that woke soc from LPM.
- *		- timestamp: Timestamp at which soc woke.
- * @set_device_constraint: Set LPM constraint on behalf of a device
- *		- id: Device Identifier
- *		- state: The desired state of device constraint: set or clear.
- * @set_latency_constraint: Set LPM resume latency constraint
- *		- latency: maximum acceptable latency to wake up from low power mode
- *		- state: The desired state of latency constraint: set or clear.
- */
-struct ti_sci_pm_ops {
-	int (*lpm_wake_reason)(const struct ti_sci_handle *handle,
-			       u32 *source, u64 *timestamp, u8 *pin, u8 *mode);
-	int (*set_device_constraint)(const struct ti_sci_handle *handle,
-				     u32 id, u8 state);
-	int (*set_latency_constraint)(const struct ti_sci_handle *handle,
-				      u16 latency, u8 state);
-};
-
-/**
- * struct ti_sci_resource_desc - Description of TI SCI resource instance range.
- * @start:	Start index of the first resource range.
- * @num:	Number of resources in the first range.
- * @start_sec:	Start index of the second resource range.
- * @num_sec:	Number of resources in the second range.
- * @res_map:	Bitmap to manage the allocation of these resources.
- */
-struct ti_sci_resource_desc {
-	u16 start;
-	u16 num;
-	u16 start_sec;
-	u16 num_sec;
-	unsigned long *res_map;
-};
-
 /**
  * struct ti_sci_rm_core_ops - Resource management core operations
  * @get_range:		Get a range of resources belonging to ti sci host.
@@ -254,15 +209,15 @@ struct ti_sci_resource_desc {
  * - dev_id:	TISCI device ID.
  * - subtype:	Resource assignment subtype that is being requested
  *		from the given device.
- * - desc:	Pointer to ti_sci_resource_desc to be updated with the resource
- *		range start index and number of resources
+ * - range_start:	Start index of the resource range
+ * - range_end:		Number of resources in the range
  */
 struct ti_sci_rm_core_ops {
 	int (*get_range)(const struct ti_sci_handle *handle, u32 dev_id,
-			 u8 subtype, struct ti_sci_resource_desc *desc);
+			 u8 subtype, u16 *range_start, u16 *range_num);
 	int (*get_range_from_shost)(const struct ti_sci_handle *handle,
 				    u32 dev_id, u8 subtype, u8 s_host,
-				    struct ti_sci_resource_desc *desc);
+				    u16 *range_start, u16 *range_num);
 };
 
 #define TI_SCI_RESASG_SUBTYPE_IR_OUTPUT		0
@@ -304,46 +259,30 @@ struct ti_sci_rm_irq_ops {
 #define TI_SCI_MSG_VALUE_RM_RING_SIZE_VALID	BIT(4)
 /* RA config.order_id parameter is valid for RM ring configure TISCI message */
 #define TI_SCI_MSG_VALUE_RM_RING_ORDER_ID_VALID	BIT(5)
-/* RA config.virtid parameter is valid for RM ring configure TISCI message */
-#define TI_SCI_MSG_VALUE_RM_RING_VIRTID_VALID	BIT(6)
-/* RA config.asel parameter is valid for RM ring configure TISCI message */
-#define TI_SCI_MSG_VALUE_RM_RING_ASEL_VALID	BIT(7)
 
 #define TI_SCI_MSG_VALUE_RM_ALL_NO_ORDER \
 	(TI_SCI_MSG_VALUE_RM_RING_ADDR_LO_VALID | \
 	TI_SCI_MSG_VALUE_RM_RING_ADDR_HI_VALID | \
 	TI_SCI_MSG_VALUE_RM_RING_COUNT_VALID | \
 	TI_SCI_MSG_VALUE_RM_RING_MODE_VALID | \
-	TI_SCI_MSG_VALUE_RM_RING_SIZE_VALID | \
-	TI_SCI_MSG_VALUE_RM_RING_ASEL_VALID)
-
-/**
- * struct ti_sci_msg_rm_ring_cfg - Ring configuration
- *
- * Parameters for Navigator Subsystem ring configuration
- * See @ti_sci_msg_rm_ring_cfg_req
- */
-struct ti_sci_msg_rm_ring_cfg {
-	u32 valid_params;
-	u16 nav_id;
-	u16 index;
-	u32 addr_lo;
-	u32 addr_hi;
-	u32 count;
-	u8 mode;
-	u8 size;
-	u8 order_id;
-	u16 virtid;
-	u8 asel;
-};
+	TI_SCI_MSG_VALUE_RM_RING_SIZE_VALID)
 
 /**
  * struct ti_sci_rm_ringacc_ops - Ring Accelerator Management operations
- * @set_cfg: configure the SoC Navigator Subsystem Ring Accelerator ring
+ * @config: configure the SoC Navigator Subsystem Ring Accelerator ring
+ * @get_config: get the SoC Navigator Subsystem Ring Accelerator ring
+ *		configuration
  */
 struct ti_sci_rm_ringacc_ops {
-	int (*set_cfg)(const struct ti_sci_handle *handle,
-		       const struct ti_sci_msg_rm_ring_cfg *params);
+	int (*config)(const struct ti_sci_handle *handle,
+		      u32 valid_params, u16 nav_id, u16 index,
+		      u32 addr_lo, u32 addr_hi, u32 count, u8 mode,
+		      u8 size, u8 order_id
+	);
+	int (*get_config)(const struct ti_sci_handle *handle,
+			  u32 nav_id, u32 index, u8 *mode,
+			  u32 *addr_lo, u32 *addr_hi, u32 *count,
+			  u8 *size, u8 *order_id);
 };
 
 /**
@@ -381,9 +320,6 @@ struct ti_sci_rm_psil_ops {
 #define TI_SCI_RM_UDMAP_CHAN_BURST_SIZE_128_BYTES	2
 #define TI_SCI_RM_UDMAP_CHAN_BURST_SIZE_256_BYTES	3
 
-#define TI_SCI_RM_BCDMA_EXTENDED_CH_TYPE_TCHAN		0
-#define TI_SCI_RM_BCDMA_EXTENDED_CH_TYPE_BCHAN		1
-
 /* UDMAP TX/RX channel valid_params common declarations */
 #define TI_SCI_MSG_VALUE_RM_UDMAP_CH_PAUSE_ON_ERR_VALID		BIT(0)
 #define TI_SCI_MSG_VALUE_RM_UDMAP_CH_ATYPE_VALID                BIT(1)
@@ -409,8 +345,6 @@ struct ti_sci_msg_rm_udmap_tx_ch_cfg {
 #define TI_SCI_MSG_VALUE_RM_UDMAP_CH_TX_SUPR_TDPKT_VALID        BIT(11)
 #define TI_SCI_MSG_VALUE_RM_UDMAP_CH_TX_CREDIT_COUNT_VALID      BIT(12)
 #define TI_SCI_MSG_VALUE_RM_UDMAP_CH_TX_FDEPTH_VALID            BIT(13)
-#define TI_SCI_MSG_VALUE_RM_UDMAP_CH_TX_TDTYPE_VALID            BIT(15)
-#define TI_SCI_MSG_VALUE_RM_UDMAP_CH_EXTENDED_CH_TYPE_VALID	BIT(16)
 	u16 nav_id;
 	u16 index;
 	u8 tx_pause_on_err;
@@ -428,8 +362,6 @@ struct ti_sci_msg_rm_udmap_tx_ch_cfg {
 	u16 fdepth;
 	u8 tx_sched_priority;
 	u8 tx_burst_size;
-	u8 tx_tdtype;
-	u8 extended_ch_type;
 };
 
 /**
@@ -568,7 +500,6 @@ struct ti_sci_ops {
 	struct ti_sci_core_ops core_ops;
 	struct ti_sci_dev_ops dev_ops;
 	struct ti_sci_clk_ops clk_ops;
-	struct ti_sci_pm_ops pm_ops;
 	struct ti_sci_rm_core_ops rm_core_ops;
 	struct ti_sci_rm_irq_ops rm_irq_ops;
 	struct ti_sci_rm_ringacc_ops rm_ring_ops;
@@ -588,6 +519,18 @@ struct ti_sci_handle {
 };
 
 #define TI_SCI_RESOURCE_NULL	0xffff
+
+/**
+ * struct ti_sci_resource_desc - Description of TI SCI resource instance range.
+ * @start:	Start index of the resource.
+ * @num:	Number of resources.
+ * @res_map:	Bitmap to manage the allocation of these resources.
+ */
+struct ti_sci_resource_desc {
+	u16 start;
+	u16 num;
+	unsigned long *res_map;
+};
 
 /**
  * struct ti_sci_resource - Structure representing a resource assigned

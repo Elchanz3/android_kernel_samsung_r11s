@@ -14,8 +14,10 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regmap.h>
@@ -84,8 +86,6 @@ static int avs_map[] = {
 };
 
 struct armada37xx_cpufreq_state {
-	struct platform_device *pdev;
-	struct device *cpu_dev;
 	struct regmap *regmap;
 	u32 nb_l0l1;
 	u32 nb_l2l3;
@@ -102,7 +102,11 @@ struct armada_37xx_dvfs {
 };
 
 static struct armada_37xx_dvfs armada_37xx_dvfs[] = {
-	{.cpu_freq_max = 1200*1000*1000, .divider = {1, 2, 4, 6} },
+	/*
+	 * The cpufreq scaling for 1.2 GHz variant of the SOC is currently
+	 * unstable because we do not know how to configure it properly.
+	 */
+	/* {.cpu_freq_max = 1200*1000*1000, .divider = {1, 2, 4, 6} }, */
 	{.cpu_freq_max = 1000*1000*1000, .divider = {1, 2, 4, 5} },
 	{.cpu_freq_max = 800*1000*1000,  .divider = {1, 2, 3, 4} },
 	{.cpu_freq_max = 600*1000*1000,  .divider = {2, 4, 5, 6} },
@@ -265,7 +269,7 @@ static void __init armada37xx_cpufreq_avs_configure(struct regmap *base,
 	 */
 
 	target_vm = avs_map[l0_vdd_min] - 100;
-	target_vm = max(target_vm, MIN_VOLT_MV);
+	target_vm = target_vm > MIN_VOLT_MV ? target_vm : MIN_VOLT_MV;
 	dvfs->avs[1] = armada_37xx_avs_val_match(target_vm);
 
 	/*
@@ -273,7 +277,7 @@ static void __init armada37xx_cpufreq_avs_configure(struct regmap *base,
 	 * be larger than 1000mv
 	 */
 	target_vm = avs_map[l0_vdd_min] - 150;
-	target_vm = max(target_vm, MIN_VOLT_MV);
+	target_vm = target_vm > MIN_VOLT_MV ? target_vm : MIN_VOLT_MV;
 	dvfs->avs[2] = dvfs->avs[3] = armada_37xx_avs_val_match(target_vm);
 
 	/*
@@ -400,7 +404,7 @@ static int __init armada37xx_cpufreq_driver_init(void)
 	struct armada_37xx_dvfs *dvfs;
 	struct platform_device *pdev;
 	unsigned long freq;
-	unsigned int base_frequency;
+	unsigned int cur_frequency, base_frequency;
 	struct regmap *nb_clk_base, *nb_pm_base, *avs_base;
 	struct device *cpu_dev;
 	int load_lvl, ret;
@@ -461,6 +465,14 @@ static int __init armada37xx_cpufreq_driver_init(void)
 		return -EINVAL;
 	}
 
+	/* Get nominal (current) CPU frequency */
+	cur_frequency = clk_get_rate(clk);
+	if (!cur_frequency) {
+		dev_err(cpu_dev, "Failed to get clock rate for CPU\n");
+		clk_put(clk);
+		return -EINVAL;
+	}
+
 	dvfs = armada_37xx_cpu_freq_info_get(base_frequency);
 	if (!dvfs) {
 		clk_put(clk);
@@ -506,9 +518,6 @@ static int __init armada37xx_cpufreq_driver_init(void)
 	if (ret)
 		goto disable_dvfs;
 
-	armada37xx_cpufreq_state->cpu_dev = cpu_dev;
-	armada37xx_cpufreq_state->pdev = pdev;
-	platform_set_drvdata(pdev, dvfs);
 	return 0;
 
 disable_dvfs:
@@ -526,26 +535,6 @@ remove_opp:
 }
 /* late_initcall, to guarantee the driver is loaded after A37xx clock driver */
 late_initcall(armada37xx_cpufreq_driver_init);
-
-static void __exit armada37xx_cpufreq_driver_exit(void)
-{
-	struct platform_device *pdev = armada37xx_cpufreq_state->pdev;
-	struct armada_37xx_dvfs *dvfs = platform_get_drvdata(pdev);
-	unsigned long freq;
-	int load_lvl;
-
-	platform_device_unregister(pdev);
-
-	armada37xx_cpufreq_disable_dvfs(armada37xx_cpufreq_state->regmap);
-
-	for (load_lvl = ARMADA_37XX_DVFS_LOAD_0; load_lvl < LOAD_LEVEL_NR; load_lvl++) {
-		freq = dvfs->cpu_freq_max / dvfs->divider[load_lvl];
-		dev_pm_opp_remove(armada37xx_cpufreq_state->cpu_dev, freq);
-	}
-
-	kfree(armada37xx_cpufreq_state);
-}
-module_exit(armada37xx_cpufreq_driver_exit);
 
 static const struct of_device_id __maybe_unused armada37xx_cpufreq_of_match[] = {
 	{ .compatible = "marvell,armada-3700-nb-pm" },

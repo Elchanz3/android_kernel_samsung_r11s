@@ -97,9 +97,9 @@ config USB_GADGET_DEBUG_FS
 	   to conserve kernel memory, say "N".
 
 config USB_GADGET_VBUS_DRAW
-	int "Maximum VBUS Power usage (2-500 mA)"
-	range 2 500
-	default 2
+	int "Maximum VBUS Power usage (0-900 mA)"
+	range 0 900
+	default 0
 	help
 	   Some devices need to draw power from USB when they are
 	   configured, perhaps to operate circuitry or to recharge
@@ -107,9 +107,11 @@ config USB_GADGET_VBUS_DRAW
 	   such as an AC adapter or batteries.
 
 	   Enter the maximum power your device draws through USB, in
-	   milliAmperes.  The permitted range of values is 2 - 500 mA;
+	   milliAmperes.  The permitted range of values is 0 - 900 mA;
 	   0 mA would be legal, but can make some hosts misbehave.
-
+	   Exceptionally, when connecting to a USB port capable of
+	   PD charging, it should be specified as 0mA.
+	   
 	   This value will be used except for system-specific gadget
 	   drivers that have more specific information.
 
@@ -190,7 +192,6 @@ config USB_F_MASS_STORAGE
 	tristate
 
 config USB_F_FS
-	select DMA_SHARED_BUFFER
 	tristate
 
 config USB_F_UAC1
@@ -204,15 +205,9 @@ config USB_F_UAC2
 
 config USB_F_UVC
 	tristate
-	select UVC_COMMON
 
 config USB_F_MIDI
 	tristate
-
-config USB_F_MIDI2
-	tristate
-	select SND_UMP
-	select SND_UMP_LEGACY_RAWMIDI
 
 config USB_F_HID
 	tristate
@@ -221,6 +216,18 @@ config USB_F_PRINTER
 	tristate
 
 config USB_F_TCM
+	tristate
+
+config USB_F_ACC
+	tristate
+
+config USB_F_AUDIO_SRC
+	tristate
+
+config USB_F_CONN_GADGET
+	tristate
+
+config USB_F_SS_MON_GADGET
 	tristate
 
 # this first set of drivers all depend on bulk-capable hardware.
@@ -236,6 +243,14 @@ config USB_CONFIGFS
 	  Associating functions with configurations is done by creating
 	  appropriate symbolic links.
 	  For more information see Documentation/usb/gadget_configfs.rst.
+
+config USB_CONFIGFS_UEVENT
+	bool "Uevent notification of Gadget state"
+	depends on USB_CONFIGFS
+	help
+	  Enable uevent notifications to userspace when the gadget
+	  state changes. The gadget can be in any of the following
+	  three states: "CONNECTED/DISCONNECTED/CONFIGURED"
 
 config USB_CONFIGFS_SERIAL
 	bool "Generic serial bulk in/out"
@@ -378,6 +393,46 @@ config USB_CONFIGFS_F_FS
 	  implemented in kernel space (for instance Ethernet, serial or
 	  mass storage) and other are implemented in user space.
 
+config USB_CONFIGFS_F_DM
+	tristate "DM gadget"
+	depends on USB_CONFIGFS
+	select USB_F_DM
+	select USB_U_SERIAL
+	help
+	  USB gadget DM(Diagnosis Monitor) support
+
+config USB_CONFIGFS_F_CONN_GADGET
+	tristate "F_CONN gadget"
+	depends on USB_CONFIGFS
+	select USB_F_CONN_GADGET
+	help
+	  USB Sidesync function support
+
+config USB_CONFIGFS_F_SS_MON_GADGET
+	tristate "F_SAMSUNG gadget"
+	depends on USB_CONFIGFS
+	select USB_F_SS_MON_GADGET
+	help
+	 Driver for control to Samsung Usb device layer
+	 For Samung working scenario and saving debug log, etc
+
+config USB_CONFIGFS_F_ACC
+	bool "Accessory gadget"
+	depends on USB_CONFIGFS
+	depends on HID=y
+	select USB_F_ACC
+	help
+	  USB gadget Accessory support
+
+config USB_CONFIGFS_F_AUDIO_SRC
+	bool "Audio Source gadget"
+	depends on USB_CONFIGFS
+	depends on SND
+	select SND_PCM
+	select USB_F_AUDIO_SRC
+	help
+	  USB gadget Audio Source support
+
 config USB_CONFIGFS_F_UAC1
 	bool "Audio Class 1.0"
 	depends on USB_CONFIGFS
@@ -442,19 +497,6 @@ config USB_CONFIGFS_F_MIDI
 	  connections can then be made on the gadget system, using
 	  ALSA's aconnect utility etc.
 
-config USB_CONFIGFS_F_MIDI2
-	bool "MIDI 2.0 function"
-	depends on USB_CONFIGFS
-	depends on SND
-	select USB_LIBCOMPOSITE
-	select USB_F_MIDI2
-	help
-	  The MIDI 2.0 function driver provides the generic emulated
-	  USB MIDI 2.0 interface, looped back to ALSA UMP rawmidi
-	  device on the gadget host. It supports UMP 1.1 spec and
-	  responds UMP Stream messages for UMP Endpoint and Function
-	  Block information / configuration.
-
 config USB_CONFIGFS_F_HID
 	bool "HID function"
 	depends on USB_CONFIGFS
@@ -468,9 +510,8 @@ config USB_CONFIGFS_F_HID
 config USB_CONFIGFS_F_UVC
 	bool "USB Webcam function"
 	depends on USB_CONFIGFS
+	depends on VIDEO_V4L2
 	depends on VIDEO_DEV
-	depends on VIDEO_DEV
-	select VIDEOBUF2_DMA_SG
 	select VIDEOBUF2_VMALLOC
 	select USB_F_UVC
 	help

@@ -36,9 +36,8 @@
 /**
  * struct clk_icst - ICST VCO clock wrapper
  * @hw: corresponding clock hardware entry
- * @map: register map
- * @vcoreg_off: VCO register address
- * @lockreg_off: VCO lock register address
+ * @vcoreg: VCO register address
+ * @lockreg: VCO lock register address
  * @params: parameters for this ICST instance
  * @rate: current rate
  * @ctype: the type of control register for the ICST
@@ -194,7 +193,7 @@ static int vco_set(struct clk_icst *icst, struct icst_vco vco)
 			pr_err("ICST error: tried to use RDW != 22\n");
 		break;
 	default:
-		/* Regular auxiliary oscillator */
+		/* Regular auxilary oscillator */
 		mask = VERSATILE_AUX_OSC_BITS;
 		val = vco.v | (vco.r << 9) | (vco.s << 16);
 		break;
@@ -234,51 +233,39 @@ static unsigned long icst_recalc_rate(struct clk_hw *hw,
 	return icst->rate;
 }
 
-static int icst_determine_rate(struct clk_hw *hw,
-			       struct clk_rate_request *req)
+static long icst_round_rate(struct clk_hw *hw, unsigned long rate,
+			    unsigned long *prate)
 {
 	struct clk_icst *icst = to_icst(hw);
 	struct icst_vco vco;
 
 	if (icst->ctype == ICST_INTEGRATOR_AP_CM ||
 	    icst->ctype == ICST_INTEGRATOR_CP_CM_CORE) {
-		if (req->rate <= 12000000)
-			req->rate = 12000000;
-		else if (req->rate >= 160000000)
-			req->rate = 160000000;
-		else {
-			/* Slam to closest megahertz */
-			req->rate = DIV_ROUND_CLOSEST(req->rate, 1000000) * 1000000;
-		}
-
-		return 0;
+		if (rate <= 12000000)
+			return 12000000;
+		if (rate >= 160000000)
+			return 160000000;
+		/* Slam to closest megahertz */
+		return DIV_ROUND_CLOSEST(rate, 1000000) * 1000000;
 	}
 
 	if (icst->ctype == ICST_INTEGRATOR_CP_CM_MEM) {
-		if (req->rate <= 6000000)
-			req->rate = 6000000;
-		else if (req->rate >= 66000000)
-			req->rate = 66000000;
-		else {
-			/* Slam to closest 0.5 megahertz */
-			req->rate = DIV_ROUND_CLOSEST(req->rate, 500000) * 500000;
-		}
-
-		return 0;
+		if (rate <= 6000000)
+			return 6000000;
+		if (rate >= 66000000)
+			return 66000000;
+		/* Slam to closest 0.5 megahertz */
+		return DIV_ROUND_CLOSEST(rate, 500000) * 500000;
 	}
 
 	if (icst->ctype == ICST_INTEGRATOR_AP_SYS) {
 		/* Divides between 3 and 50 MHz in steps of 0.25 MHz */
-		if (req->rate <= 3000000)
-			req->rate = 3000000;
-		else if (req->rate >= 50000000)
-			req->rate = 5000000;
-		else {
-			/* Slam to closest 0.25 MHz */
-			req->rate = DIV_ROUND_CLOSEST(req->rate, 250000) * 250000;
-		}
-
-		return 0;
+		if (rate <= 3000000)
+			return 3000000;
+		if (rate >= 50000000)
+			return 5000000;
+		/* Slam to closest 0.25 MHz */
+		return DIV_ROUND_CLOSEST(rate, 250000) * 250000;
 	}
 
 	if (icst->ctype == ICST_INTEGRATOR_AP_PCI) {
@@ -286,20 +273,14 @@ static int icst_determine_rate(struct clk_hw *hw,
 		 * If we're below or less than halfway from 25 to 33 MHz
 		 * select 25 MHz
 		 */
-		if (req->rate <= 25000000 || req->rate < 29000000)
-			req->rate = 25000000;
-		else {
-			/* Else just return the default frequency */
-			req->rate = 33000000;
-		}
-
-		return 0;
+		if (rate <= 25000000 || rate < 29000000)
+			return 25000000;
+		/* Else just return the default frequency */
+		return 33000000;
 	}
 
-	vco = icst_hz_to_vco(icst->params, req->rate);
-	req->rate = icst_hz(icst->params, vco);
-
-	return 0;
+	vco = icst_hz_to_vco(icst->params, rate);
+	return icst_hz(icst->params, vco);
 }
 
 static int icst_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -347,7 +328,7 @@ static int icst_set_rate(struct clk_hw *hw, unsigned long rate,
 
 static const struct clk_ops icst_ops = {
 	.recalc_rate = icst_recalc_rate,
-	.determine_rate = icst_determine_rate,
+	.round_rate = icst_round_rate,
 	.set_rate = icst_set_rate,
 };
 
@@ -447,7 +428,7 @@ static const struct icst_params icst307_params = {
 	.idx2s		= icst307_idx2s,
 };
 
-/*
+/**
  * The core modules on the Integrator/AP and Integrator/CP have
  * especially crippled ICST525 control.
  */
@@ -502,7 +483,7 @@ static void __init of_syscon_icst_setup(struct device_node *np)
 	struct device_node *parent;
 	struct regmap *map;
 	struct clk_icst_desc icst_desc;
-	const char *name;
+	const char *name = np->name;
 	const char *parent_name;
 	struct clk *regclk;
 	enum icst_control_type ctype;
@@ -519,8 +500,7 @@ static void __init of_syscon_icst_setup(struct device_node *np)
 		return;
 	}
 
-	if (of_property_read_u32(np, "reg", &icst_desc.vco_offset) &&
-	    of_property_read_u32(np, "vco-offset", &icst_desc.vco_offset)) {
+	if (of_property_read_u32(np, "vco-offset", &icst_desc.vco_offset)) {
 		pr_err("no VCO register offset for ICST clock\n");
 		return;
 	}
@@ -551,18 +531,16 @@ static void __init of_syscon_icst_setup(struct device_node *np)
 		icst_desc.params = &icst525_apcp_cm_params;
 		ctype = ICST_INTEGRATOR_CP_CM_MEM;
 	} else {
-		pr_err("unknown ICST clock %pOF\n", np);
+		pr_err("unknown ICST clock %s\n", name);
 		return;
 	}
 
 	/* Parent clock name is not the same as node parent */
 	parent_name = of_clk_get_parent_name(np, 0);
-	name = kasprintf(GFP_KERNEL, "%pOFP", np);
 
 	regclk = icst_clk_setup(NULL, &icst_desc, name, parent_name, map, ctype);
 	if (IS_ERR(regclk)) {
 		pr_err("error setting up syscon ICST clock %s\n", name);
-		kfree(name);
 		return;
 	}
 	of_clk_add_provider(np, of_clk_src_simple_get, regclk);

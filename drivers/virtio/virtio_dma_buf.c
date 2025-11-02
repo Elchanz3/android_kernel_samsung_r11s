@@ -25,10 +25,13 @@ struct dma_buf *virtio_dma_buf_export
 			     const struct virtio_dma_buf_ops, ops);
 
 	if (!exp_info->ops ||
-	    exp_info->ops->attach != &virtio_dma_buf_attach ||
 	    !virtio_ops->get_uuid) {
 		return ERR_PTR(-EINVAL);
 	}
+
+	if (!(IS_ENABLED(CONFIG_CFI_CLANG) && IS_ENABLED(CONFIG_MODULES)) &&
+	    exp_info->ops->attach != &virtio_dma_buf_attach)
+		return ERR_PTR(-EINVAL);
 
 	return dma_buf_export(exp_info);
 }
@@ -36,8 +39,6 @@ EXPORT_SYMBOL(virtio_dma_buf_export);
 
 /**
  * virtio_dma_buf_attach - mandatory attach callback for virtio dma-bufs
- * @dma_buf: [in] buffer to attach
- * @attach: [in] attachment structure
  */
 int virtio_dma_buf_attach(struct dma_buf *dma_buf,
 			  struct dma_buf_attachment *attach)
@@ -62,6 +63,9 @@ EXPORT_SYMBOL(virtio_dma_buf_attach);
  */
 bool is_virtio_dma_buf(struct dma_buf *dma_buf)
 {
+	if (IS_ENABLED(CONFIG_CFI_CLANG) && IS_ENABLED(CONFIG_MODULES))
+		return true;
+
 	return dma_buf->ops->attach == &virtio_dma_buf_attach;
 }
 EXPORT_SYMBOL(is_virtio_dma_buf);
@@ -87,6 +91,4 @@ int virtio_dma_buf_get_uuid(struct dma_buf *dma_buf,
 }
 EXPORT_SYMBOL(virtio_dma_buf_get_uuid);
 
-MODULE_DESCRIPTION("dma-bufs for virtio exported objects");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS("DMA_BUF");

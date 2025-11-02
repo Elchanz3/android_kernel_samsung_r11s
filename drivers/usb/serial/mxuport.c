@@ -25,7 +25,7 @@
 #include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 /* Definitions for the vendor ID and device ID */
 #define MX_USBSERIAL_VID	0x110A
@@ -259,6 +259,13 @@ static int mxuport_send_ctrl_data_urb(struct usb_serial *serial,
 			"%s - usb_control_msg failed (%d)\n",
 			__func__, status);
 		return status;
+	}
+
+	if (status != size) {
+		dev_err(&serial->interface->dev,
+			"%s - short write (%d / %zd)\n",
+			__func__, status, size);
+		return -EIO;
 	}
 
 	return 0;
@@ -760,7 +767,7 @@ static int mxuport_tiocmget(struct tty_struct *tty)
 }
 
 static int mxuport_set_termios_flow(struct tty_struct *tty,
-				    const struct ktermios *old_termios,
+				    struct ktermios *old_termios,
 				    struct usb_serial_port *port,
 				    struct usb_serial *serial)
 {
@@ -834,7 +841,7 @@ out:
 
 static void mxuport_set_termios(struct tty_struct *tty,
 				struct usb_serial_port *port,
-				const struct ktermios *old_termios)
+				struct ktermios *old_termios)
 {
 	struct usb_serial *serial = port->serial;
 	u8 *buf;
@@ -1230,7 +1237,7 @@ static void mxuport_close(struct usb_serial_port *port)
 }
 
 /* Send a break to the port. */
-static int mxuport_break_ctl(struct tty_struct *tty, int break_state)
+static void mxuport_break_ctl(struct tty_struct *tty, int break_state)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct usb_serial *serial = port->serial;
@@ -1244,8 +1251,8 @@ static int mxuport_break_ctl(struct tty_struct *tty, int break_state)
 		dev_dbg(&port->dev, "%s - clearing break\n", __func__);
 	}
 
-	return mxuport_send_ctrl_urb(serial, RQ_VENDOR_SET_BREAK,
-				     enable, port->port_number);
+	mxuport_send_ctrl_urb(serial, RQ_VENDOR_SET_BREAK,
+			      enable, port->port_number);
 }
 
 static int mxuport_resume(struct usb_serial *serial)
@@ -1278,6 +1285,7 @@ static int mxuport_resume(struct usb_serial *serial)
 
 static struct usb_serial_driver mxuport_device = {
 	.driver = {
+		.owner =	THIS_MODULE,
 		.name =		"mxuport",
 	},
 	.description		= "MOXA UPort",
@@ -1314,5 +1322,4 @@ module_usb_serial_driver(serial_drivers, mxuport_idtable);
 
 MODULE_AUTHOR("Andrew Lunn <andrew@lunn.ch>");
 MODULE_AUTHOR("<support@moxa.com>");
-MODULE_DESCRIPTION("Moxa UPORT USB Serial driver");
 MODULE_LICENSE("GPL");
