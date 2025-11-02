@@ -88,8 +88,8 @@ build_kernel() {
   echo "${BOLD_GREEN}***** Compiling kernel *****${RESET}"
   mkdir -p "$OUT_DIR"
 
-  make -j12 -C "$(pwd)" $KERNEL_MAKE_ENV "exynos2200_${VARIANT}_defconfig" "JollyKernel.config" dtbs
-  make -j12 -C "$(pwd)" $KERNEL_MAKE_ENV
+  make -j8 -C "$(pwd)" $KERNEL_MAKE_ENV "exynos2200_${VARIANT}_defconfig" dtbs
+  make -j8 -C "$(pwd)" $KERNEL_MAKE_ENV
 
   # Generate dtbo and dtb
   ./toolchain/mkdtimg cfg_create out/dtbo.img dtconfigs/r11s.cfg -d arch/arm64/boot/dts/samsung/r11s
