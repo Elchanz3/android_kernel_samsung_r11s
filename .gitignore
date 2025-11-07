@@ -36,3 +36,5 @@ arch/arm64/boot/dts/allwinner/sun50i-a100-allwinner-perf1.dtb.dtout
 *.rej
 fs/exec.c.rej
 /modules
+/toolchain
+build.sh
