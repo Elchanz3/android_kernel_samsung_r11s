@@ -61,6 +61,29 @@
  */
 #define DMA_ATTR_PRIVILEGED		(1UL << 9)
 
+#define IOMMU_PRIV_SHIFT		10
+#define DMA_ATTR_PRIV_SHIFT		16
+#define DMA_ATTR_HAS_PRIV_DATA		(1UL << 15)
+#define DMA_ATTR_SET_PRIV_DATA(val)	(DMA_ATTR_HAS_PRIV_DATA |	\
+					 ((val) & 0xf) << DMA_ATTR_PRIV_SHIFT)
+#define DMA_ATTR_TO_PRIV_PROT(val)	(((val) >> DMA_ATTR_PRIV_SHIFT) & 0x3)
+/*
+ * DMA_ATTR_SYS_CACHE_ONLY: used to indicate that the buffer should be mapped
+ * with the correct memory attributes so that it can be cached in the system
+ * or last level cache. This is useful for buffers that are being mapped for
+ * devices that are non-coherent, but can use the system cache.
+ */
+#define DMA_ATTR_SYS_CACHE_ONLY		(1UL << 14)
+
+/*
+ * DMA_ATTR_SYS_CACHE_ONLY_NWA: used to indicate that the buffer should be
+ * mapped with the correct memory attributes so that it can be cached in the
+ * system or last level cache, with a no write allocate cache policy. This is
+ * useful for buffers that are being mapped for devices that are non-coherent,
+ * but can use the system cache.
+ */
+#define DMA_ATTR_SYS_CACHE_ONLY_NWA	(1UL << 15)
+
 /*
  * A dma_addr_t can hold any valid DMA or bus address for the platform.  It can
  * be given to a device to use as a DMA source or target.  It is specific to a
@@ -498,6 +521,22 @@ static inline int dma_set_seg_boundary(struct device *dev, unsigned long mask)
 		return 0;
 	}
 	return -EIO;
+}
+
+static inline unsigned int dma_get_min_align_mask(struct device *dev)
+{
+	if (dev->dma_parms)
+		return dev->dma_parms->min_align_mask;
+	return 0;
+}
+
+static inline int dma_set_min_align_mask(struct device *dev,
+		unsigned int min_align_mask)
+{
+	if (WARN_ON_ONCE(!dev->dma_parms))
+		return -EIO;
+	dev->dma_parms->min_align_mask = min_align_mask;
+	return 0;
 }
 
 static inline int dma_get_cache_alignment(void)

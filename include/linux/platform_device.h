@@ -11,6 +11,7 @@
 #define _PLATFORM_DEVICE_H_
 
 #include <linux/device.h>
+#include <linux/android_kabi.h>
 
 #define PLATFORM_DEVID_NONE	(-1)
 #define PLATFORM_DEVID_AUTO	(-2)
@@ -30,13 +31,20 @@ struct platform_device {
 	struct resource	*resource;
 
 	const struct platform_device_id	*id_entry;
-	char *driver_override; /* Driver name to force a match */
+	/*
+	 * Driver name to force a match.  Do not set directly, because core
+	 * frees it.  Use driver_set_override() to set or clear it.
+	 */
+	char *driver_override;
 
 	/* MFD cell pointer */
 	struct mfd_cell *mfd_cell;
 
 	/* arch specific additions */
 	struct pdev_archdata	archdata;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 #define platform_get_device_id(pdev)	((pdev)->id_entry)
@@ -94,6 +102,8 @@ struct platform_device_info {
 		u64 dma_mask;
 
 		const struct property_entry *properties;
+
+		ANDROID_KABI_RESERVE(1);
 };
 extern struct platform_device *platform_device_register_full(
 		const struct platform_device_info *pdevinfo);
@@ -206,6 +216,8 @@ struct platform_driver {
 	struct device_driver driver;
 	const struct platform_device_id *id_table;
 	bool prevent_deferred_probe;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define to_platform_driver(drv)	(container_of((drv), struct platform_driver, \
@@ -349,5 +361,8 @@ static inline int is_sh_early_platform_device(struct platform_device *pdev)
 	return 0;
 }
 #endif /* CONFIG_SUPERH */
+
+/* For now only SuperH uses it */
+void early_platform_cleanup(void);
 
 #endif /* _PLATFORM_DEVICE_H_ */

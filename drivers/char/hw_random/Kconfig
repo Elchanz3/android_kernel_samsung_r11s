@@ -427,7 +427,7 @@ config HW_RANDOM_MESON
 
 config HW_RANDOM_CAVIUM
 	tristate "Cavium ThunderX Random Number Generator support"
-	depends on HW_RANDOM && PCI && (ARM64 || (COMPILE_TEST && 64BIT))
+	depends on HW_RANDOM && PCI && ARCH_THUNDER
 	default HW_RANDOM
 	help
 	  This driver provides kernel-side support for the Random Number
@@ -466,17 +466,16 @@ config HW_RANDOM_S390
 
 	  If unsure, say Y.
 
-config HW_RANDOM_EXYNOS
-	tristate "Samsung Exynos True Random Number Generator support"
-	depends on ARCH_EXYNOS || COMPILE_TEST
-	default HW_RANDOM
+config HW_RANDOM_EXYNOS_SWD
+	tristate "EXYNOS SWD HW random number generator support"
+	depends on ARCH_EXYNOS
+	default m
 	help
-	  This driver provides support for the True Random Number
-	  Generator available in Exynos SoCs.
+	  This driver provides kernel-side support for TRNG hardware
+	  found in secure world by using smc call
 
-	  To compile this driver as a module, choose M here: the module
-	  will be called exynos-trng.
-
+	  To compile this driver as a module, choose M here: the
+	  module will be called exynos-rng.
 	  If unsure, say Y.
 
 config HW_RANDOM_OPTEE
@@ -540,15 +539,15 @@ endif # HW_RANDOM
 
 config UML_RANDOM
 	depends on UML
-	tristate "Hardware random number generator"
+	select HW_RANDOM
+	tristate "UML Random Number Generator support"
 	help
 	  This option enables UML's "hardware" random number generator.  It
 	  attaches itself to the host's /dev/random, supplying as much entropy
 	  as the host has, rather than the small amount the UML gets from its
-	  own drivers.  It registers itself as a standard hardware random number
-	  generator, major 10, minor 183, and the canonical device name is
-	  /dev/hwrng.
-	  The way to make use of this is to install the rng-tools package
-	  (check your distro, or download from
-	  http://sourceforge.net/projects/gkernel/).  rngd periodically reads
-	  /dev/hwrng and injects the entropy into /dev/random.
+	  own drivers. It registers itself as a rng-core driver thus providing
+	  a device which is usually called /dev/hwrng. This hardware random
+	  number generator does feed into the kernel's random number generator
+	  entropy pool.
+
+	  If unsure, say Y.

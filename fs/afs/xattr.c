@@ -11,29 +11,6 @@
 #include <linux/xattr.h>
 #include "internal.h"
 
-static const char afs_xattr_list[] =
-	"afs.acl\0"
-	"afs.cell\0"
-	"afs.fid\0"
-	"afs.volume\0"
-	"afs.yfs.acl\0"
-	"afs.yfs.acl_inherited\0"
-	"afs.yfs.acl_num_cleaned\0"
-	"afs.yfs.vol_acl";
-
-/*
- * Retrieve a list of the supported xattrs.
- */
-ssize_t afs_listxattr(struct dentry *dentry, char *buffer, size_t size)
-{
-	if (size == 0)
-		return sizeof(afs_xattr_list);
-	if (size < sizeof(afs_xattr_list))
-		return -ERANGE;
-	memcpy(buffer, afs_xattr_list, sizeof(afs_xattr_list));
-	return sizeof(afs_xattr_list);
-}
-
 /*
  * Deal with the result of a successful fetch ACL operation.
  */
@@ -59,7 +36,7 @@ static const struct afs_operation_ops afs_fetch_acl_operation = {
 static int afs_xattr_get_acl(const struct xattr_handler *handler,
 			     struct dentry *dentry,
 			     struct inode *inode, const char *name,
-			     void *buffer, size_t size)
+			     void *buffer, size_t size, int flags)
 {
 	struct afs_operation *op;
 	struct afs_vnode *vnode = AFS_FS_I(inode);
@@ -160,7 +137,7 @@ static const struct afs_operation_ops yfs_fetch_opaque_acl_operation = {
 static int afs_xattr_get_yfs(const struct xattr_handler *handler,
 			     struct dentry *dentry,
 			     struct inode *inode, const char *name,
-			     void *buffer, size_t size)
+			     void *buffer, size_t size, int flags)
 {
 	struct afs_operation *op;
 	struct afs_vnode *vnode = AFS_FS_I(inode);
@@ -230,6 +207,8 @@ static int afs_xattr_get_yfs(const struct xattr_handler *handler,
 			else
 				ret = -ERANGE;
 		}
+	} else if (ret == -ENOTSUPP) {
+		ret = -ENODATA;
 	}
 
 error_yacl:
@@ -254,6 +233,7 @@ static int afs_xattr_set_yfs(const struct xattr_handler *handler,
 {
 	struct afs_operation *op;
 	struct afs_vnode *vnode = AFS_FS_I(inode);
+	int ret;
 
 	if (flags == XATTR_CREATE ||
 	    strcmp(name, "acl") != 0)
@@ -268,7 +248,10 @@ static int afs_xattr_set_yfs(const struct xattr_handler *handler,
 		return afs_put_operation(op);
 
 	op->ops = &yfs_store_opaque_acl2_operation;
-	return afs_do_sync_operation(op);
+	ret = afs_do_sync_operation(op);
+	if (ret == -ENOTSUPP)
+		ret = -ENODATA;
+	return ret;
 }
 
 static const struct xattr_handler afs_xattr_yfs_handler = {
@@ -283,7 +266,7 @@ static const struct xattr_handler afs_xattr_yfs_handler = {
 static int afs_xattr_get_cell(const struct xattr_handler *handler,
 			      struct dentry *dentry,
 			      struct inode *inode, const char *name,
-			      void *buffer, size_t size)
+			      void *buffer, size_t size, int flags)
 {
 	struct afs_vnode *vnode = AFS_FS_I(inode);
 	struct afs_cell *cell = vnode->volume->cell;
@@ -310,7 +293,7 @@ static const struct xattr_handler afs_xattr_afs_cell_handler = {
 static int afs_xattr_get_fid(const struct xattr_handler *handler,
 			     struct dentry *dentry,
 			     struct inode *inode, const char *name,
-			     void *buffer, size_t size)
+			     void *buffer, size_t size, int flags)
 {
 	struct afs_vnode *vnode = AFS_FS_I(inode);
 	char text[16 + 1 + 24 + 1 + 8 + 1];
@@ -348,7 +331,7 @@ static const struct xattr_handler afs_xattr_afs_fid_handler = {
 static int afs_xattr_get_volume(const struct xattr_handler *handler,
 			      struct dentry *dentry,
 			      struct inode *inode, const char *name,
-			      void *buffer, size_t size)
+			      void *buffer, size_t size, int flags)
 {
 	struct afs_vnode *vnode = AFS_FS_I(inode);
 	const char *volname = vnode->volume->name;

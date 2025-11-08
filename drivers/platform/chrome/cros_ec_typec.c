@@ -438,8 +438,7 @@ static int cros_typec_enable_tbt(struct cros_typec_data *typec,
 	if (pd_ctrl->control_flags & USB_PD_CTRL_ACTIVE_LINK_UNIDIR)
 		data.cable_mode |= TBT_CABLE_LINK_TRAINING;
 
-	if (pd_ctrl->cable_gen)
-		data.cable_mode |= TBT_CABLE_ROUNDED;
+	data.cable_mode |= TBT_SET_CABLE_ROUNDED(pd_ctrl->cable_gen);
 
 	/* Enter Mode VDO */
 	data.enter_vdo = TBT_SET_CABLE_SPEED(pd_ctrl->cable_speed);
@@ -473,6 +472,11 @@ static int cros_typec_enable_dp(struct cros_typec_data *typec,
 		dev_err(typec->dev,
 			"PD_CTRL version too old: %d\n", typec->pd_ctrl_ver);
 		return -ENOTSUPP;
+	}
+
+	if (!pd_ctrl->dp_mode) {
+		dev_err(typec->dev, "No valid DP mode provided.\n");
+		return -EINVAL;
 	}
 
 	/* Status VDO. */
@@ -707,7 +711,13 @@ static int cros_typec_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	typec->dev = dev;
+
 	typec->ec = dev_get_drvdata(pdev->dev.parent);
+	if (!typec->ec) {
+		dev_err(dev, "couldn't find parent EC device\n");
+		return -ENODEV;
+	}
+
 	platform_set_drvdata(pdev, typec);
 
 	ret = cros_typec_get_cmd_version(typec);

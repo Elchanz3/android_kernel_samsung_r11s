@@ -762,7 +762,7 @@ int drm_mode_vrefresh(const struct drm_display_mode *mode)
 	if (mode->htotal == 0 || mode->vtotal == 0)
 		return 0;
 
-	num = mode->clock * 1000;
+	num = mode->clock;
 	den = mode->htotal * mode->vtotal;
 
 	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
@@ -772,7 +772,7 @@ int drm_mode_vrefresh(const struct drm_display_mode *mode)
 	if (mode->vscan > 1)
 		den *= mode->vscan;
 
-	return DIV_ROUND_CLOSEST(num, den);
+	return DIV_ROUND_CLOSEST_ULL(mul_u32_u32(num, 1000), den);
 }
 EXPORT_SYMBOL(drm_mode_vrefresh);
 
@@ -1939,6 +1939,7 @@ void drm_mode_convert_to_umode(struct drm_mode_modeinfo *out,
 	strncpy(out->name, in->name, DRM_DISPLAY_MODE_LEN);
 	out->name[DRM_DISPLAY_MODE_LEN-1] = 0;
 }
+EXPORT_SYMBOL_GPL(drm_mode_convert_to_umode);
 
 /**
  * drm_crtc_convert_umode - convert a modeinfo into a drm_display_mode
@@ -2015,6 +2016,7 @@ int drm_mode_convert_umode(struct drm_device *dev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(drm_mode_convert_umode);
 
 /**
  * drm_mode_is_420_only - if a given videomode can be only supported in YCBCR420

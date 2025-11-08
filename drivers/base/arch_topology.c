@@ -20,6 +20,12 @@
 #include <linux/percpu.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
+#include <trace/hooks/topology.h>
+
+#if IS_ENABLED(CONFIG_CPU_CAPACITY_FIXUP)
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#endif
 
 bool topology_scale_freq_invariant(void)
 {
@@ -32,6 +38,7 @@ __weak bool arch_freq_counters_available(const struct cpumask *cpus)
 	return false;
 }
 DEFINE_PER_CPU(unsigned long, freq_scale) = SCHED_CAPACITY_SCALE;
+EXPORT_PER_CPU_SYMBOL_GPL(freq_scale);
 
 void topology_set_freq_scale(const struct cpumask *cpus, unsigned long cur_freq,
 			     unsigned long max_freq)
@@ -52,11 +59,14 @@ void topology_set_freq_scale(const struct cpumask *cpus, unsigned long cur_freq,
 
 	scale = (cur_freq << SCHED_CAPACITY_SHIFT) / max_freq;
 
+	trace_android_vh_arch_set_freq_scale(cpus, cur_freq, max_freq, &scale);
+
 	for_each_cpu(i, cpus)
 		per_cpu(freq_scale, i) = scale;
 }
 
 DEFINE_PER_CPU(unsigned long, cpu_scale) = SCHED_CAPACITY_SCALE;
+EXPORT_PER_CPU_SYMBOL_GPL(cpu_scale);
 
 void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity)
 {
@@ -64,6 +74,7 @@ void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity)
 }
 
 DEFINE_PER_CPU(unsigned long, thermal_pressure);
+EXPORT_PER_CPU_SYMBOL_GPL(thermal_pressure);
 
 void topology_set_thermal_pressure(const struct cpumask *cpus,
 			       unsigned long th_pressure)
@@ -73,12 +84,69 @@ void topology_set_thermal_pressure(const struct cpumask *cpus,
 	for_each_cpu(cpu, cpus)
 		WRITE_ONCE(per_cpu(thermal_pressure, cpu), th_pressure);
 }
+EXPORT_SYMBOL_GPL(topology_set_thermal_pressure);
+
+#if IS_ENABLED(CONFIG_CPU_CAPACITY_FIXUP)
+static char cpu_cap_fixup_target[TASK_COMM_LEN];
+
+static int proc_cpu_capacity_fixup_target_show(struct seq_file *m, void *data)
+{
+	seq_printf(m, "%s\n", cpu_cap_fixup_target);
+	return 0;
+}
+
+static int proc_cpu_capacity_fixup_target_open(struct inode *inode,
+		struct file *file)
+{
+	return single_open(file, proc_cpu_capacity_fixup_target_show, NULL);
+}
+
+static ssize_t proc_cpu_capacity_fixup_target_write(struct file *file,
+		const char __user *buf, size_t count, loff_t *offs)
+{
+	char temp[TASK_COMM_LEN];
+	const size_t maxlen = sizeof(temp) - 1;
+
+	memset(temp, 0, sizeof(temp));
+	if (copy_from_user(temp, buf, count > maxlen ? maxlen : count))
+		return -EFAULT;
+
+	if (temp[strlen(temp) - 1] == '\n')
+		temp[strlen(temp) - 1] = '\0';
+
+	strlcpy(cpu_cap_fixup_target, temp, sizeof(cpu_cap_fixup_target));
+
+	return count;
+}
+
+static const struct proc_ops proc_cpu_capacity_fixup_target_op = {
+	.proc_open = proc_cpu_capacity_fixup_target_open,
+	.proc_write = proc_cpu_capacity_fixup_target_write,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+#endif
 
 static ssize_t cpu_capacity_show(struct device *dev,
 				 struct device_attribute *attr,
 				 char *buf)
 {
 	struct cpu *cpu = container_of(dev, struct cpu, dev);
+
+#if IS_ENABLED(CONFIG_CPU_CAPACITY_FIXUP)
+	if (strncmp(current->comm, cpu_cap_fixup_target,
+			strnlen(current->comm, TASK_COMM_LEN)) == 0) {
+		unsigned long curr, left, right;
+
+		curr = topology_get_cpu_scale(cpu->dev.id);
+		left = topology_get_cpu_scale(0);
+		right = topology_get_cpu_scale(num_possible_cpus() - 1);
+
+		if (curr != left && curr != right)
+			return sysfs_emit(buf, "%lu\n", left > right ? left : right);
+	}
+#endif
 
 	return sysfs_emit(buf, "%lu\n", topology_get_cpu_scale(cpu->dev.id));
 }
@@ -103,11 +171,20 @@ static int register_cpu_capacity_sysctl(void)
 		device_create_file(cpu, &dev_attr_cpu_capacity);
 	}
 
+#if IS_ENABLED(CONFIG_CPU_CAPACITY_FIXUP)
+	memset(cpu_cap_fixup_target, 0, sizeof(cpu_cap_fixup_target));
+	if (!proc_create("cpu_capacity_fixup_target",
+			0660, NULL, &proc_cpu_capacity_fixup_target_op))
+		pr_err("Failed to register 'cpu_capacity_fixup_target'\n");
+#endif
+
 	return 0;
 }
 subsys_initcall(register_cpu_capacity_sysctl);
 
 static int update_topology;
+bool topology_update_done;
+EXPORT_SYMBOL_GPL(topology_update_done);
 
 int topology_update_cpu_topology(void)
 {
@@ -122,6 +199,8 @@ static void update_topology_flags_workfn(struct work_struct *work)
 {
 	update_topology = 1;
 	rebuild_sched_domains();
+	topology_update_done = true;
+	trace_android_vh_update_topology_flags_workfn(NULL);
 	pr_debug("sched_domain hierarchy rebuilt, flags updated\n");
 	update_topology = 0;
 }
@@ -515,7 +594,7 @@ void update_siblings_masks(unsigned int cpuid)
 	for_each_online_cpu(cpu) {
 		cpu_topo = &cpu_topology[cpu];
 
-		if (cpuid_topo->llc_id == cpu_topo->llc_id) {
+		if (cpu_topo->llc_id != -1 && cpuid_topo->llc_id == cpu_topo->llc_id) {
 			cpumask_set_cpu(cpu, &cpuid_topo->llc_sibling);
 			cpumask_set_cpu(cpuid, &cpu_topo->llc_sibling);
 		}
@@ -595,5 +674,24 @@ void __init init_cpu_topology(void)
 		reset_cpu_topology();
 	else if (of_have_populated_dt() && parse_dt_topology())
 		reset_cpu_topology();
+}
+
+void store_cpu_topology(unsigned int cpuid)
+{
+	struct cpu_topology *cpuid_topo = &cpu_topology[cpuid];
+
+	if (cpuid_topo->package_id != -1)
+		goto topology_populated;
+
+	cpuid_topo->thread_id = -1;
+	cpuid_topo->core_id = cpuid;
+	cpuid_topo->package_id = cpu_to_node(cpuid);
+
+	pr_debug("CPU%u: package %d core %d thread %d\n",
+		 cpuid, cpuid_topo->package_id, cpuid_topo->core_id,
+		 cpuid_topo->thread_id);
+
+topology_populated:
+	update_siblings_masks(cpuid);
 }
 #endif

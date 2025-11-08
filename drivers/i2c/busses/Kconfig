@@ -488,7 +488,7 @@ config I2C_BRCMSTB
 
 config I2C_CADENCE
 	tristate "Cadence I2C Controller"
-	depends on ARCH_ZYNQ || ARM64 || XTENSA
+	depends on ARCH_ZYNQ || ARM64 || XTENSA || COMPILE_TEST
 	help
 	  Say yes here to select Cadence I2C Host Controller. This controller is
 	  e.g. used by Xilinx Zynq.
@@ -620,9 +620,16 @@ config I2C_EXYNOS5
 	tristate "Exynos high-speed I2C driver"
 	depends on OF
 	depends on ARCH_EXYNOS || COMPILE_TEST
-	default y if ARCH_EXYNOS
 	help
 	  High-speed I2C controller on Exynos5 and newer Samsung SoCs.
+
+config I2C_SAMSUNG_HWACG
+	bool "HWACG(HW Auto Clock Gating) support for Exynos I2C port"
+	default y
+	help
+	If HWACG is enabled on I2C, System power mode will goes into
+	suspend state only when I2C master is not in busy state.
+	To support HWACG on I2C, this configuration should be selected.
 
 config I2C_GPIO
 	tristate "GPIO-based bitbanging I2C"
@@ -926,7 +933,7 @@ config I2C_QCOM_GENI
 
 config I2C_QUP
 	tristate "Qualcomm QUP based I2C controller"
-	depends on ARCH_QCOM
+	depends on ARCH_QCOM || COMPILE_TEST
 	help
 	  If you say yes to this option, support will be included for the
 	  built-in I2C interface on the Qualcomm SoCs.
@@ -1012,6 +1019,7 @@ config I2C_SIRF
 config I2C_SPRD
 	tristate "Spreadtrum I2C interface"
 	depends on I2C=y && (ARCH_SPRD || COMPILE_TEST)
+	depends on COMMON_CLK
 	help
 	  If you say yes to this option, support will be included for the
 	  Spreadtrum I2C interface.
@@ -1418,5 +1426,11 @@ config I2C_FSI
 
 	  This driver can also be built as a module. If so, the module will be
 	  called as i2c-fsi.
+
+config EXYNOS_ACPM_MFD_BUS
+	tristate "SAMSUNG EXYNOS ACPM_MFD_BUS driver"
+	depends on ARCH_EXYNOS && OF
+	help
+	  ACPM MFD BUS on Exynos based Samsung SoCs.
 
 endmenu

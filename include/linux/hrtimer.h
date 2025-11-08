@@ -20,6 +20,7 @@
 #include <linux/seqlock.h>
 #include <linux/timer.h>
 #include <linux/timerqueue.h>
+#include <linux/android_kabi.h>
 
 struct hrtimer_clock_base;
 struct hrtimer_cpu_base;
@@ -124,6 +125,8 @@ struct hrtimer {
 	u8				is_rel;
 	u8				is_soft;
 	u8				is_hard;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -318,15 +321,11 @@ struct clock_event_device;
 
 extern void hrtimer_interrupt(struct clock_event_device *dev);
 
-extern void clock_was_set_delayed(void);
-
 extern unsigned int hrtimer_resolution;
 
 #else
 
 #define hrtimer_resolution	(unsigned int)LOW_RES_NSEC
-
-static inline void clock_was_set_delayed(void) { }
 
 #endif
 
@@ -351,7 +350,6 @@ hrtimer_expires_remaining_adjusted(const struct hrtimer *timer)
 						    timer->base->get_time());
 }
 
-extern void clock_was_set(void);
 #ifdef CONFIG_TIMERFD
 extern void timerfd_clock_was_set(void);
 #else
@@ -532,8 +530,12 @@ extern void sysrq_timer_list_show(void);
 int hrtimers_prepare_cpu(unsigned int cpu);
 #ifdef CONFIG_HOTPLUG_CPU
 int hrtimers_dead_cpu(unsigned int cpu);
+extern void save_pcpu_tick(int cpu);
+extern void restore_pcpu_tick(int cpu);
 #else
 #define hrtimers_dead_cpu	NULL
+static inline void save_pcpu_tick(int cpu) {}
+static inline void restore_pcpu_tick(int cpu) {}
 #endif
 
 #endif

@@ -1264,8 +1264,8 @@ static int
 record__switch_output(struct record *rec, bool at_exit)
 {
 	struct perf_data *data = &rec->data;
+	char *new_filename = NULL;
 	int fd, err;
-	char *new_filename;
 
 	/* Same Size:      "2015122520103046"*/
 	char timestamp[] = "InvalidTimestamp";
@@ -1666,7 +1666,7 @@ static int __cmd_record(struct record *rec, int argc, const char **argv)
 		status = -1;
 		goto out_delete_session;
 	}
-	err = evlist__add_pollfd(rec->evlist, done_fd);
+	err = evlist__add_wakeup_eventfd(rec->evlist, done_fd);
 	if (err < 0) {
 		pr_err("Failed to add wakeup eventfd to poll list\n");
 		status = err;

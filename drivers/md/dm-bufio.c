@@ -19,6 +19,8 @@
 #include <linux/rbtree.h>
 #include <linux/stacktrace.h>
 
+#include <trace/hooks/mm.h>
+
 #define DM_MSG_PREFIX "bufio"
 
 /*
@@ -49,7 +51,7 @@
 /*
  * The nr of bytes of cached data to keep around.
  */
-#define DM_BUFIO_DEFAULT_RETAIN_BYTES   (256 * 1024)
+#define DM_BUFIO_DEFAULT_RETAIN_BYTES   (1024 * 1024)
 
 /*
  * Align buffer writes to this boundary.
@@ -1526,6 +1528,10 @@ EXPORT_SYMBOL_GPL(dm_bufio_get_block_size);
 sector_t dm_bufio_get_device_size(struct dm_bufio_client *c)
 {
 	sector_t s = i_size_read(c->bdev->bd_inode) >> SECTOR_SHIFT;
+	if (s >= c->start)
+		s -= c->start;
+	else
+		s = 0;
 	if (likely(c->sectors_per_block_bits >= 0))
 		s >>= c->sectors_per_block_bits;
 	else
@@ -1533,6 +1539,12 @@ sector_t dm_bufio_get_device_size(struct dm_bufio_client *c)
 	return s;
 }
 EXPORT_SYMBOL_GPL(dm_bufio_get_device_size);
+
+struct dm_io_client *dm_bufio_get_dm_io_client(struct dm_bufio_client *c)
+{
+	return c->dm_io;
+}
+EXPORT_SYMBOL_GPL(dm_bufio_get_dm_io_client);
 
 sector_t dm_bufio_get_block_number(struct dm_buffer *b)
 {
@@ -1673,6 +1685,13 @@ static void shrink_work(struct work_struct *w)
 static unsigned long dm_bufio_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
 {
 	struct dm_bufio_client *c;
+	bool bypass = false;
+
+	trace_android_vh_dm_bufio_shrink_scan_bypass(
+			dm_bufio_current_allocated,
+			&bypass);
+	if (bypass)
+		return 0;
 
 	c = container_of(shrink, struct dm_bufio_client, shrinker);
 	atomic_long_add(sc->nr_to_scan, &c->need_shrink);
@@ -1999,6 +2018,14 @@ static void cleanup_old_buffers(void)
 {
 	unsigned long max_age_hz = get_max_age_hz();
 	struct dm_bufio_client *c;
+	bool bypass = false;
+
+	trace_android_vh_cleanup_old_buffers_bypass(
+				dm_bufio_current_allocated,
+				&max_age_hz,
+				&bypass);
+	if (bypass)
+		return;
 
 	mutex_lock(&dm_bufio_clients_lock);
 

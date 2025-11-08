@@ -402,13 +402,11 @@ static int xfrm_outer_mode_output(struct xfrm_state *x, struct sk_buff *skb)
 	return -EOPNOTSUPP;
 }
 
-#if IS_ENABLED(CONFIG_NET_PKTGEN)
 int pktgen_xfrm_outer_mode_output(struct xfrm_state *x, struct sk_buff *skb)
 {
 	return xfrm_outer_mode_output(x, skb);
 }
 EXPORT_SYMBOL_GPL(pktgen_xfrm_outer_mode_output);
-#endif
 
 static int xfrm_output_one(struct sk_buff *skb, int err)
 {
@@ -659,6 +657,12 @@ out:
 static int xfrm4_extract_output(struct xfrm_state *x, struct sk_buff *skb)
 {
 	int err;
+
+	if (x->outer_mode.encap == XFRM_MODE_BEET &&
+	    ip_is_fragment(ip_hdr(skb))) {
+		net_warn_ratelimited("BEET mode doesn't support inner IPv4 fragments\n");
+		return -EAFNOSUPPORT;
+	}
 
 	err = xfrm4_tunnel_check_size(skb);
 	if (err)
