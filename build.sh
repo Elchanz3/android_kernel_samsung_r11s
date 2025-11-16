@@ -111,7 +111,7 @@ build_kernel() {
     echo "Building kernel using "$KERNEL_DEFCONFIG""
     echo "Generating configuration file..."
     echo "-----------------------------------------------"
-    make ${MAKE_ARGS} -j$CORES exynos2200_r11s_defconfig  $RECOVERY $KSU $PERMISSIVE || abort
+    make ${MAKE_ARGS} -j$CORES exynos2200_r11s_defconfig custom.config  $RECOVERY $KSU $PERMISSIVE || abort
 
     echo "Building kernel..."
     echo "-----------------------------------------------"
@@ -315,15 +315,15 @@ build_zip() {
     cp build/update-binary build/out/r11s/zip/META-INF/com/google/android/update-binary
     cp build/updater-script build/out/r11s/zip/META-INF/com/google/android/updater-script
 
-    version=$(grep -o 'CONFIG_LOCALVERSION="[^"]*"' arch/arm64/configs/s5e9925_defconfig | cut -d '"' -f 2)
+    version=$(grep -o 'CONFIG_LOCALVERSION="[^"]*"' arch/arm64/configs/exynos2200_r11s_defconfig | cut -d '"' -f 2)
     version=${version:1}
     pushd build/out/r11s/zip > /dev/null
     DATE=`date +"%d-%m-%Y_%H-%M-%S"`
 
     if [[ "$KSU_OPTION" == "y" ]]; then
-        NAME="$version"_"r11s"_UNOFFICIAL_KSU_"$DATE".zip
+        NAME="$version"_"r11s"_"$DATE".zip
     else
-        NAME="$version"_"r11s"_UNOFFICIAL_"$DATE".zip
+        NAME="$version"_"r11s"_"$DATE".zip
     fi
     zip -r -qq ../"$NAME" .
     popd > /dev/null
