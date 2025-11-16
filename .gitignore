@@ -95,3 +95,4 @@ kernel/kheaders_data.tar.xz
 scripts/basic/fixdep
 include/linux/ologk.h
 /KernelSU-Next
+*.old
