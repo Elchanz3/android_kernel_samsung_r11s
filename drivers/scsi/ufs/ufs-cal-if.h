@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (c) 2013-2016, Linux Foundation. All rights reserved.
+ */
+
 #ifndef _UFS_CAL_
 #define _UFS_CAL_
 
@@ -40,7 +45,7 @@ enum {
 
 #define MAX_LANE		4
 
-#define EOM_PH_SEL_MAX		72
+#define EOM_PH_SEL_MAX		128
 #define EOM_DEF_VREF_MAX	256
 #define EOM_MAX_SIZE		(EOM_RTY_MAX * EOM_PH_SEL_MAX * \
 					EOM_DEF_VREF_MAX)

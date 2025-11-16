@@ -24,3 +24,5 @@ arch/arm64/kvm/hyp/nvhe/gen-hyprel
 *.alias
 /modules
 /toolchain
+arch/arm64/boot/Image
+*.gz

@@ -76,7 +76,7 @@ enum {
 #define UNIP_DL_ERROR_IRQ_MASK		0x4844	/* shadow of DL error */
 #define PA_ERROR_IND_RECEIVED		BIT(15)
 
-#define PHY_PMA_LANE_OFFSET		0x00
+#define PHY_PMA_LANE_OFFSET		0x800
 #define PHY_PMA_COMN_ADDR(reg)			(reg)
 #define PHY_PMA_TRSV_ADDR(reg, lane)	((reg) + (PHY_PMA_LANE_OFFSET * (lane)))
 
@@ -310,6 +310,11 @@ static enum ufs_cal_errno ufs30_cal_done_wait(struct ufs_vs_handle *handle,
 			return UFS_CAL_NO_ERROR;
 	}
 
+#if defined(__UFS_CAL_FW__)
+	if (i >= 100)
+		return UFS_CAL_ERROR;
+#endif
+
 	return UFS_CAL_NO_ERROR;
 }
 
@@ -320,7 +325,6 @@ static inline void __set_pcs(struct ufs_vs_handle *handle,
 		      UNIP_COMP_AXI_AUX_FIELD);
 	unipro_writel(handle, value, offset);
 	unipro_writel(handle, __WSTRB, UNIP_COMP_AXI_AUX_FIELD);
-	//printk("[__set_pcs]0x%08x[lane %d] : 0x%x\n", offset, lane, value);
 }
 
 static enum ufs_cal_errno __config_uic(struct ufs_vs_handle *handle, u8 lane,
@@ -334,8 +338,7 @@ static enum ufs_cal_errno __config_uic(struct ufs_vs_handle *handle, u8 lane,
 	switch (cfg->lyr) {
 	/* hci */
 	case HCI_AH8_THIBERN:
-		value = H8T_GRANULARITY |
-			((p->ah8_thinern8_time - AH8_EXIT_REQUIRED) & 0x3FF);
+		value = H8T_GRANULARITY | ((p->ah8_thinern8_time - AH8_EXIT_REQUIRED) & 0x3FF);
 		hci_writel(handle, value, cfg->addr);
 		break;
 	case HCI_AH8_REFCLKGATINGTING:
@@ -455,8 +458,7 @@ static enum ufs_cal_errno __config_uic(struct ufs_vs_handle *handle, u8 lane,
 		/* after gear change */
 	case PHY_CDR_AFC_WAIT:
 		if (ufs_cal_wait_cdr_afc_check(p->handle, cfg->addr,
-					cfg->val, lane)
-				== UFS_CAL_ERROR)
+					cfg->val, lane) == UFS_CAL_ERROR)
 			ret = UFS_CAL_TIMEOUT;
 		break;
 	case PHY_EMB_CAL_WAIT:
@@ -690,8 +692,14 @@ enum ufs_cal_errno ufs_cal_post_pmc(struct ufs_cal_param *p)
 
 	ret = ufs_cal_config_uic(p, cfg, p->pmd);
 
-	if (ret == UFS_CAL_NO_ERROR && p->support_ah8_cal)
-		ret = ufs_cal_config_uic(p, post_ah8_cfg, p->pmd);
+	if (ret == UFS_CAL_NO_ERROR && p->support_ah8_cal) {
+		if (p->evt_ver == 0)
+			cfg = post_ah8_cfg_evt0;
+		else
+			cfg = post_ah8_cfg_evt1;
+
+		ret = ufs_cal_config_uic(p, cfg, p->pmd);
+	}
 
 	return ret;
 }
@@ -766,9 +774,118 @@ enum ufs_cal_errno ufs_cal_pre_link(struct ufs_cal_param *p)
 	return ret;
 }
 
+static enum ufs_cal_errno ufs_cal_eom_prepare(struct ufs_cal_param *p)
+{
+	enum ufs_cal_errno ret = UFS_CAL_NO_ERROR;
+	struct ufs_cal_phy_cfg *cfg;
+
+	cfg = eom_prepare;
+	ret = ufs_cal_config_uic(p, cfg, p->pmd);
+	return ret;
+}
+
+static u32 ufs_cal_get_eom_err_cnt(struct ufs_vs_handle *handle, u32 lane_loop)
+{
+	u32 val;
+
+	val = (u32)(pma_readl(handle,
+			      PHY_PMA_TRSV_ADDR(0xCAC, lane_loop)) << 24);
+	val += (u32)(pma_readl(handle,
+			      PHY_PMA_TRSV_ADDR(0xCB0, lane_loop)) << 16);
+	val += (u32)(pma_readl(handle,
+			       PHY_PMA_TRSV_ADDR(0xCB4, lane_loop)) << 8);
+	val += (u32)(pma_readl(handle,
+			       PHY_PMA_TRSV_ADDR(0xCB8, lane_loop)));
+	return val;
+}
+
+static enum ufs_cal_errno
+ufs_cal_sweep_get_eom_data(struct ufs_vs_handle *handle, u32 *cnt,
+			   struct ufs_cal_param *p, u32 lane, u32 repeat)
+{
+	u32 phase, vref;
+	u32 errors;
+	struct ufs_eom_result_s *data = p->eom[lane];
+	u32 retries = 100 * 1000;	/* 100ms */
+	u32 val;
+
+	for (phase = 0; phase < EOM_PH_SEL_MAX; phase++) {
+		pma_writel(handle, phase << 1,
+			   PHY_PMA_TRSV_ADDR(0x91C, lane));
+
+		for (vref = 0; vref < EOM_DEF_VREF_MAX; vref++) {
+			pma_writel(handle, 0x18,
+				   PHY_PMA_TRSV_ADDR(0xB84, lane));
+			pma_writel(handle, vref,
+				   PHY_PMA_TRSV_ADDR(0xB9C, lane));
+			pma_writel(handle, 0x19,
+				   PHY_PMA_TRSV_ADDR(0xB84, lane));
+
+			do {
+				val = pma_readl(handle,
+						PHY_PMA_TRSV_ADDR(0xC60, lane));
+				if (val & 0x1)
+					break;
+#if defined(__UFS_CAL_FW__)
+			} while (1);
+#else
+				/* expecting a multiple of 10us */
+				if (handle->udelay)
+					handle->udelay(10);
+			} while (retries--);
+#endif
+			errors = ufs_cal_get_eom_err_cnt(handle, lane);
+
+			if (handle->udelay)
+				handle->udelay(1);
+
+			data[*cnt].v_phase =
+					phase + (repeat * EOM_PH_SEL_MAX);
+			data[*cnt].v_vref = vref;
+			data[*cnt].v_err = errors;
+			(*cnt)++;
+		}
+	}
+
+	return UFS_CAL_NO_ERROR;
+}
+
 enum ufs_cal_errno ufs_cal_eom(struct ufs_cal_param *p)
 {
-	return UFS_CAL_NO_ERROR;
+	u32 repeat;
+	u32 lane;
+	u32 i;
+	u32 cnt;
+	struct ufs_vs_handle *handle = p->handle;
+	u32 num_of_active_rx = p->available_lane;
+	enum ufs_cal_errno res = UFS_CAL_NO_ERROR;
+
+	ufs_cal_eom_prepare(p);
+
+	repeat = (p->max_gear <= GEAR_MAX) ? ufs_s_eom_repeat[p->pmd->gear] : 0;
+	if (repeat == 0) {
+		res = UFS_CAL_ERROR;
+		goto end;
+	} else {
+		for (i = GEAR_1 ; i < GEAR_MAX ; i++) {
+			if (repeat > EOM_RTY_MAX) {
+				res = UFS_CAL_INV_CONF;
+				goto end;
+			}
+		}
+	}
+
+	for (lane = 0; lane < num_of_active_rx; lane++) {
+		cnt = 0;
+		for (i = 0; i < repeat; i++) {
+			res = ufs_cal_sweep_get_eom_data(handle,
+							 &cnt, p, lane, i);
+			if (res)
+				goto end;
+		}
+	}
+end:
+	return res;
 }
 
 enum ufs_cal_errno ufs_cal_init(struct ufs_cal_param *p, int idx)
