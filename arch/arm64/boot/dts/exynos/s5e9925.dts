@@ -5207,15 +5207,11 @@
 		memory-region = <0x99>;
 		flags = <0x1e>;
 		g3d_cmu_cal_id = <0xb04000d>;
-		min_freq = <0x49f98>;
-		max_freq = <0x13ed90>;
 		samsung,imgloader-s2mpu-support;
 		dma-coherent;
 		power-domains = <0x9a>;
-		mif_min_lock = "421000 404000:1352000 500000:1716000 807000:2288000 903000:2535000 999000:2730000 1095000:3172000";
-		mif_cl_boost_min_lock = "421000 404000:1014000 605000:1352000 807000:1539000 903000:1716000 999000:2028000";
-		mo_scenario = "default 404000:g3d_performance";
-		llc_ways = "0 605000:16";
+		mo_scenario = "default 1402000:g3d_performance";
+		llc_ways = "0 1402000:16";
 		gpu_power_coeff = <0x271>;
 		ect-coeff-index = <0x03>;
 		gpu_tmu = <0x9b>;
@@ -6552,15 +6548,15 @@
 			cal-id = <0xb040002>;
 			dm-type = <0x00>;
 			dss-type = <0x00>;
-			max-freq = <0x1bd500>;
-			min-freq = <0x61a80>;
-			pm_qos-booting = <0x1a5e00>;
+			max-freq = <2112000>;
+			min-freq = <400000>;
+			pm_qos-booting = <2112000>;
 			fast-switch;
 			thread-run-on = "0-5";
 			#cooling-cells = <0x02>;
 			ect-coeff-index = <0x02>;
 			tz-cooling-name = "LITTLE";
-			freq-table = <0x61a80 0x8ca00 0xa4100 0xbb800 0xd2f00 0xea600 0x101d00 0x119400 0x130b00 0x148200 0x15f900 0x177000 0x18e700 0x1a5e00 0x1bd500>;
+			freq-table = <400000 576000 768000 960000 152000 1344000 1536000 1728000 1824000 1920000 2112000 2304000 2400000 2515000>;
 			phandle = <0x11e>;
 
 			dm-constraints {
@@ -6573,14 +6569,14 @@
 			cal-id = <0xb040003>;
 			dm-type = <0x01>;
 			dss-type = <0x01>;
-			max-freq = <0x266038>;
-			min-freq = <0x8ca00>;
+			max-freq = <2707000>;
+			min-freq = <576000>;
 			fast-switch;
 			thread-run-on = "0-5";
 			#cooling-cells = <0x02>;
 			ect-coeff-index = <0x01>;
 			tz-cooling-name = "MID";
-			freq-table = <0x8ca00 0xa4100 0xbb800 0xd2f00 0xea600 0x101d00 0x119400 0x130b00 0x148200 0x15f900 0x177000 0x18e700 0x1a5e00 0x1bd500 0x1d4c00 0x1ec300 0x203a00 0x21b100 0x232800 0x249f00 0x266038>;
+			freq-table = <160000 267000 400000 576000 768000 960000 1152000 1344000 1536000 1728000 1920000 2112000 2304000 2400000 2515000 2611000 2707000 2803000 2900000>;
 			phandle = <0x119>;
 
 			dm-constraints {
@@ -6593,15 +6589,15 @@
 			cal-id = <0xb040004>;
 			dm-type = <0x02>;
 			dss-type = <0x02>;
-			max-freq = <0x2ac538>;
-			min-freq = <0x8ca00>;
+			max-freq = <3016000>;
+			min-freq = <768000>;
 			fast-switch;
 			thread-run-on = "0-5";
-			pm_qos-booting = <0x27d738>;
+			pm_qos-booting = <3016000>;
 			#cooling-cells = <0x02>;
 			ect-coeff-index = <0x00>;
 			tz-cooling-name = "BIG";
-			freq-table = <0x8ca00 0xa4100 0xbb800 0xd2f00 0xea600 0x101d00 0x119400 0x130b00 0x148200 0x15f900 0x177000 0x18e700 0x1a5e00 0x1bd500 0x1d4c00 0x1ec300 0x203a00 0x21b100 0x232800 0x249f00 0x266038 0x27d738 0x294e38 0x2ac538>;
+			freq-table = <160000 267000 400000 576000 768000 960000 1152000 1344000 1536000 1728000 1920000 2112000 2304000 2400000 2515000 2611000 2707000 2803000 2900000 3016000>;
 			phandle = <0x118>;
 
 			dm-constraints {
@@ -6618,7 +6614,10 @@
 			master-cal-id = <0xb040002>;
 			slave-cal-id = <0xb040006>;
 			multi-table;
-			table = <0x61a80 0x3a980 0x8ca00 0x5dc00 0xa4100 0x69780 0xbb800 0x80e80 0xd2f00 0x8ca00 0xea600 0x98580 0x101d00 0xafc80 0x119400 0xbb800 0x130b00 0xc7380 0x148200 0xdea80 0x15f900 0xea600 0x177000 0xf6180 0x18e700 0x10d880 0x1a5e00 0x119400 0x1bd500 0x1bd500>;
+			table = <400000 240000 576000 384000 672000 432000 768000 528000
+         864000 576000 960000 624000 1056000 720000 1152000 768000
+         1248000 816000 1344000 912000 1440000 960000 1536000 1008000
+         1632000 1096000 1728000 1152000 1824000 1824000 1920000 1824000 2112000 1824000>;
 			phandle = <0xcd>;
 		};
 
@@ -6628,7 +6627,10 @@
 			master-cal-id = <0xb040002>;
 			slave-cal-id = <0xb040006>;
 			multi-table;
-			table = <0x61a80 0x30d40 0x8ca00 0x46500 0xa4100 0x52080 0xbb800 0x5dc00 0xd2f00 0x69780 0xea600 0x75300 0x101d00 0x80e80 0x119400 0x8ca00 0x130b00 0x98580 0x148200 0xa4100 0x15f900 0xafc80 0x177000 0xbb800 0x18e700 0x10d880 0x1a5e00 0x119400 0x1bd500 0x124f80>;
+			table = <400000 200000 576000 288000 672000 336000 768000 384000
+         864000 432000 960000 480000 1056000 528000 1152000 576000
+         1248000 624000 1344000 672000 1440000 720000 1536000 768000
+         1632000 866000 1728000 1152000 1824000 1200000 1920000 1200000 2112000 1200000>;
 			phandle = <0xce>;
 		};
 
@@ -6638,7 +6640,12 @@
 			master-cal-id = <0xb040003>;
 			slave-cal-id = <0xb040006>;
 			multi-table;
-			table = <0x8ca00 0x412f8 0xa4100 0x69780 0xbb800 0x80e80 0xd2f00 0x8ca00 0xea600 0x98580 0x101d00 0xafc80 0x119400 0xbb800 0x130b00 0xc7380 0x148200 0xd2f00 0x15f900 0xea600 0x177000 0xf6180 0x18e700 0x10d880 0x1a5e00 0x119400 0x1bd500 0x124f80 0x1d4c00 0x130b00 0x1ec300 0x148200 0x203a00 0x153d80 0x21b100 0x15f900 0x232800 0x177000 0x249f00 0x182b80 0x266038 0x1a5e00>;
+			table = <576000 267000 672000 432000 768000 528000 864000 576000
+         960000 624000 1056000 720000 1152000 768000 1248000 816000
+         1344000 864000 1440000 960000 1536000 1008000 1632000 1096000
+         1728000 1152000 1824000 1200000 1920000 1248000 2020000 1344000
+         2130000 1392000 2232000 1440000 2316000 1536000 2400000 1584000
+         2515000 1728000 2611000 1728000 2707000 1728000>;
 			phandle = <0xd0>;
 		};
 
@@ -6648,9 +6655,32 @@
 			master-cal-id = <0xb040003>;
 			slave-cal-id = <0xb040006>;
 			multi-table;
-			table = <0x8ca00 0x46500 0xa4100 0x52080 0xbb800 0x5dc00 0xd2f00 0x69780 0xea600 0x75300 0x101d00 0x80e80 0x119400 0x8ca00 0x130b00 0x98580 0x148200 0xa4100 0x15f900 0xafc80 0x177000 0xbb800 0x18e700 0xc7380 0x1a5e00 0xd2f00 0x1bd500 0x124f80 0x1d4c00 0x130b00 0x1ec300 0x148200 0x203a00 0x153d80 0x21b100 0x15f900 0x232800 0x177000 0x249f00 0x182b80 0x266038 0x18e700>;
-			phandle = <0xd1>;
-		};
+			table = <
+        576000  288000
+        672000  336000
+        768000  384000
+        864000  432000
+        960000  480000
+        1056000 528000
+        1152000 576000
+        1248000 624000
+        1344000 672000
+        1440000 720000
+        1536000 768000
+        1632000 816000
+        1728000 864000
+        1824000 902000
+        1920000 960000
+        2016000 1014000
+        2112000 1068000
+        2208000 1122000
+        2304000 1176000
+        2400000 1228800
+        2515000 1286400
+        2560000 1326000
+    >;
+    phandle = <0xd1>;
+};
 
 		dm-table@0002 {
 			const-type = <0x00>;
@@ -6658,9 +6688,36 @@
 			master-cal-id = <0xb040004>;
 			slave-cal-id = <0xb040006>;
 			multi-table;
-			table = <0x8ca00 0x412f8 0xa4100 0x69780 0xbb800 0x80e80 0xd2f00 0x8ca00 0xea600 0x98580 0x101d00 0xafc80 0x119400 0xbb800 0x130b00 0xc7380 0x148200 0xdea80 0x15f900 0xea600 0x177000 0xf6180 0x18e700 0x10d880 0x1a5e00 0x119400 0x1bd500 0x124f80 0x1d4c00 0x130b00 0x1ec300 0x148200 0x203a00 0x153d80 0x21b100 0x15f900 0x232800 0x177000 0x249f00 0x182b80 0x266038 0x1a5e00 0x27d738 0x1a5e00 0x294e38 0x1a5e00 0x2ac538 0x1a5e00>;
-			phandle = <0xd3>;
-		};
+			table = <
+        576000  267000
+        672000  432000
+        768000  528000
+        864000  576000
+        960000  624000
+        1056000 720000
+        1152000 768000
+        1248000 816000
+        1344000 912000
+        1440000 960000
+        1536000 1008000
+        1632000 1104000
+        1728000 1152000
+        1824000 1200000
+        1920000 1248000
+        2016000 1296000
+        2112000 1344000
+        2208000 1440000
+        2304000 1536000
+        2400000 1608000
+        2515000 1750000
+        2614000 1804800
+        2707000 1804800
+        2803000 1804800
+        2900000 1804800
+        3016000 1804800
+    >;
+    phandle = <0xd3>;
+};
 
 		dm-table@0012 {
 			const-type = <0x00>;
@@ -6668,9 +6725,37 @@
 			master-cal-id = <0xb040004>;
 			slave-cal-id = <0xb040006>;
 			multi-table;
-			table = <0x8ca00 0x46500 0xa4100 0x52080 0xbb800 0x5dc00 0xd2f00 0x69780 0xea600 0x75300 0x101d00 0x80e80 0x119400 0x8ca00 0x130b00 0x98580 0x148200 0xa4100 0x15f900 0xafc80 0x177000 0xbb800 0x18e700 0xc7380 0x1a5e00 0xd2f00 0x1bd500 0x124f80 0x1d4c00 0x130b00 0x1ec300 0x148200 0x203a00 0x153d80 0x21b100 0x15f900 0x232800 0x177000 0x249f00 0x182b80 0x266038 0x18e700 0x27d738 0x18e700 0x294e38 0x18e700 0x2ac538 0x18e700>;
-			phandle = <0xd4>;
-		};
+			table = <
+        576000  288000
+        672000  336000
+        768000  384000
+        864000  432000
+        960000  480000
+        1056000 528000
+        1152000 576000
+        1248000 624000
+        1344000 672000
+        1440000 720000
+        1536000 768000
+        1632000 816000
+        1728000 864000
+        1824000 902000
+        1920000 960000
+        2016000 1014000
+        2112000 1068000
+        2208000 1122000
+        2304000 1176000
+        2400000 1228800
+        2515000 1286400
+        2560000 1326000
+        2614000 1326000
+        2707000 1326000
+        2803000 1326000
+        2900000 1326000
+        3016000 1326000
+    >;
+    phandle = <0xd4>;
+};
 
 		dm-table@0003 {
 			const-type = <0x00>;
@@ -6678,9 +6763,27 @@
 			master-cal-id = <0xb040002>;
 			slave-cal-id = <0xb040000>;
 			dynamic-disable;
-			table = <0x61a80 0x00 0x8ca00 0x00 0xa4100 0x00 0xbb800 0x00 0xd2f00 0x00 0xea600 0x00 0x101d00 0x00 0x119400 0x00 0x130b00 0x00 0x148200 0x00 0x15f900 0x00 0x177000 0x00 0x18e700 0x00 0x1a5e00 0x00 0x1bd500 0x00>;
-			phandle = <0xcf>;
-		};
+			table = <
+        400000  0
+        576000  0
+        672000  0
+        768000  0
+        864000  0
+        960000  0
+        1056000 0
+        1152000 0
+        1248000 0
+        1344000 0
+        1440000 0
+        1536000 0
+        1632000 0
+        1728000 0
+        1824000 0
+        1920000 0
+        2112000 0
+    >;
+    phandle = <0xcf>;
+};
 
 		dm-table@0004 {
 			const-type = <0x00>;
@@ -6688,9 +6791,32 @@
 			master-cal-id = <0xb040003>;
 			slave-cal-id = <0xb040000>;
 			dynamic-disable;
-			table = <0x8ca00 0x00 0xa4100 0x00 0xbb800 0x00 0xd2f00 0x00 0xea600 0x00 0x101d00 0x00 0x119400 0x00 0x130b00 0x00 0x148200 0x00 0x15f900 0x00 0x177000 0x00 0x18e700 0x00 0x1a5e00 0x00 0x1bd500 0x00 0x1d4c00 0x00 0x1ec300 0x22e980 0x203a00 0x22e980 0x21b100 0x22e980 0x232800 0x26ae58 0x249f00 0x29a810 0x266038 0x3066a0>;
-			phandle = <0xd2>;
-		};
+			table = <
+        576000  0
+        672000  0
+        768000  0
+        864000  0
+        960000  0
+        1056000 0
+        1152000 0
+        1248000 0
+        1344000 0
+        1440000 0
+        1536000 0
+        1632000 0
+        1728000 0
+        1824000 0
+        1920000 0
+        2016000 2288000
+        2112000 2288000
+        2208000 2288000
+        2304000 2535000
+        2400000 2730000
+        2515000 3172000
+        2611000 3172000
+    >;
+    phandle = <0xd2>;
+};
 
 		dm-table@0005 {
 			const-type = <0x00>;
@@ -6698,9 +6824,36 @@
 			master-cal-id = <0xb040004>;
 			slave-cal-id = <0xb040000>;
 			dynamic-disable;
-			table = <0x8ca00 0x00 0xa4100 0x00 0xbb800 0x00 0xd2f00 0x00 0xea600 0x00 0x101d00 0x00 0x119400 0x00 0x130b00 0x00 0x148200 0x00 0x15f900 0x00 0x177000 0x00 0x18e700 0x00 0x1a5e00 0x00 0x1bd500 0x00 0x1d4c00 0x00 0x1ec300 0x22e980 0x203a00 0x22e980 0x21b100 0x22e980 0x232800 0x26ae58 0x249f00 0x26ae58 0x266038 0x29a810 0x27d738 0x3066a0 0x294e38 0x3066a0 0x2ac538 0x3066a0>;
-			phandle = <0xd5>;
-		};
+			table = <
+        576000  0
+        672000  0
+        768000  0
+        864000  0
+        960000  0
+        1056000 0
+        1152000 0
+        1248000 0
+        1344000 0
+        1440000 0
+        1536000 0
+        1632000 0
+        1728000 0
+        1824000 0
+        1920000 0
+        2016000 2288000
+        2112000 2288000
+        2208000 2288000
+        2304000 2535000
+        2400000 2535000
+        2515000 2730000
+        2614000 3172000
+        2707000 3172000
+        2803000 3172000
+        2900000 3172000
+        3016000 3172000
+    >;
+    phandle = <0xd5>;
+};
 
 		dm-table@0006 {
 			const-type = <0x00>;
@@ -6717,10 +6870,30 @@
 		cal-id = <0xb040006>;
 		dm-type = <0x06>;
 		dss-type = <0x0b>;
-		max-freq = <0x1bd500>;
-		min-freq = <0x17700>;
+		max-freq = <2208000>;
+		min-freq = <96000>;
 		init-with-dt = <0x01>;
-		table = <0x17700 0x23280 0x2ee00 0x3a980 0x46500 0x52080 0x5dc00 0x69780 0x75300 0x80e80 0x8ca00 0x98580 0xa4100 0xafc80 0xbb800 0xc7380 0xd2f00 0xdea80 0xea600 0xf6180 0x101d00 0x10d880 0x119400 0x124f80 0x130b00 0x13c680 0x148200 0x153d80 0x15f900 0x16b480 0x177000 0x182b80 0x18e700 0x1a5e00 0x1bd500>;
+		table = <
+        96000   144000
+        192000  240000
+        288000  336000
+        384000  432000
+        480000  528000
+        576000  624000
+        672000  720000
+        768000  816000
+        864000  912000
+        960000  1008000
+        1056000 1104000
+        1152000 1200000
+        1248000 1296000
+        1344000 1392000
+        1440000 1488000
+        1536000 1584000
+        1632000 1728000
+        1824000 2016000
+        2112000 2208000
+    >;
 
 		request_domain0 {
 			sibling-cpus = "0-3";
@@ -6771,7 +6944,6 @@
 				device_type = "ufc-domain";
 				shared-cpus = "0-3";
 				table-col-idx = <0x03>;
-				hold-freq = <0x1a5e00>;
 			};
 
 			domain@1 {
@@ -6795,14 +6967,52 @@
 			max-limit {
 				device_type = "ufc-table";
 				ctrl-type = <0x02>;
-				table = <0x2ac538 0x2ac538 0x266038 0x1bd500 0x00 0x00 0x294e38 0x294e38 0x266038 0x1bd500 0x00 0x00 0x27d738 0x27d738 0x266038 0x177000 0x00 0x00 0x266038 0x266038 0x266038 0x177000 0x00 0x00 0x249f00 0x249f00 0x249f00 0x177000 0x00 0x00 0x232800 0x232800 0x232800 0x177000 0x00 0x00 0x21b100 0x21b100 0x21b100 0x177000 0x00 0x00 0x203a00 0x203a00 0x203a00 0x177000 0x00 0x00 0x1ec300 0x1ec300 0x1ec300 0x177000 0x00 0x00 0x1d4c00 0x1d4c00 0x1d4c00 0x148200 0x00 0x00 0x1bd500 0x1bd500 0x1bd500 0x148200 0x00 0x00 0x1a5e00 0x1a5e00 0x1a5e00 0x148200 0x00 0x00 0x18e700 0x18e700 0x18e700 0x148200 0x00 0x00 0x177000 0x177000 0x177000 0x148200 0x00 0x00 0x15f900 0x15f900 0x15f900 0x148200 0x00 0x00 0x148200 0x148200 0x148200 0x148200 0x00 0x00 0x130b00 0x130b00 0x130b00 0x148200 0x00 0x00 0x119400 0x119400 0x119400 0x148200 0x00 0x00 0x101d00 0x101d00 0x101d00 0x148200 0x00 0x00 0xea600 0xea600 0xea600 0x148200 0x00 0x00 0xd2f00 0xd2f00 0xd2f00 0x148200 0x00 0x00 0xbb800 0xbb800 0xbb800 0x148200 0x00 0x00 0xa4100 0xa4100 0xa4100 0x148200 0x00 0x00 0x8ca00 0x8ca00 0x8ca00 0x148200 0x00 0x00>;
-			};
+				table = <
+
+        3016000 3016000 2707000 2112000 0 0
+        2900000 2900000 2707000 2112000 0 0
+        2803000 2803000 2707000 2112000 0 0
+        2707000 2707000 2707000 2112000 0 0
+        2611000 2611000 2611000 2112000 0 0
+        2515000 2515000 2515000 2112000 0 0
+        2400000 2400000 2400000 2112000 0 0
+        2304000 2304000 2304000 2112000 0 0
+        2112000 2112000 2112000 2112000 0 0
+        1920000 1920000 1920000 2112000 0 0
+        1728000 1728000 1728000 2112000 0 0
+        1536000 1536000 1536000 2112000 0 0
+        1344000  1344000  1344000  2112000 0 0
+        1152000  1152000  1152000  1920000 0 0
+        960000  960000  960000  1728000 0 0
+        768000  768000  768000  1536000 0 0
+        576000  576000  576000  1344000 0 0
+    >;
+};
 
 			min-limit {
 				device_type = "ufc-table";
 				ctrl-type = <0x00>;
-				table = <0x2ac538 0x2ac538 0x266038 0x1a5e00 0x02 0x01 0x294e38 0x294e38 0x266038 0x1a5e00 0x02 0x01 0x27d738 0x27d738 0x266038 0x1a5e00 0x02 0x01 0x266038 0x266038 0x266038 0x1a5e00 0x02 0x01 0x249f00 0x249f00 0x249f00 0x119400 0x02 0x01 0x232800 0x232800 0x232800 0x119400 0x02 0x01 0x21b100 0x21b100 0x21b100 0x119400 0x02 0x01 0x203a00 0x203a00 0x203a00 0x119400 0x02 0x01 0x1ec300 0x1ec300 0x1ec300 0x119400 0x02 0x01 0x1d4c00 0x1d4c00 0x1d4c00 0x119400 0x02 0x01 0x1bd500 0x1bd500 0x1bd500 0x119400 0x01 0x01 0x1a5e00 0x1a5e00 0x1a5e00 0xea600 0x01 0x01 0x18e700 0x18e700 0x18e700 0xea600 0x01 0x01 0x177000 0x177000 0x177000 0xea600 0x01 0x01 0x15f900 0x15f900 0x15f900 0xea600 0x01 0x01 0x148200 0x148200 0x148200 0xea600 0x01 0x01 0x130b00 0x130b00 0x130b00 0xea600 0x01 0x01 0x119400 0x119400 0x119400 0xea600 0x01 0x01 0x101d00 0x101d00 0x101d00 0xea600 0x01 0x01 0xea600 0xea600 0xea600 0xbb800 0x01 0x00 0xd2f00 0xd2f00 0xd2f00 0xbb800 0x01 0x00 0xbb800 0xbb800 0xbb800 0xbb800 0x00 0x00 0xa4100 0xa4100 0xa4100 0xbb800 0x00 0x00 0x8ca00 0x8ca00 0x8ca00 0xbb800 0x00 0x00>;
-			};
+				table = <
+				
+        3016000 3016000 2707000 2112000 2 1
+        2900000 2900000 2707000 2112000 2 1
+        2803000 2803000 2707000 2112000 2 1
+        2707000 2707000 2707000 2112000 1 1
+        2611000 2611000 2707000 2112000  1 1
+        2515000 2515000 2611000 2112000  1 1
+        2400000 2400000 2515000 2112000  1 1
+        2304000 2304000 2400000 2112000  1 1
+        2112000 2112000 2304000 2112000  1 1
+        1920000 1920000 2112000 2112000  1 1
+        1728000 1728000 1920000 1920000  1 1
+        1536000 1536000 1536000 1728000  1 1
+        1344000 1344000 1344000 1536000  1 0
+        1152000 1152000 1152000 1344000  1 0
+        960000  960000  960000  1152000  0 0
+        768000  768000  768000  960000  0 0
+        576000  576000  576000  768000  0 0
+    >;
+};
 		};
 	};
 
@@ -6825,7 +7035,6 @@
 			s2mps-afm-offset = <0x74>;
 			htu-base-addr = <0x1d080000>;
 			down-step = <0x01>;
-			max-freq-wo-afm = <0x1e8c50>;
 			release-duration = <0x0f>;
 			phandle = <0x2dc>;
 		};
@@ -6839,7 +7048,6 @@
 			s2mps-afm-offset = <0x80>;
 			htu-base-addr = <0x1d090000>;
 			down-step = <0x01>;
-			max-freq-wo-afm = <0x1e8c50>;
 			release-duration = <0x0f>;
 			phandle = <0x2dd>;
 		};
@@ -6853,7 +7061,6 @@
 			s2mps-afm-offset = <0x80>;
 			htu-base-addr = <0x1d0a0000>;
 			down-step = <0x01>;
-			max-freq-wo-afm = <0x1e8c50>;
 			release-duration = <0x0f>;
 			phandle = <0x2de>;
 		};
@@ -8812,57 +9019,57 @@
 			trips {
 
 				big-cold {
-					temperature = <0x4e20>;
-					hysteresis = <0x1388>;
+					temperature = <108000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x308>;
 				};
 
 				big-switch-on {
-					temperature = <0xea60>;
-					hysteresis = <0x7d0>;
+					temperature = <110000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x309>;
 				};
 
 				big-control-temp {
-					temperature = <0x11170>;
-					hysteresis = <0x1388>;
+					temperature = <112000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x117>;
 				};
 
 				big-alert0 {
-					temperature = <0x17318>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x30a>;
 				};
 
 				big-alert1 {
-					temperature = <0x186a0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x30b>;
 				};
 
 				big-alert2 {
-					temperature = <0x19a28>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x30c>;
 				};
 
 				big-alert3 {
-					temperature = <0x1adb0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x30d>;
 				};
 
 				big-hot {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "hot";
 					phandle = <0x30e>;
 				};
@@ -8892,57 +9099,57 @@
 			trips {
 
 				mid-cold {
-					temperature = <0x4e20>;
-					hysteresis = <0x1388>;
+					temperature = <108000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x30f>;
 				};
 
 				mid-switch-on {
-					temperature = <0xea60>;
-					hysteresis = <0x7d0>;
+					temperature = <110000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x310>;
 				};
 
 				mid-control-temp {
-					temperature = <0x11170>;
-					hysteresis = <0x1388>;
+					temperature = <112000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x11b>;
 				};
 
 				mid-alert0 {
-					temperature = <0x17318>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x311>;
 				};
 
 				mid-alert1 {
-					temperature = <0x186a0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x312>;
 				};
 
 				mid-alert2 {
-					temperature = <0x19a28>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x313>;
 				};
 
 				mid-alert3 {
-					temperature = <0x1adb0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x314>;
 				};
 
 				mid-hot {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "hot";
 					phandle = <0x315>;
 				};
@@ -8972,57 +9179,57 @@
 			trips {
 
 				little-cold {
-					temperature = <0x4e20>;
-					hysteresis = <0x1388>;
+					temperature = <108000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x316>;
 				};
 
 				little-switch-on {
-					temperature = <0x128e0>;
-					hysteresis = <0x1388>;
+					temperature = <110000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x317>;
 				};
 
 				little-control-temp {
-					temperature = <0x13c68>;
-					hysteresis = <0x1388>;
+					temperature = <112000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x11d>;
 				};
 
 				little-alert0 {
-					temperature = <0x14ff0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x318>;
 				};
 
 				little-alert1 {
-					temperature = <0x16378>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x319>;
 				};
 
 				little-alert2 {
-					temperature = <0x17700>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x31a>;
 				};
 
 				little-alert3 {
-					temperature = <0x18a88>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x31b>;
 				};
 
 				little-hot {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "hot";
 					phandle = <0x31c>;
 				};
@@ -9047,57 +9254,57 @@
 			trips {
 
 				gpu-cold {
-					temperature = <0x4e20>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x31e>;
 				};
 
 				gpu-switch-on {
-					temperature = <0xfde8>;
-					hysteresis = <0x7d0>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x31f>;
 				};
 
 				gpu-control-temp {
-					temperature = <0x11170>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x11f>;
 				};
 
 				gpu-alert0 {
-					temperature = <0x17318>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x320>;
 				};
 
 				gpu-alert1 {
-					temperature = <0x186a0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x321>;
 				};
 
 				gpu-alert2 {
-					temperature = <0x19a28>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "passive";
 					phandle = <0x322>;
 				};
 
 				gpu-alert3 {
-					temperature = <0x1adb0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x323>;
 				};
 
 				gpu-hot {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "hot";
 					phandle = <0x324>;
 				};
@@ -9122,57 +9329,57 @@
 			trips {
 
 				isp-alert0 {
-					temperature = <0x4e20>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x122>;
 				};
 
 				isp-alert1 {
-					temperature = <0x17318>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x124>;
 				};
 
 				isp-alert2 {
-					temperature = <0x186a0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x125>;
 				};
 
 				isp-alert3 {
-					temperature = <0x19a28>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x126>;
 				};
 
 				isp-alert4 {
-					temperature = <0x1adb0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x127>;
 				};
 
 				isp-alert5 {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x128>;
 				};
 
 				isp-alert6 {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x129>;
 				};
 
 				isp-hot {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "hot";
 					phandle = <0x12a>;
 				};
@@ -9232,57 +9439,57 @@
 			trips {
 
 				npu-alert0 {
-					temperature = <0x4e20>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x12c>;
 				};
 
 				npu-alert1 {
-					temperature = <0x128e0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x12e>;
 				};
 
 				npu-alert2 {
-					temperature = <0x13c68>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x12f>;
 				};
 
 				npu-alert3 {
-					temperature = <0x14ff0>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x130>;
 				};
 
 				npu-alert4 {
-					temperature = <0x16378>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x131>;
 				};
 
 				npu-alert5 {
-					temperature = <0x17700>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x132>;
 				};
 
 				npu-alert6 {
-					temperature = <0x18a88>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "active";
 					phandle = <0x133>;
 				};
 
 				npu-hot {
-					temperature = <0x1c138>;
-					hysteresis = <0x1388>;
+					temperature = <114000>;
+					hysteresis = <5000>;
 					type = "hot";
 					phandle = <0x134>;
 				};
@@ -9357,55 +9564,55 @@
 		amb_tz_name = "battery";
 		default_sampling_rate = <0x3e8>;
 		high_sampling_rate = <0x64>;
-		increase_sampling_temp = <0xd6d8>;
-		decrease_sampling_temp = <0xc350>;
+		increase_sampling_temp = <80000>;
+		decrease_sampling_temp = <79000>;
 		mcinfo_threshold = <0xea60>;
 		use_mif_throttle;
 		mif_down_threshold = <0xea60>;
 		mif_up_threshold = <0xd6d8>;
-		mif_throttle_freq = <0x1a2f20>;
+		mif_throttle_freq = <3172000>;
 		use_llc_throttle;
-		llc_off_thresohld = <0x14438>;
-		llc_on_threshold = <0x13880>;
+		llc_off_thresohld = <100000>;
+		llc_on_threshold = <100000>;
 
 		tz_big {
 			tz = <0x136>;
 			hotplug_cpu_list = "7";
-			hotplug_in_threshold = <0xea60>;
-			hotplug_out_threshold = <0xfde8>;
+			hotplug_in_threshold = <100000>;
+			hotplug_out_threshold = <100000>;
 
 			trip_set {
 
 				trip_0 {
 					trigger_cond = <0x01>;
 					trip_point = <0x02>;
-					trigger_temp = <0xea60>;
-					release_temp = <0xd6d8>;
-					throttle_temp = <0x124f8>;
+					trigger_temp = <110000>;
+					release_temp = <108000>;
+					throttle_temp = <106000>;
 				};
 
 				trip_1 {
 					trigger_cond = <0x01>;
 					trip_point = <0x01>;
-					trigger_temp = <0xea60>;
-					release_temp = <0xd6d8>;
-					throttle_temp = <0x11170>;
+					trigger_temp = <112000>;
+					release_temp = <110000>;
+					throttle_temp = <109000>;
 				};
 
 				trip_2 {
 					trigger_cond = <0x00>;
 					trip_point = <0x02>;
-					trigger_temp = <0x2710>;
-					release_temp = <0x61a8>;
-					throttle_temp = <0x14c08>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <111000>;
 				};
 
 				trip_3 {
 					trigger_cond = <0x00>;
 					trip_point = <0x01>;
-					trigger_temp = <0x2710>;
-					release_temp = <0x61a8>;
-					throttle_temp = <0x13880>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 			};
 		};
@@ -9413,41 +9620,41 @@
 		tz_mid {
 			tz = <0x137>;
 			hotplug_cpu_list = "5-6";
-			hotplug_in_threshold = <0xea60>;
-			hotplug_out_threshold = <0xfde8>;
+			hotplug_in_threshold = <100000>;
+			hotplug_out_threshold = <100000>;
 
 			trip_set {
 
 				trip_0 {
 					trigger_cond = <0x01>;
 					trip_point = <0x02>;
-					trigger_temp = <0xea60>;
-					release_temp = <0xd6d8>;
-					throttle_temp = <0x124f8>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 
 				trip_1 {
 					trigger_cond = <0x01>;
 					trip_point = <0x01>;
-					trigger_temp = <0xea60>;
-					release_temp = <0xd6d8>;
-					throttle_temp = <0x11170>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 
 				trip_2 {
 					trigger_cond = <0x00>;
 					trip_point = <0x02>;
-					trigger_temp = <0x2710>;
-					release_temp = <0x61a8>;
-					throttle_temp = <0x14c08>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 
 				trip_3 {
 					trigger_cond = <0x00>;
 					trip_point = <0x01>;
-					trigger_temp = <0x2710>;
-					release_temp = <0x61a8>;
-					throttle_temp = <0x13880>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 			};
 		};
@@ -9455,25 +9662,25 @@
 		tz_lit {
 			tz = <0x138>;
 			hotplug_cpu_list = "2-3";
-			hotplug_in_threshold = <0x11170>;
-			hotplug_out_threshold = <0x124f8>;
+			hotplug_in_threshold = <100000>;
+			hotplug_out_threshold = <100000>;
 
 			trip_set {
 
 				trip_0 {
 					trigger_cond = <0x00>;
 					trip_point = <0x02>;
-					trigger_temp = <0x2710>;
-					release_temp = <0x61a8>;
-					throttle_temp = <0x14c08>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 
 				trip_1 {
 					trigger_cond = <0x00>;
 					trip_point = <0x01>;
-					trigger_temp = <0x2710>;
-					release_temp = <0x61a8>;
-					throttle_temp = <0x13880>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 			};
 		};
@@ -9486,9 +9693,9 @@
 				trip_0 {
 					trigger_cond = <0x00>;
 					trip_point = <0x01>;
-					trigger_temp = <0xea60>;
-					release_temp = <0xd6d8>;
-					throttle_temp = <0x17318>;
+					trigger_temp = <114000>;
+					release_temp = <114000>;
+					throttle_temp = <114000>;
 				};
 			};
 		};
@@ -12175,7 +12382,7 @@
 		compatible = "samsung,exynos-pd";
 		reg = <0x00 0x15862300 0x20>;
 		cal_id = <0xb138000b>;
-		cmu_id = <0x18300000>;
+		cmu_id = <0x18240000>;
 		status = "okay";
 		#power-domain-cells = <0x00>;
 		phandle = <0x13d>;
@@ -14994,7 +15201,7 @@
 		pago {
 			gov-ms = <0xc8>;
 			gov-run = <0x00>;
-			power-limit = <0x1f40 0x1f40 0x1f40 0x1f40>;
+			power-limit = <10000 10000 10000 10000>;
 			multi-volt = <0x7d0 0x41a 0x41a>;
 			batt-tz-names = "battery";
 			batt-temp-thd = <0x4e20>;
@@ -15012,35 +15219,35 @@
 
 				trigger {
 					gpu-fps = <0x50>;
-					gpu-freq = <0xdbba0>;
-					gpu-temp = <0x11170>;
-					cpu-temp = <0x11170 0x11170 0x11170>;
+					gpu-freq = <1306000>;
+					gpu-temp = <114000>;
+					cpu-temp = <114000 114000 114000>;
 				};
 
 				release {
 					gpu-fps = <0x14>;
-					gpu-temp = <0xd6d8>;
-					cpu-temp = <0xd6d8 0xd6d8 0xd6d8>;
+					gpu-temp = <114000>;
+					cpu-temp = <114000 114000 114000>;
 				};
 			};
 
 			type1 {
 				boost-cnt = <0x00>;
 				boost-step = <0x00>;
-				cpu-maxlock = <0x119400 0x177000 0x177000>;
+				cpu-maxlock = <2112000 2707000 3016000>;
 				fps-drop = <0x0a>;
 
 				trigger {
 					gpu-fps = <0x1e>;
-					gpu-freq = <0xdbba0>;
-					gpu-temp = <0xea60>;
-					cpu-temp = <0xea60 0xea60 0xea60>;
+					gpu-freq = <1306000>;
+					gpu-temp = <114000>;
+					cpu-temp = <114000 114000 114000>;
 				};
 
 				release {
 					gpu-fps = <0x0a>;
-					gpu-temp = <0xd6d8>;
-					cpu-temp = <0xd6d8 0xd6d8 0xd6d8>;
+					gpu-temp = <114000>;
+					cpu-temp = <114000 114000 114000>;
 				};
 			};
 		};
@@ -15100,8 +15307,8 @@
 			down-step = <0x05>;
 			default-step = <0x0a>;
 			pm-qos-min-freq = <0x00>;
-			pm-qos-max-freq = <0x148200>;
-			hp-minlock-low-limit = <0x1e8c50>;
+			pm-qos-max-freq = <2112000>;
+			hp-minlock-low-limit = <2112000>;
 			lp-minlock-low-limit = <0x00>;
 			pid-util-max = <0x320>;
 			pid-util-min = <0x258>;
@@ -15116,9 +15323,7 @@
 			up-step = <0x02>;
 			down-step = <0x05>;
 			default-step = <0x0a>;
-			pm-qos-max-freq = "\0#(";
-			hp-minlock-low-limit = <0x1e26c0>;
-			lp-minlock-low-limit = <0x00>;
+			pm-qos-max-freq = <2707000>;
 			pid-util-max = <0x320>;
 			pid-util-min = <0x258>;
 			pid-util-lpmax = <0x384>;
@@ -15132,9 +15337,7 @@
 			up-step = <0x02>;
 			down-step = <0x05>;
 			default-step = <0x0a>;
-			pm-qos-max-freq = "\0#(";
-			hp-minlock-low-limit = <0x1e26c0>;
-			lp-minlock-low-limit = <0x00>;
+			pm-qos-max-freq = <3016000>;
 			pid-util-max = <0x384>;
 			pid-util-min = <0x2bc>;
 			pid-util-lpmax = <0x3b6>;
@@ -15149,8 +15352,8 @@
 			down-step = <0x05>;
 			default-step = <0x02>;
 			pm-qos-max-class = <0x1b>;
-			pm-qos-max-freq = <0xe7b08>;
-			pm-qos-min-freq = <0x00>;
+			pm-qos-max-freq = <1402000>;
+			pm-qos-min-freq = <80000>;
 			q0-empty-pct-thr = <0x00>;
 			q1-empty-pct-thr = <0x00>;
 			active-pct-thr = <0x64>;
@@ -15165,8 +15368,8 @@
 			default-step = <0x0a>;
 			pm-qos-max-class = <0x0f>;
 			freq-stats0-mode-min-freq = <0x1a2f20>;
-			pm-qos-max-freq = <0x3066a0>;
-			pm-qos-min-freq = <0xce4c8>;
+			pm-qos-max-freq = <3172000>;
+			pm-qos-min-freq = <421000>;
 			freq-stats0-thr = <0x1194>;
 			freq-stats0-updown-delta-pct-thr = <0xc8>;
 			hp-minlock-low-limit = <0x29a810>;
@@ -16311,7 +16514,7 @@
 	timer {
 		compatible = "arm,armv8-timer";
 		interrupts = <0x01 0x0d 0xff08 0x00 0x01 0x0e 0xff08 0x00 0x01 0x0b 0xff08 0x00 0x01 0x0a 0xff08 0x00>;
-		clock-frequency = <0x186a000>;
+		clock-frequency = <25600000>;
 		use-clocksource-only;
 	};
 
