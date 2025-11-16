@@ -49,7 +49,9 @@ static ssize_t fscontext_read(struct file *file,
 {
 	struct fs_context *fc = file->private_data;
 	ssize_t err;
-	const char *p __free(kfree) = NULL, *message;
+ 	char *p = NULL;
+        char *message = NULL;
+
 	bool need_free;
 	int n;
 

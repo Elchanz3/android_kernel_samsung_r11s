@@ -9,6 +9,8 @@
 #include <linux/prefetch.h>
 #include <linux/cpuhotplug.h>
 #include <trace/events/erofs.h>
+#include <linux/minmax.h>
+
 
 /*
  * since pclustersize is variable for big pcluster feature, introduce slab

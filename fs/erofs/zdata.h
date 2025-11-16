@@ -10,6 +10,8 @@
 #include <linux/kthread.h>
 #include "internal.h"
 #include "zpvec.h"
+#include <linux/minmax.h>
+
 
 #define Z_EROFS_PCLUSTER_MAX_PAGES	(Z_EROFS_PCLUSTER_MAX_SIZE / PAGE_SIZE)
 #define Z_EROFS_NR_INLINE_PAGEVECS      3

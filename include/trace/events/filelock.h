@@ -27,8 +27,7 @@
 		{ FL_SLEEP,		"FL_SLEEP" },			\
 		{ FL_DOWNGRADE_PENDING,	"FL_DOWNGRADE_PENDING" },	\
 		{ FL_UNLOCK_PENDING,	"FL_UNLOCK_PENDING" },		\
-		{ FL_OFDLCK,		"FL_OFDLCK" },			\
-		{ FL_RECLAIM,		"FL_RECLAIM"})
+		{ FL_OFDLCK,		"FL_OFDLCK" })
 
 #define show_fl_type(val)				\
 	__print_symbolic(val,				\
@@ -96,7 +95,6 @@ DECLARE_EVENT_CLASS(filelock_lock,
 	TP_printk("fl=%p dev=0x%x:0x%x ino=0x%lx fl_blocker=%p fl_owner=%p fl_pid=%u fl_flags=%s fl_type=%s fl_start=%lld fl_end=%lld ret=%d",
 		__entry->fl, MAJOR(__entry->s_dev), MINOR(__entry->s_dev),
 		__entry->i_ino, __entry->fl_blocker, __entry->fl_owner,
-		__entry->fl_pid, show_fl_flags(__entry->fl_flags),
 		show_fl_type(__entry->fl_type),
 		__entry->fl_start, __entry->fl_end, __entry->ret)
 );
@@ -149,7 +147,6 @@ DECLARE_EVENT_CLASS(filelock_lease,
 	TP_printk("fl=%p dev=0x%x:0x%x ino=0x%lx fl_blocker=%p fl_owner=%p fl_flags=%s fl_type=%s fl_break_time=%lu fl_downgrade_time=%lu",
 		__entry->fl, MAJOR(__entry->s_dev), MINOR(__entry->s_dev),
 		__entry->i_ino, __entry->fl_blocker, __entry->fl_owner,
-		show_fl_flags(__entry->fl_flags),
 		show_fl_type(__entry->fl_type),
 		__entry->fl_break_time, __entry->fl_downgrade_time)
 );
@@ -200,7 +197,6 @@ TRACE_EVENT(generic_add_lease,
 		MAJOR(__entry->s_dev), MINOR(__entry->s_dev),
 		__entry->i_ino, __entry->wcount, __entry->rcount,
 		__entry->icount, __entry->fl_owner,
-		show_fl_flags(__entry->fl_flags),
 		show_fl_type(__entry->fl_type))
 );
 
@@ -232,10 +228,8 @@ TRACE_EVENT(leases_conflict,
 	TP_printk("conflict %d: lease=%p fl_flags=%s fl_type=%s; breaker=%p fl_flags=%s fl_type=%s",
 		__entry->conflict,
 		__entry->lease,
-		show_fl_flags(__entry->l_fl_flags),
 		show_fl_type(__entry->l_fl_type),
 		__entry->breaker,
-		show_fl_flags(__entry->b_fl_flags),
 		show_fl_type(__entry->b_fl_type))
 );
 

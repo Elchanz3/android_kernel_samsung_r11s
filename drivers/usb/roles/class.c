@@ -336,13 +336,10 @@ usb_role_switch_register(struct device *parent,
 	dev_set_name(&sw->dev, "%s-role-switch",
 		     desc->name ? desc->name : dev_name(parent));
 
-	sw->registered = true;
-
 	ret = device_register(&sw->dev);
 	if (ret) {
-		sw->registered = false;
-		put_device(&sw->dev);
-		return ERR_PTR(ret);
+             put_device(&sw->dev);
+             return ERR_PTR(ret);
 	}
 
 	/* TODO: Symlinks for the host port and the device controller. */
@@ -351,12 +348,6 @@ usb_role_switch_register(struct device *parent,
 }
 EXPORT_SYMBOL_GPL(usb_role_switch_register);
 
-/**
- * usb_role_switch_unregister - Unregsiter USB Role Switch
- * @sw: USB Role Switch
- *
- * Unregister switch that was registered with usb_role_switch_register().
- */
 void usb_role_switch_unregister(struct usb_role_switch *sw)
 {
 	if (!IS_ERR_OR_NULL(sw))

@@ -2273,23 +2273,6 @@ static __latent_entropy struct task_struct *copy_process(
 		}
 	}
 
-	/*
-	 * This has to happen after we've potentially unshared the file
-	 * descriptor table (so that the pidfd doesn't leak into the child
-	 * if the fd table isn't shared).
-	 */
-	if (clone_flags & CLONE_PIDFD) {
-		/* Note that no task has been attached to @pid yet. */
-		retval = __pidfd_prepare(pid, O_RDWR | O_CLOEXEC, &pidfile);
-		if (retval < 0)
-			goto bad_fork_free_pid;
-		pidfd = retval;
-
-		retval = put_user(pidfd, args->pidfd);
-		if (retval)
-			goto bad_fork_put_pidfd;
-	}
-
 #ifdef CONFIG_BLOCK
 	p->plug = NULL;
 #endif
