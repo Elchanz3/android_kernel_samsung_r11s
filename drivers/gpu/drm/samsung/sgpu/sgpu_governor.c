@@ -21,9 +21,9 @@
 
 #endif /* CONFIG_DRM_SGPU_EXYNOS */
 
-static char *gpu_dvfs_min_threshold = "0 303000:60 404000:65 1306000:78";
-static char *gpu_dvfs_max_threshold = "75 303000:80 404000:85 605000:90 1306000:95";
-static char *gpu_dvfs_downstay_time = "32 500000:64 605000:96 1306000:160";
+static char *gpu_dvfs_min_threshold = "0 303000:60 404000:65 1306000:78 1402000:80";
+static char *gpu_dvfs_max_threshold = "75 303000:80 404000:85 605000:90 1306000:95 1402000:98";
+static char *gpu_dvfs_downstay_time = "32 500000:64 605000:96 1402000:160";
 
 /* get frequency and delay time data from string */
 unsigned int *sgpu_get_array_data(struct devfreq_dev_profile *dp, const char *buf)
@@ -808,23 +808,23 @@ int sgpu_governor_change(struct devfreq *df, char *str_governor)
 	return -ENODEV;
 }
 
-#define DVFS_TABLE_ROW_MAX			1
-#define DEFAULT_GOVERNOR			SGPU_DVFS_GOVERNOR_STATIC
+#define DVFS_TABLE_ROW_MAX			0
+#define DEFAULT_GOVERNOR			SGPU_DVFS_GOVERNOR_CONSERVATIVE
 #define DEFAULT_POLLING_MS			32
 #define DEFAULT_VALID_TIME			32
-#define DEFAULT_INITIAL_FREQ			26000
-#define DEFAULT_HIGHSPEED_FREQ			1306000
-#define DEFAULT_HIGHSPEED_LOAD			50
-#define DEFAULT_HIGHSPEED_DELAY			0
+#define DEFAULT_INITIAL_FREQ			80000
+#define DEFAULT_HIGHSPEED_FREQ			1402000
+#define DEFAULT_HIGHSPEED_LOAD			1
+#define DEFAULT_HIGHSPEED_DELAY			5
 #define DEFAULT_POWER_RATIO			100
-#define DEFAULT_CL_BOOST_FREQ			1306000
-#define DEFAULT_LOCAL_MINLOCK_FREQ		404000
-#define DEFAULT_LOCAL_MINLOCK_UTIL		0
+#define DEFAULT_CL_BOOST_FREQ			1402000
+#define DEFAULT_LOCAL_MINLOCK_FREQ		1402000
+#define DEFAULT_LOCAL_MINLOCK_UTIL		101
 #define DEFAULT_LOCAL_MINLOCK_TEMP		115
 #define DEFAULT_FINE_GRAINED_LOW_FREQ		0
-#define DEFAULT_FINE_GRAINED_HIGH_FREQ		1306000
+#define DEFAULT_FINE_GRAINED_HIGH_FREQ		1402000
 #define DEFAULT_FINE_GRAINED_STEP_UNIT		1
-#define DEFAULT_MINLOCK_LIMIT_FREQ		1306000
+#define DEFAULT_MINLOCK_LIMIT_FREQ		80000
 
 int sgpu_governor_init(struct device *dev, struct devfreq_dev_profile *dp,
 		       struct sgpu_governor_data **governor_data)
@@ -907,8 +907,8 @@ int sgpu_governor_init(struct device *dev, struct devfreq_dev_profile *dp,
 
 	cal_table_size = cal_dfs_get_rate_asv_table(adev->cal_id, g3d_rate_volt);
 	dp->initial_freq = cal_dfs_get_boot_freq(adev->cal_id);
-	cal_maxfreq = cal_dfs_get_max_freq(adev->cal_id);
-	cal_minfreq = cal_dfs_get_min_freq(adev->cal_id);
+	cal_maxfreq = 1402000;
+	cal_minfreq = 80000;
 
 	ret = of_property_read_u32(dev->of_node, "compute_weight",
 				   &data->compute_weight);
