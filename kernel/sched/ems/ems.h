@@ -279,13 +279,6 @@ extern void cpufreq_unregister_hook(void);
 extern unsigned int fclamp_apply(struct cpufreq_policy *policy, unsigned int orig_freq);
 extern int fclamp_init(void);
 
-/* esg */
-extern int esgov_pre_init(struct kobject *ems_kobj);
-extern int get_gov_next_cap(struct tp_env *env, struct cpumask *cpus, int dst_cpu, bool apply_clamp);
-
-/* ego */
-extern int ego_pre_init(struct kobject *ems_kobj);
-
 /* freqboost */
 extern int freqboost_init(void);
 extern void freqboost_enqueue_task(struct task_struct *p, int cpu, int flags);

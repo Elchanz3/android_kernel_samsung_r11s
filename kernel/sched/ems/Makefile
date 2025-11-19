@@ -12,7 +12,6 @@ ems-y += sysbusy.o
 ems-y += frt.o
 ems-y += profile.o
 ems-y += state.o
-ems-$(CONFIG_CPU_FREQ_GOV_ENERGYSTEP) += energy_step.o
 ems-y += ego.o
 ems-y += cpufreq.o
 ems-$ += frt.o
