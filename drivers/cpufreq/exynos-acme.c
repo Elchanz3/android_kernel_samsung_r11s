@@ -1733,6 +1733,7 @@ static int init_fast_switch(struct exynos_cpufreq_domain *domain,
 	return 0;
 }
 
+/*Underclocking little cores to 160 MHz*/
 unsigned long arg_cpu_min_c1 = 400000; 
 
 static int __init __used cpufreq_read_cpu_min_c1(char *cpu_min_c1) /*integer remains in memory after function call*/
@@ -1750,6 +1751,7 @@ static int __init __used cpufreq_read_cpu_min_c1(char *cpu_min_c1) /*integer rem
 }
 __setup("cpu_min_c1=", cpufreq_read_cpu_min_c1);
 
+/*Underclocking perf cores to 160 MHz*/
 unsigned long arg_cpu_min_c2 = 576000; 
 
 static __init __used int cpufreq_read_cpu_min_c2(char *cpu_min_c2)
@@ -1767,6 +1769,7 @@ static __init __used int cpufreq_read_cpu_min_c2(char *cpu_min_c2)
 }
 __setup("cpu_min_c2=", cpufreq_read_cpu_min_c2);
 
+/*Underclocking prime cores to 160 MHz*/
 unsigned long arg_cpu_min_c3 = 768000; 
 
 static __init __used int cpufreq_read_cpu_min_c3(char *cpu_min_c3)
@@ -1819,7 +1822,7 @@ static __init __used int cpufreq_read_mif_min(char *mif_min)
 __setup("mif_min=", cpufreq_read_mif_min);
 
 
-/*Overclocking little cores to 2112000 MHz*/
+/*Overclocking little cores to 2112 MHz*/
 unsigned long arg_cpu_max_c1 = 2112000; /*max_cpu_freq=2496 MHz for little cores*/
 
 static int __init __used cpufreq_read_cpu_max_c1(char *cpu_max_c1) /*integer remains in memory after function call*/
@@ -1837,8 +1840,8 @@ static int __init __used cpufreq_read_cpu_max_c1(char *cpu_max_c1) /*integer rem
 }
 __setup("cpu_max_c1=", cpufreq_read_cpu_max_c1);
 
-/*Overclocking perf cores to 2707 MHz*/
-unsigned long arg_cpu_max_c2 = 2707000; /*max_cpu_freq=2900 MHz*/
+/*Overclocking perf cores to 2900 MHz*/
+unsigned long arg_cpu_max_c2 = 2900000; /*max_cpu_freq=2900 MHz*/
 
 static __init __used int cpufreq_read_cpu_max_c2(char *cpu_max_c2)
 {
@@ -1856,7 +1859,7 @@ static __init __used int cpufreq_read_cpu_max_c2(char *cpu_max_c2)
 __setup("cpu_max_c2=", cpufreq_read_cpu_max_c2);
 
 /*Overclocking prime cores to 2900 MHz*/
-unsigned long arg_cpu_max_c3 = 2900000; /*max_cpu_freq=2900 MHz*/
+unsigned long arg_cpu_max_c3 = 2900000; /*max_cpu_freq=3016 MHz*/
 
 static __init __used int cpufreq_read_cpu_max_c3(char *cpu_max_c3)
 {
