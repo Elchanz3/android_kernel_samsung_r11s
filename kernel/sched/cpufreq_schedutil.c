@@ -227,6 +227,7 @@ static __always_inline void sugov_iowait_boost(struct sugov_cpu *sg_cpu, u64 tim
 
 	sg_cpu->iowait_boost = min_t(unsigned int, sg_cpu->iowait_boost << 1,
 				     SCHED_CAPACITY_SCALE);
+	trace_android_vh_set_iowait_boost(sg_cpu->iowait_boost, &sg_cpu->iowait_boost);
 }
 
 static __always_inline unsigned long sugov_iowait_apply(struct sugov_cpu *sg_cpu, u64 time,
