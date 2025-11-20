@@ -56,8 +56,8 @@ static unsigned int *mo_scen;
 static unsigned int *llc_ways;
 static unsigned int disable_llc_way;
 static unsigned long ski_gpu_min_clock;
-static unsigned long ski_gpu_max_clock = 1402000;
-static unsigned long gpu_siop_max_clock = 1402000;
+static unsigned long ski_gpu_max_clock = 1536000;
+static unsigned long gpu_siop_max_clock = 1536000;
 
 static struct delayed_work work_mm_min_clock;
 

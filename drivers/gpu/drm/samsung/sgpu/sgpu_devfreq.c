@@ -46,7 +46,7 @@ static int sgpu_devfreq_target(struct device *dev, unsigned long *target_freq, u
 		cur_freq = df->previous_freq;
 
 	qos_min_freq = 80000;
-	qos_max_freq = 1402000;
+	qos_max_freq = 1536000;
 	if (qos_min_freq >= qos_max_freq)
 		flags = 1;
 
