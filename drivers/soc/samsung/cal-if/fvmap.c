@@ -434,7 +434,12 @@ static void apply_g3d_overvolt(void __iomem *sram_base,
 		int old_volt = fv_table->table[j].volt;
 		int freq = fv_table->table[j].rate;
 		
-		if (freq >= 1402000) {
+		if (freq >= 1536000) {
+			fv_table->table[j].volt += 6;  // 6 steps * 6250 = 37500uV = 37.5mV
+			pr_info("G3D Level %d: %d kHz - Voltage: %d uV -> %d uV (+37500 uV)\n",
+			        j, freq, old_volt * STEP_UV,
+			        fv_table->table[j].volt * STEP_UV);
+		} else if (freq >= 1402000) {
 			fv_table->table[j].volt += 5;  // 5 steps * 6250 = 31250uV = 31.2mV
 			pr_info("G3D Level %d: %d kHz - Voltage: %d uV -> %d uV (+31200 uV)\n",
 			        j, freq, old_volt * STEP_UV,
@@ -1370,6 +1375,41 @@ static void __used apply_ufd_undervolt(void __iomem *sram_base,
 	}
 }
 
+/* write 1536 for G3D in sram*/
+static void add_g3d_1536mhz_level(void __iomem *sram_base, 
+                                   volatile struct fvmap_header *fvmap_header,
+                                   struct vclk *vclk, int idx)
+{
+	struct rate_volt_header *fv_table;
+	int j;
+	int num_of_lv;
+	
+	// margin_id 13 = G3D
+	if (vclk->margin_id != 13)
+		return;
+	
+	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
+	num_of_lv = fvmap_header[idx].num_of_lv;
+	
+	for (j = num_of_lv - 1; j >= 0; j--) {
+		fv_table->table[j + 1].rate = fv_table->table[j].rate;
+		fv_table->table[j + 1].volt = fv_table->table[j].volt;
+	}
+	
+	fv_table->table[0].rate = 1536000;  // 1536MHz em KHz
+	fv_table->table[0].volt = 140;      // 875000 uV / 6250 = 140 steps
+	
+	// Atualiza o número de níveis
+	fvmap_header[idx].num_of_lv = num_of_lv + 1;
+	
+	// Log dos primeiros níveis
+	for (j = 0; j < 4 && j < fvmap_header[idx].num_of_lv; j++) {
+		pr_info("G3D Level %d: %d kHz @ %d uV\n",
+		        j, fv_table->table[j].rate, 
+		        fv_table->table[j].volt * STEP_UV);
+	}
+}
+
 static void add_cpucl2_3016mhz_level(void __iomem *sram_base, 
                                       volatile struct fvmap_header *fvmap_header,
                                       struct vclk *vclk, int idx)
@@ -1450,8 +1490,8 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 		old = sram_base + fvmap_header[i].o_ratevolt;
 		new = map_base + fvmap_header[i].o_ratevolt;
 
+		add_g3d_1536mhz_level(sram_base, fvmap_header, vclk, i);
 		add_cpucl2_3016mhz_level(sram_base, fvmap_header, vclk, i);
-		/* ================================================================ */
 
 		apply_g3d_overvolt(sram_base, fvmap_header, vclk, i);
 		apply_cpucl0_voltage_mod(sram_base, fvmap_header, vclk, i);
@@ -1711,3 +1751,4 @@ err_sram_kobj:
 EXPORT_SYMBOL_GPL(fvmap_init);
 
 MODULE_LICENSE("GPL");
+
