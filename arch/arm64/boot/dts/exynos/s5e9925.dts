@@ -8517,8 +8517,8 @@
 			clocks = <0x19 0x5dc>;
 			clock-names = "DEVFREQ";
 			use_delay_time = "false";
-			freq_info = <0x3066a0 0x66c88 0x66c88 0x66c88 0x3066a0 0xf78f0>;
-			boot_info = <0x28 0x3066a0>;
+			freq_info = <3379200 421000 421000 421000 3379200 1014000>;
+			boot_info = <0x28 3379200>;
 			governor = <0x00>;
 			dfs_id = <0xb040000>;
 			acpm-ipc-channel = <0x01>;
@@ -8542,12 +8542,12 @@
 					min_sample_time = <0x32>;
 					hold_sample_time = <0x64>;
 					hispeed_load = <0x62>;
-					hispeed_freq = <0xf78f0>;
+					hispeed_freq = <3379200>;
 				};
 
 				mode_1 {
 					mode_id = <0x01>;
-					target_load = "3 3172000:3";
+					target_load = "3 3379200:3";
 					min_sample_time = <0x32>;
 					hold_sample_time = <0x64>;
 					hispeed_load = <0x03>;
@@ -9564,7 +9564,7 @@
 		use_mif_throttle;
 		mif_down_threshold = <0xea60>;
 		mif_up_threshold = <0xd6d8>;
-		mif_throttle_freq = <3172000>;
+		mif_throttle_freq = <3379200>;
 		use_llc_throttle;
 		llc_off_thresohld = <100000>;
 		llc_on_threshold = <100000>;
@@ -14811,7 +14811,7 @@
 					thrd_mb = <0x4a180a>;
 					freq_mfc = "\0\f5";
 					freq_int = "\0\f5";
-					freq_mif = <0x3066a0>;
+					freq_mif = <3379200>;
 					bts_scen = "mfc_uhd_10bit";
 					time_fw = <0xaf>;
 				};
@@ -15346,7 +15346,7 @@
 			down-step = <0x05>;
 			default-step = <0x02>;
 			pm-qos-max-class = <0x1b>;
-			pm-qos-max-freq = <1402000>;
+			pm-qos-max-freq = <1536000>;
 			pm-qos-min-freq = <80000>;
 			q0-empty-pct-thr = <0x00>;
 			q1-empty-pct-thr = <0x00>;
@@ -15362,7 +15362,7 @@
 			default-step = <0x0a>;
 			pm-qos-max-class = <0x0f>;
 			freq-stats0-mode-min-freq = <0x1a2f20>;
-			pm-qos-max-freq = <3172000>;
+			pm-qos-max-freq = <3379200>;
 			pm-qos-min-freq = <421000>;
 			freq-stats0-thr = <0x1194>;
 			freq-stats0-updown-delta-pct-thr = <0xc8>;

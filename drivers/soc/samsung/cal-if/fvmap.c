@@ -847,7 +847,7 @@ static void apply_cpucl2_voltage_mod(void __iomem *sram_base,
 	}
 }
 
-static void __used apply_mif_undervolt(void __iomem *sram_base, 
+static void __used apply_mif_overvolt(void __iomem *sram_base, 
                                volatile struct fvmap_header *fvmap_header,
                                struct vclk *vclk, int idx)
 {
@@ -861,11 +861,24 @@ static void __used apply_mif_undervolt(void __iomem *sram_base,
 	
 	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
 		int old_volt = fv_table->table[j].volt;
-		fv_table->table[j].volt -= 6;
+		int freq_khz = fv_table->table[j].rate;
+		int overvolt = 0;
 		
-		pr_info("MIF Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-		        j, fv_table->table[j].rate, old_volt * STEP_UV,
-		        fv_table->table[j].volt * STEP_UV);
+		if (freq_khz >= 3379200) {
+			overvolt = 6;
+		} else if (freq_khz >= 3172000) {
+			overvolt = 4;
+		} else if (freq_khz >= 2730000) {
+			overvolt = 2;
+		}
+		
+		if (overvolt > 0) {
+			fv_table->table[j].volt += overvolt;
+			pr_info("MIF Level %d: %d kHz - Voltage: %d uV -> %d uV (+%d uV)\n",
+			        j, freq_khz, old_volt * STEP_UV,
+			        fv_table->table[j].volt * STEP_UV,
+			        overvolt * STEP_UV);
+		}
 	}
 }
 
@@ -905,7 +918,7 @@ static void __used apply_dsu_undervolt(void __iomem *sram_base,
 	
 	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
 		int old_volt = fv_table->table[j].volt;
-		fv_table->table[j].volt -= 2;
+		fv_table->table[j].volt += 6;
 		
 		pr_info("SYS1 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
 		        j, fv_table->table[j].rate, old_volt * STEP_UV,
@@ -1376,6 +1389,37 @@ static void __used apply_ufd_undervolt(void __iomem *sram_base,
 }
 
 /* write 1536 for G3D in sram*/
+static void add_mif_3379mhz_level(void __iomem *sram_base, 
+                                   volatile struct fvmap_header *fvmap_header,
+                                   struct vclk *vclk, int idx)
+{
+	struct rate_volt_header *fv_table;
+	int j;
+	int num_of_lv;
+	
+	if (vclk->margin_id != 0)
+		return;
+	
+	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
+	num_of_lv = fvmap_header[idx].num_of_lv;
+	
+	for (j = num_of_lv - 1; j >= 0; j--) {
+		fv_table->table[j + 1].rate = fv_table->table[j].rate;
+		fv_table->table[j + 1].volt = fv_table->table[j].volt;
+	}
+	
+	fv_table->table[0].rate = 3379200;
+	fv_table->table[0].volt = 148;
+	
+	fvmap_header[idx].num_of_lv = num_of_lv + 1;
+	
+	for (j = 0; j < 4 && j < fvmap_header[idx].num_of_lv; j++) {
+		pr_info("MIF Level %d: %d kHz @ %d uV\n",
+		        j, fv_table->table[j].rate, 
+		        fv_table->table[j].volt * STEP_UV);
+	}
+}
+
 static void add_g3d_1536mhz_level(void __iomem *sram_base, 
                                    volatile struct fvmap_header *fvmap_header,
                                    struct vclk *vclk, int idx)
@@ -1490,6 +1534,7 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 		old = sram_base + fvmap_header[i].o_ratevolt;
 		new = map_base + fvmap_header[i].o_ratevolt;
 
+		add_mif_3379mhz_level(sram_base, fvmap_header, vclk, i);
 		add_g3d_1536mhz_level(sram_base, fvmap_header, vclk, i);
 		add_cpucl2_3016mhz_level(sram_base, fvmap_header, vclk, i);
 
@@ -1497,7 +1542,7 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 		apply_cpucl0_voltage_mod(sram_base, fvmap_header, vclk, i);
 		apply_cpucl1_voltage_mod(sram_base, fvmap_header, vclk, i);
 		apply_cpucl2_voltage_mod(sram_base, fvmap_header, vclk, i);
-		apply_mif_undervolt(sram_base, fvmap_header, vclk, i);
+		apply_mif_overvolt(sram_base, fvmap_header, vclk, i);
 		apply_npu_undervolt(sram_base, fvmap_header, vclk, i);
 		
 		apply_dsu_undervolt(sram_base, fvmap_header, vclk, i);
@@ -1751,4 +1796,5 @@ err_sram_kobj:
 EXPORT_SYMBOL_GPL(fvmap_init);
 
 MODULE_LICENSE("GPL");
+
 

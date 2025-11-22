@@ -249,14 +249,14 @@ struct qos_table platform_mif_pm_qos_get_table(struct platform_mif *platform, en
 		break;
 
 	case SCSC_QOS_MED:
-		table.freq_mif = platform->qos[1].freq_mif;
+		table.freq_mif = 3379200;
 		table.freq_int = platform->qos[1].freq_int;
 		table.freq_cl0 = platform->qos[1].freq_cl0;
 		table.freq_cl1 = platform->qos[1].freq_cl1;
 		break;
 
 	case SCSC_QOS_MAX:
-		table.freq_mif = platform->qos[2].freq_mif;
+		table.freq_mif = 3379200;
 		table.freq_int = platform->qos[2].freq_int;
 		table.freq_cl0 = platform->qos[2].freq_cl0;
 		table.freq_cl1 = platform->qos[2].freq_cl1;

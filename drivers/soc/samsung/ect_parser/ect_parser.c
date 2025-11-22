@@ -23,6 +23,14 @@ static int ect_create_complete_dump(void);
 static ssize_t ect_dump_complete_read(struct file *file, struct kobject *kobj,
                                     struct bin_attribute *bin_attr, char *buf,
                                     loff_t pos, size_t count);
+                                    
+struct ect_pll_freq {
+    unsigned long frequency;
+    unsigned int p;
+    unsigned int m;
+    unsigned int s;
+    unsigned int k;
+};
 
 #define ALIGNMENT_SIZE	 4
 
@@ -271,6 +279,56 @@ static int ect_parse_dvfs_header(void *address, struct ect_info *info)
         }
     }
 
+    for (i = 0; i < ect_dvfs_header->num_of_domain; ++i) {
+        ect_dvfs_domain = &ect_dvfs_header->domain_list[i];
+        
+        if (strcmp(ect_dvfs_domain->domain_name, "MIF") == 0) {
+            int new_num_level = ect_dvfs_domain->num_of_level + 1;
+            struct ect_dvfs_level *new_list_level;
+            unsigned int *new_list_dvfs_value;
+            int dvfs_value_size = ect_dvfs_domain->num_of_clock;
+            
+            pr_info("ECT: Adding 3379MHz to MIF DVFS\n");
+            
+            new_list_level = kzalloc(sizeof(struct ect_dvfs_level) * new_num_level, GFP_KERNEL);
+            if (new_list_level == NULL) {
+                ret = -ENOMEM;
+                goto err_parse_domain;
+            }
+            
+            new_list_level[0].level = 3379200;
+            new_list_level[0].level_en = 0;
+            
+            memcpy(&new_list_level[1], 
+                   ect_dvfs_domain->list_level, 
+                   sizeof(struct ect_dvfs_level) * ect_dvfs_domain->num_of_level);
+            
+            new_list_dvfs_value = kzalloc(sizeof(unsigned int) * new_num_level * dvfs_value_size, GFP_KERNEL);
+            if (new_list_dvfs_value == NULL) {
+                kfree(new_list_level);
+                ret = -ENOMEM;
+                goto err_parse_domain;
+            }
+            
+            memset(new_list_dvfs_value, 0, dvfs_value_size * sizeof(unsigned int));
+            
+            memcpy(&new_list_dvfs_value[dvfs_value_size], 
+                   ect_dvfs_domain->list_dvfs_value, 
+                   sizeof(unsigned int) * ect_dvfs_domain->num_of_level * dvfs_value_size);
+            
+            ect_dvfs_domain->num_of_level = new_num_level;
+            ect_dvfs_domain->list_level = new_list_level;
+            ect_dvfs_domain->list_dvfs_value = new_list_dvfs_value;
+            
+            if (ect_dvfs_domain->max_frequency < 3379200) {
+                ect_dvfs_domain->max_frequency = 3379200;
+            }
+            
+            pr_info("ECT: MIF DVFS expanded to %d levels\n", new_num_level);
+            break;
+        }
+    }
+
     info->block_handle = ect_dvfs_header;
 
     return 0;
@@ -343,6 +401,64 @@ static int ect_parse_pll_header(void *address, struct ect_info *info)
 					address_pll_header + ect_pll->pll_offset, ect_pll)) {
 			ret = -EINVAL;
 			goto err_parse_pll;
+		}
+	}
+
+	for (i = 0; i < ect_pll_header->num_of_pll; ++i) {
+		ect_pll = &ect_pll_header->pll_list[i];
+		
+		if (strcmp(ect_pll->pll_name, "PLL_MIF") == 0) {
+			int new_num_freq = ect_pll->num_of_frequency + 1;
+			struct ect_pll_frequency *new_freq_list;
+			
+			pr_info("ECT: Adding 3379.2MHz to PLL_MIF\n");
+			
+			new_freq_list = kzalloc(sizeof(struct ect_pll_frequency) * new_num_freq, GFP_KERNEL);
+			if (new_freq_list == NULL) {
+				ret = -ENOMEM;
+				goto err_parse_pll;
+			}
+			
+			new_freq_list[0].frequency = 3379200000;
+			new_freq_list[0].p = 10;
+			new_freq_list[0].m = 440;
+			new_freq_list[0].s = 0;
+			new_freq_list[0].k = 0;
+			
+			memcpy(&new_freq_list[1], 
+			       ect_pll->frequency_list, 
+			       sizeof(struct ect_pll_frequency) * ect_pll->num_of_frequency);
+			
+			ect_pll->num_of_frequency = new_num_freq;
+			ect_pll->frequency_list = new_freq_list;
+			
+			pr_info("ECT: PLL_MIF expanded to %d frequencies\n", new_num_freq);
+		} else if (strcmp(ect_pll->pll_name, "PLL_SHARED_MIF") == 0) {
+			int new_num_freq = ect_pll->num_of_frequency + 1;
+			struct ect_pll_frequency *new_freq_list;
+			
+			pr_info("ECT: Adding 2400MHz to PLL_SHARED_MIF\n");
+			
+			new_freq_list = kzalloc(sizeof(struct ect_pll_frequency) * new_num_freq, GFP_KERNEL);
+			if (new_freq_list == NULL) {
+				ret = -ENOMEM;
+				goto err_parse_pll;
+			}
+			
+			new_freq_list[0].frequency = 2400000000;
+			new_freq_list[0].p = 4;
+			new_freq_list[0].m = 62;
+			new_freq_list[0].s = 0;
+			new_freq_list[0].k = 0;
+			
+			memcpy(&new_freq_list[1], 
+			       ect_pll->frequency_list, 
+			       sizeof(struct ect_pll_frequency) * ect_pll->num_of_frequency);
+			
+			ect_pll->num_of_frequency = new_num_freq;
+			ect_pll->frequency_list = new_freq_list;
+			
+			pr_info("ECT: PLL_SHARED_MIF expanded to %d frequencies\n", new_num_freq);
 		}
 	}
 
@@ -519,7 +635,7 @@ static int ect_parse_voltage_header(void *address, struct ect_info *info)
 		if (strcmp(ect_voltage_domain->domain_name, "G3D") == 0) {
 			int new_num_level = ect_voltage_domain->num_of_level + 1;
 			unsigned int *new_level_list;
-			int j;
+			
 
 			
 			new_level_list = kzalloc(sizeof(unsigned int) * new_num_level, GFP_KERNEL);
@@ -536,13 +652,14 @@ static int ect_parse_voltage_header(void *address, struct ect_info *info)
 			
 			ect_voltage_domain->level_list = new_level_list;
 			
-			for (j = 0; j < ect_voltage_domain->num_of_table; ++j) {
+			int j;
+				for (j = 0; j < ect_voltage_domain->num_of_table; ++j) {
 				struct ect_voltage_table *table = &ect_voltage_domain->table_list[j];
 				
 				if (table->voltages_step != NULL) {
 					unsigned char *new_voltages_step;
 					int num_of_data = ect_voltage_domain->num_of_group * new_num_level;
-					int old_num_data = ect_voltage_domain->num_of_group * ect_voltage_domain->num_of_level;
+					
 					
 					new_voltages_step = kzalloc(sizeof(unsigned char) * num_of_data, GFP_KERNEL);
 					if (new_voltages_step == NULL) {
@@ -551,8 +668,9 @@ static int ect_parse_voltage_header(void *address, struct ect_info *info)
 						goto err_parse_voltage_domain;
 					}
 					
-					int k;
-					for (k = 0; k < ect_voltage_domain->num_of_group; k++) {
+					
+int k;
+							for (k = 0; k < ect_voltage_domain->num_of_level; k++) {
 						new_voltages_step[k * new_num_level] = 140;
 						
 						memcpy(&new_voltages_step[k * new_num_level + 1],
@@ -584,6 +702,84 @@ static int ect_parse_voltage_header(void *address, struct ect_info *info)
 			
 			ect_voltage_domain->num_of_level = new_num_level;
 			
+			break;
+		}
+	}
+
+	for (i = 0; i < ect_voltage_header->num_of_domain; ++i) {
+		ect_voltage_domain = &ect_voltage_header->domain_list[i];
+		
+		if (strcmp(ect_voltage_domain->domain_name, "MIF") == 0) {
+			int new_num_level = ect_voltage_domain->num_of_level + 1;
+			unsigned int *new_level_list;
+			
+			
+			pr_info("ECT: Adding 3379MHz to MIF ASV\n");
+			
+			new_level_list = kzalloc(sizeof(unsigned int) * new_num_level, GFP_KERNEL);
+			if (new_level_list == NULL) {
+				ret = -ENOMEM;
+				goto err_parse_voltage_domain;
+			}
+			
+			new_level_list[0] = 3379;
+			
+			memcpy(&new_level_list[1], 
+			       ect_voltage_domain->level_list, 
+			       sizeof(unsigned int) * ect_voltage_domain->num_of_level);
+			
+			ect_voltage_domain->level_list = new_level_list;
+			
+			int j;
+				for (j = 0; j < ect_voltage_domain->num_of_table; ++j) {
+				struct ect_voltage_table *table = &ect_voltage_domain->table_list[j];
+				
+				if (table->voltages_step != NULL) {
+					unsigned char *new_voltages_step;
+					int num_of_data = ect_voltage_domain->num_of_group * new_num_level;
+					
+					
+					new_voltages_step = kzalloc(sizeof(unsigned char) * num_of_data, GFP_KERNEL);
+					if (new_voltages_step == NULL) {
+						kfree(new_level_list);
+						ret = -ENOMEM;
+						goto err_parse_voltage_domain;
+					}
+					
+					int k;
+						for (k = 0; k < ect_voltage_domain->num_of_group; k++) {
+						new_voltages_step[k * new_num_level] = 148;
+						
+						memcpy(&new_voltages_step[k * new_num_level + 1],
+						       &table->voltages_step[k * ect_voltage_domain->num_of_level],
+						       sizeof(unsigned char) * ect_voltage_domain->num_of_level);
+					}
+					
+					table->voltages_step = new_voltages_step;
+				}
+				
+				if (table->level_en != NULL) {
+					int *new_level_en;
+					new_level_en = kzalloc(sizeof(int) * new_num_level, GFP_KERNEL);
+					if (new_level_en == NULL) {
+						kfree(new_level_list);
+						ret = -ENOMEM;
+						goto err_parse_voltage_domain;
+					}
+					
+					new_level_en[0] = 0;
+					
+					memcpy(&new_level_en[1], 
+					       table->level_en, 
+					       sizeof(int) * ect_voltage_domain->num_of_level);
+					
+					table->level_en = new_level_en;
+				}
+			}
+			
+			ect_voltage_domain->num_of_level = new_num_level;
+			
+			pr_info("ECT: MIF ASV expanded to %d levels\n", new_num_level);
 			break;
 		}
 	}
@@ -1046,7 +1242,6 @@ static int ect_parse_minlock_header(void *address, struct ect_info *info)
 		if (strcmp(ect_minlock_domain->domain_name, "DISP_INT") == 0) {
 			int new_num_level = ect_minlock_domain->num_of_level + 1;
 			struct ect_minlock_frequency *new_level;
-			int j;
 			
 			new_level = kzalloc(sizeof(struct ect_minlock_frequency) * new_num_level, GFP_KERNEL);
 			if (new_level == NULL) {
@@ -1064,7 +1259,29 @@ static int ect_parse_minlock_header(void *address, struct ect_info *info)
 			ect_minlock_domain->num_of_level = new_num_level;
 			ect_minlock_domain->level = new_level;
 			
-			break;
+		} else if (strcmp(ect_minlock_domain->domain_name, "G3D_MIF") == 0) {
+			int new_num_level = ect_minlock_domain->num_of_level + 1;
+			struct ect_minlock_frequency *new_level;
+			
+			pr_info("ECT: Adding 1536MHz to G3D_MIF\n");
+			
+			new_level = kzalloc(sizeof(struct ect_minlock_frequency) * new_num_level, GFP_KERNEL);
+			if (new_level == NULL) {
+				ret = -ENOMEM;
+				goto err_parse_minlock_domain;
+			}
+			
+			new_level[0].main_frequencies = 1536000;
+			new_level[0].sub_frequencies = 676000;
+			
+			memcpy(&new_level[1], 
+			       ect_minlock_domain->level, 
+			       sizeof(struct ect_minlock_frequency) * ect_minlock_domain->num_of_level);
+			
+			ect_minlock_domain->num_of_level = new_num_level;
+			ect_minlock_domain->level = new_level;
+			
+			pr_info("ECT: G3D_MIF expanded to %d levels\n", new_num_level);
 		}
 	}
 
@@ -1181,7 +1398,7 @@ static int ect_parse_gen_param_header(void *address, struct ect_info *info)
         if (strcmp(ect_gen_param_table->table_name, "MDISP") == 0) {
             int new_num_row = ect_gen_param_table->num_of_row + 1;
             int32_t *new_parameter;
-            int j;
+            
             
             new_parameter = kmalloc(sizeof(int32_t) * new_num_row * ect_gen_param_table->num_of_col, GFP_KERNEL);
             if (new_parameter == NULL) {
@@ -1189,6 +1406,7 @@ static int ect_parse_gen_param_header(void *address, struct ect_info *info)
                 goto err_parse_gen_param_table;
             }
             
+            int j;
             for (j = 0; j < ect_gen_param_table->num_of_col; j++) {
                 if (j == 0) {
                     new_parameter[j] = 999;
@@ -1209,70 +1427,123 @@ static int ect_parse_gen_param_header(void *address, struct ect_info *info)
     }
 
     for (i = 0; i < ect_gen_param_header->num_of_table; ++i) {
-        ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    
+    if (strcmp(ect_gen_param_table->table_name, "MG3D") == 0) {
+        int total_elements = ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col;
+        int j;
+        int replaced_count = 0;
         
-        if (strcmp(ect_gen_param_table->table_name, "MG3D") == 0) {
-            int new_num_row = ect_gen_param_table->num_of_row + 1;
-            int32_t *new_parameter;
-            int j;
-            
-            new_parameter = kmalloc(sizeof(int32_t) * new_num_row * ect_gen_param_table->num_of_col, GFP_KERNEL);
-            if (new_parameter == NULL) {
-                ret = -ENOMEM;
-                goto err_parse_gen_param_table;
+        pr_info("ECT: Replacing 1306 with 1536 in MG3D table\n");
+        
+        for (j = 0; j < total_elements; j++) {
+            if (ect_gen_param_table->parameter[j] == 1306) {
+                ect_gen_param_table->parameter[j] = 1536;
+                replaced_count++;
             }
-            
-            for (j = 0; j < ect_gen_param_table->num_of_col; j++) {
-                if (j == 0) {
-                    new_parameter[j] = 1536;
-                } else {
-                    new_parameter[j] = ect_gen_param_table->parameter[j];
-                }
-            }
-            
-            memcpy(&new_parameter[ect_gen_param_table->num_of_col], 
-                   ect_gen_param_table->parameter, 
-                   sizeof(int32_t) * ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col);
-            
-            ect_gen_param_table->num_of_row = new_num_row;
-            ect_gen_param_table->parameter = new_parameter;
-
-            break;
         }
+        
+        pr_info("ECT: Replaced %d occurrences of 1306 with 1536 in MG3D\n", replaced_count);
+        break;
     }
+}
+
+for (i = 0; i < ect_gen_param_header->num_of_table; ++i) {
+    ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    
+    if (strcmp(ect_gen_param_table->table_name, "VG3D") == 0) {
+        int total_elements = ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col;
+        int j;
+        int replaced_count = 0;
+        
+        pr_info("ECT: Replacing 1306 with 1536 in VG3D table\n");
+        
+        for (j = 0; j < total_elements; j++) {
+            if (ect_gen_param_table->parameter[j] == 1306) {
+                ect_gen_param_table->parameter[j] = 1536;
+                replaced_count++;
+            }
+        }
+        
+        pr_info("ECT: Replaced %d occurrences of 1306 with 1536 in VG3D\n", replaced_count);
+        break;
+    }
+}
 
     for (i = 0; i < ect_gen_param_header->num_of_table; ++i) {
-        ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    
+    if (strcmp(ect_gen_param_table->table_name, "FG3D") == 0) {
+        int new_num_row = ect_gen_param_table->num_of_row + 1;
+        int32_t *new_parameter;
         
-        if (strcmp(ect_gen_param_table->table_name, "VG3D") == 0) {
-            int new_num_row = ect_gen_param_table->num_of_row + 1;
-            int32_t *new_parameter;
-            int j;
-            
-            new_parameter = kmalloc(sizeof(int32_t) * new_num_row * ect_gen_param_table->num_of_col, GFP_KERNEL);
-            if (new_parameter == NULL) {
-                ret = -ENOMEM;
-                goto err_parse_gen_param_table;
-            }
-            
-            for (j = 0; j < ect_gen_param_table->num_of_col; j++) {
-                if (j == 0) {
-                    new_parameter[j] = 1536;
-                } else {
-                    new_parameter[j] = ect_gen_param_table->parameter[j];
-                }
-            }
-            
-            memcpy(&new_parameter[ect_gen_param_table->num_of_col], 
-                   ect_gen_param_table->parameter, 
-                   sizeof(int32_t) * ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col);
-            
-            ect_gen_param_table->num_of_row = new_num_row;
-            ect_gen_param_table->parameter = new_parameter;
-            
-            break;
+        pr_info("ECT: Adding 1536MHz to FG3D table\n");
+        
+        new_parameter = kmalloc(sizeof(int32_t) * new_num_row * ect_gen_param_table->num_of_col, GFP_KERNEL);
+        if (new_parameter == NULL) {
+            ret = -ENOMEM;
+            goto err_parse_gen_param_table;
         }
+
+        new_parameter[0] = 1536;
+        new_parameter[1] = 1536;
+        new_parameter[2] = 400;
+        
+        memcpy(&new_parameter[3], 
+               ect_gen_param_table->parameter, 
+               sizeof(int32_t) * ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col);
+        
+        ect_gen_param_table->num_of_row = new_num_row;
+        ect_gen_param_table->parameter = new_parameter;
+        
+        pr_info("ECT: FG3D expanded to %d rows\n", new_num_row);
+        break;
     }
+}
+
+    for (i = 0; i < ect_gen_param_header->num_of_table; ++i) {
+    ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    
+    if (strcmp(ect_gen_param_table->table_name, "MMIF") == 0) {
+        int total_elements = ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col;
+        int j;
+        int replaced_count = 0;
+        
+        pr_info("ECT: Replacing 3172 with 3379 in MMIF table\n");
+        
+        for (j = 0; j < total_elements; j++) {
+            if (ect_gen_param_table->parameter[j] == 3172) {
+                ect_gen_param_table->parameter[j] = 3379;
+                replaced_count++;
+            }
+        }
+        
+        pr_info("ECT: Replaced %d occurrences of 3172 with 3379 in MMIF\n", replaced_count);
+        break;
+    }
+}
+
+for (i = 0; i < ect_gen_param_header->num_of_table; ++i) {
+    ect_gen_param_table = &ect_gen_param_header->table_list[i];
+    
+    if (strcmp(ect_gen_param_table->table_name, "VMIF") == 0) {
+        int total_elements = ect_gen_param_table->num_of_row * ect_gen_param_table->num_of_col;
+        int j;
+        int replaced_count = 0;
+        
+        pr_info("ECT: Replacing 3172 with 3379 in VMIF table\n");
+        
+        for (j = 0; j < total_elements; j++) {
+            if (ect_gen_param_table->parameter[j] == 3172) {
+                ect_gen_param_table->parameter[j] = 3379;
+                replaced_count++;
+            }
+        }
+        
+        pr_info("ECT: Replaced %d occurrences of 3172 with 3379 in VMIF\n", replaced_count);
+        break;
+    }
+}
 
     info->block_handle = ect_gen_param_header;
 
@@ -2462,7 +2733,7 @@ static int ect_generate_complete_dump(void)
 {
     struct ect_info *info;
     struct ect_header *header;
-    int i, j, k, l, m;
+    int i, j, k, l;
     ssize_t count = 0;
 
     if (!ect_complete_dump_buffer) {
@@ -2706,14 +2977,14 @@ static int ect_create_complete_dump(void)
                 count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
                                  "  Parser Version: %d\n", voltage_header->parser_version);
                 count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                 "  Dominios: %d\n", voltage_header->num_of_domain);
+                                 "  domains: %d\n", voltage_header->num_of_domain);
 
                 for (k = 0; k < voltage_header->num_of_domain; k++) {
                     struct ect_voltage_domain *domain = &voltage_header->domain_list[k];
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
                                      "\n  DOMAIN: %s\n", domain->domain_name);
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                     "    Groups: %d, levels: %d, Tabelas: %d\n",
+                                     "    Groups: %d, levels: %d, tables: %d\n",
                                      domain->num_of_group, domain->num_of_level, domain->num_of_table);
                     
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
@@ -2741,12 +3012,12 @@ static int ect_create_complete_dump(void)
                 count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
                                  "  Parser Version: %d\n", dvfs_header->parser_version);
                 count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                 "  Dominios: %d\n", dvfs_header->num_of_domain);
+                                 "  domains: %d\n", dvfs_header->num_of_domain);
 
                 for (k = 0; k < dvfs_header->num_of_domain; k++) {
                     struct ect_dvfs_domain *domain = &dvfs_header->domain_list[k];
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                     "\n  DOMINIO: %s\n", domain->domain_name);
+                                     "\n  domain: %s\n", domain->domain_name);
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
                                      "    Clocks: %d, Niveis: %d\n",
                                      domain->num_of_clock, domain->num_of_level);
@@ -2772,20 +3043,20 @@ static int ect_create_complete_dump(void)
                 count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
                                  "  Parser Version: %d\n", gen_header->parser_version);
                 count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                 "  Tabelas: %d\n", gen_header->num_of_table);
+                                 "  tables: %d\n", gen_header->num_of_table);
 
                 for (k = 0; k < gen_header->num_of_table; k++) {
                     struct ect_gen_param_table *table = &gen_header->table_list[k];
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                     "\n  TABELA: %s\n", table->table_name);
+                                     "\n  TABLE: %s\n", table->table_name);
                     count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                     "    Linhas: %d, Colunas: %d\n",
+                                     "    Lines: %d, Colunas: %d\n",
                                      table->num_of_row, table->num_of_col);
 
                     if (strcmp(table->table_name, "FCPUCL2") == 0 && table->parameter) {
                         int m;
                         count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
-                                         "    Parametros:\n");
+                                         "    Paramters:\n");
                         for (l = 0; l < table->num_of_row; l++) {
                             count += snprintf(ect_dump_complete_buffer + count, ECT_DUMP_COMPLETE_SIZE - count,
                                              "      ");
@@ -3413,4 +3684,3 @@ postcore_initcall(exynos_ect_init);
 module_exit(exynos_ect_exit);
 
 MODULE_LICENSE("GPL");
-
