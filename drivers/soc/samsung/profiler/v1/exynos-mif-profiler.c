@@ -36,7 +36,7 @@ u32 mifpro_get_freq_table(s32 id, u32 *table)
 
 u32 mifpro_get_max_freq(s32 id)
 {
-	return exynos_pm_qos_request(profiler.freq_infos.pm_qos_class_max);
+	return 3379000;
 }
 
 u32 mifpro_get_min_freq(s32 id)
@@ -306,7 +306,7 @@ static int register_export_fn(u32 *max_freq, u32 *min_freq, u32 *cur_freq)
 
 	exynos_devfreq_get_freq_infos(profiler.devfreq_type, freq_infos);
 
-	*max_freq = freq_infos->max_freq;		/* get_org_max_freq(void) */
+	*max_freq = 3379000;		/* get_org_max_freq(void) */
 	*min_freq = freq_infos->min_freq;		/* get_org_min_freq(void) */
 	*cur_freq = *freq_infos->cur_freq;		/* get_cur_freq(void)	  */
 	profiler.table_cnt = freq_infos->max_state;	/* get_freq_table_cnt(void)  */
@@ -418,7 +418,7 @@ static int exynos_mif_profiler_probe(struct platform_device *pdev)
 		pr_err("mifpro: failed to init freq_table\n");
 		return -EINVAL;
 	}
-	profiler.max_freq_idx = 0;
+	profiler.max_freq_idx = 3379000;
 	profiler.min_freq_idx = profiler.table_cnt - 1;
 	profiler.cur_freq_idx = get_idx_from_freq(profiler.table,
 				profiler.table_cnt, cur_freq, RELATION_HIGH);
