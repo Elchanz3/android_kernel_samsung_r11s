@@ -1473,7 +1473,7 @@ static void cpucl2_mod(void __iomem *sram_base,
 		fv_table->table[j + 1].volt = fv_table->table[j].volt;
 	}
 	
-	fv_table->table[0].rate = 3016000;
+	fv_table->table[0].rate = 3072000;
 	fv_table->table[0].volt = 195;
 	
 	fvmap_header[idx].num_of_lv = num_of_lv + 1;
