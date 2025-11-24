@@ -1454,7 +1454,7 @@ static void add_g3d_1536mhz_level(void __iomem *sram_base,
 	}
 }
 
-static void add_cpucl2_3016mhz_level(void __iomem *sram_base, 
+static void cpucl2_mod(void __iomem *sram_base, 
                                       volatile struct fvmap_header *fvmap_header,
                                       struct vclk *vclk, int idx)
 {
@@ -1536,7 +1536,7 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 
 		add_mif_3379mhz_level(sram_base, fvmap_header, vclk, i);
 		add_g3d_1536mhz_level(sram_base, fvmap_header, vclk, i);
-		add_cpucl2_3016mhz_level(sram_base, fvmap_header, vclk, i);
+		cpucl2_mod(sram_base, fvmap_header, vclk, i);
 
 		apply_g3d_overvolt(sram_base, fvmap_header, vclk, i);
 		apply_cpucl0_voltage_mod(sram_base, fvmap_header, vclk, i);
