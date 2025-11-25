@@ -35,7 +35,7 @@ static int sgpu_devfreq_target(struct device *dev, unsigned long *target_freq, u
 	struct devfreq *df = adev->devfreq;
 	struct sgpu_governor_data *data = df->data;
 	unsigned long cur_freq, qos_min_freq, qos_max_freq;
-	struct dev_pm_opp;
+	struct dev_pm_opp *target_opp;
 	int i;
 #if defined(CONFIG_DRM_SGPU_EXYNOS) && !defined(CONFIG_SOC_S5E9925_EVT0)
 	uint32_t cnt_value;
@@ -45,10 +45,17 @@ static int sgpu_devfreq_target(struct device *dev, unsigned long *target_freq, u
 	else
 		cur_freq = df->previous_freq;
 
-	qos_min_freq = 80000;
-	qos_max_freq = 1402000;
+	qos_min_freq = dev_pm_qos_read_value(dev, DEV_PM_QOS_MIN_FREQUENCY);
+	qos_max_freq = dev_pm_qos_read_value(dev, DEV_PM_QOS_MAX_FREQUENCY);
 	if (qos_min_freq >= qos_max_freq)
 		flags = 1;
+
+	target_opp = devfreq_recommended_opp(dev, target_freq, flags);
+	if (IS_ERR(target_opp)) {
+		dev_err(dev, "target_freq: not found valid OPP table\n");
+		return PTR_ERR(target_opp);
+	}
+	dev_pm_opp_put(target_opp);
 
 	if (cur_freq == *target_freq)
 		return 0;
