@@ -351,10 +351,10 @@ static inline void set_bfs(struct i2s_dai *i2s, unsigned bfs)
 		mod |= (MOD_BCLK_16FS << bfs_shift);
 		break;
 	case 64:
-		mod |= (EXYNOS5420_MOD_BCLK_64FS << bfs_shift);
+		mod |= (EXYNOS5420_MOD_BCLK_128FS << bfs_shift);
 		break;
 	case 96:
-		mod |= (EXYNOS5420_MOD_BCLK_96FS << bfs_shift);
+		mod |= (EXYNOS5420_MOD_BCLK_128FS << bfs_shift);
 		break;
 	case 128:
 		mod |= (EXYNOS5420_MOD_BCLK_128FS << bfs_shift);

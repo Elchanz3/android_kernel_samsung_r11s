@@ -147,7 +147,7 @@ static int dsif_hw_params(struct snd_pcm_substream *substream,
 	int tx_slot[] = {0, 1};
 
 	/* bclk ratio 64 for DSD64, 128 for DSD128 */
-	snd_soc_dai_set_bclk_ratio(cpu_dai, 64);
+	snd_soc_dai_set_bclk_ratio(cpu_dai, 128);
 
 	/* channel map 0 1 if left is first, 1 0 if right is first */
 	snd_soc_dai_set_channel_map(cpu_dai, 2, tx_slot, 0, NULL);

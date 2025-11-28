@@ -12,7 +12,7 @@
 
 #include "i2s.h"
 
-#define FIN_PLL_RATE		24000000
+#define FIN_PLL_RATE		26000000
 
 SND_SOC_DAILINK_DEFS(links,
 	DAILINK_COMP_ARRAY(COMP_EMPTY()),
