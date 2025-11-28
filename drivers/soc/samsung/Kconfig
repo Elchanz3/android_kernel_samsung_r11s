@@ -543,6 +543,4 @@ source "drivers/soc/samsung/acpm/Kconfig"
 
 source "drivers/soc/samsung/debug/Kconfig"
 
-source "drivers/soc/samsung/xperf/Kconfig"
-
 source "drivers/soc/samsung/exynos-hdcp/Kconfig"
