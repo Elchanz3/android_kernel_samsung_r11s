@@ -119,6 +119,53 @@ static int ect_parse_dvfs_domain(int parser_version, void *address, struct ect_d
 
 	domain->list_dvfs_value = address;
 
+	if (domain->domain_name && strcmp(domain->domain_name, "DSU") == 0) {
+		pr_info("DSU domain detected, adding 2304MHz level\n");
+		
+		int new_num_of_level = domain->num_of_level + 1;
+		struct ect_dvfs_level *new_levels;
+		unsigned int *new_dvfs_values;
+
+		new_levels = kmalloc(sizeof(struct ect_dvfs_level) * new_num_of_level, GFP_KERNEL);
+		if (new_levels) {
+
+			memcpy(&new_levels[1], domain->list_level, 
+				   sizeof(struct ect_dvfs_level) * domain->num_of_level);
+
+			new_levels[0].level = 2304000;
+			new_levels[0].level_en = 0;
+
+			domain->list_level = new_levels;
+		}
+
+		new_dvfs_values = kmalloc(sizeof(unsigned int) * new_num_of_level * domain->num_of_clock, GFP_KERNEL);
+		if (new_dvfs_values) {
+			for (i = 0; i < domain->num_of_level; i++) {
+				memcpy(&new_dvfs_values[i * domain->num_of_clock],
+					   &domain->list_dvfs_value[i * domain->num_of_clock],
+					   sizeof(unsigned int) * domain->num_of_clock);
+			}
+
+			int last_row_index = domain->num_of_level * domain->num_of_clock;
+			unsigned int new_row_values[] = {0, 0};
+
+			if (domain->num_of_clock == 2) {
+				memcpy(&new_dvfs_values[last_row_index], new_row_values, 
+					   sizeof(unsigned int) * domain->num_of_clock);
+			} else {
+
+				memcpy(&new_dvfs_values[last_row_index], new_row_values, 
+					   sizeof(unsigned int) * min(domain->num_of_clock, 2));
+			}
+
+			domain->list_dvfs_value = new_dvfs_values;
+		}
+
+		domain->num_of_level = new_num_of_level;
+		
+		pr_info("DSU domain modified: now has %d levels (added 2304MHz)\n", domain->num_of_level);
+	}
+
 	return 0;
 
 err_parse_string:
@@ -328,6 +375,53 @@ static int ect_parse_voltage_domain(int parser_version, void *address, struct ec
 			ret = -EINVAL;
 			goto err_parse_voltage_table;
 		}
+	}
+
+	if (domain->domain_name && strcmp(domain->domain_name, "DSU") == 0) {
+		pr_info("DSU voltage domain detected, adding 2304MHz level\n");
+		
+		int new_num_of_level = domain->num_of_level + 1;
+		int32_t *new_level_list;
+		int j, k;
+
+		new_level_list = kmalloc(sizeof(int32_t) * new_num_of_level, GFP_KERNEL);
+		if (new_level_list) {
+			new_level_list[0] = 2304;
+			memcpy(&new_level_list[1], domain->level_list, sizeof(int32_t) * domain->num_of_level);
+			domain->level_list = new_level_list;
+		}
+
+		for (j = 0; j < domain->num_of_table; j++) {
+			struct ect_voltage_table *table = &domain->table_list[j];
+			unsigned char *new_voltages_step;
+
+			new_voltages_step = kmalloc(sizeof(unsigned char) * domain->num_of_group * new_num_of_level, GFP_KERNEL);
+			if (new_voltages_step) {
+
+				for (k = 0; k < domain->num_of_group; k++) {
+
+					new_voltages_step[k * new_num_of_level + 0] = 0;
+
+					memcpy(&new_voltages_step[k * new_num_of_level + 1],
+						   &table->voltages_step[k * domain->num_of_level],
+						   sizeof(unsigned char) * domain->num_of_level);
+				}
+				table->voltages_step = new_voltages_step;
+			}
+
+			if (table->level_en) {
+				int32_t *new_level_en = kmalloc(sizeof(int32_t) * new_num_of_level, GFP_KERNEL);
+				if (new_level_en) {
+					new_level_en[0] = 0;
+					memcpy(&new_level_en[1], table->level_en, sizeof(int32_t) * domain->num_of_level);
+					table->level_en = new_level_en;
+				}
+			}
+		}
+
+		domain->num_of_level = new_num_of_level;
+		
+		pr_info("DSU voltage domain modified: now has %d levels (added 2304MHz)\n", domain->num_of_level);
 	}
 
 	return 0;
@@ -854,15 +948,110 @@ err_domain_list_allocation:
 	return ret;
 }
 
-static int ect_parse_gen_param_table(int parser_version, void *address, struct ect_gen_param_table *size)
+static int ect_parse_gen_param_table(int parser_version, void *address, struct ect_gen_param_table *table)
 {
-	ect_parse_integer(&address, &size->num_of_col);
-	ect_parse_integer(&address, &size->num_of_row);
+	int i, j;
+	
+	ect_parse_integer(&address, &table->num_of_col);
+	ect_parse_integer(&address, &table->num_of_row);
 
-	size->parameter = address;
+	table->parameter = address;
+
+	if (table->table_name && strcmp(table->table_name, "MDSU") == 0) {
+		pr_info("MDSU table detected, updating frequencies\n");
+		
+		int total_params = table->num_of_col * table->num_of_row;
+		int32_t *new_parameters;
+		
+		new_parameters = kmalloc(sizeof(int32_t) * total_params, GFP_KERNEL);
+		if (new_parameters) {
+			memcpy(new_parameters, table->parameter, sizeof(int32_t) * total_params);
+
+			for (i = 0; i < table->num_of_row; i++) {
+				int base_index = i * table->num_of_col;
+				if (base_index + 3 < total_params) {
+					if (i >= 6 && i <= 8 && new_parameters[base_index + 3] == 1824) {
+						new_parameters[base_index + 3] = 2016;
+					}
+					else if (i >= 9 && i <= 10 && new_parameters[base_index + 3] == 1824) {
+						new_parameters[base_index + 3] = 2304;
+					}
+				}
+			}
+			
+			table->parameter = new_parameters;
+			pr_info("MDSU table modified: frequencies updated to 2016/2304 MHz\n");
+		}
+	}
+
+	if (table->table_name && strcmp(table->table_name, "VDSU") == 0) {
+		pr_info("VDSU table detected, adding 2304MHz level\n");
+		
+		int new_num_of_row = table->num_of_row + 1;
+		int total_params = table->num_of_col * new_num_of_row;
+		int32_t *new_parameters;
+		
+		new_parameters = kmalloc(sizeof(int32_t) * total_params, GFP_KERNEL);
+		if (new_parameters) {
+
+			int32_t new_row[] = {0, 2304, 1440, 1056, 266, 1112500, 837500, 731250, 600000};
+			memcpy(&new_parameters[0], new_row, sizeof(int32_t) * table->num_of_col);
+
+			memcpy(&new_parameters[table->num_of_col], new_row, sizeof(int32_t) * table->num_of_col);
+			memcpy(&new_parameters[table->num_of_col * 2], new_row, sizeof(int32_t) * table->num_of_col);
+
+			for (i = 2; i < table->num_of_row; i++) {
+				memcpy(&new_parameters[table->num_of_col * (i + 1)],
+					   &table->parameter[table->num_of_col * i],
+					   sizeof(int32_t) * table->num_of_col);
+			}
+			
+			table->parameter = new_parameters;
+			table->num_of_row = new_num_of_row;
+			pr_info("VDSU table modified: added 2304MHz level, now %d rows\n", new_num_of_row);
+		}
+	}
+
+	if (table->table_name && strcmp(table->table_name, "FDSU") == 0) {
+		pr_info("FDSU table detected, updating frequencies\n");
+		
+		int total_params = table->num_of_col * table->num_of_row;
+		int32_t *new_parameters;
+		
+		new_parameters = kmalloc(sizeof(int32_t) * total_params, GFP_KERNEL);
+		if (new_parameters) {
+			memcpy(new_parameters, table->parameter, sizeof(int32_t) * total_params);
+
+			if (table->num_of_row >= 2) {
+				int row1_index = table->num_of_col;
+				for (j = 0; j < table->num_of_col; j++) {
+					if (new_parameters[row1_index + j] == 2208) {
+						new_parameters[row1_index + j] = 2304;
+					}
+				}
+			}
+
+			if (table->num_of_row >= 3) {
+				int row2_index = table->num_of_col * 2;
+				for (j = 0; j < table->num_of_col; j++) {
+					if (new_parameters[row2_index + j] == 2112) {
+						new_parameters[row2_index + j] = 2304;
+					}
+				}
+			}
+			
+			table->parameter = new_parameters;
+			pr_info("FDSU table modified: frequencies updated to 2304 MHz\n");
+		}
+	}
+
+	if (table->table_name && strcmp(table->table_name, "SPEC_DSU") == 0) {
+		pr_info("SPEC_DSU table detected, no changes needed\n");
+	}
 
 	return 0;
 }
+
 
 static int ect_parse_gen_param_header(void *address, struct ect_info *info)
 {
