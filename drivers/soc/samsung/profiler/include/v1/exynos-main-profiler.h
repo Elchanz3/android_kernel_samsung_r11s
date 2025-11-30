@@ -2,8 +2,6 @@
 #define __EXYNOS_MAIN_PROFILER_H__
 #include <exynos-profiler-if.h>
 #include "../../../../../../kernel/sched/sched.h"
-#include "../../../../../../kernel/sched/ems/ems.h"
-
 
 
 #include <v1/exynos-profiler-shared.h>
