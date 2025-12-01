@@ -96,3 +96,4 @@ scripts/basic/fixdep
 include/linux/ologk.h
 /KernelSU-Next
 *.old
+.config.old
