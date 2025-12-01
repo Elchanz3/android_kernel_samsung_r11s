@@ -68,7 +68,7 @@ struct exynos_pm_qos_object {
 
 static struct exynos_pm_qos_object null_exynos_pm_qos;
 
-SRCU_NOTIFIER_HEAD_STATIC(network_lat_notifier);
+static BLOCKING_NOTIFIER_HEAD(network_lat_notifier);
 static struct exynos_pm_qos_constraints network_lat_constraints = {
 	.list = PLIST_HEAD_INIT(network_lat_constraints.list),
 	.target_value = PM_QOS_NETWORK_LAT_DEFAULT_VALUE,
@@ -84,7 +84,7 @@ static struct exynos_pm_qos_object network_lat_pm_qos = {
 	.name = "network_latency",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(device_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(device_throughput_notifier);
 static struct exynos_pm_qos_constraints device_tput_constraints = {
 	.list = PLIST_HEAD_INIT(device_tput_constraints.list),
 	.target_value = PM_QOS_DEVICE_THROUGHPUT_DEFAULT_VALUE,
@@ -99,7 +99,7 @@ static struct exynos_pm_qos_object device_throughput_pm_qos = {
 	.name = "device_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(device_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(device_throughput_max_notifier);
 static struct exynos_pm_qos_constraints device_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(device_tput_max_constraints.list),
 	.target_value = PM_QOS_DEVICE_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -114,7 +114,7 @@ static struct exynos_pm_qos_object device_throughput_max_pm_qos = {
 	.name = "device_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(intcam_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(intcam_throughput_notifier);
 static struct exynos_pm_qos_constraints intcam_tput_constraints = {
 	.list = PLIST_HEAD_INIT(intcam_tput_constraints.list),
 	.target_value = PM_QOS_INTCAM_THROUGHPUT_DEFAULT_VALUE,
@@ -129,7 +129,7 @@ static struct exynos_pm_qos_object intcam_throughput_pm_qos = {
 	.name = "intcam_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(intcam_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(intcam_throughput_max_notifier);
 static struct exynos_pm_qos_constraints intcam_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(intcam_tput_max_constraints.list),
 	.target_value = PM_QOS_INTCAM_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -144,7 +144,7 @@ static struct exynos_pm_qos_object intcam_throughput_max_pm_qos = {
 	.name = "intcam_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(bus_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(bus_throughput_notifier);
 static struct exynos_pm_qos_constraints bus_tput_constraints = {
 	.list = PLIST_HEAD_INIT(bus_tput_constraints.list),
 	.target_value = PM_QOS_BUS_THROUGHPUT_DEFAULT_VALUE,
@@ -159,7 +159,7 @@ static struct exynos_pm_qos_object bus_throughput_pm_qos = {
 	.name = "bus_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(bus_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(bus_throughput_max_notifier);
 static struct exynos_pm_qos_constraints bus_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(bus_tput_max_constraints.list),
 	.target_value = PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -174,7 +174,7 @@ static struct exynos_pm_qos_object bus_throughput_max_pm_qos = {
 	.name = "bus_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cluster2_freq_min_notifier);
+static BLOCKING_NOTIFIER_HEAD(cluster2_freq_min_notifier);
 static struct exynos_pm_qos_constraints cluster2_freq_min_constraints = {
 	.list = PLIST_HEAD_INIT(cluster2_freq_min_constraints.list),
 	.target_value = PM_QOS_CLUSTER2_FREQ_MIN_DEFAULT_VALUE,
@@ -189,7 +189,7 @@ static struct exynos_pm_qos_object cluster2_freq_min_pm_qos = {
 	.name = "cluster2_freq_min",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cluster2_freq_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(cluster2_freq_max_notifier);
 static struct exynos_pm_qos_constraints cluster2_freq_max_constraints = {
 	.list = PLIST_HEAD_INIT(cluster2_freq_max_constraints.list),
 	.target_value = PM_QOS_CLUSTER2_FREQ_MAX_DEFAULT_VALUE,
@@ -204,7 +204,7 @@ static struct exynos_pm_qos_object cluster2_freq_max_pm_qos = {
 	.name = "cluster2_freq_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cluster1_freq_min_notifier);
+static BLOCKING_NOTIFIER_HEAD(cluster1_freq_min_notifier);
 static struct exynos_pm_qos_constraints cluster1_freq_min_constraints = {
 	.list = PLIST_HEAD_INIT(cluster1_freq_min_constraints.list),
 	.target_value = PM_QOS_CLUSTER1_FREQ_MIN_DEFAULT_VALUE,
@@ -219,7 +219,7 @@ static struct exynos_pm_qos_object cluster1_freq_min_pm_qos = {
 	.name = "cluster1_freq_min",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cluster1_freq_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(cluster1_freq_max_notifier);
 static struct exynos_pm_qos_constraints cluster1_freq_max_constraints = {
 	.list = PLIST_HEAD_INIT(cluster1_freq_max_constraints.list),
 	.target_value = PM_QOS_CLUSTER1_FREQ_MAX_DEFAULT_VALUE,
@@ -234,7 +234,7 @@ static struct exynos_pm_qos_object cluster1_freq_max_pm_qos = {
 	.name = "cluster1_freq_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cluster0_freq_min_notifier);
+static BLOCKING_NOTIFIER_HEAD(cluster0_freq_min_notifier);
 static struct exynos_pm_qos_constraints cluster0_freq_min_constraints = {
 	.list = PLIST_HEAD_INIT(cluster0_freq_min_constraints.list),
 	.target_value = PM_QOS_CLUSTER0_FREQ_MIN_DEFAULT_VALUE,
@@ -249,7 +249,7 @@ static struct exynos_pm_qos_object cluster0_freq_min_pm_qos = {
 	.name = "cluster0_freq_min",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cluster0_freq_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(cluster0_freq_max_notifier);
 static struct exynos_pm_qos_constraints cluster0_freq_max_constraints = {
 	.list = PLIST_HEAD_INIT(cluster0_freq_max_constraints.list),
 	.target_value = PM_QOS_CLUSTER0_FREQ_MAX_DEFAULT_VALUE,
@@ -264,7 +264,7 @@ static struct exynos_pm_qos_object cluster0_freq_max_pm_qos = {
 	.name = "cluster0_freq_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cpu_online_min_notifier);
+static BLOCKING_NOTIFIER_HEAD(cpu_online_min_notifier);
 static struct exynos_pm_qos_constraints cpu_online_min_constraints = {
 	.list = PLIST_HEAD_INIT(cpu_online_min_constraints.list),
 	.target_value = PM_QOS_CPU_ONLINE_MIN_DEFAULT_VALUE,
@@ -279,7 +279,7 @@ static struct exynos_pm_qos_object cpu_online_min_pm_qos = {
 	.name = "cpu_online_min",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cpu_online_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(cpu_online_max_notifier);
 static struct exynos_pm_qos_constraints cpu_online_max_constraints = {
 	.list = PLIST_HEAD_INIT(cpu_online_max_constraints.list),
 	.target_value = PM_QOS_CPU_ONLINE_MAX_DEFAULT_VALUE,
@@ -294,7 +294,7 @@ static struct exynos_pm_qos_object cpu_online_max_pm_qos = {
 	.name = "cpu_online_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(display_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(display_throughput_notifier);
 static struct exynos_pm_qos_constraints display_tput_constraints = {
 	.list = PLIST_HEAD_INIT(display_tput_constraints.list),
 	.target_value = PM_QOS_DISPLAY_THROUGHPUT_DEFAULT_VALUE,
@@ -309,7 +309,7 @@ static struct exynos_pm_qos_object display_throughput_pm_qos = {
 	.name = "display_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(display_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(display_throughput_max_notifier);
 static struct exynos_pm_qos_constraints display_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(display_tput_max_constraints.list),
 	.target_value = PM_QOS_DISPLAY_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -324,7 +324,7 @@ static struct exynos_pm_qos_object display_throughput_max_pm_qos = {
 	.name = "display_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cam_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(cam_throughput_notifier);
 static struct exynos_pm_qos_constraints cam_tput_constraints = {
 	.list = PLIST_HEAD_INIT(cam_tput_constraints.list),
 	.target_value = PM_QOS_CAM_THROUGHPUT_DEFAULT_VALUE,
@@ -339,7 +339,7 @@ static struct exynos_pm_qos_object cam_throughput_pm_qos = {
 	.name = "cam_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(aud_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(aud_throughput_notifier);
 static struct exynos_pm_qos_constraints aud_tput_constraints = {
 	.list = PLIST_HEAD_INIT(aud_tput_constraints.list),
 	.target_value = PM_QOS_AUD_THROUGHPUT_DEFAULT_VALUE,
@@ -354,7 +354,7 @@ static struct exynos_pm_qos_object aud_throughput_pm_qos = {
 	.name = "aud_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(cam_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(cam_throughput_max_notifier);
 static struct exynos_pm_qos_constraints cam_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(cam_tput_max_constraints.list),
 	.target_value = PM_QOS_CAM_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -369,7 +369,7 @@ static struct exynos_pm_qos_object cam_throughput_max_pm_qos = {
 	.name = "cam_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(aud_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(aud_throughput_max_notifier);
 static struct exynos_pm_qos_constraints aud_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(aud_tput_max_constraints.list),
 	.target_value = PM_QOS_AUD_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -384,7 +384,7 @@ static struct exynos_pm_qos_object aud_throughput_max_pm_qos = {
 	.name = "aud_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(mfc_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(mfc_throughput_notifier);
 static struct exynos_pm_qos_constraints mfc_tput_constraints = {
 	.list = PLIST_HEAD_INIT(mfc_tput_constraints.list),
 	.target_value = PM_QOS_MFC_THROUGHPUT_DEFAULT_VALUE,
@@ -399,7 +399,7 @@ static struct exynos_pm_qos_object mfc_throughput_pm_qos = {
 	.name = "mfc_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(npu_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(npu_throughput_notifier);
 static struct exynos_pm_qos_constraints npu_tput_constraints = {
 	.list = PLIST_HEAD_INIT(npu_tput_constraints.list),
 	.target_value = PM_QOS_NPU_THROUGHPUT_DEFAULT_VALUE,
@@ -414,7 +414,7 @@ static struct exynos_pm_qos_object npu_throughput_pm_qos = {
 	.name = "npu_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(gpu_freq_min_notifier);
+static BLOCKING_NOTIFIER_HEAD(gpu_freq_min_notifier);
 static struct exynos_pm_qos_constraints gpu_freq_min_constraints = {
 	.list = PLIST_HEAD_INIT(gpu_freq_min_constraints.list),
 	.target_value = PM_QOS_GPU_FREQ_MIN_DEFAULT_VALUE,
@@ -429,7 +429,7 @@ static struct exynos_pm_qos_object gpu_freq_min_pm_qos = {
 	.name = "gpu_freq_min",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(gpu_freq_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(gpu_freq_max_notifier);
 static struct exynos_pm_qos_constraints gpu_freq_max_constraints = {
 	.list = PLIST_HEAD_INIT(gpu_freq_max_constraints.list),
 	.target_value = PM_QOS_GPU_FREQ_MAX_DEFAULT_VALUE,
@@ -444,7 +444,7 @@ static struct exynos_pm_qos_object gpu_freq_max_pm_qos = {
 	.name = "gpu_freq_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(mfc_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(mfc_throughput_max_notifier);
 static struct exynos_pm_qos_constraints mfc_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(mfc_tput_max_constraints.list),
 	.target_value = PM_QOS_MFC_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -459,7 +459,7 @@ static struct exynos_pm_qos_object mfc_throughput_max_pm_qos = {
 	.name = "mfc_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(npu_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(npu_throughput_max_notifier);
 static struct exynos_pm_qos_constraints npu_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(npu_tput_max_constraints.list),
 	.target_value = PM_QOS_NPU_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -474,7 +474,7 @@ static struct exynos_pm_qos_object npu_throughput_max_pm_qos = {
 	.name = "npu_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(vpc_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(vpc_throughput_notifier);
 static struct exynos_pm_qos_constraints vpc_tput_constraints = {
 	.list = PLIST_HEAD_INIT(vpc_tput_constraints.list),
 	.target_value = PM_QOS_VPC_THROUGHPUT_DEFAULT_VALUE,
@@ -489,7 +489,7 @@ static struct exynos_pm_qos_object vpc_throughput_pm_qos = {
 	.name = "vpc_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(vpc_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(vpc_throughput_max_notifier);
 static struct exynos_pm_qos_constraints vpc_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(vpc_tput_max_constraints.list),
 	.target_value = PM_QOS_VPC_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -504,7 +504,7 @@ static struct exynos_pm_qos_object vpc_throughput_max_pm_qos = {
 	.name = "vpc_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(csis_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(csis_throughput_notifier);
 static struct exynos_pm_qos_constraints csis_tput_constraints = {
 	.list = PLIST_HEAD_INIT(csis_tput_constraints.list),
 	.target_value = PM_QOS_CSIS_THROUGHPUT_DEFAULT_VALUE,
@@ -519,7 +519,7 @@ static struct exynos_pm_qos_object csis_throughput_pm_qos = {
 	.name = "csis_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(csis_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(csis_throughput_max_notifier);
 static struct exynos_pm_qos_constraints csis_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(csis_tput_max_constraints.list),
 	.target_value = PM_QOS_CSIS_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -534,7 +534,7 @@ static struct exynos_pm_qos_object csis_throughput_max_pm_qos = {
 	.name = "csis_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(isp_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(isp_throughput_notifier);
 static struct exynos_pm_qos_constraints isp_tput_constraints = {
 	.list = PLIST_HEAD_INIT(isp_tput_constraints.list),
 	.target_value = PM_QOS_ISP_THROUGHPUT_DEFAULT_VALUE,
@@ -549,7 +549,7 @@ static struct exynos_pm_qos_object isp_throughput_pm_qos = {
 	.name = "isp_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(isp_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(isp_throughput_max_notifier);
 static struct exynos_pm_qos_constraints isp_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(isp_tput_max_constraints.list),
 	.target_value = PM_QOS_ISP_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -564,7 +564,7 @@ static struct exynos_pm_qos_object isp_throughput_max_pm_qos = {
 	.name = "isp_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(mfc1_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(mfc1_throughput_notifier);
 static struct exynos_pm_qos_constraints mfc1_tput_constraints = {
 	.list = PLIST_HEAD_INIT(mfc1_tput_constraints.list),
 	.target_value = PM_QOS_MFC1_THROUGHPUT_DEFAULT_VALUE,
@@ -579,7 +579,7 @@ static struct exynos_pm_qos_object mfc1_throughput_pm_qos = {
 	.name = "mfc1_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(mfc1_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(mfc1_throughput_max_notifier);
 static struct exynos_pm_qos_constraints mfc1_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(mfc1_tput_max_constraints.list),
 	.target_value = PM_QOS_MFC1_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -594,7 +594,7 @@ static struct exynos_pm_qos_object mfc1_throughput_max_pm_qos = {
 	.name = "mfc1_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(dnc_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(dnc_throughput_max_notifier);
 static struct exynos_pm_qos_constraints dnc_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(dnc_tput_max_constraints.list),
 	.target_value = PM_QOS_DNC_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -609,7 +609,7 @@ static struct exynos_pm_qos_object dnc_throughput_max_pm_qos = {
 	.name = "dnc_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(dnc_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(dnc_throughput_notifier);
 static struct exynos_pm_qos_constraints dnc_tput_constraints = {
 	.list = PLIST_HEAD_INIT(dnc_tput_constraints.list),
 	.target_value = PM_QOS_DNC_THROUGHPUT_DEFAULT_VALUE,
@@ -624,7 +624,7 @@ static struct exynos_pm_qos_object dnc_throughput_pm_qos = {
 	.name = "dnc_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(dsp_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(dsp_throughput_max_notifier);
 static struct exynos_pm_qos_constraints dsp_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(dsp_tput_max_constraints.list),
 	.target_value = PM_QOS_DSP_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -639,7 +639,7 @@ static struct exynos_pm_qos_object dsp_throughput_max_pm_qos = {
 	.name = "dsp_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(dsp_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(dsp_throughput_notifier);
 static struct exynos_pm_qos_constraints dsp_tput_constraints = {
 	.list = PLIST_HEAD_INIT(dsp_tput_constraints.list),
 	.target_value = PM_QOS_DSP_THROUGHPUT_DEFAULT_VALUE,
@@ -654,7 +654,7 @@ static struct exynos_pm_qos_object dsp_throughput_pm_qos = {
 	.name = "dsp_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(chub_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(chub_throughput_max_notifier);
 static struct exynos_pm_qos_constraints chub_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(chub_tput_max_constraints.list),
 	.target_value = PM_QOS_CHUB_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -669,7 +669,7 @@ static struct exynos_pm_qos_object chub_throughput_max_pm_qos = {
 	.name = "chub_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(chub_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(chub_throughput_notifier);
 static struct exynos_pm_qos_constraints chub_tput_constraints = {
 	.list = PLIST_HEAD_INIT(chub_tput_constraints.list),
 	.target_value = PM_QOS_CHUB_THROUGHPUT_DEFAULT_VALUE,
@@ -684,7 +684,7 @@ static struct exynos_pm_qos_object chub_throughput_pm_qos = {
 	.name = "chub_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(vts_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(vts_throughput_max_notifier);
 static struct exynos_pm_qos_constraints vts_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(vts_tput_max_constraints.list),
 	.target_value = PM_QOS_VTS_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -699,7 +699,7 @@ static struct exynos_pm_qos_object vts_throughput_max_pm_qos = {
 	.name = "vts_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(vts_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(vts_throughput_notifier);
 static struct exynos_pm_qos_constraints vts_tput_constraints = {
 	.list = PLIST_HEAD_INIT(vts_tput_constraints.list),
 	.target_value = PM_QOS_VTS_THROUGHPUT_DEFAULT_VALUE,
@@ -714,7 +714,7 @@ static struct exynos_pm_qos_object vts_throughput_pm_qos = {
 	.name = "vts_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(hsi0_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(hsi0_throughput_max_notifier);
 static struct exynos_pm_qos_constraints hsi0_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(hsi0_tput_max_constraints.list),
 	.target_value = PM_QOS_HSI0_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -729,7 +729,7 @@ static struct exynos_pm_qos_object hsi0_throughput_max_pm_qos = {
 	.name = "hsi0_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(hsi0_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(hsi0_throughput_notifier);
 static struct exynos_pm_qos_constraints hsi0_tput_constraints = {
 	.list = PLIST_HEAD_INIT(hsi0_tput_constraints.list),
 	.target_value = PM_QOS_HSI0_THROUGHPUT_DEFAULT_VALUE,
@@ -744,7 +744,7 @@ static struct exynos_pm_qos_object hsi0_throughput_pm_qos = {
 	.name = "hsi0_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(alive_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(alive_throughput_max_notifier);
 static struct exynos_pm_qos_constraints alive_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(alive_tput_max_constraints.list),
 	.target_value = PM_QOS_ALIVE_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -759,7 +759,7 @@ static struct exynos_pm_qos_object alive_throughput_max_pm_qos = {
 	.name = "alive_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(alive_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(alive_throughput_notifier);
 static struct exynos_pm_qos_constraints alive_tput_constraints = {
 	.list = PLIST_HEAD_INIT(alive_tput_constraints.list),
 	.target_value = PM_QOS_ALIVE_THROUGHPUT_DEFAULT_VALUE,
@@ -774,7 +774,7 @@ static struct exynos_pm_qos_object alive_throughput_pm_qos = {
 	.name = "alive_throughput",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(ufd_throughput_max_notifier);
+static BLOCKING_NOTIFIER_HEAD(ufd_throughput_max_notifier);
 static struct exynos_pm_qos_constraints ufd_tput_max_constraints = {
 	.list = PLIST_HEAD_INIT(ufd_tput_max_constraints.list),
 	.target_value = PM_QOS_UFD_THROUGHPUT_MAX_DEFAULT_VALUE,
@@ -789,7 +789,7 @@ static struct exynos_pm_qos_object ufd_throughput_max_pm_qos = {
 	.name = "ufd_throughput_max",
 };
 
-SRCU_NOTIFIER_HEAD_STATIC(ufd_throughput_notifier);
+static BLOCKING_NOTIFIER_HEAD(ufd_throughput_notifier);
 static struct exynos_pm_qos_constraints ufd_tput_constraints = {
 	.list = PLIST_HEAD_INIT(ufd_tput_constraints.list),
 	.target_value = PM_QOS_UFD_THROUGHPUT_DEFAULT_VALUE,
@@ -1239,7 +1239,7 @@ int exynos_pm_qos_update_target(struct exynos_pm_qos_constraints *c, struct plis
 	if (!nosync && (prev_value != curr_value)) {
 		ret = 1;
 		if (c->notifiers)
-			srcu_notifier_call_chain(c->notifiers,
+			blocking_notifier_call_chain(c->notifiers,
 						     (unsigned long)curr_value,
 						     NULL);
 	} else {
@@ -1431,7 +1431,9 @@ int exynos_pm_qos_add_notifier(int exynos_pm_qos_class, struct notifier_block *n
 {
 	int retval;
 
-	retval = srcu_notifier_chain_register(constraints->notifiers, notifier);
+	retval = blocking_notifier_chain_register(
+			exynos_pm_qos_array[exynos_pm_qos_class]->constraints->notifiers,
+			notifier);
 
 	return retval;
 }
@@ -1449,8 +1451,9 @@ int exynos_pm_qos_remove_notifier(int exynos_pm_qos_class, struct notifier_block
 {
 	int retval;
 
-	retval = srcu_notifier_chain_unregister(constraints->notifiers,
-						notifier);
+	retval = blocking_notifier_chain_unregister(
+			exynos_pm_qos_array[exynos_pm_qos_class]->constraints->notifiers,
+			notifier);
 
 	return retval;
 }
