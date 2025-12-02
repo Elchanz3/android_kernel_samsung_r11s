@@ -137,4 +137,5 @@ extern void cal_register_pd_lookup_cmu_id(void *(*func)(u32 cmu_id));
 
 int fvmap_patch(unsigned int domain_id, unsigned int rate, unsigned int volt);
 unsigned int fvmap_read(unsigned int domain_id, int mode, unsigned int value);
+ssize_t fvmap_print(char *buf, unsigned int dvfs_type);
 #endif
