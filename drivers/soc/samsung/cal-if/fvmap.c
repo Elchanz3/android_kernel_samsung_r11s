@@ -25,7 +25,7 @@ static size_t sram_buffer_size;
 #include "vclk.h"
 #include "ra.h"
 
-#define FVMAP_SIZE		(SZ_32K)
+#define FVMAP_SIZE		(SZ_8K)
 #define STEP_UV			(6250)
 
 void __iomem *fvmap_base;
@@ -297,7 +297,6 @@ static void optimize_rate_volt_table(struct rate_volt_header *head, unsigned int
 			break;
 	}
 }
-
 unsigned int dvfs_calibrate_voltage(unsigned int rate_target, unsigned int rate_up,
 		unsigned int rate_down, unsigned int volt_up, unsigned int volt_down)
 {
@@ -417,435 +416,20 @@ int fvmap_get_raw_voltage_table(unsigned int id)
 	return 0;
 }
 
-static void apply_g3d_overvolt(void __iomem *sram_base, 
-                                volatile struct fvmap_header *fvmap_header,
-                                struct vclk *vclk, int idx)
+/* write 1536 for G3D in sram*/
+
+static void add_g3d_1536mhz_level(void __iomem *sram_base, 
+                                   volatile struct fvmap_header *fvmap_header,
+                                   struct vclk *vclk, int idx)
 {
 	struct rate_volt_header *fv_table;
 	int j;
+	int num_of_lv;
 	
+	// margin_id 13 = G3D
 	if (vclk->margin_id != 13)
 		return;
 	
-	pr_info("Applying voltage modifications to G3D domain\n");
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	
-	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
-		int old_volt = fv_table->table[j].volt;
-		int freq = fv_table->table[j].rate;
-		int volt_change = 0;
-		
-		if (freq >= 1536000) {
-			continue;
-		} else if (freq >= 1402000) {
-			volt_change = 5;  // +31250 uV
-		} else if (freq >= 1306000) {
-			volt_change = 2;  // +12500 uV
-		} else if (freq >= 80000) {
-			volt_change = -1; // -6250 uV
-		}
-		
-		if (volt_change != 0) {
-			fv_table->table[j].volt += volt_change;
-			pr_info("G3D Level %d: %d kHz - Voltage: %d uV -> %d uV (%c%d uV)\n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV,
-			        volt_change > 0 ? '+' : '-',
-			        abs(volt_change) * STEP_UV);
-		}
-	}
-}
-
-static void apply_cpucl0_voltage_mod(void __iomem *sram_base, 
-                                     volatile struct fvmap_header *fvmap_header,
-                                     struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	
-	if (vclk->margin_id != 2)
-		return;
-	
-	pr_info("Applying voltage modifications to CPUCL0 domain\n");
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	
-	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
-		int old_volt = fv_table->table[j].volt;
-		int freq = fv_table->table[j].rate;
-		
-		if (freq >= 2496000) {
-			fv_table->table[j].volt += 4;  // 8 steps = 50mV
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 2400000) {
-			fv_table->table[j].volt += 4;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 2304000) {
-			fv_table->table[j].volt += 4;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 2112000) {
-			fv_table->table[j].volt += 4;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 1920000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 1824000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 1728000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 1536000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 1344000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 1152000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 960000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 768000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 576000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 400000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 267000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq <= 160000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL0 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		}
-	}
-}
-
-static void apply_cpucl1_voltage_mod(void __iomem *sram_base, 
-                                     volatile struct fvmap_header *fvmap_header,
-                                     struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	
-	if (vclk->margin_id != 3)
-		return;
-	
-	pr_info("Applying voltage modifications to CPUCL1 domain\n");
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	
-	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
-		int old_volt = fv_table->table[j].volt;
-		int freq = fv_table->table[j].rate;
-		
-		if (freq == 2900000) {
-			fv_table->table[j].volt += 4;  // 8 steps = 50mV
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2803000) {
-			fv_table->table[j].volt += 4;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2707000) {
-			fv_table->table[j].volt += 4;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2611000) {
-			fv_table->table[j].volt += 2;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2515000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2400000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2304000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2112000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1920000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1728000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1536000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1344000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1152000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 960000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 768000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 576000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 400000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 267000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 160000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} 
-	}
-}
-
-static void apply_cpucl2_voltage_mod(void __iomem *sram_base, 
-                                     volatile struct fvmap_header *fvmap_header,
-                                     struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	
-	if (vclk->margin_id != 4)
-		return;
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	
-	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
-		int old_volt = fv_table->table[j].volt;
-		int freq = fv_table->table[j].rate;
-		
-		if (freq == 2900000) {
-			fv_table->table[j].volt += 8;  // 8 steps = 50mV
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2803000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2707000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2611000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2515000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2400000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2304000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 2112000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1920000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1728000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1536000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1344000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 1152000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 960000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 768000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 576000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 400000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 267000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} else if (freq == 160000) {
-			fv_table->table[j].volt -= 1;
-			pr_info("CPUCL2 Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-			        j, freq, old_volt * STEP_UV,
-			        fv_table->table[j].volt * STEP_UV);
-		} 
-	}
-}
-
-static void __used apply_mif_undervolt(void __iomem *sram_base, 
-                               volatile struct fvmap_header *fvmap_header,
-                               struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	
-	if (vclk->margin_id != 0)
-		return;
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	
-	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
-		int old_volt = fv_table->table[j].volt;
-		fv_table->table[j].volt += 2;
-		
-		pr_info("MIF Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-		        j, fv_table->table[j].rate, old_volt * STEP_UV,
-		        fv_table->table[j].volt * STEP_UV);
-	}
-}
-
-static void __used apply_npu_undervolt(void __iomem *sram_base, 
-                               volatile struct fvmap_header *fvmap_header,
-                               struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	
-	if (vclk->margin_id != 5)
-		return;
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	
-	for (j = 0; j < fvmap_header[idx].num_of_lv; j++) {
-		int old_volt = fv_table->table[j].volt;
-		fv_table->table[j].volt -= 3;
-		
-		pr_info("SYS Level %d: %d kHz - Voltage: %d uV -> %d uV \n",
-		        j, fv_table->table[j].rate, old_volt * STEP_UV,
-		        fv_table->table[j].volt * STEP_UV);
-	}
-}
-
-static void add_cpucl2_3016mhz_level(void __iomem *sram_base, 
-                                      volatile struct fvmap_header *fvmap_header,
-                                      struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	int num_of_lv;
-	
-	if (vclk->margin_id != 4)
-		return;
-	
 	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
 	num_of_lv = fvmap_header[idx].num_of_lv;
 	
@@ -854,207 +438,151 @@ static void add_cpucl2_3016mhz_level(void __iomem *sram_base,
 		fv_table->table[j + 1].volt = fv_table->table[j].volt;
 	}
 	
-	fv_table->table[0].rate = 3016000;
-	fv_table->table[0].volt = 195;
+	fv_table->table[0].rate = 1536000;  // 1536MHz em KHz
+	fv_table->table[0].volt = 155;      // 937500 uV / 6250 = 140 steps
 	
+	// Atualiza o número de níveis
 	fvmap_header[idx].num_of_lv = num_of_lv + 1;
 	
+	// Log dos primeiros níveis
 	for (j = 0; j < 4 && j < fvmap_header[idx].num_of_lv; j++) {
-		pr_info("CPUCL2 Level %d: %d kHz @ %d uV\n",
+		pr_info("G3D Level %d: %d kHz @ %d uV\n",
 		        j, fv_table->table[j].rate, 
 		        fv_table->table[j].volt * STEP_UV);
 	}
 }
 
-static void add_mif_level(void __iomem *sram_base, 
-                                      volatile struct fvmap_header *fvmap_header,
-                                      struct vclk *vclk, int idx)
-{
-	struct rate_volt_header *fv_table;
-	int j;
-	int num_of_lv;
-	
-	if (vclk->margin_id != 0)
-		return;
-	
-	fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-	num_of_lv = fvmap_header[idx].num_of_lv;
-	
-	for (j = num_of_lv - 1; j >= 0; j--) {
-		fv_table->table[j + 1].rate = fv_table->table[j].rate;
-		fv_table->table[j + 1].volt = fv_table->table[j].volt;
-	}
-	
-	fv_table->table[0].rate = 3711000;
-	fv_table->table[0].volt = 150;
-	
-	fvmap_header[idx].num_of_lv = num_of_lv + 1;
-	
-	for (j = 0; j < 4 && j < fvmap_header[idx].num_of_lv; j++) {
-		pr_info("MIF Level %d: %d kHz @ %d uV\n",
-		        j, fv_table->table[j].rate, 
-		        fv_table->table[j].volt * STEP_UV);
-	}
-}
-
-static void int_modfreq(void __iomem *sram_base,
-                       volatile struct fvmap_header *fvmap_header,
-                       struct vclk *vclk, int idx)
+/* write 3548 for MIF in sram*/
+static void add_mif_3548mhz_level(void __iomem *sram_base, 
+                                   volatile struct fvmap_header *fvmap_header,
+                                   struct vclk *vclk, int idx)
 {
     struct rate_volt_header *fv_table;
     int j;
     int num_of_lv;
     
-    if (vclk->margin_id != 1)
+    // margin_id 0 = MIF (conforme o log mostra "Margin ID: 0")
+    if (vclk->margin_id != 0)
         return;
     
     fv_table = sram_base + fvmap_header[idx].o_ratevolt;
     num_of_lv = fvmap_header[idx].num_of_lv;
     
+    // Deslocar todos os níveis existentes para baixo (do fim para o início)
     for (j = num_of_lv - 1; j >= 0; j--) {
         fv_table->table[j + 1].rate = fv_table->table[j].rate;
         fv_table->table[j + 1].volt = fv_table->table[j].volt;
     }
     
-    fv_table->table[0].rate = 935000;
-    fv_table->table[0].volt = 146;
+    // Inserir novo nível 3548MHz no topo (índice 0)
+    fv_table->table[0].rate = 3548000;  // 3548MHz em KHz
     
+    // Calcular a tensão apropriada para 3548MHz
+    // Baseado na tabela existente: 3172MHz = 718750uV
+    // Vamos usar uma tensão maior para 3548MHz. 
+    // Se 3172MHz -> 718750uV, então para 3548MHz podemos usar ~768750uV
+    // Isso é ~50mV a mais (7.0%)
+    // Ou podemos usar a tensão do JSON VMIF: 968750uV para 3548MHz
+    // Vamos usar 968750uV / 6250 = 155 steps
+    fv_table->table[0].volt = 155;      // 968750 uV / 6250 = 155 steps
+    
+    // Atualiza o número de níveis
     fvmap_header[idx].num_of_lv = num_of_lv + 1;
     
+    // Log dos primeiros níveis
     for (j = 0; j < 4 && j < fvmap_header[idx].num_of_lv; j++) {
-        pr_info("INT Level %d: %d kHz @ %d uV\n",
-                j, fv_table->table[j].rate,
-                fv_table->table[j].volt * 6250);
+        pr_info("MIF Level %d: %d kHz @ %d uV (steps: %d)\n",
+                j, fv_table->table[j].rate, 
+                fv_table->table[j].volt * STEP_UV,
+                fv_table->table[j].volt);
     }
-    
-    pr_info("INT: Added 933 MHz level successfully\n");
 }
 
-static void g3d_modfreq(void __iomem *sram_base,
-                       volatile struct fvmap_header *fvmap_header,
-                       struct vclk *vclk, int idx)
+static int patch_fvmap(void __iomem *map_base, unsigned int domain_id, unsigned int rate, unsigned int volt)
 {
-    struct rate_volt_header *fv_table;
-    int j;
-    int num_of_lv;
-    
-    if (vclk->margin_id != 13)
-        return;
-    
-    fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-    num_of_lv = fvmap_header[idx].num_of_lv;
-    
-    for (j = num_of_lv - 1; j >= 0; j--) {
-        fv_table->table[j + 1].rate = fv_table->table[j].rate;
-        fv_table->table[j + 1].volt = fv_table->table[j].volt;
-    }
-    
-    fv_table->table[0].rate = 1536000;
-    fv_table->table[0].volt = 149;
-    
-    // Atualiza o número de níveis
-    fvmap_header[idx].num_of_lv = num_of_lv + 1;
+	volatile struct fvmap_header *fvmap_header;
+	struct rate_volt_header *rvh;
+	bool exists = false;
+	int size, rest;
+	int i, j, k;
+	int ret = 0;
 
-    for (j = 0; j < 4 && j < fvmap_header[idx].num_of_lv; j++) {
-        pr_info("G3D Level %d: %d kHz @ %d uV\n",
-                j, fv_table->table[j].rate,
-                fv_table->table[j].volt * 6250);
-    }
-    
-    pr_info("G3D: Added 1536 MHz level successfully\n");
-}
+	if (rate < 1)
+		return -1;
 
-static void add_int_935mhz_level(void __iomem *sram_base, 
-                                volatile struct fvmap_header *fvmap_header,
-                                struct vclk *vclk, int idx)
-{
-    struct rate_volt_header *fv_table;
-    int j;
-    int num_of_lv;
-    
-    // Verifica se é o domínio INT pelo Margin ID (1 do seu dump)
-    if (vclk->margin_id != 1)
-        return;
-    
-    fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-    num_of_lv = fvmap_header[idx].num_of_lv;
-    
-    // Desloca todos os níveis para baixo para abrir espaço no topo
-    for (j = num_of_lv - 1; j >= 0; j--) {
-        fv_table->table[j + 1].rate = fv_table->table[j].rate;
-        fv_table->table[j + 1].volt = fv_table->table[j].volt;
-    }
-    
-    // Adiciona o novo nível no topo (935 MHz)
-    fv_table->table[0].rate = 935000;   // 935 MHz em kHz
-    fv_table->table[0].volt = 150;      // 937500 uV / STEP_UV (6250) = 150
-    
-    // Atualiza o número de níveis
-    fvmap_header[idx].num_of_lv = num_of_lv + 1;
-    
-    pr_info("INT: Added 935 MHz level with 937500 uV\n");
-}
+	fvmap_header = map_base;
+	size = cmucal_get_list_size(ACPM_VCLK_TYPE);
 
-static void add_dsu_2304mhz_level(void __iomem *sram_base, 
-                                 volatile struct fvmap_header *fvmap_header,
-                                 struct vclk *vclk, int idx)
-{
-    struct rate_volt_header *fv_table;
-    int j;
-    int num_of_lv;
-    
-    // Verifica se é o domínio DSU pelo Margin ID (6 do seu dump)
-    if (vclk->margin_id != 6)
-        return;
-    
-    fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-    num_of_lv = fvmap_header[idx].num_of_lv;
-    
-    // Desloca todos os níveis para baixo para abrir espaço no topo
-    for (j = num_of_lv - 1; j >= 0; j--) {
-        fv_table->table[j + 1].rate = fv_table->table[j].rate;
-        fv_table->table[j + 1].volt = fv_table->table[j].volt;
-    }
-    
-    // Adiciona o novo nível no topo (2304 MHz)
-    fv_table->table[0].rate = 2304000;   // 2304 MHz em kHz
-    fv_table->table[0].volt = 190;       // 1187500 uV / STEP_UV (6250) = 190
-    
-    // Atualiza o número de níveis
-    fvmap_header[idx].num_of_lv = num_of_lv + 1;
-    
-    pr_info("DSU: Added 2304 MHz level with 1187500 uV\n");
-}
+	if (volt > 10000)
+		if ((rest = volt % STEP_UV) != 0) 
+				volt += STEP_UV - rest;
 
-static void add_disp_935mhz_level(void __iomem *sram_base, 
-                                 volatile struct fvmap_header *fvmap_header,
-                                 struct vclk *vclk, int idx)
-{
-    struct rate_volt_header *fv_table;
-    int j;
-    int num_of_lv;
-    
-    // Verifica se é o domínio DISP pelo Margin ID (7 do seu dump)
-    if (vclk->margin_id != 7)
-        return;
-    
-    fv_table = sram_base + fvmap_header[idx].o_ratevolt;
-    num_of_lv = fvmap_header[idx].num_of_lv;
-    
-    // Desloca todos os níveis para baixo para abrir espaço no topo
-    for (j = num_of_lv - 1; j >= 0; j--) {
-        fv_table->table[j + 1].rate = fv_table->table[j].rate;
-        fv_table->table[j + 1].volt = fv_table->table[j].volt;
-    }
-    
-    // Adiciona o novo nível no topo (935 MHz)
-    fv_table->table[0].rate = 935000;   // 935 MHz em kHz
-    fv_table->table[0].volt = 156;      // 975000 uV / STEP_UV (6250) = 156
-    
-    // Atualiza o número de níveis
-    fvmap_header[idx].num_of_lv = num_of_lv + 1;
-    
-    pr_info("DISP: Added 935 MHz level with 975000 uV\n");
+	for (i = 0; i < size; i++) {
+		if (fvmap_header[i].domain_id == domain_id) {
+			rvh = map_base + fvmap_header[i].o_ratevolt;
+
+			for (j = 0; j < fvmap_header[i].num_of_lv; j++) {
+				if (rvh->table[j].rate == rate) {
+					exists = true;
+					break;
+				}
+			}
+
+			if (exists) {
+				if (volt > 0) {
+					for (j = 0; j < fvmap_header[i].num_of_lv; j++) {
+						if (rvh->table[j].rate == rate) {
+							if (volt > 10000)
+								rvh->table[j].volt = volt;
+							else
+								rvh->table[j].volt += volt * STEP_UV;
+							break;
+						}
+					}
+				} else {
+					for (j = 0; j < fvmap_header[i].num_of_lv; j++) {
+						if (rvh->table[j].rate == rate) {
+							for (k = j; k < fvmap_header[i].num_of_lv - 1; k++) {
+								rvh->table[k].rate = rvh->table[k + 1].rate;
+								rvh->table[k].volt = rvh->table[k + 1].volt;
+							}
+							fvmap_header[i].num_of_lv--;
+							break;
+						}
+					}
+				}
+				ret = 1;
+			} else {
+				int insertPosition = -1;
+
+				for (j = 0; j < fvmap_header[i].num_of_lv; j++) {
+					if (rvh->table[j].rate < rate) {
+						insertPosition = j;
+						break;
+					}
+				}
+
+				if (insertPosition < 0)
+					insertPosition = fvmap_header[i].num_of_lv;
+
+				for (j = fvmap_header[i].num_of_lv; j > insertPosition; j--) {
+					rvh->table[j].rate = rvh->table[j - 1].rate;
+					rvh->table[j].volt = rvh->table[j - 1].volt;
+				}
+
+				rvh->table[insertPosition].rate = rate;
+				if (volt > 10000)
+					rvh->table[insertPosition].volt = volt;
+				else if (volt > 0)
+					rvh->table[insertPosition].volt += volt * STEP_UV;
+
+				fvmap_header[i].num_of_lv++;
+			}
+			break;
+		}
+	}
+
+	return ret;
 }
 
 static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base)
@@ -1106,13 +634,10 @@ static void fvmap_copy_from_sram(void __iomem *map_base, void __iomem *sram_base
 		old = sram_base + fvmap_header[i].o_ratevolt;
 		new = map_base + fvmap_header[i].o_ratevolt;
 
-		// ============ ADICIONE ESTAS LINHAS ============
-		add_dsu_2304mhz_level(sram_base, fvmap_header, vclk, i);
-
-		apply_cpucl0_voltage_mod(sram_base, fvmap_header, vclk, i);
-		apply_cpucl1_voltage_mod(sram_base, fvmap_header, vclk, i);
-		apply_cpucl2_voltage_mod(sram_base, fvmap_header, vclk, i);
-		apply_mif_undervolt(sram_base, fvmap_header, vclk, i);
+		add_g3d_1536mhz_level(sram_base, fvmap_header, vclk, i);
+	
+		
+		optimize_rate_volt_table(old, fvmap_header[i].num_of_lv);
 
 		margin = init_margin_table[vclk->margin_id];
 		if (margin)
@@ -1339,3 +864,5 @@ err_sram_kobj:
 EXPORT_SYMBOL_GPL(fvmap_init);
 
 MODULE_LICENSE("GPL");
+
+
