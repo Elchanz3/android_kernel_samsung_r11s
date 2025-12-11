@@ -22,6 +22,9 @@
 
 #include "thermal_core.h"
 
+/* thermal bypass */
+#include "linux/thermal_bypass.h"
+
 /* sys I/F for thermal zone */
 
 static ssize_t
@@ -38,15 +41,12 @@ temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct thermal_zone_device *tz = to_thermal_zone(dev);
 	int temperature, ret;
 
-	ret = thermal_zone_get_temp(tz, &temperature);
+	ret = thermal_zone_get_temp_bypass(tz, &temperature, true);
 
-	if (!ret)
-		return sprintf(buf, "%d\n", temperature);
+	if (ret)
+		return ret;
 
-	if (ret == -EAGAIN)
-		return -ENODATA;
-
-	return ret;
+	return sprintf(buf, "%d\n", temperature);
 }
 
 static ssize_t

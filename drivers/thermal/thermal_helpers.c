@@ -23,6 +23,9 @@
 
 #include "thermal_core.h"
 
+/* thermal bypass */
+#include "linux/thermal_bypass.h"
+
 int get_tz_trend(struct thermal_zone_device *tz, int trip)
 {
 	enum thermal_trend trend;
@@ -75,7 +78,7 @@ EXPORT_SYMBOL(get_thermal_instance);
  *
  * Return: On success returns 0, an error code otherwise
  */
-int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
+static int thermal_zone_get_temp_bool(struct thermal_zone_device *tz, int *temp, bool forced)
 {
 	int ret = -EINVAL;
 	int count;
@@ -89,30 +92,47 @@ int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
 
 	ret = tz->ops->get_temp(tz, temp);
 
-	if (IS_ENABLED(CONFIG_THERMAL_EMULATION) && tz->emul_temperature) {
-		for (count = 0; count < tz->trips; count++) {
-			ret = tz->ops->get_trip_type(tz, count, &type);
-			if (!ret && type == THERMAL_TRIP_CRITICAL) {
-				ret = tz->ops->get_trip_temp(tz, count,
-						&crit_temp);
-				break;
+	if (!forced) {
+		if ((IS_ENABLED(CONFIG_THERMAL_EMULATION) && tz->emul_temperature) || thermal_bypass_get_value()) {
+			for (count = 0; count < tz->trips; count++) {
+				ret = tz->ops->get_trip_type(tz, count, &type);
+				if (!ret && type == THERMAL_TRIP_CRITICAL) {
+					ret = tz->ops->get_trip_temp(tz, count,
+							&crit_temp);
+					break;
+				}
+			}
+
+			/*
+			 * Only allow emulating a temperature when the real temperature
+			 * is below the critical temperature so that the emulation code
+			 * cannot hide critical conditions.
+			 */
+			if (!ret && *temp < crit_temp) {
+				if (thermal_bypass_get_value())
+					*temp = thermal_bypass_get_value();
+				else if (tz->emul_temperature)
+					*temp = tz->emul_temperature;
 			}
 		}
-
-		/*
-		 * Only allow emulating a temperature when the real temperature
-		 * is below the critical temperature so that the emulation code
-		 * cannot hide critical conditions.
-		 */
-		if (!ret && *temp < crit_temp)
-			*temp = tz->emul_temperature;
 	}
-
+ 
 	mutex_unlock(&tz->lock);
 exit:
 	return ret;
 }
+
+int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
+{
+	return thermal_zone_get_temp_bool(tz, temp, false);
+}
 EXPORT_SYMBOL_GPL(thermal_zone_get_temp);
+
+int thermal_zone_get_temp_bypass(struct thermal_zone_device *tz, int *temp)
+{
+	return thermal_zone_get_temp_bool(tz, temp, false);
+}
+EXPORT_SYMBOL_GPL(thermal_zone_get_temp_bypass);
 
 /**
  * thermal_zone_set_trips - Computes the next trip points for the driver

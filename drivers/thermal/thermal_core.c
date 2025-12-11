@@ -29,6 +29,9 @@
 #include "thermal_core.h"
 #include "thermal_hwmon.h"
 
+/* thermal bypass */
+#include "linux/thermal_bypass.h"
+
 static DEFINE_IDA(thermal_tz_ida);
 static DEFINE_IDA(thermal_cdev_ida);
 

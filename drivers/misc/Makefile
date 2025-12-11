@@ -60,6 +60,9 @@ obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
 obj-$(CONFIG_UID_SYS_STATS)	+= uid_sys_stats.o
 obj-y				+= samsung/
 
+# Thermal bypass
+obj-y		+= thermal_bypass.o
+
 # TEEGRIS kernel driver
 ccflags-$(CONFIG_TZDEV) += -I$(srctree)/drivers/misc/tzdev/include
 obj-$(CONFIG_TZDEV)     += tzdev/
