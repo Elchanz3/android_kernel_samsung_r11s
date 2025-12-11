@@ -67,6 +67,9 @@
 #if IS_ENABLED(CONFIG_SEC_PM)
 #include <linux/sec_class.h>
 
+/* thermal bypass */
+#include "linux/thermal_bypass.h"
+
 static int exynos_tmu_sec_pm_init(void);
 static void exynos_tmu_show_curr_temp(void);
 static void exynos_tmu_show_curr_temp_work(struct work_struct *work);
@@ -409,11 +412,19 @@ static int exynos_get_temp(void *p, int *temp)
 	int acpm_data[2];
 	unsigned long long dbginfo;
 	unsigned int limited_max_freq = 0;
+	int bypass_temp;
 
 	if (!data || !data->enabled)
 		return -EINVAL;
 
 	mutex_lock(&data->lock);
+
+	bypass_temp = thermal_bypass_get_value();
+	if (bypass_temp) {
+		*temp = bypass_temp;
+		mutex_unlock(&data->lock);
+		return 0;
+	}
 
 	exynos_acpm_tmu_set_read_temp(data->id, &acpm_temp, &stat, acpm_data);
 
@@ -2788,3 +2799,4 @@ err_create_sysfs:
 
 MODULE_DESCRIPTION("EXYNOS TMU Driver");
 MODULE_LICENSE("GPL");
+
