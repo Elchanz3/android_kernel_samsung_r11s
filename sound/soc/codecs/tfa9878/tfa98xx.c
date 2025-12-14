@@ -1404,8 +1404,8 @@ static int tfa98xx_run_calibration(struct tfa98xx *tfa98xx0)
 		return -EIO;
 	}
 
-	/* EXT_TEMP */
-	ret = tfa98xx_read_reference_temp(&temp_val);
+/* EXT_TEMP */
+	ret = (enum tfa_error)tfa98xx_read_reference_temp(&temp_val);
 	if (ret) {
 		pr_err("%s: error in reading reference temp\n",
 			__func__);
