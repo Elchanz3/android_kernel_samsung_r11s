@@ -1513,7 +1513,7 @@ static int ufc_parse_init_table(struct ufc_table_info *ufc_info,
 			if (pos->frequency > policy->max)
 				continue;
 
-#define SCALE_SIZE 8
+#define SCALE_SIZE 2
 			if (col_idx == ufc.col_vfreq)
 				ufc_info->ufc_table[col_idx][row_idx--]
 						= pos->frequency / SCALE_SIZE;
