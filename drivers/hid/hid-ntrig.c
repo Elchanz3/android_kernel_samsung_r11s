@@ -141,12 +141,15 @@ static void ntrig_report_version(struct hid_device *hdev)
 {
 	int ret;
 	char buf[20];
-	struct usb_device *usb_dev = hid_to_usb_dev(hdev);
-	unsigned char *data __free(kfree) = kmalloc(8, GFP_KERNEL);
+	struct usb_device *usb_dev;
+	unsigned char *data;
 
 	if (!hid_is_usb(hdev))
 		return;
 
+	usb_dev = hid_to_usb_dev(hdev);
+
+	data = kmalloc(8, GFP_KERNEL);
 	if (!data)
 		return;
 
@@ -159,10 +162,12 @@ static void ntrig_report_version(struct hid_device *hdev)
 
 	if (ret == 8) {
 		ret = ntrig_version_string(&data[2], buf);
-
-		hid_info(hdev, "Firmware version: %s (%02x%02x %02x%02x)\n",
-			 buf, data[2], data[3], data[4], data[5]);
+		if (ret >= 0)
+			hid_info(hdev, "Firmware version: %s (%02x%02x %02x%02x)\n",
+				 buf, data[2], data[3], data[4], data[5]);
 	}
+
+	kfree(data);
 }
 
 static ssize_t show_phys_width(struct device *dev,
